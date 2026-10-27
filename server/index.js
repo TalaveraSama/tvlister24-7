@@ -289,6 +289,85 @@ app.delete('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/streams/import-m3u', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    let { m3u_content = '', m3u_url = '', stream_mode = 'direct' } = req.body || {};
+    if (!m3u_content && m3u_url) {
+      const resp = await fetch(String(m3u_url).trim());
+      if (!resp.ok) {
+        return res.status(400).json({ error: `No se pudo descargar la lista M3U (HTTP ${resp.status})` });
+      }
+      m3u_content = await resp.text();
+    }
+    if (!m3u_content || !String(m3u_content).includes('#EXTINF')) {
+      return res.status(400).json({ error: 'Pega un contenido M3U válido (#EXTM3U / #EXTINF) o una URL accesible.' });
+    }
+
+    const lines = String(m3u_content).split(/\r?\n/);
+    const existingCats = db.prepare("SELECT * FROM categories WHERE type = 'live'").all();
+    const catByName = new Map(existingCats.map((c) => [c.name.toLowerCase(), c.id]));
+    const insertCat = db.prepare("INSERT INTO categories (name, type, sort_order) VALUES (?, 'live', 10)");
+    const insertStream = db.prepare(`
+      INSERT INTO streams (name, category_id, source_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
+    `);
+
+    const b1 = db.prepare('SELECT * FROM bouquets WHERE id = 1').get();
+    const bouquetStreamIds = b1 ? JSON.parse(b1.stream_ids_json || '[]') : [];
+
+    let pendingMeta = null;
+    let importedCount = 0;
+
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith('#EXTINF')) {
+        const logoMatch = line.match(/tvg-logo="([^"]*)"/i);
+        const epgMatch = line.match(/tvg-id="([^"]*)"/i);
+        const groupMatch = line.match(/group-title="([^"]*)"/i);
+        const commaIdx = line.lastIndexOf(',');
+        const name = commaIdx !== -1 ? line.slice(commaIdx + 1).trim() : 'Canal Importado';
+        pendingMeta = {
+          name: name || 'Canal Importado',
+          logo: logoMatch?.[1] || '',
+          epg: epgMatch?.[1] || '',
+          group: groupMatch?.[1]?.trim() || 'Importados XUI / M3U'
+        };
+      } else if (!line.startsWith('#') && pendingMeta) {
+        const groupKey = pendingMeta.group.toLowerCase();
+        let catId = catByName.get(groupKey);
+        if (!catId) {
+          const cInfo = insertCat.run(pendingMeta.group);
+          catId = Number(cInfo.lastInsertRowid);
+          catByName.set(groupKey, catId);
+        }
+        const stStatus = stream_mode === 'ondemand' ? 'ondemand_idle' : 'running';
+        const sInfo = insertStream.run(
+          pendingMeta.name,
+          catId,
+          line,
+          pendingMeta.logo,
+          pendingMeta.epg,
+          String(stream_mode || 'direct'),
+          stStatus
+        );
+        const sid = Number(sInfo.lastInsertRowid);
+        if (!bouquetStreamIds.includes(sid)) bouquetStreamIds.push(sid);
+        importedCount++;
+        pendingMeta = null;
+      }
+    }
+
+    if (b1 && importedCount > 0) {
+      db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = 1').run(JSON.stringify(bouquetStreamIds));
+    }
+
+    res.json({ ok: true, importedCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Error al importar M3U' });
+  }
+});
+
 // ==================== 24/7 CUSTOM CHANNELS STUDIO ====================
 app.get('/api/channels247', requireAuth, (req, res) => {
   const rows = db

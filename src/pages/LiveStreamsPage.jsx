@@ -11,7 +11,8 @@ import {
   Radio,
   X,
   Copy,
-  Check
+  Check,
+  Upload
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -44,6 +45,12 @@ export default function LiveStreamsPage({ onPreview }) {
 
   const [ffmpegModal, setFfmpegModal] = useState(null);
   const [copied, setCopied] = useState(false);
+
+  const [importOpen, setImportOpen] = useState(false);
+  const [m3uUrl, setM3uUrl] = useState('');
+  const [m3uContent, setM3uContent] = useState('');
+  const [importMode, setImportMode] = useState('direct');
+  const [importMsg, setImportMsg] = useState('');
 
   const loadAll = async () => {
     const [st, cats, sys] = await Promise.all([
@@ -119,6 +126,31 @@ export default function LiveStreamsPage({ onPreview }) {
     setFfmpegModal({ name: s.name, command: res.command });
   };
 
+  const handleImportM3u = async (e) => {
+    e.preventDefault();
+    setImportMsg('');
+    try {
+      const res = await apiFetch('/api/streams/import-m3u', {
+        method: 'POST',
+        body: JSON.stringify({
+          m3u_url: m3uUrl,
+          m3u_content: m3uContent,
+          stream_mode: importMode
+        })
+      });
+      setImportMsg(`✅ ${res.importedCount} canales importados correctamente.`);
+      setM3uUrl('');
+      setM3uContent('');
+      loadAll();
+      setTimeout(() => {
+        setImportOpen(false);
+        setImportMsg('');
+      }, 1500);
+    } catch (err) {
+      setImportMsg(`❌ ${err.message}`);
+    }
+  };
+
   const filtered = streams.filter((s) => {
     const matchesSearch =
       s.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -157,13 +189,23 @@ export default function LiveStreamsPage({ onPreview }) {
           </select>
         </div>
 
-        <button
-          onClick={openCreate}
-          className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-lg shadow-indigo-600/20 transition"
-        >
-          <Plus className="w-4 h-4" />
-          Nuevo Canal en Vivo
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setImportOpen(true)}
+            className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold transition"
+          >
+            <Upload className="w-4 h-4" />
+            Importar M3U / XUI.one
+          </button>
+
+          <button
+            onClick={openCreate}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-lg shadow-indigo-600/20 transition"
+          >
+            <Plus className="w-4 h-4" />
+            Nuevo Canal en Vivo
+          </button>
+        </div>
       </div>
 
       {/* Streams Table */}
@@ -465,6 +507,75 @@ export default function LiveStreamsPage({ onPreview }) {
                   className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
                 >
                   Guardar Canal
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Import M3U / XUI.one Modal */}
+      {importOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-xl rounded-2xl bg-[#0e1526] border border-slate-800 overflow-hidden">
+            <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">
+                Importar Lista M3U desde XUI.one u otro Panel
+              </h3>
+              <button onClick={() => setImportOpen(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleImportM3u} className="p-5 space-y-4 text-xs">
+              {importMsg && (
+                <div className="p-3 rounded-xl bg-slate-900 border border-slate-700 text-slate-200 font-medium">
+                  {importMsg}
+                </div>
+              )}
+              <div>
+                <label className="block text-slate-300 mb-1">URL M3U (ej. desde tu XUI.one local o remoto)</label>
+                <input
+                  type="text"
+                  value={m3uUrl}
+                  onChange={(e) => setM3uUrl(e.target.value)}
+                  placeholder="http://127.0.0.1/playlist/... o URL M3U"
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">O pega directamente el contenido #EXTM3U</label>
+                <textarea
+                  rows={5}
+                  value={m3uContent}
+                  onChange={(e) => setM3uContent(e.target.value)}
+                  placeholder={'#EXTM3U\n#EXTINF:-1 tvg-logo="" group-title="Deportes",Canal 1\nhttp://...'}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Modo de apertura para los canales importados</label>
+                <select
+                  value={importMode}
+                  onChange={(e) => setImportMode(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                >
+                  <option value="ondemand">On-Demand (Recomendado para listas grandes)</option>
+                  <option value="direct">Direct Stream Siempre Activo</option>
+                </select>
+              </div>
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setImportOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold"
+                >
+                  Importar Canales
                 </button>
               </div>
             </form>

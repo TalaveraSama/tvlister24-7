@@ -8,17 +8,39 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_DIR = path.resolve(__dirname, '../streams_runtime');
 
 let ffmpegAvailableCache = null;
+let resolvedFfmpegBin = null;
 const runningProcesses = new Map();
+
+export function getFfmpegBin() {
+  if (resolvedFfmpegBin) return resolvedFfmpegBin;
+  const candidates = [
+    process.env.FFMPEG_PATH,
+    '/opt/tvlister24-7/.runtime/bin/ffmpeg',
+    '/home/xui/bin/ffmpeg',
+    'ffmpeg'
+  ].filter(Boolean);
+
+  for (const bin of candidates) {
+    try {
+      const env = bin.startsWith('/home/xui/')
+        ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
+        : process.env;
+      execSync(`"${bin}" -version`, { stdio: 'ignore', env });
+      resolvedFfmpegBin = bin;
+      ffmpegAvailableCache = true;
+      return bin;
+    } catch {
+      // try next candidate
+    }
+  }
+  ffmpegAvailableCache = false;
+  return 'ffmpeg';
+}
 
 export function isFfmpegAvailable() {
   if (ffmpegAvailableCache !== null) return ffmpegAvailableCache;
-  try {
-    execSync('ffmpeg -version', { stdio: 'ignore' });
-    ffmpegAvailableCache = true;
-  } catch {
-    ffmpegAvailableCache = false;
-  }
-  return ffmpegAvailableCache;
+  getFfmpegBin();
+  return Boolean(ffmpegAvailableCache);
 }
 
 export function getHostTelemetry() {
@@ -205,11 +227,15 @@ export function buildFfmpegCommandForChannel247(channel, profile) {
 
 export function startFfmpegWorkerIfAvailable(key, args) {
   if (!isFfmpegAvailable()) return null;
+  const bin = getFfmpegBin();
   stopWorker(key);
   if (!fs.existsSync(RUNTIME_DIR)) {
     fs.mkdirSync(RUNTIME_DIR, { recursive: true });
   }
-  const child = spawn('ffmpeg', args, { stdio: 'ignore', detached: false });
+  const env = bin.startsWith('/home/xui/')
+    ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
+    : process.env;
+  const child = spawn(bin, args, { stdio: 'ignore', detached: false, env });
   runningProcesses.set(key, child);
   child.on('exit', () => {
     if (runningProcesses.get(key) === child) {
