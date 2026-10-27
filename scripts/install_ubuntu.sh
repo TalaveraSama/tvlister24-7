@@ -2,7 +2,7 @@
 # ==============================================================================
 # TVLister 24/7 — Midnight Edition | Instalador Aislado Ubuntu / Debian VPS
 # Compatible 100% con servidores que ya tienen XUI.one, Xtream UI, Nginx o Docker
-# No modifica paquetes apt existentes, ni MariaDB, ni puertos ocupados.
+# Idempotente: puede ejecutarse múltiples veces para instalar o actualizar sin perder datos.
 # ==============================================================================
 set -euo pipefail
 
@@ -11,12 +11,13 @@ RUNTIME_DIR="${APP_DIR}/.runtime"
 NODE_DIR="${RUNTIME_DIR}/node"
 RUNTIME_BIN="${RUNTIME_DIR}/bin"
 SERVICE_NAME="tvlister24-7"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 REPO_URL="https://github.com/TalaveraSama/tvlister24-7.git"
 FALLBACK_BRANCH="arena/85cc9902-tvlister24-7"
 NODE_VERSION="v22.23.4"
 
 echo "============================================================"
-echo "  Instalando TVLister 24/7 (Modo Aislado / Coexistencia)    "
+echo "  Instalando / Actualizando TVLister 24/7 (Modo Aislado)    "
 echo "============================================================"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -38,7 +39,7 @@ if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 || ! co
   apt-get update -y || true
   apt-get install -y curl git tar ca-certificates
 else
-  echo "      curl, git y tar ya están instalados (se omite apt-get para evitar conflictos de paquetes retenidos)."
+  echo "      curl, git y tar ya están instalados (se omite apt-get)."
 fi
 
 # 2. Instalar Node.js 22 LTS aislado en /opt/tvlister24-7/.runtime/node
@@ -53,7 +54,7 @@ case "$ARCH_RAW" in
 esac
 
 NEED_STANDALONE_NODE=1
-if [ -x "${NODE_DIR}/bin/node" ]; then
+if [ -f "${NODE_DIR}/bin/node" ] && [ -x "${NODE_DIR}/bin/node" ]; then
   CUR_VER=$("${NODE_DIR}/bin/node" -v | sed 's/^v//')
   CUR_MAJ=$(echo "$CUR_VER" | cut -d. -f1)
   CUR_MIN=$(echo "$CUR_VER" | cut -d. -f2)
@@ -75,42 +76,65 @@ if [ "$NEED_STANDALONE_NODE" -eq 1 ]; then
   echo "      Node.js $("${NODE_DIR}/bin/node" -v) instalado en ${NODE_DIR}."
 fi
 
-export PATH="${RUNTIME_BIN}:${NODE_DIR}/bin:${PATH}"
-
-# 3. Detectar FFmpeg existente (incluyendo /home/xui/bin/ffmpeg) o instalar binario estático
+# 3. Detectar FFmpeg de forma 100% idempotente (antes de modificar PATH)
 echo "[3/6] Configurando FFmpeg sin tocar librerías del sistema..."
 FFMPEG_READY=0
 
-if [ -x "/home/xui/bin/ffmpeg" ]; then
-  cat >"${RUNTIME_BIN}/ffmpeg" <<'EOF'
-#!/usr/bin/env bash
-export LD_LIBRARY_PATH="/home/xui/lib:${LD_LIBRARY_PATH:-}"
-exec /home/xui/bin/ffmpeg "$@"
-EOF
-  chmod +x "${RUNTIME_BIN}/ffmpeg"
+# Si ya tenemos un binario/wrapper válido en RUNTIME_BIN de una instalación previa, reutilizarlo
+if [ -f "${RUNTIME_BIN}/ffmpeg" ] && [ -x "${RUNTIME_BIN}/ffmpeg" ]; then
   if "${RUNTIME_BIN}/ffmpeg" -version >/dev/null 2>&1; then
     FFMPEG_READY=1
-    echo "      Vinculado FFmpeg existente de XUI.one (/home/xui/bin/ffmpeg) en modo solo-lectura."
+    echo "      FFmpeg aislado ya configurado y operativo en ${RUNTIME_BIN}/ffmpeg."
   else
     rm -f "${RUNTIME_BIN}/ffmpeg"
   fi
 fi
 
-if [ "$FFMPEG_READY" -eq 0 ] && command -v ffmpeg >/dev/null 2>&1; then
-  SYS_FFMPEG=$(command -v ffmpeg)
-  if "$SYS_FFMPEG" -version >/dev/null 2>&1; then
-    ln -sf "$SYS_FFMPEG" "${RUNTIME_BIN}/ffmpeg"
-    FFMPEG_READY=1
-    echo "      FFmpeg del sistema detectado en ${SYS_FFMPEG}."
-  fi
+# Probar rutas conocidas de XUI.one (/home/xui/bin/ffmpeg/ffmpeg o archivo /home/xui/bin/ffmpeg)
+if [ "$FFMPEG_READY" -eq 0 ]; then
+  for XUI_FF in "/home/xui/bin/ffmpeg/ffmpeg" "/home/xui/bin/ffmpeg"; do
+    if [ -f "$XUI_FF" ] && [ -x "$XUI_FF" ]; then
+      rm -f "${RUNTIME_BIN}/ffmpeg"
+      cat >"${RUNTIME_BIN}/ffmpeg" <<EOF
+#!/usr/bin/env bash
+export LD_LIBRARY_PATH="/home/xui/bin/ffmpeg:/home/xui/lib:\${LD_LIBRARY_PATH:-}"
+exec "${XUI_FF}" "\$@"
+EOF
+      chmod +x "${RUNTIME_BIN}/ffmpeg"
+      if "${RUNTIME_BIN}/ffmpeg" -version >/dev/null 2>&1; then
+        FFMPEG_READY=1
+        echo "      Vinculado FFmpeg de XUI.one (${XUI_FF}) en modo solo-lectura."
+        break
+      else
+        rm -f "${RUNTIME_BIN}/ffmpeg"
+      fi
+    fi
+  done
 fi
 
+# Probar FFmpeg del sistema (evitando apuntarse a sí mismo)
+if [ "$FFMPEG_READY" -eq 0 ]; then
+  for SYS_FF in "/usr/local/bin/ffmpeg" "/usr/bin/ffmpeg"; do
+    if [ -f "$SYS_FF" ] && [ -x "$SYS_FF" ] && [ "$SYS_FF" != "${RUNTIME_BIN}/ffmpeg" ]; then
+      if "$SYS_FF" -version >/dev/null 2>&1; then
+        rm -f "${RUNTIME_BIN}/ffmpeg"
+        ln -s "$SYS_FF" "${RUNTIME_BIN}/ffmpeg"
+        FFMPEG_READY=1
+        echo "      FFmpeg del sistema detectado en ${SYS_FF}."
+        break
+      fi
+    fi
+  done
+fi
+
+# Si no existe ninguno, descargar binario estático independiente
 if [ "$FFMPEG_READY" -eq 0 ] && command -v xz >/dev/null 2>&1; then
   echo "      Descargando binario estático independiente de FFmpeg..."
   TMP_FF=$(mktemp -d)
   if curl -fsSL --max-time 60 "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${FF_ARCH}-static.tar.xz" -o "${TMP_FF}/ffmpeg.tar.xz"; then
     tar -xJf "${TMP_FF}/ffmpeg.tar.xz" --strip-components=1 -C "$TMP_FF" || true
     if [ -f "${TMP_FF}/ffmpeg" ]; then
+      rm -f "${RUNTIME_BIN}/ffmpeg"
       cp "${TMP_FF}/ffmpeg" "${RUNTIME_BIN}/ffmpeg"
       chmod +x "${RUNTIME_BIN}/ffmpeg"
       FFMPEG_READY=1
@@ -124,8 +148,10 @@ if [ "$FFMPEG_READY" -eq 0 ]; then
   echo "      [AVISO] No se encontró FFmpeg; el panel funcionará en modo Direct Stream / Reloj 24-7 Virtual."
 fi
 
-# 4. Descargar código fuente de TVLister 24/7 preservando .runtime y data
-echo "[4/6] Descargando código fuente de TVLister 24/7..."
+export PATH="${RUNTIME_BIN}:${NODE_DIR}/bin:${PATH}"
+
+# 4. Descargar código fuente actualizado preservando .runtime y data
+echo "[4/6] Descargando código fuente actualizado de TVLister 24/7..."
 if [ -f "./package.json" ] && grep -q '"tvlister24-7"' "./package.json" 2>/dev/null; then
   SRC_REAL=$(pwd -P)
   DST_REAL=$(cd "$APP_DIR" && pwd -P)
@@ -134,34 +160,43 @@ if [ -f "./package.json" ] && grep -q '"tvlister24-7"' "./package.json" 2>/dev/n
   fi
 else
   TMP_CLONE=$(mktemp -d)
-  git clone --quiet "$REPO_URL" "$TMP_CLONE"
-  if [ ! -f "$TMP_CLONE/package.json" ]; then
-    git -C "$TMP_CLONE" checkout --quiet "$FALLBACK_BRANCH"
-  else
-    # Si la rama arena tiene cambios más recientes que main, usar la rama activa si main aún está vacía
-    git -C "$TMP_CLONE" checkout --quiet "$FALLBACK_BRANCH" 2>/dev/null || true
+  if ! git clone --quiet --depth 1 --branch "$FALLBACK_BRANCH" "$REPO_URL" "$TMP_CLONE" 2>/dev/null; then
+    git clone --quiet --depth 1 "$REPO_URL" "$TMP_CLONE"
   fi
   tar --exclude='./data' --exclude='./.runtime' -cf - -C "$TMP_CLONE" . | tar -xf - -C "$APP_DIR"
   rm -rf "$TMP_CLONE"
 fi
 
+# Instalar inmediatamente el comando CLI tvlister-admin en /usr/local/bin y /usr/bin
+if [ -f "${APP_DIR}/scripts/tvlister-admin.sh" ]; then
+  cp -f "${APP_DIR}/scripts/tvlister-admin.sh" /usr/local/bin/tvlister-admin
+  chmod +x /usr/local/bin/tvlister-admin
+  ln -sf /usr/local/bin/tvlister-admin /usr/bin/tvlister-admin
+fi
+
 cd "$APP_DIR"
 
 # 5. Compilar aplicación con el Node aislado
-echo "[5/6] Instalando dependencias NPM y compilando panel..."
+echo "[5/6] Instalando dependencias NPM y compilando panel de producción..."
 "${NODE_DIR}/bin/npm" install --no-audit --no-fund
 "${NODE_DIR}/bin/npm" run build
 
 mkdir -p /var/lib/tvlister24-7/hls /var/lib/tvlister24-7/playlists "$APP_DIR/data"
 
-# 6. Selección automática de puerto libre (sin chocar con XUI.one) + Servicio systemd
-echo "[6/6] Verificando puertos libres y activando servicio systemd..."
+# 6. Selección automática de puerto libre (conservando puerto previo si ya existía) + systemd
+echo "[6/6] Configurando puerto libre y servicio systemd..."
+EXISTING_PORT=""
+if [ -f "$SERVICE_FILE" ]; then
+  EXISTING_PORT=$(grep -E '^Environment=PORT=' "$SERVICE_FILE" 2>/dev/null | head -n1 | cut -d= -f3 || true)
+fi
+
 systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
 
 if [ -n "${PORT:-}" ]; then
   CANDIDATE_PORTS="$PORT 8095 8895 9080 9095"
+elif [ -n "$EXISTING_PORT" ]; then
+  CANDIDATE_PORTS="$EXISTING_PORT 8095 8895 9080 9095"
 elif [ "$XUI_DETECTED" -eq 1 ]; then
-  # En servidores con XUI.one preferimos 8095 por defecto para no interferir con 80/8080 de XUI
   CANDIDATE_PORTS="8095 8895 9080 9095 8080"
 else
   CANDIDATE_PORTS="8080 8095 8895 9080 9095"
@@ -181,7 +216,7 @@ function check(idx) {
 check(0);
 ' "$CANDIDATE_PORTS")
 
-echo "      Puerto libre seleccionado: ${FINAL_PORT}"
+echo "      Puerto activo asignado: ${FINAL_PORT}"
 
 SECRET_FILE="$APP_DIR/data/.panel_secret"
 if [ -f "$SECRET_FILE" ]; then
@@ -192,7 +227,7 @@ else
   chmod 600 "$SECRET_FILE"
 fi
 
-cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
+cat >"$SERVICE_FILE" <<EOF
 [Unit]
 Description=TVLister 24/7 Midnight OTT/VOD Streaming Panel
 After=network.target
@@ -218,18 +253,12 @@ systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1
 systemctl restart "${SERVICE_NAME}"
 
-# Instalar herramienta CLI para el Admin del Sistema Linux (tvlister-admin)
-if [ -f "${APP_DIR}/scripts/tvlister-admin.sh" ]; then
-  cp "${APP_DIR}/scripts/tvlister-admin.sh" /usr/local/bin/tvlister-admin
-  chmod +x /usr/local/bin/tvlister-admin
-fi
-
 # Si UFW está activo, abrir el puerto elegido
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow "${FINAL_PORT}/tcp" >/dev/null 2>&1 || true
 fi
 
-# Asegurar que iptables permita tráfico entrante al puerto del panel (común en servidores XUI.one)
+# Asegurar que iptables permita tráfico entrante al puerto del panel
 if command -v iptables >/dev/null 2>&1; then
   iptables -C INPUT -p tcp --dport "${FINAL_PORT}" -j ACCEPT 2>/dev/null || \
     iptables -I INPUT 1 -p tcp --dport "${FINAL_PORT}" -j ACCEPT 2>/dev/null || true
@@ -242,9 +271,9 @@ else
   STATUS_MSG="⚠️ Servicio iniciado; revisa logs con: journalctl -u ${SERVICE_NAME} -n 30"
 fi
 
-SERVER_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1)
+SERVER_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || true)
 if [ -z "$SERVER_IP" ]; then
-  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 fi
 if [ -z "$SERVER_IP" ]; then
   SERVER_IP="TU_IP_SERVIDOR"
@@ -256,15 +285,7 @@ echo "  ${STATUS_MSG}"
 echo "============================================================"
 echo "  🌐 Panel Admin & WebTV : http://${SERVER_IP}:${FINAL_PORT}"
 echo "  👤 Usuario Admin       : admin"
-echo "  🔑 Contraseña inicial  : admin123"
-echo "  🛠️  Consola SysAdmin    : tvlister-admin (ejecútalo en SSH como root)"
+echo "  🛠️  Consola SysAdmin    : tvlister-admin (ya instalado en /usr/bin)"
+echo "  🔑 Cambiar clave Admin : tvlister-admin reset-admin TU_NUEVA_CLAVE"
 echo "  📺 Lista M3U Demo      : http://${SERVER_IP}:${FINAL_PORT}/get.php?username=demo&password=demo123&type=m3u_plus&output=hls"
-echo "  📅 Guía EPG XMLTV      : http://${SERVER_IP}:${FINAL_PORT}/xmltv.php?username=demo&password=demo123"
-if [ "$XUI_DETECTED" -eq 1 ]; then
-  echo "------------------------------------------------------------"
-  echo "  💡 Coexistencia con XUI.one:"
-  echo "     - XUI.one sigue intacto en sus puertos originales."
-  echo "     - Puedes importar tus canales desde XUI.one entrando a:"
-  echo "       Canales en Vivo -> botón 'Importar M3U / XUI.one'."
-fi
 echo "============================================================"

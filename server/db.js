@@ -29,7 +29,11 @@ export function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(candidate, 'hex'));
 }
 
+let dbInitialized = false;
+
 export function initDb() {
+  if (dbInitialized) return;
+  dbInitialized = true;
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -586,3 +590,5 @@ function seedInitialData() {
   insertSetting.run('default_output_format', 'hls');
   insertSetting.run('flood_limit_per_min', '120');
 }
+
+initDb();

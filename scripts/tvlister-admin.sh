@@ -59,17 +59,19 @@ cmd_reset_admin() {
     exit 1
   fi
   cd "$APP_DIR"
-  "$NODE_BIN" --no-warnings --input-type=module -e '
-    import { db, hashPassword } from "./server/db.js";
-    const pwd = process.argv[1];
+  NEW_ADMIN_PASS="$new_pass" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { db, initDb, hashPassword } from "./server/db.js";
+    initDb();
+    const pwd = process.env.NEW_ADMIN_PASS;
     const row = db.prepare("SELECT id FROM users WHERE username = ?").get("admin");
     if (row) {
-      db.prepare("UPDATE users SET password_hash = ?, status = '\''active'\'' WHERE id = ?").run(hashPassword(pwd), row.id);
+      db.prepare("UPDATE users SET password_hash = ?, status = ? WHERE id = ?").run(hashPassword(pwd), "active", row.id);
     } else {
-      db.prepare("INSERT INTO users (username, password_hash, role, credits, status) VALUES ('\''admin'\'', ?, '\''admin'\'', 999999, '\''active'\'')").run(hashPassword(pwd));
+      db.prepare("INSERT INTO users (username, password_hash, role, credits, status) VALUES (?, ?, ?, 999999, ?)").run("admin", hashPassword(pwd), "admin", "active");
     }
+    db.exec("PRAGMA wal_checkpoint(PASSIVE);");
     console.log("✅ Contraseña del Super Admin (admin) actualizada correctamente.");
-  ' "$new_pass"
+  '
 }
 
 cmd_open_firewall() {

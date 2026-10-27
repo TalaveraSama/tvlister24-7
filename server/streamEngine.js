@@ -20,14 +20,18 @@ export function getFfmpegBin() {
   const candidates = [
     process.env.FFMPEG_PATH,
     '/opt/tvlister24-7/.runtime/bin/ffmpeg',
+    '/home/xui/bin/ffmpeg/ffmpeg',
     '/home/xui/bin/ffmpeg',
     'ffmpeg'
   ].filter(Boolean);
 
   for (const bin of candidates) {
     try {
+      if (bin.startsWith('/') && (!fs.existsSync(bin) || fs.statSync(bin).isDirectory())) {
+        continue;
+      }
       const env = bin.startsWith('/home/xui/')
-        ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
+        ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
         : process.env;
       execSync(`"${bin}" -version`, { stdio: 'ignore', env });
       resolvedFfmpegBin = bin;
