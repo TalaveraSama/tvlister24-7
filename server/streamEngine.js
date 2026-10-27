@@ -56,6 +56,7 @@ export function getHostTelemetry() {
   return {
     hostname: os.hostname(),
     platform: `${os.type()} ${os.release()}`,
+    nodeVersion: process.version,
     cpuCores: cpuCount,
     cpuModel: cpus[0]?.model || 'Server vCPU',
     cpuPercent,
@@ -63,7 +64,9 @@ export function getHostTelemetry() {
     ramUsedGb: Number((usedMem / 1024 ** 3).toFixed(2)),
     ramTotalGb: Number((totalMem / 1024 ** 3).toFixed(2)),
     uptimeSeconds: Math.floor(os.uptime()),
-    ffmpegInstalled: isFfmpegAvailable()
+    ffmpegInstalled: isFfmpegAvailable(),
+    ffmpegBin: isFfmpegAvailable() ? getFfmpegBin() : 'No detectado (Modo Direct Stream)',
+    xuiCoexistence: fs.existsSync('/home/xui')
   };
 }
 

@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
 
-import { db, initDb, hashPassword, verifyPassword } from './db.js';
+import crypto from 'node:crypto';
+import { db, DB_PATH, initDb, hashPassword, verifyPassword } from './db.js';
 import { signToken, firewallMiddleware, requireAuth, requireAdmin } from './auth.js';
 import {
   getHostTelemetry,
@@ -916,14 +917,86 @@ app.put('/api/claims/:id/resolve', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ==================== SERVERS, PROFILES, FIREWALL & BACKUP ====================
+// ==================== SYSTEM ADMIN, SERVERS, PROFILES, FIREWALL & BACKUP ====================
 app.get('/api/system', requireAuth, (req, res) => {
   const servers = db.prepare('SELECT * FROM servers ORDER BY is_main DESC, id ASC').all();
   const profiles = db.prepare('SELECT * FROM transcode_profiles ORDER BY id ASC').all();
   const firewall = db.prepare('SELECT * FROM firewall_rules ORDER BY id DESC').all();
   const settingsRows = db.prepare('SELECT * FROM settings').all();
   const settings = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
-  res.json({ servers, profiles, firewall, settings, telemetry: getHostTelemetry() });
+  const admins = db
+    .prepare("SELECT id, username, email, status, notes, created_at FROM users WHERE role = 'admin' ORDER BY id ASC")
+    .all();
+
+  let dbSizeKb = 0;
+  try {
+    dbSizeKb = Math.round(fs.statSync(DB_PATH).size / 1024);
+  } catch {
+    dbSizeKb = 0;
+  }
+
+  res.json({
+    servers,
+    profiles,
+    firewall,
+    settings,
+    admins,
+    dbSizeKb,
+    listenPort: PORT,
+    telemetry: getHostTelemetry()
+  });
+});
+
+app.post('/api/system/admins', requireAuth, requireAdmin, (req, res) => {
+  const { username, password, email = '', notes = 'Administrador del Sistema' } = req.body || {};
+  if (!username || !password || String(password).length < 5) {
+    return res.status(400).json({ error: 'Usuario y contraseña (mínimo 5 caracteres) requeridos.' });
+  }
+  const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(String(username).trim());
+  if (exists) return res.status(400).json({ error: 'Ese usuario ya existe.' });
+
+  const info = db
+    .prepare(
+      "INSERT INTO users (username, password_hash, role, credits, email, status, notes) VALUES (?, ?, 'admin', 999999, ?, 'active', ?)"
+    )
+    .run(String(username).trim(), hashPassword(String(password)), String(email), String(notes));
+
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.put('/api/system/admins/:id/password', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const { newPassword } = req.body || {};
+  if (!newPassword || String(newPassword).length < 5) {
+    return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 5 caracteres.' });
+  }
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(newPassword)), id);
+  res.json({ ok: true });
+});
+
+app.post('/api/system/maintenance', requireAuth, requireAdmin, (req, res) => {
+  const { action } = req.body || {};
+  if (action === 'clear_connections') {
+    db.prepare('DELETE FROM active_connections').run();
+    return res.json({ ok: true, message: 'Todas las sesiones activas fueron reiniciadas.' });
+  }
+  if (action === 'restart_streams') {
+    db.prepare("UPDATE streams SET uptime_started_at = datetime('now') WHERE status = 'running'").run();
+    db.prepare("UPDATE channels_247 SET status = 'running'").run();
+    return res.json({ ok: true, message: 'Motor de canales en vivo y canales 24/7 sincronizado.' });
+  }
+  if (action === 'vacuum_db') {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE); VACUUM;');
+    return res.json({ ok: true, message: 'Base de datos SQLite compactada y optimizada.' });
+  }
+  if (action === 'regen_stalker_key') {
+    const newKey = crypto.randomBytes(16).toString('hex');
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('stalker_key', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run(newKey);
+    return res.json({ ok: true, stalker_key: newKey, message: 'Nueva Stalker Key generada.' });
+  }
+  res.status(400).json({ error: 'Acción no reconocida' });
 });
 
 app.post('/api/servers', requireAuth, requireAdmin, (req, res) => {

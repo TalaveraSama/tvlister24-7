@@ -218,9 +218,21 @@ systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1
 systemctl restart "${SERVICE_NAME}"
 
+# Instalar herramienta CLI para el Admin del Sistema Linux (tvlister-admin)
+if [ -f "${APP_DIR}/scripts/tvlister-admin.sh" ]; then
+  cp "${APP_DIR}/scripts/tvlister-admin.sh" /usr/local/bin/tvlister-admin
+  chmod +x /usr/local/bin/tvlister-admin
+fi
+
 # Si UFW está activo, abrir el puerto elegido
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow "${FINAL_PORT}/tcp" >/dev/null 2>&1 || true
+fi
+
+# Asegurar que iptables permita tráfico entrante al puerto del panel (común en servidores XUI.one)
+if command -v iptables >/dev/null 2>&1; then
+  iptables -C INPUT -p tcp --dport "${FINAL_PORT}" -j ACCEPT 2>/dev/null || \
+    iptables -I INPUT 1 -p tcp --dport "${FINAL_PORT}" -j ACCEPT 2>/dev/null || true
 fi
 
 sleep 2
@@ -245,6 +257,7 @@ echo "============================================================"
 echo "  🌐 Panel Admin & WebTV : http://${SERVER_IP}:${FINAL_PORT}"
 echo "  👤 Usuario Admin       : admin"
 echo "  🔑 Contraseña inicial  : admin123"
+echo "  🛠️  Consola SysAdmin    : tvlister-admin (ejecútalo en SSH como root)"
 echo "  📺 Lista M3U Demo      : http://${SERVER_IP}:${FINAL_PORT}/get.php?username=demo&password=demo123&type=m3u_plus&output=hls"
 echo "  📅 Guía EPG XMLTV      : http://${SERVER_IP}:${FINAL_PORT}/xmltv.php?username=demo&password=demo123"
 if [ "$XUI_DETECTED" -eq 1 ]; then
