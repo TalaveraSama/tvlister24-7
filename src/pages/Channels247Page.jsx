@@ -613,6 +613,20 @@ export default function Channels247Page({ onPreview }) {
             <pre className="p-4 rounded-xl bg-[#070b13] border border-slate-800 text-xs font-mono text-emerald-300 whitespace-pre-wrap break-all">
               {ffmpegModal.ffmpegCommand}
             </pre>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="text-slate-400">
+                En tu VPS con FFmpeg genera segmentos HLS continuos propios sin depender de redirección.
+              </span>
+              <button
+                onClick={async () => {
+                  await handleAction(ffmpegModal.id, 'start_ffmpeg');
+                  setFfmpegModal(null);
+                }}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
+              >
+                Iniciar Worker FFmpeg 24/7 en Servidor
+              </button>
+            </div>
           </div>
         </div>
       )}

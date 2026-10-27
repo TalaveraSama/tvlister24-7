@@ -1,8 +1,11 @@
 import express from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Readable } from 'node:stream';
 import { db } from './db.js';
 import { extractClientIp } from './auth.js';
-import { computeChannel247LiveState } from './streamEngine.js';
+import { computeChannel247LiveState, getLocalHlsManifestPath, HLS_ROOT } from './streamEngine.js';
 
 export const iptvRouter = express.Router();
 
@@ -35,13 +38,20 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-function authenticateLine(username, password) {
+function authenticateLine(username, password, req = null) {
   if (!username || !password) return { error: 'Credenciales requeridas', code: 401 };
   const line = db.prepare('SELECT * FROM lines WHERE username = ? AND password = ?').get(username, password);
   if (!line) return { error: 'Usuario o contraseña inválidos', code: 401 };
   if (line.status !== 'active') return { error: 'Línea suspendida o bloqueada', code: 403 };
   if (line.exp_date && new Date(line.exp_date).getTime() < Date.now()) {
     return { error: 'Suscripción expirada', code: 403 };
+  }
+  if (req && line.allowed_ips && line.allowed_ips.trim().length > 0) {
+    const clientIp = extractClientIp(req);
+    const allowedList = line.allowed_ips.split(',').map((s) => s.trim()).filter(Boolean);
+    if (allowedList.length > 0 && !allowedList.includes(clientIp)) {
+      return { error: 'IP no autorizada para esta línea', code: 403 };
+    }
   }
   return { line };
 }
@@ -67,7 +77,7 @@ function getAllowedContentForLine(line) {
       JSON.parse(b.channel247_ids_json || '[]').forEach((id) => ch247Set.add(Number(id)));
       JSON.parse(b.vod_ids_json || '[]').forEach((id) => vodSet.add(Number(id)));
     } catch {
-      // ignore malformed
+      // ignore
     }
   }
 
@@ -97,7 +107,6 @@ function getAllowedContentForLine(line) {
 }
 
 function recordConnection(req, line, targetType, targetId, targetName, protocol = 'HLS') {
-  // Clean stale connections older than 15 minutes
   db.prepare("DELETE FROM active_connections WHERE datetime(last_ping_at) < datetime('now', '-15 minutes')").run();
 
   const ip = extractClientIp(req);
@@ -113,7 +122,7 @@ function recordConnection(req, line, targetType, targetId, targetName, protocol 
     db.prepare(
       "UPDATE active_connections SET last_ping_at = datetime('now'), target_name = ?, protocol = ? WHERE id = ?"
     ).run(targetName, protocol, existing.id);
-    return { allowed: true };
+    return { allowed: true, connId: existing.id };
   }
 
   const activeCount = db
@@ -121,7 +130,6 @@ function recordConnection(req, line, targetType, targetId, targetName, protocol 
     .get(line.id).c;
 
   if (activeCount >= line.max_connections) {
-    // Replace oldest connection from same IP if re-zapping, else enforce limit
     const sameIpOldest = db
       .prepare('SELECT id FROM active_connections WHERE line_id = ? AND ip_address = ? ORDER BY last_ping_at ASC LIMIT 1')
       .get(line.id, ip);
@@ -129,23 +137,24 @@ function recordConnection(req, line, targetType, targetId, targetName, protocol 
       db.prepare(
         "UPDATE active_connections SET target_type = ?, target_id = ?, target_name = ?, protocol = ?, user_agent = ?, last_ping_at = datetime('now') WHERE id = ?"
       ).run(targetType, targetId, targetName, protocol, ua, sameIpOldest.id);
-      return { allowed: true };
+      return { allowed: true, connId: sameIpOldest.id };
     }
     return { allowed: false, error: 'Límite máximo de conexiones simultáneas alcanzado' };
   }
 
-  db.prepare(`
+  const info = db.prepare(`
     INSERT INTO active_connections (line_id, username, target_type, target_id, target_name, ip_address, country, isp, user_agent, protocol, server_id)
     VALUES (?, ?, ?, ?, ?, ?, 'NI', 'Client Network', ?, ?, 1)
   `).run(line.id, line.username, targetType, targetId, targetName, ip, ua, protocol);
 
-  return { allowed: true };
+  return { allowed: true, connId: Number(info.lastInsertRowid) };
 }
 
 // 1. Standard M3U / M3U_Plus Playlist Generator (/get.php)
 iptvRouter.get('/get.php', (req, res) => {
-  const { username, password, output = 'hls' } = req.query;
-  const auth = authenticateLine(username, password);
+  const defaultFmtRow = db.prepare("SELECT value FROM settings WHERE key = 'default_output_format'").get();
+  const { username, password, output = defaultFmtRow?.value || 'hls' } = req.query;
+  const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
 
   const baseUrl = getBaseUrl(req);
@@ -188,7 +197,7 @@ iptvRouter.get('/get.php', (req, res) => {
 iptvRouter.get('/xmltv.php', (req, res) => {
   const { username, password } = req.query;
   if (username || password) {
-    const auth = authenticateLine(username, password);
+    const auth = authenticateLine(username, password, req);
     if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
   }
 
@@ -226,7 +235,6 @@ iptvRouter.get('/xmltv.php', (req, res) => {
     xml.push('  </programme>');
   }
 
-  // Dynamic 24/7 Channels EPG Schedule
   for (const ch of channels247) {
     const cid = xmlEscape(ch.epg_channel_id || `ch247-${ch.id}`);
     const state = computeChannel247LiveState(ch);
@@ -245,11 +253,11 @@ iptvRouter.get('/xmltv.php', (req, res) => {
   res.send(xml.join('\n'));
 });
 
-// 3. Xtream / MidnightStreamer Compatible Player API (/player_api.php)
+// 3. Xtream / MidnightStreamer Compatible Player & Panel API (/player_api.php & /panel_api.php)
 const handlePlayerApi = (req, res) => {
   const params = { ...req.query, ...req.body };
   const { username, password, action } = params;
-  const auth = authenticateLine(username, password);
+  const auth = authenticateLine(username, password, req);
   if (auth.error) {
     return res.json({ user_info: { auth: 0, message: auth.error } });
   }
@@ -277,7 +285,7 @@ const handlePlayerApi = (req, res) => {
       },
       server_info: {
         url: parsedUrl.hostname,
-        port: parsedUrl.port || '80',
+        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? '443' : '80'),
         https_port: '443',
         server_protocol: parsedUrl.protocol.replace(':', ''),
         rtmp_port: '1935',
@@ -289,20 +297,23 @@ const handlePlayerApi = (req, res) => {
   }
 
   if (action === 'get_live_categories') {
-    const liveCats = categories
-      .filter((c) => c.type === 'live' || c.type === 'channel247')
-      .map((c) => ({
-        category_id: String(c.id),
-        category_name: c.name,
-        parent_id: 0
-      }));
-    return res.json(liveCats);
+    return res.json(
+      categories
+        .filter((c) => c.type === 'live' || c.type === 'channel247')
+        .map((c) => ({
+          category_id: String(c.id),
+          category_name: c.name,
+          parent_id: 0
+        }))
+    );
   }
 
   if (action === 'get_live_streams') {
+    const catFilter = params.category_id ? String(params.category_id) : null;
     const out = [];
     let num = 1;
     for (const s of streams) {
+      if (catFilter && String(s.category_id) !== catFilter) continue;
       out.push({
         num: num++,
         name: s.name,
@@ -312,11 +323,14 @@ const handlePlayerApi = (req, res) => {
         epg_channel_id: s.epg_channel_id || `stream-${s.id}`,
         added: String(Math.floor(Date.now() / 1000)),
         category_id: String(s.category_id || 1),
+        custom_sid: '',
         tv_archive: s.tv_archive_days > 0 ? 1 : 0,
+        direct_source: '',
         tv_archive_duration: s.tv_archive_days
       });
     }
     for (const ch of channels247) {
+      if (catFilter && String(ch.category_id) !== catFilter) continue;
       out.push({
         num: num++,
         name: `[24/7] ${ch.name}`,
@@ -326,7 +340,9 @@ const handlePlayerApi = (req, res) => {
         epg_channel_id: ch.epg_channel_id || `ch247-${ch.id}`,
         added: String(Math.floor(Date.now() / 1000)),
         category_id: String(ch.category_id || 4),
+        custom_sid: '',
         tv_archive: 0,
+        direct_source: '',
         tv_archive_duration: 0
       });
     }
@@ -334,29 +350,36 @@ const handlePlayerApi = (req, res) => {
   }
 
   if (action === 'get_vod_categories') {
-    const vodCats = categories
-      .filter((c) => c.type === 'vod')
-      .map((c) => ({
-        category_id: String(c.id),
-        category_name: c.name,
-        parent_id: 0
-      }));
-    return res.json(vodCats);
+    return res.json(
+      categories
+        .filter((c) => c.type === 'vod')
+        .map((c) => ({
+          category_id: String(c.id),
+          category_name: c.name,
+          parent_id: 0
+        }))
+    );
   }
 
   if (action === 'get_vod_streams') {
+    const catFilter = params.category_id ? String(params.category_id) : null;
     return res.json(
-      vodItems.map((v, idx) => ({
-        num: idx + 1,
-        name: v.title,
-        stream_type: 'movie',
-        stream_id: v.id,
-        stream_icon: v.poster_url || '',
-        rating: String(v.rating || 8.0),
-        added: String(Math.floor(Date.now() / 1000)),
-        category_id: String(v.category_id || 6),
-        container_extension: v.container_ext || 'mp4'
-      }))
+      vodItems
+        .filter((v) => !catFilter || String(v.category_id) === catFilter)
+        .map((v, idx) => ({
+          num: idx + 1,
+          name: v.title,
+          stream_type: 'movie',
+          stream_id: v.id,
+          stream_icon: v.poster_url || '',
+          rating: String(v.rating || 8.0),
+          rating_5based: Number(((v.rating || 8) / 2).toFixed(1)),
+          added: String(Math.floor(Date.now() / 1000)),
+          category_id: String(v.category_id || 6),
+          container_extension: v.container_ext || 'mp4',
+          custom_sid: '',
+          direct_source: ''
+        }))
     );
   }
 
@@ -381,7 +404,15 @@ const handlePlayerApi = (req, res) => {
     });
   }
 
-  if (action === 'get_short_epg') {
+  // Series endpoints required by TiviMate / IPTV Smarters Pro sync
+  if (action === 'get_series_categories' || action === 'get_series') {
+    return res.json([]);
+  }
+  if (action === 'get_series_info') {
+    return res.json({ seasons: [], info: {}, episodes: {} });
+  }
+
+  if (action === 'get_short_epg' || action === 'get_simple_data_table') {
     const streamId = Number(params.stream_id);
     if (streamId > 10000) {
       const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(streamId - 10000);
@@ -420,17 +451,39 @@ const handlePlayerApi = (req, res) => {
 
 iptvRouter.get('/player_api.php', handlePlayerApi);
 iptvRouter.post('/player_api.php', handlePlayerApi);
+iptvRouter.get('/panel_api.php', handlePlayerApi);
+iptvRouter.post('/panel_api.php', handlePlayerApi);
 
-// 4. Live Stream & 24/7 Channel Delivery (/live/:username/:password/:streamSpec)
-iptvRouter.get('/live/:username/:password/:streamSpec', (req, res) => {
+// Serve local FFmpeg-transcoded HLS segments securely
+iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) => {
+  const { username, password, workerKey, fileName } = req.params;
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).send(auth.error);
+
+  const safeKey = path.basename(workerKey);
+  const safeFile = path.basename(fileName);
+  const fullPath = path.join(HLS_ROOT, safeKey, safeFile);
+  if (!fs.existsSync(fullPath)) return res.status(404).send('Segment not ready');
+
+  if (safeFile.endsWith('.m3u8')) {
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  } else if (safeFile.endsWith('.ts')) {
+    res.setHeader('Content-Type', 'video/mp2t');
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  fs.createReadStream(fullPath).pipe(res);
+});
+
+async function serveLiveStreamRequest(req, res) {
   const { username, password, streamSpec } = req.params;
-  const auth = authenticateLine(username, password);
+  const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).send(auth.error);
 
   const rawId = streamSpec.replace(/\.(m3u8|ts)$/i, '');
   const protocol = streamSpec.toLowerCase().endsWith('.ts') ? 'MPEG-TS' : 'HLS';
   const numericId = Number(rawId);
 
+  // 24/7 Channel Delivery
   if (numericId > 10000 || rawId.startsWith('ch247_')) {
     const chId = rawId.startsWith('ch247_') ? Number(rawId.replace('ch247_', '')) : numericId - 10000;
     const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(chId);
@@ -440,6 +493,18 @@ iptvRouter.get('/live/:username/:password/:streamSpec', (req, res) => {
     const conn = recordConnection(req, auth.line, 'channel247', ch.id, ch.name, protocol);
     if (!conn.allowed) return res.status(429).send(conn.error);
 
+    // If local FFmpeg 24/7 HLS worker is active and has written segments, serve live HLS manifest!
+    const workerKey = `ch247_${ch.id}`;
+    const localManifest = getLocalHlsManifestPath(workerKey);
+    if (localManifest) {
+      const content = fs.readFileSync(localManifest, 'utf8');
+      const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${workerKey}/`;
+      const rewritten = content.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(rewritten);
+    }
+
     const state = computeChannel247LiveState(ch);
     if (!state.currentItem?.url) {
       return res.status(404).send('Playlist 24/7 vacía');
@@ -447,11 +512,11 @@ iptvRouter.get('/live/:username/:password/:streamSpec', (req, res) => {
     return res.redirect(302, state.currentItem.url);
   }
 
+  // Standard Live Stream Delivery
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(numericId);
   if (!stream) return res.status(404).send('Canal no encontrado');
   if (stream.status === 'stopped') return res.status(503).send('Canal detenido por el administrador');
 
-  // Auto-wake on-demand stream
   if (stream.status === 'ondemand_idle') {
     db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(stream.id);
   }
@@ -459,13 +524,66 @@ iptvRouter.get('/live/:username/:password/:streamSpec', (req, res) => {
   const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, protocol);
   if (!conn.allowed) return res.status(429).send(conn.error);
 
+  // 1) If local FFmpeg transcoder has generated HLS manifest, serve local HLS
+  const workerKey = `stream_${stream.id}`;
+  const localManifest = getLocalHlsManifestPath(workerKey);
+  if (localManifest) {
+    const content = fs.readFileSync(localManifest, 'utf8');
+    const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${workerKey}/`;
+    const rewritten = content.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(rewritten);
+  }
+
+  // 2) Optional Direct MPEG-TS Reverse Proxy with automatic Backup URL Failover
+  const proxySetting = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
+  if (proxySetting?.value === 'true' && !stream.source_url.toLowerCase().includes('.m3u8')) {
+    const ac = new AbortController();
+    req.on('close', () => {
+      ac.abort();
+      if (conn.connId) {
+        db.prepare('DELETE FROM active_connections WHERE id = ?').run(conn.connId);
+      }
+    });
+
+    const candidates = [stream.source_url, stream.backup_url].filter(Boolean);
+    for (const upstreamUrl of candidates) {
+      try {
+        const upRes = await fetch(upstreamUrl, {
+          headers: { 'User-Agent': stream.user_agent || 'MidnightStreamer/5.3' },
+          signal: ac.signal
+        });
+        if (upRes.ok && upRes.body) {
+          res.setHeader('Content-Type', upRes.headers.get('content-type') || 'video/mp2t');
+          res.setHeader('Cache-Control', 'no-store');
+          return Readable.fromWeb(upRes.body).pipe(res);
+        }
+      } catch {
+        // failover to backup_url
+      }
+    }
+  }
+
   return res.redirect(302, stream.source_url);
+}
+
+// 4. Live Stream Delivery (/live/:username/:password/:streamSpec AND short Xtream /:username/:password/:numericId)
+iptvRouter.get('/live/:username/:password/:streamSpec', serveLiveStreamRequest);
+
+iptvRouter.get(/^\/([^/]+)\/([^/]+)\/(\d+(?:\.(?:ts|m3u8))?)$/i, (req, res) => {
+  req.params = {
+    username: decodeURIComponent(req.params[0]),
+    password: decodeURIComponent(req.params[1]),
+    streamSpec: req.params[2]
+  };
+  return serveLiveStreamRequest(req, res);
 });
 
 // 5. Movie VOD Delivery (/movie/:username/:password/:vodSpec)
 iptvRouter.get('/movie/:username/:password/:vodSpec', (req, res) => {
   const { username, password, vodSpec } = req.params;
-  const auth = authenticateLine(username, password);
+  const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).send(auth.error);
 
   const vodId = Number(vodSpec.split('.')[0]);
@@ -481,7 +599,7 @@ iptvRouter.get('/movie/:username/:password/:vodSpec', (req, res) => {
 // 6. Built-in WebTV HTML5 Client Portal Endpoints (/api/webtv/*)
 iptvRouter.post('/api/webtv/login', (req, res) => {
   const { username, password } = req.body || {};
-  const auth = authenticateLine(username, password);
+  const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).json({ error: auth.error });
 
   const { line } = auth;
@@ -499,7 +617,7 @@ iptvRouter.post('/api/webtv/login', (req, res) => {
 
 iptvRouter.get('/api/webtv/catalog', (req, res) => {
   const { username, password } = req.query;
-  const auth = authenticateLine(username, password);
+  const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).json({ error: auth.error });
 
   const { categories, streams, channels247, vodItems } = getAllowedContentForLine(auth.line);
@@ -544,7 +662,7 @@ iptvRouter.get('/api/webtv/channel247/:id/state', (req, res) => {
 
 iptvRouter.post('/api/webtv/ping', (req, res) => {
   const { username, password, target_type, target_id, target_name } = req.body || {};
-  const auth = authenticateLine(username, password);
+  const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).json({ error: auth.error });
 
   const conn = recordConnection(req, auth.line, target_type || 'live', Number(target_id) || 1, target_name || 'Stream', 'WebTV');
@@ -561,7 +679,7 @@ iptvRouter.post('/api/webtv/ping', (req, res) => {
 
 iptvRouter.post('/api/webtv/claim', (req, res) => {
   const { username, password, stream_name, issue_type, message } = req.body || {};
-  const auth = authenticateLine(username, password);
+  const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).json({ error: auth.error });
 
   if (!stream_name) return res.status(400).json({ error: 'Selecciona el canal o contenido' });

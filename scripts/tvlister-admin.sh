@@ -112,6 +112,13 @@ cmd_backup() {
   echo "✅ Copia de seguridad guardada en: ${out}"
 }
 
+cmd_update() {
+  local port
+  port=$(get_current_port)
+  echo "🔄 Actualizando TVLister 24/7 desde GitHub (conservando base de datos y puerto ${port})..."
+  curl -fsSL "https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/arena/85cc9902-tvlister24-7/scripts/install_ubuntu.sh?ts=$(date +%s)" | PORT="$port" bash
+}
+
 ACTION="${1:-menu}"
 
 case "$ACTION" in
@@ -137,6 +144,9 @@ case "$ACTION" in
   backup)
     cmd_backup
     ;;
+  update)
+    cmd_update
+    ;;
   *)
     echo "============================================================"
     echo "  TVLister 24/7 — Consola de Administración del Sistema     "
@@ -147,10 +157,11 @@ case "$ACTION" in
     echo "  4) Abrir puerto en Firewall / iptables (open-firewall)"
     echo "  5) Reiniciar motor TVLister 24/7 (restart)"
     echo "  6) Crear backup de base de datos en /root (backup)"
-    echo "  7) Ver logs en vivo (logs)"
+    echo "  7) Actualizar panel desde GitHub sin perder datos (update)"
+    echo "  8) Ver logs en vivo (logs)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-7]: " opt
+    read -r -p "Selecciona una opción [0-8]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_reset_admin "" ;;
@@ -158,7 +169,8 @@ case "$ACTION" in
       4) cmd_open_firewall "" ;;
       5) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
       6) cmd_backup ;;
-      7) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
+      7) cmd_update ;;
+      8) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
       *) exit 0 ;;
     esac
     ;;

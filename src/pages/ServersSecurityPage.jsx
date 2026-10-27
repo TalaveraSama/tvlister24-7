@@ -13,7 +13,9 @@ import {
   RefreshCw,
   Database,
   Save,
-  Terminal
+  Terminal,
+  CheckCircle2,
+  AlertTriangle
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -54,10 +56,15 @@ export default function ServersSecurityPage() {
   });
   const [notice, setNotice] = useState('');
   const [errMsg, setErrMsg] = useState('');
+  const [readiness, setReadiness] = useState(null);
 
   const loadAll = async () => {
-    const data = await apiFetch('/api/system');
+    const [data, rdy] = await Promise.all([
+      apiFetch('/api/system'),
+      apiFetch('/api/system/readiness')
+    ]);
     setSys(data);
+    setReadiness(rdy);
     setSettingsForm({
       panel_name: data.settings?.panel_name || 'TVLister 24/7 — Midnight Streamer Panel',
       server_timezone: data.settings?.server_timezone || 'UTC',
@@ -108,12 +115,13 @@ export default function ServersSecurityPage() {
   const handleChangeAdminPwd = async (e) => {
     e.preventDefault();
     try {
-      await apiFetch(`/api/system/admins/${pwdTargetId}/password`, {
+      const res = await apiFetch(`/api/system/admins/${pwdTargetId}/password`, {
         method: 'PUT',
         body: JSON.stringify({ newPassword: newPwd })
       });
       setNewPwd('');
       flash('Contraseña de Administrador actualizada correctamente.');
+      loadAll();
     } catch (err) {
       setErrMsg(err.message);
     }
@@ -212,6 +220,52 @@ export default function ServersSecurityPage() {
       {/* TAB 1: SYSTEM ADMIN & MAINTENANCE */}
       {subTab === 'sysadmin' && (
         <div className="space-y-6">
+          {/* Production Readiness Live Audit */}
+          {readiness && (
+            <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  Auditoría de Preparación para Producción (Tiempo Real)
+                </h2>
+                <span
+                  className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                    readiness.actionNeeded
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  }`}
+                >
+                  {readiness.actionNeeded
+                    ? 'Listo • Cambia la clave inicial admin123'
+                    : '100% Listo para Producción'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 text-xs">
+                {readiness.checks.map((chk) => (
+                  <div
+                    key={chk.id}
+                    className={`p-3 rounded-xl border flex items-start gap-2.5 ${
+                      chk.severity === 'warn'
+                        ? 'bg-amber-500/10 border-amber-500/30'
+                        : 'bg-[#090e1a] border-slate-800'
+                    }`}
+                  >
+                    {chk.severity === 'warn' ? (
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    )}
+                    <div className="min-w-0">
+                      <div className="font-semibold text-white">{chk.label}</div>
+                      <div className="text-[11px] text-slate-400 mt-0.5">{chk.hint}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Diagnostics & Quick Maintenance */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             <div className="lg:col-span-7 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">

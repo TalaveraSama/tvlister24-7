@@ -1,9 +1,7 @@
 node_modules/
 dist/
 build/
-data/*.db
-data/*.db-shm
-data/*.db-wal
+data/
 streams_runtime/
 .env
 *.log

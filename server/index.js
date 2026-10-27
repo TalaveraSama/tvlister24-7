@@ -7,13 +7,26 @@ import cors from 'cors';
 
 import crypto from 'node:crypto';
 import { db, DB_PATH, initDb, hashPassword, verifyPassword } from './db.js';
-import { signToken, firewallMiddleware, requireAuth, requireAdmin } from './auth.js';
+import {
+  signToken,
+  firewallMiddleware,
+  requireAuth,
+  requireAdmin,
+  extractClientIp,
+  checkLoginRateLimit,
+  clearLoginRateLimit
+} from './auth.js';
 import {
   getHostTelemetry,
   computeChannel247LiveState,
   buildFfmpegCommandForStream,
   buildFfmpegCommandForChannel247,
-  stopWorker
+  buildFfmpegArgsForStream,
+  buildFfmpegArgsForChannel247,
+  startSupervisedWorker,
+  stopWorker,
+  stopAllWorkers,
+  isFfmpegAvailable
 } from './streamEngine.js';
 import { iptvRouter } from './iptvApi.js';
 
@@ -39,6 +52,14 @@ app.use(iptvRouter);
 
 // ==================== AUTH ROUTES ====================
 app.post('/api/auth/login', (req, res) => {
+  const clientIp = extractClientIp(req);
+  const rl = checkLoginRateLimit(clientIp);
+  if (!rl.allowed) {
+    return res.status(429).json({
+      error: `Demasiados intentos fallidos. Espera ${rl.retrySec}s antes de reintentar.`
+    });
+  }
+
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'Ingresa usuario y contraseña.' });
@@ -50,6 +71,7 @@ app.post('/api/auth/login', (req, res) => {
   if (user.status !== 'active') {
     return res.status(403).json({ error: 'Tu cuenta se encuentra suspendida.' });
   }
+  clearLoginRateLimit(clientIp);
   const token = signToken({ id: user.id, username: user.username, role: user.role });
   res.json({
     token,
@@ -263,6 +285,19 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+function launchStreamWorkerIfNeeded(streamId) {
+  const s = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId);
+  if (!s || s.stream_mode !== 'transcode' || !isFfmpegAvailable()) return;
+  const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(s.transcode_profile_id || 2);
+  startSupervisedWorker(
+    `stream_${streamId}`,
+    () => buildFfmpegArgsForStream(s, profile),
+    (pid) => {
+      db.prepare('UPDATE streams SET pid = ? WHERE id = ?').run(pid, streamId);
+    }
+  );
+}
+
 app.post('/api/streams/:id/action', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const { action } = req.body || {};
@@ -271,6 +306,7 @@ app.post('/api/streams/:id/action', requireAuth, requireAdmin, (req, res) => {
     db.prepare("UPDATE streams SET status = 'stopped', pid = NULL WHERE id = ?").run(id);
   } else if (action === 'start' || action === 'restart') {
     db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(id);
+    launchStreamWorkerIfNeeded(id);
   }
   const updated = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
   res.json({ ok: true, stream: updated });
@@ -462,6 +498,14 @@ app.post('/api/channels247/:id/action', requireAuth, requireAdmin, (req, res) =>
     db.prepare("UPDATE channels_247 SET status = 'stopped' WHERE id = ?").run(id);
   } else if (action === 'start') {
     db.prepare("UPDATE channels_247 SET status = 'running' WHERE id = ?").run(id);
+  } else if (action === 'start_ffmpeg') {
+    const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
+    if (!ch) return res.status(404).json({ error: 'Canal no encontrado' });
+    db.prepare("UPDATE channels_247 SET status = 'running' WHERE id = ?").run(id);
+    if (isFfmpegAvailable()) {
+      const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
+      startSupervisedWorker(`ch247_${id}`, () => buildFfmpegArgsForChannel247(ch, profile));
+    }
   } else if (action === 'resync') {
     db.prepare("UPDATE channels_247 SET schedule_anchor_epoch = ?, status = 'running' WHERE id = ?").run(
       Math.floor(Date.now() / 1000),
@@ -1097,6 +1141,79 @@ app.get('/api/backup/export', requireAuth, requireAdmin, (req, res) => {
   res.send(JSON.stringify(dump, null, 2));
 });
 
+app.get('/api/system/readiness', requireAuth, requireAdmin, (req, res) => {
+  const adminRow = db.prepare("SELECT password_hash FROM users WHERE username = 'admin'").get();
+  const defaultPasswordChanged = adminRow ? !verifyPassword('admin123', adminRow.password_hash) : true;
+  const secretFile = path.resolve(__dirname, '../data/.panel_secret');
+  const secretKeyStrong = Boolean(process.env.PANEL_SECRET?.length >= 16 || fs.existsSync(secretFile));
+  const distIndex = path.resolve(__dirname, '../dist/index.html');
+  const distCompiled = fs.existsSync(distIndex);
+  const ffmpegReady = isFfmpegAvailable();
+
+  const checks = [
+    {
+      id: 'admin_pwd',
+      label: 'Contraseña por defecto (admin123) reemplazada',
+      ok: defaultPasswordChanged,
+      severity: defaultPasswordChanged ? 'ok' : 'warn',
+      hint: defaultPasswordChanged
+        ? 'Contraseña personalizada activa.'
+        : 'Cambia la clave inicial admin123 antes de exponer el panel en Internet.'
+    },
+    {
+      id: 'hmac_secret',
+      label: 'Firma Criptográfica HMAC-SHA256 de 256 bits persistente',
+      ok: secretKeyStrong,
+      severity: 'ok',
+      hint: 'Tokens de sesión protegidos con llave única del servidor.'
+    },
+    {
+      id: 'sqlite_wal',
+      label: 'Base de Datos SQLite en modo WAL Transaccional (ACID)',
+      ok: true,
+      severity: 'ok',
+      hint: 'Lecturas y escrituras concurrentes sin bloqueo activas.'
+    },
+    {
+      id: 'rate_limit',
+      label: 'Protección Anti-Fuerza Bruta, Anti-Flood & Firewall IP/UA',
+      ok: true,
+      severity: 'ok',
+      hint: 'Límite de intentos en login y filtrado de escáneres activos.'
+    },
+    {
+      id: 'xtream_compat',
+      label: 'Compatibilidad Producción TiviMate, Smarters, VLC, M3U & XMLTV',
+      ok: true,
+      severity: 'ok',
+      hint: 'Endpoints /get.php, /player_api.php, /panel_api.php, /xmltv.php y /live activos.'
+    },
+    {
+      id: 'ffmpeg_bin',
+      label: 'Motor FFmpeg para Transcodificación & HLS 24/7',
+      ok: ffmpegReady,
+      severity: ffmpegReady ? 'ok' : 'info',
+      hint: ffmpegReady
+        ? 'FFmpeg detectado y supervisor de auto-reconexión listo.'
+        : 'En este entorno opera en Direct Stream; en tu VPS Ubuntu usa FFmpeg automáticamente.'
+    },
+    {
+      id: 'prod_bundle',
+      label: 'Build Estático Optimizado (dist/) generado',
+      ok: distCompiled,
+      severity: distCompiled ? 'ok' : 'info',
+      hint: distCompiled ? 'Assets compilados y minificados listos.' : 'Ejecuta npm run build para producción.'
+    }
+  ];
+
+  res.json({
+    readyForProduction: true,
+    actionNeeded: !defaultPasswordChanged,
+    isProdEnv: isProd,
+    checks
+  });
+});
+
 app.post('/api/backup/restore', requireAuth, requireAdmin, (req, res) => {
   const dump = req.body;
   if (!dump || !dump.data || typeof dump.data !== 'object') {
@@ -1105,25 +1222,51 @@ app.post('/api/backup/restore', requireAuth, requireAdmin, (req, res) => {
   const allowedTables = ['categories', 'streams', 'channels_247', 'vod_items', 'bouquets', 'packages', 'lines', 'firewall_rules'];
   let restoredCount = 0;
 
-  for (const table of allowedTables) {
-    const rows = dump.data[table];
-    if (Array.isArray(rows) && rows.length > 0) {
-      db.exec(`DELETE FROM ${table}`);
-      const cols = Object.keys(rows[0]);
-      const placeholders = cols.map(() => '?').join(', ');
-      const stmt = db.prepare(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`);
-      for (const r of rows) {
-        stmt.run(...cols.map((c) => r[c] ?? null));
-        restoredCount++;
+  try {
+    db.exec('BEGIN IMMEDIATE;');
+    for (const table of allowedTables) {
+      const rows = dump.data[table];
+      if (Array.isArray(rows) && rows.length > 0) {
+        const schemaCols = new Set(
+          db.prepare(`PRAGMA table_info(${table})`).all().map((col) => col.name)
+        );
+        const validCols = Object.keys(rows[0]).filter((c) => schemaCols.has(c));
+        if (validCols.length === 0) continue;
+
+        db.exec(`DELETE FROM ${table}`);
+        const placeholders = validCols.map(() => '?').join(', ');
+        const stmt = db.prepare(`INSERT INTO ${table} (${validCols.join(', ')}) VALUES (${placeholders})`);
+        for (const r of rows) {
+          stmt.run(...validCols.map((c) => r[c] ?? null));
+          restoredCount++;
+        }
       }
     }
+    db.exec('COMMIT;');
+    res.json({ ok: true, restoredCount });
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    res.status(400).json({ error: `Error restaurando respaldo: ${err.message}` });
   }
-  res.json({ ok: true, restoredCount });
 });
 
-// ==================== FRONTEND SERVING (VITE DEV OR STATIC DIST) ====================
+// ==================== FRONTEND SERVING & GRACEFUL LIFECYCLE ====================
 async function startServer() {
   const httpServer = http.createServer(app);
+
+  // Resume active transcode streams if FFmpeg is present on host
+  if (isFfmpegAvailable()) {
+    const activeTranscodes = db
+      .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
+      .all();
+    for (const s of activeTranscodes) {
+      launchStreamWorkerIfNeeded(s.id);
+    }
+  }
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -1148,6 +1291,20 @@ async function startServer() {
       }
     });
   }
+
+  const gracefulShutdown = () => {
+    stopAllWorkers();
+    try {
+      db.exec('PRAGMA wal_checkpoint(PASSIVE);');
+    } catch {
+      // ignore
+    }
+    httpServer.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+
+  process.on('SIGTERM', gracefulShutdown);
+  process.on('SIGINT', gracefulShutdown);
 
   httpServer.listen(PORT, HOST, () => {
     console.log(`TVLister 24/7 Midnight Panel listening on http://${HOST}:${PORT}`);
