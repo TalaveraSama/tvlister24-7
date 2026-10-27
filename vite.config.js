@@ -7,5 +7,16 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     allowedHosts: true
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-hls': ['hls.js'],
+          'vendor-icons': ['lucide-react']
+        }
+      }
+    }
   }
 });

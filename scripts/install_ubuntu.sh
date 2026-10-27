@@ -5,6 +5,7 @@
 # Idempotente: puede ejecutarse múltiples veces para instalar o actualizar sin perder datos.
 # ==============================================================================
 set -euo pipefail
+trap 'case "${0:-}" in /tmp/tvlister_update.*) rm -f "$0" ;; esac' EXIT
 
 APP_DIR="${APP_DIR:-/opt/tvlister24-7}"
 RUNTIME_DIR="${APP_DIR}/.runtime"
@@ -167,10 +168,11 @@ else
   rm -rf "$TMP_CLONE"
 fi
 
-# Instalar inmediatamente el comando CLI tvlister-admin en /usr/local/bin y /usr/bin
+# Instalar atómicamente el comando CLI tvlister-admin (nuevo inodo con mv para no afectar procesos en curso)
 if [ -f "${APP_DIR}/scripts/tvlister-admin.sh" ]; then
-  cp -f "${APP_DIR}/scripts/tvlister-admin.sh" /usr/local/bin/tvlister-admin
-  chmod +x /usr/local/bin/tvlister-admin
+  cp "${APP_DIR}/scripts/tvlister-admin.sh" /usr/local/bin/tvlister-admin.tmp
+  chmod 0755 /usr/local/bin/tvlister-admin.tmp
+  mv -f /usr/local/bin/tvlister-admin.tmp /usr/local/bin/tvlister-admin
   ln -sf /usr/local/bin/tvlister-admin /usr/bin/tvlister-admin
 fi
 

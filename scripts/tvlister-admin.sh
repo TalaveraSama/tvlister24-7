@@ -3,6 +3,7 @@
 # tvlister-admin — Consola CLI para el Administrador del Sistema Linux (Root)
 # Gestión de estado, puertos, firewall, reseteo de clave admin, logs y backups
 # ==============================================================================
+{
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/tvlister24-7}"
@@ -223,10 +224,12 @@ EOF
 }
 
 cmd_update() {
-  local port
+  local port tmp_script
   port=$(get_current_port)
   echo "🔄 Actualizando TVLister 24/7 desde GitHub (conservando base de datos y puerto ${port})..."
-  curl -fsSL "https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/arena/85cc9902-tvlister24-7/scripts/install_ubuntu.sh?ts=$(date +%s)" | PORT="$port" bash
+  tmp_script=$(mktemp /tmp/tvlister_update.XXXXXX.sh)
+  curl -fsSL "https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/arena/85cc9902-tvlister24-7/scripts/install_ubuntu.sh?ts=$(date +%s)" -o "$tmp_script"
+  PORT="$port" exec bash "$tmp_script"
 }
 
 ACTION="${1:-menu}"
@@ -300,3 +303,5 @@ case "$ACTION" in
     esac
     ;;
 esac
+exit 0
+}
