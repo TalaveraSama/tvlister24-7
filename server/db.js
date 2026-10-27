@@ -253,11 +253,140 @@ export function initDb() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS series (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      category_id INTEGER,
+      poster_url TEXT DEFAULT '',
+      backdrop_url TEXT DEFAULT '',
+      plot TEXT DEFAULT '',
+      genre TEXT DEFAULT 'Drama, Ciencia Ficción',
+      release_year INTEGER DEFAULT 2025,
+      rating REAL DEFAULT 8.4,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS series_episodes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      series_id INTEGER NOT NULL,
+      season_num INTEGER NOT NULL DEFAULT 1,
+      episode_num INTEGER NOT NULL DEFAULT 1,
+      title TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      plot TEXT DEFAULT '',
+      duration_sec INTEGER NOT NULL DEFAULT 1200,
+      container_ext TEXT NOT NULL DEFAULT 'mp4',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+    );
   `);
+
+  const ensureColumn = (table, column, def) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes(column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def};`);
+    }
+  };
+
+  ensureColumn('servers', 'api_token', "TEXT DEFAULT ''");
+  ensureColumn('servers', 'last_heartbeat_at', 'TEXT');
+  ensureColumn('servers', 'active_conns', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('servers', 'region_countries', "TEXT DEFAULT ''");
+  ensureColumn('servers', 'isp_match', "TEXT DEFAULT ''");
+  ensureColumn('servers', 'https_port', 'INTEGER');
+  ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('channels_247', 'engine_mode', "TEXT NOT NULL DEFAULT 'virtual'");
+  ensureColumn('epg_sources', 'program_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('epg_programs', 'source_id', 'INTEGER');
+  ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
+
+  // Ensure every LB server has a unique Edge API token
+  const serversWithoutToken = db.prepare("SELECT id FROM servers WHERE api_token IS NULL OR api_token = ''").all();
+  for (const s of serversWithoutToken) {
+    db.prepare('UPDATE servers SET api_token = ? WHERE id = ?').run(crypto.randomBytes(16).toString('hex'), s.id);
+  }
 
   const adminCount = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
   if (adminCount === 0) {
     seedInitialData();
+  }
+
+  // Seed initial demo Series on upgraded DBs if not purged yet
+  const demoPurged = db.prepare("SELECT value FROM settings WHERE key = 'demo_purged'").get();
+  const seriesCount = db.prepare('SELECT COUNT(*) as c FROM series').get().c;
+  if (seriesCount === 0 && demoPurged?.value !== 'true') {
+    seedInitialSeries();
+  }
+}
+
+function seedInitialSeries() {
+  let seriesCat = db.prepare("SELECT id FROM categories WHERE type = 'series' LIMIT 1").get();
+  if (!seriesCat) {
+    const info = db
+      .prepare("INSERT INTO categories (name, type, sort_order) VALUES ('Series & Antologías HD', 'series', 8)")
+      .run();
+    seriesCat = { id: Number(info.lastInsertRowid) };
+  }
+
+  const sInfo = db
+    .prepare(
+      `INSERT INTO series (title, category_id, poster_url, plot, genre, release_year, rating)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      'Crónicas Blender Open Studio',
+      seriesCat.id,
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/Sintel_poster.jpg/440px-Sintel_poster.jpg',
+      'Antología remasterizada de historias animadas y ciencia ficción producida en código abierto.',
+      'Ciencia Ficción, Animación',
+      2024,
+      8.7
+    );
+
+  const seriesId = Number(sInfo.lastInsertRowid);
+  const insertEp = db.prepare(
+    `INSERT INTO series_episodes (series_id, season_num, episode_num, title, source_url, plot, duration_sec, container_ext)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  insertEp.run(
+    seriesId,
+    1,
+    1,
+    'Episodio 1: El Bosque de Big Buck Bunny',
+    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+    'Capítulo inaugural de la primera temporada.',
+    596,
+    'mp4'
+  );
+  insertEp.run(
+    seriesId,
+    1,
+    2,
+    'Episodio 2: El Viaje de Sintel',
+    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
+    'Sintel cruza las montañas heladas en busca de Scales.',
+    888,
+    'mp4'
+  );
+  insertEp.run(
+    seriesId,
+    2,
+    1,
+    'Episodio 1: Tears of Steel en Ámsterdam',
+    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
+    'Inicio de la segunda temporada futurista.',
+    734,
+    'mp4'
+  );
+
+  const b1 = db.prepare('SELECT id, series_ids_json FROM bouquets WHERE id = 1').get();
+  if (b1) {
+    const arr = JSON.parse(b1.series_ids_json || '[]');
+    if (!arr.includes(seriesId)) {
+      arr.push(seriesId);
+      db.prepare('UPDATE bouquets SET series_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
+    }
   }
 }
 

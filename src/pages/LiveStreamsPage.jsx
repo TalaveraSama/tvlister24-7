@@ -115,6 +115,15 @@ export default function LiveStreamsPage({ onPreview }) {
     loadAll();
   };
 
+  const toggleArchive = async (s) => {
+    const nextEnabled = !s.archive_enabled;
+    await apiFetch(`/api/streams/${s.id}/archive`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled: nextEnabled, days: s.tv_archive_days || 3 })
+    });
+    loadAll();
+  };
+
   const handleDelete = async (id) => {
     if (!window.confirm('¿Eliminar este canal en vivo?')) return;
     await apiFetch(`/api/streams/${id}`, { method: 'DELETE' });
@@ -218,7 +227,7 @@ export default function LiveStreamsPage({ onPreview }) {
                 <th className="px-4 py-3">Canal</th>
                 <th className="px-4 py-3">Categoría</th>
                 <th className="px-4 py-3">Modo & Perfil</th>
-                <th className="px-4 py-3">Nodo</th>
+                <th className="px-4 py-3">Catchup DVR</th>
                 <th className="px-4 py-3">Estado</th>
                 <th className="px-4 py-3 text-right">Controles</th>
               </tr>
@@ -253,7 +262,29 @@ export default function LiveStreamsPage({ onPreview }) {
                       {s.profile_name || 'Direct Stream'} • {s.bitrate_kbps} kbps
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-slate-300">{s.server_name || 'Main Node'}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => toggleArchive(s)}
+                      title="Activar/Desactivar Grabación Catchup DVR en disco"
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition ${
+                        s.archive_enabled
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-white'
+                      }`}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          s.archive_enabled ? 'bg-rose-400 animate-ping' : 'bg-slate-500'
+                        }`}
+                      />
+                      {s.archive_enabled ? `REC ${s.tv_archive_days || 3}d` : 'DVR OFF'}
+                    </button>
+                    {s.archive_enabled ? (
+                      <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
+                        {s.archiveStats?.segmentCount || 0} segs • {s.archiveStats?.sizeMb || 0} MB
+                      </div>
+                    ) : null}
+                  </td>
                   <td className="px-4 py-3">
                     {s.status === 'running' ? (
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold text-[11px]">

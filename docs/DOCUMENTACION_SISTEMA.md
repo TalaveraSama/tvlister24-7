@@ -157,22 +157,28 @@ tvlister-admin logs             # Muestra logs del servicio en tiempo real
 4. **Programar Backups Automáticos Diarios en Linux (`cron`):**
    - Ejecuta `crontab -e` como `root` y añade:
      ```cron
-     0 4 * * * /usr/local/bin/tvlister-admin backup >/dev/null 2>&1
-     ```
-5. **(Opcional en GitHub) Fusionar la rama de trabajo a `main`:**
-   - Todo el proyecto está actualmente en la rama `arena/85cc9902-tvlister24-7`; puedes abrir y fusionar un Pull Request hacia `main` cuando quieras consolidarlo como rama principal.
+## 5. Nuevos Módulos Enterprise v2.0 (Partes A y B Implementadas)
+
+### 5.1. Automatización Operativa de Producción (Parte A — 100% Activa)
+1. **Modo Producción Limpio (`Purgar Datos Demo`):**
+   - Desde **Admin Sistema & Seguridad → Purgar Datos Demo (Modo Limpio)** o por SSH con `sudo tvlister-admin purge-demo`.
+   - Elimina todos los canales/VOD/series/líneas de prueba y marca `demo_purged=true` para que nunca se vuelvan a sembrar al reiniciar, conservando intactos tu Super Admin, categorías y perfiles FFmpeg.
+2. **Motor FFmpeg HLS 24/7 Persistente (`Auto-Start`):**
+   - Cada canal en **Canales 24/7** permite elegir entre **Reloj Virtual (0% CPU)** o **FFmpeg HLS Continuo (`Auto-Start`)**; los canales en modo FFmpeg levantan automáticamente su proceso supervisor al reiniciar el servidor Linux.
+3. **Configurador Automático Dominio Nginx + SSL Let's Encrypt (Compatible XUI.one):**
+   - Generador integrado en **Admin Sistema & Seguridad** y comando directo `sudo tvlister-admin setup-ssl tv.midominio.com admin@midominio.com`.
+4. **Snapshots y Backups Diarios Automáticos:**
+   - Planificador interno cada 24h en `data/backups/` con retención automática (creación, descarga y restauración en 1 clic desde la UI) + `sudo tvlister-admin enable-cron` para respaldo diario en `/root` a las 03:00 AM.
 
 ---
 
-### 5.2. Roadmap Técnico (Funciones Enterprise que aún no existen si deseas expandir el software más adelante)
+### 5.2. Módulos Enterprise Avanzados (Parte B — 100% Activa)
 
-Para que tengas claridad total comparándolo contra suites comerciales multi-servidor:
-
-| Módulo / Función | Estado Actual | Qué faltaría construir si lo necesitas |
+| Módulo / Función | Estado en v2.0 | Detalles Técnicos y Rutas |
 | :--- | :--- | :--- |
-| **Clúster Multi-Servidor Real (Load Balancers Remotos)** | Registra nodos en BD, pero todo el streaming sale del servidor principal. | Crear un **Agente Edge** ligero para servidores secundarios que distribuya clientes realmente por CPU/GeoIP y reporte telemetría remota. |
-| **Series con Temporadas y Episodios** | Soporta películas VOD individuales y responde `[]` en series para no dar error en TiviMate/Smarters. | Crear tablas `series`, `seasons`, `episodes` y su interfaz para organizar capítulos por temporada. |
-| **TV Archive / Catchup & Timeshift en Disco** | Guarda configuración de días y expone banderas en API, pero no graba a disco aún. | Agregar proceso `ffmpeg` segmentador circular por días y ruta `/timeshift/...` para retroceder programas pasados. |
-| **Sincronizador Automático de EPG Externo (`.xml.gz`)** | Genera EPG dinámico 24/7 automático + editor manual. | Agregar tarea programada (*cron*) que descargue e indexe guías XMLTV externas de terceros cada 12 h. |
-| **Portal Middleware Stalker (`/c/`) Nativo** | Soporta registro MAC y llave Stalker; funciona vía Xtream API y M3U. | Emular el protocolo JSON interno `/stalker_portal/server/load.php` para decodificadores MAG antiguos que solo aceptan Portal URL `/c/`. |
-| **Motor PostgreSQL / MariaDB para +5,000 conexiones** | Usa SQLite WAL (óptimo y muy veloz hasta ~1,500–2,000 conexiones en 1 VPS). | Migrar capa `server/db.js` a PostgreSQL o MariaDB cuando operes múltiples nodos con decenas de miles de usuarios simultáneos. |
+| **Agente Edge Load Balancer Remoto Real** | **ACTIVO** | `scripts/edge-agent.js` + instalador 1-clic `/api/lb/install.sh`. Reporta CPU/RAM/Conexiones cada 10s a `/api/lb/heartbeat` y enruta clientes reales por **Menor Carga, GeoIP o ISP** con failover automático al Master. |
+| **Series con Temporadas y Episodios** | **ACTIVO** | Tablas `series` y `series_episodes`, pestaña dedicada en **Películas & Series**, WebTV Series, M3U y Xtream API completa (`get_series_categories`, `get_series`, `get_series_info`, `/series/:u/:p/:id.mp4`). |
+| **TV Archive / Catchup & Timeshift DVR** | **ACTIVO** | Grabador FFmpeg de segmentos MPEG-TS por epoch (`streams_runtime/archive/`), botón **REC DVR** en vivo, limpieza automática por días y rutas `/timeshift/:u/:p/:dur/:start/:id.m3u8` + `/streaming/timeshift.php`. |
+| **Importador Automático XMLTV (`.xml` y `.xml.gz`)** | **ACTIVO** | Descompresor GZIP nativo (`node:zlib`) + parser XMLTV (`server/epgSync.js`) con auto-sincronización cada 12h y botón **Sincronizar Ahora**. |
+| **Portal Middleware Stalker / Ministra (`/c/`)** | **ACTIVO** | Emulador nativo MAG STB en `/c/`, `/stalker_portal/c/`, `/server/load.php` y `/stalker_portal/server/load.php` con autenticación por dirección MAC, géneros ITV, canales, VOD y mensajes OSD. |
+

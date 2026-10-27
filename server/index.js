@@ -26,9 +26,24 @@ import {
   startSupervisedWorker,
   stopWorker,
   stopAllWorkers,
+  getWorkerPid,
+  startArchiveWorker,
+  stopArchiveWorker,
+  getArchiveStats,
+  pruneArchiveSegmentsForStreams,
   isFfmpegAvailable
 } from './streamEngine.js';
 import { iptvRouter } from './iptvApi.js';
+import { stalkerRouter } from './stalkerPortal.js';
+import { syncEpgSourceById, startEpgAutoSyncScheduler } from './epgSync.js';
+import {
+  buildFullBackupObject,
+  createServerSnapshot,
+  listServerSnapshots,
+  readServerSnapshot,
+  deleteServerSnapshot,
+  startAutomatedBackupScheduler
+} from './backupScheduler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8080;
@@ -47,8 +62,54 @@ app.use(express.urlencoded({ extended: true }));
 // Application-level firewall check
 app.use(firewallMiddleware);
 
-// Mount IPTV / OTT Standard Endpoints (/get.php, /xmltv.php, /player_api.php, /live/*, /movie/*, /api/webtv/*)
+// Mount Stalker / Ministra MAG STB Middleware (/c/, /stalker_portal/c/, /server/load.php)
+app.use(stalkerRouter);
+
+// Mount IPTV / OTT Standard Endpoints (/get.php, /xmltv.php, /player_api.php, /live/*, /movie/*, /series/*, /timeshift/*, /api/webtv/*)
 app.use(iptvRouter);
+
+// ==================== EDGE LOAD BALANCER HEARTBEAT & AGENT DISTRIBUTION ====================
+app.post('/api/lb/heartbeat', (req, res) => {
+  const token = String(req.headers['x-edge-token'] || req.body?.api_token || '').trim();
+  if (!token) return res.status(401).json({ error: 'x-edge-token requerido' });
+
+  const srv = db.prepare('SELECT * FROM servers WHERE api_token = ? AND is_main = 0').get(token);
+  if (!srv) return res.status(403).json({ error: 'Token de Nodo Edge inválido' });
+
+  const { cpu_usage = 0, ram_usage = 0, active_conns = 0, http_port } = req.body || {};
+  db.prepare(
+    `UPDATE servers SET
+       status = 'online',
+       cpu_usage = ?,
+       ram_usage = ?,
+       active_conns = ?,
+       port = COALESCE(?, port),
+       last_heartbeat_at = datetime('now')
+     WHERE id = ?`
+  ).run(
+    Number(cpu_usage) || 0,
+    Number(ram_usage) || 0,
+    Number(active_conns) || 0,
+    http_port ? Number(http_port) : null,
+    srv.id
+  );
+
+  res.json({ ok: true, server_id: srv.id });
+});
+
+app.get('/api/lb/edge-agent.js', (req, res) => {
+  const scriptPath = path.resolve(__dirname, '../scripts/edge-agent.js');
+  if (!fs.existsSync(scriptPath)) return res.status(404).send('edge-agent.js not found');
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.send(fs.readFileSync(scriptPath, 'utf8'));
+});
+
+app.get('/api/lb/install.sh', (req, res) => {
+  const scriptPath = path.resolve(__dirname, '../scripts/install_edge_lb.sh');
+  if (!fs.existsSync(scriptPath)) return res.status(404).send('install_edge_lb.sh not found');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.send(fs.readFileSync(scriptPath, 'utf8'));
+});
 
 // ==================== AUTH ROUTES ====================
 app.post('/api/auth/login', (req, res) => {
@@ -112,6 +173,7 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
   const totalCh247 = db.prepare('SELECT COUNT(*) as c FROM channels_247').get().c;
   const runningCh247 = db.prepare("SELECT COUNT(*) as c FROM channels_247 WHERE status = 'running'").get().c;
   const totalVod = db.prepare('SELECT COUNT(*) as c FROM vod_items').get().c;
+  const totalSeries = db.prepare('SELECT COUNT(*) as c FROM series').get().c;
 
   const totalLines = isReseller
     ? db.prepare('SELECT COUNT(*) as c FROM lines WHERE owner_id = ?').get(req.user.id).c
@@ -163,6 +225,7 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
       totalCh247,
       runningCh247,
       totalVod,
+      totalSeries,
       totalLines,
       activeLines,
       onlineConnections: connections.length,
@@ -214,7 +277,11 @@ app.get('/api/streams', requireAuth, (req, res) => {
        LEFT JOIN servers srv ON srv.id = s.server_id
        ORDER BY s.id DESC`
     )
-    .all();
+    .all()
+    .map((s) => ({
+      ...s,
+      archiveStats: getArchiveStats(s.id)
+    }));
   res.json(rows);
 });
 
@@ -319,9 +386,33 @@ app.get('/api/streams/:id/ffmpeg', requireAuth, (req, res) => {
   res.json({ command: buildFfmpegCommandForStream(stream, profile) });
 });
 
+app.post('/api/streams/:id/archive', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+  if (!stream) return res.status(404).json({ error: 'Stream no encontrado' });
+
+  const enabled = req.body?.enabled ? 1 : 0;
+  const days = Math.max(1, Number(req.body?.days || stream.tv_archive_days || 3));
+
+  db.prepare('UPDATE streams SET archive_enabled = ?, tv_archive_days = ? WHERE id = ?').run(
+    enabled,
+    enabled ? days : 0,
+    id
+  );
+
+  if (enabled && isFfmpegAvailable()) {
+    startArchiveWorker({ ...stream, archive_enabled: 1, tv_archive_days: days });
+  } else {
+    stopArchiveWorker(id);
+  }
+
+  res.json({ ok: true, archive_enabled: enabled, tv_archive_days: enabled ? days : 0, archiveStats: getArchiveStats(id) });
+});
+
 app.delete('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   stopWorker(`stream_${id}`);
+  stopArchiveWorker(id);
   db.prepare('DELETE FROM streams WHERE id = ?').run(id);
   res.json({ ok: true });
 });
@@ -406,6 +497,13 @@ app.post('/api/streams/import-m3u', requireAuth, requireAdmin, async (req, res) 
 });
 
 // ==================== 24/7 CUSTOM CHANNELS STUDIO ====================
+function launchChannel247WorkerIfConfigured(chId) {
+  const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(chId);
+  if (!ch || ch.status !== 'running' || ch.engine_mode !== 'ffmpeg' || !isFfmpegAvailable()) return;
+  const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
+  startSupervisedWorker(`ch247_${ch.id}`, () => buildFfmpegArgsForChannel247(ch, profile));
+}
+
 app.get('/api/channels247', requireAuth, (req, res) => {
   const rows = db
     .prepare(
@@ -421,6 +519,7 @@ app.get('/api/channels247', requireAuth, (req, res) => {
     const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
     return {
       ...ch,
+      workerPid: getWorkerPid(`ch247_${ch.id}`),
       playlist: JSON.parse(ch.playlist_json || '[]'),
       liveState: computeChannel247LiveState(ch),
       ffmpegCommand: buildFfmpegCommandForChannel247(ch, profile)
@@ -434,11 +533,12 @@ app.post('/api/channels247', requireAuth, requireAdmin, (req, res) => {
   if (!b.name) return res.status(400).json({ error: 'El nombre del canal 24/7 es obligatorio.' });
   const playlistJson = JSON.stringify(Array.isArray(b.playlist) ? b.playlist : []);
   const anchorEpoch = Math.floor(Date.now() / 1000);
+  const engineMode = b.engine_mode === 'ffmpeg' ? 'ffmpeg' : 'virtual';
 
   const info = db
     .prepare(
-      `INSERT INTO channels_247 (name, category_id, logo_url, epg_channel_id, loop_mode, transcode_profile_id, server_id, watermark_text, status, playlist_json, schedule_anchor_epoch)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`
+      `INSERT INTO channels_247 (name, category_id, logo_url, epg_channel_id, loop_mode, engine_mode, transcode_profile_id, server_id, watermark_text, status, playlist_json, schedule_anchor_epoch)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`
     )
     .run(
       String(b.name),
@@ -446,6 +546,7 @@ app.post('/api/channels247', requireAuth, requireAdmin, (req, res) => {
       String(b.logo_url || ''),
       String(b.epg_channel_id || `ch247.${Date.now()}.tv`),
       String(b.loop_mode || 'loop'),
+      engineMode,
       b.transcode_profile_id ? Number(b.transcode_profile_id) : 2,
       b.server_id ? Number(b.server_id) : 1,
       String(b.watermark_text || ''),
@@ -462,6 +563,7 @@ app.post('/api/channels247', requireAuth, requireAdmin, (req, res) => {
       db.prepare('UPDATE bouquets SET channel247_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
     }
   }
+  launchChannel247WorkerIfConfigured(newId);
   res.json({ id: newId, ok: true });
 });
 
@@ -469,11 +571,12 @@ app.put('/api/channels247/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
   const playlistJson = JSON.stringify(Array.isArray(b.playlist) ? b.playlist : []);
+  const engineMode = b.engine_mode === 'ffmpeg' ? 'ffmpeg' : 'virtual';
 
   db.prepare(
     `UPDATE channels_247 SET
        name = ?, category_id = ?, logo_url = ?, epg_channel_id = ?,
-       loop_mode = ?, transcode_profile_id = ?, server_id = ?, watermark_text = ?, playlist_json = ?
+       loop_mode = ?, engine_mode = ?, transcode_profile_id = ?, server_id = ?, watermark_text = ?, playlist_json = ?
      WHERE id = ?`
   ).run(
     String(b.name || ''),
@@ -481,12 +584,18 @@ app.put('/api/channels247/:id', requireAuth, requireAdmin, (req, res) => {
     String(b.logo_url || ''),
     String(b.epg_channel_id || ''),
     String(b.loop_mode || 'loop'),
+    engineMode,
     b.transcode_profile_id ? Number(b.transcode_profile_id) : 2,
     b.server_id ? Number(b.server_id) : 1,
     String(b.watermark_text || ''),
     playlistJson,
     id
   );
+  if (engineMode === 'ffmpeg') {
+    launchChannel247WorkerIfConfigured(id);
+  } else {
+    stopWorker(`ch247_${id}`);
+  }
   res.json({ ok: true });
 });
 
@@ -498,14 +607,15 @@ app.post('/api/channels247/:id/action', requireAuth, requireAdmin, (req, res) =>
     db.prepare("UPDATE channels_247 SET status = 'stopped' WHERE id = ?").run(id);
   } else if (action === 'start') {
     db.prepare("UPDATE channels_247 SET status = 'running' WHERE id = ?").run(id);
+    launchChannel247WorkerIfConfigured(id);
   } else if (action === 'start_ffmpeg') {
     const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
     if (!ch) return res.status(404).json({ error: 'Canal no encontrado' });
-    db.prepare("UPDATE channels_247 SET status = 'running' WHERE id = ?").run(id);
-    if (isFfmpegAvailable()) {
-      const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
-      startSupervisedWorker(`ch247_${id}`, () => buildFfmpegArgsForChannel247(ch, profile));
-    }
+    db.prepare("UPDATE channels_247 SET status = 'running', engine_mode = 'ffmpeg' WHERE id = ?").run(id);
+    launchChannel247WorkerIfConfigured(id);
+  } else if (action === 'set_virtual') {
+    stopWorker(`ch247_${id}`);
+    db.prepare("UPDATE channels_247 SET status = 'running', engine_mode = 'virtual' WHERE id = ?").run(id);
   } else if (action === 'resync') {
     db.prepare("UPDATE channels_247 SET schedule_anchor_epoch = ?, status = 'running' WHERE id = ?").run(
       Math.floor(Date.now() / 1000),
@@ -601,13 +711,124 @@ app.delete('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ==================== SERIES (SEASONS & EPISODES) ====================
+app.get('/api/series', requireAuth, (req, res) => {
+  const seriesRows = db
+    .prepare(
+      `SELECT s.*, c.name as category_name
+       FROM series s
+       LEFT JOIN categories c ON c.id = s.category_id
+       ORDER BY s.id DESC`
+    )
+    .all();
+  const episodes = db.prepare('SELECT * FROM series_episodes ORDER BY season_num ASC, episode_num ASC, id ASC').all();
+  res.json(
+    seriesRows.map((sr) => ({
+      ...sr,
+      episodes: episodes.filter((ep) => ep.series_id === sr.id)
+    }))
+  );
+});
+
+app.post('/api/series', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.title) return res.status(400).json({ error: 'El título de la serie es obligatorio.' });
+
+  const defaultCat = db.prepare("SELECT id FROM categories WHERE type = 'series' LIMIT 1").get()?.id || 6;
+  const info = db
+    .prepare(
+      `INSERT INTO series (title, category_id, poster_url, backdrop_url, plot, genre, release_year, rating)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      String(b.title),
+      b.category_id ? Number(b.category_id) : defaultCat,
+      String(b.poster_url || ''),
+      String(b.backdrop_url || ''),
+      String(b.plot || ''),
+      String(b.genre || 'Drama'),
+      Number(b.release_year) || 2025,
+      Number(b.rating) || 8.5
+    );
+
+  const newId = Number(info.lastInsertRowid);
+  const b1 = db.prepare('SELECT * FROM bouquets WHERE id = 1').get();
+  if (b1) {
+    const arr = JSON.parse(b1.series_ids_json || '[]');
+    if (!arr.includes(newId)) {
+      arr.push(newId);
+      db.prepare('UPDATE bouquets SET series_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
+    }
+  }
+  res.json({ id: newId, ok: true });
+});
+
+app.put('/api/series/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  db.prepare(
+    `UPDATE series SET
+       title = ?, category_id = ?, poster_url = ?, backdrop_url = ?,
+       plot = ?, genre = ?, release_year = ?, rating = ?
+     WHERE id = ?`
+  ).run(
+    String(b.title || ''),
+    b.category_id ? Number(b.category_id) : 6,
+    String(b.poster_url || ''),
+    String(b.backdrop_url || ''),
+    String(b.plot || ''),
+    String(b.genre || 'Drama'),
+    Number(b.release_year) || 2025,
+    Number(b.rating) || 8.5,
+    id
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/series/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  db.prepare('DELETE FROM series_episodes WHERE series_id = ?').run(id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/series/:id/episodes', requireAuth, requireAdmin, (req, res) => {
+  const seriesId = Number(req.params.id);
+  const b = req.body || {};
+  if (!b.title || !b.source_url) {
+    return res.status(400).json({ error: 'Título del episodio y URL de video requeridos.' });
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO series_episodes (series_id, season_num, episode_num, title, source_url, duration_sec, container_ext, plot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      seriesId,
+      Math.max(1, Number(b.season_num) || 1),
+      Math.max(1, Number(b.episode_num) || 1),
+      String(b.title),
+      String(b.source_url),
+      Number(b.duration_sec) || 2400,
+      String(b.container_ext || 'mp4'),
+      String(b.plot || '')
+    );
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.delete('/api/series/episodes/:epId', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(Number(req.params.epId));
+  res.json({ ok: true });
+});
+
 // ==================== BOUQUETS & PACKAGES ====================
 app.get('/api/bouquets', requireAuth, (req, res) => {
   const rows = db.prepare('SELECT * FROM bouquets ORDER BY sort_order ASC, id ASC').all().map((b) => ({
     ...b,
     stream_ids: JSON.parse(b.stream_ids_json || '[]'),
     channel247_ids: JSON.parse(b.channel247_ids_json || '[]'),
-    vod_ids: JSON.parse(b.vod_ids_json || '[]')
+    vod_ids: JSON.parse(b.vod_ids_json || '[]'),
+    series_ids: JSON.parse(b.series_ids_json || '[]')
   }));
   res.json(rows);
 });
@@ -617,7 +838,7 @@ app.post('/api/bouquets', requireAuth, requireAdmin, (req, res) => {
   if (!b.name) return res.status(400).json({ error: 'Nombre del Bouquet requerido.' });
   const info = db
     .prepare(
-      'INSERT INTO bouquets (name, description, stream_ids_json, channel247_ids_json, vod_ids_json, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO bouquets (name, description, stream_ids_json, channel247_ids_json, vod_ids_json, series_ids_json, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
     )
     .run(
       String(b.name),
@@ -625,6 +846,7 @@ app.post('/api/bouquets', requireAuth, requireAdmin, (req, res) => {
       JSON.stringify(b.stream_ids || []),
       JSON.stringify(b.channel247_ids || []),
       JSON.stringify(b.vod_ids || []),
+      JSON.stringify(b.series_ids || []),
       Number(b.sort_order) || 0
     );
   res.json({ id: Number(info.lastInsertRowid), ok: true });
@@ -634,13 +856,14 @@ app.put('/api/bouquets/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
   db.prepare(
-    'UPDATE bouquets SET name = ?, description = ?, stream_ids_json = ?, channel247_ids_json = ?, vod_ids_json = ? WHERE id = ?'
+    'UPDATE bouquets SET name = ?, description = ?, stream_ids_json = ?, channel247_ids_json = ?, vod_ids_json = ?, series_ids_json = ? WHERE id = ?'
   ).run(
     String(b.name || ''),
     String(b.description || ''),
     JSON.stringify(b.stream_ids || []),
     JSON.stringify(b.channel247_ids || []),
     JSON.stringify(b.vod_ids || []),
+    JSON.stringify(b.series_ids || []),
     id
   );
   res.json({ ok: true });
@@ -896,13 +1119,35 @@ app.get('/api/epg', requireAuth, (req, res) => {
   res.json({ sources, programs });
 });
 
-app.post('/api/epg/sources', requireAuth, requireAdmin, (req, res) => {
+app.post('/api/epg/sources', requireAuth, requireAdmin, async (req, res) => {
   const { name, xmltv_url } = req.body || {};
   if (!name || !xmltv_url) return res.status(400).json({ error: 'Nombre y URL XMLTV requeridos.' });
   const info = db
-    .prepare("INSERT INTO epg_sources (name, xmltv_url, status, last_updated_at) VALUES (?, ?, 'synced', datetime('now'))")
+    .prepare("INSERT INTO epg_sources (name, xmltv_url, status, last_updated_at) VALUES (?, ?, 'pending', datetime('now'))")
     .run(String(name), String(xmltv_url));
-  res.json({ id: Number(info.lastInsertRowid), ok: true });
+  const id = Number(info.lastInsertRowid);
+  try {
+    const syncRes = await syncEpgSourceById(id, `http://127.0.0.1:${PORT}`);
+    return res.json({ id, ok: true, importedCount: syncRes.importedCount });
+  } catch (err) {
+    return res.json({ id, ok: true, warning: err.message });
+  }
+});
+
+app.post('/api/epg/sources/:id/sync', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await syncEpgSourceById(Number(req.params.id), `http://127.0.0.1:${PORT}`);
+    res.json({ ok: true, importedCount: result.importedCount });
+  } catch (err) {
+    res.status(400).json({ error: `Error sincronizando XMLTV: ${err.message}` });
+  }
+});
+
+app.delete('/api/epg/sources/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  db.prepare('DELETE FROM epg_programs WHERE source_id = ?').run(id);
+  db.prepare('DELETE FROM epg_sources WHERE id = ?').run(id);
+  res.json({ ok: true });
 });
 
 app.post('/api/epg/programs', requireAuth, requireAdmin, (req, res) => {
@@ -985,9 +1230,41 @@ app.get('/api/system', requireAuth, (req, res) => {
     firewall,
     settings,
     admins,
+    snapshots: listServerSnapshots(),
     dbSizeKb,
     listenPort: PORT,
     telemetry: getHostTelemetry()
+  });
+});
+
+app.get('/api/system/ssl-config', requireAuth, requireAdmin, (req, res) => {
+  const domain = String(req.query.domain || 'tv.midominio.com').trim();
+  const nginxConf = `# /etc/nginx/sites-available/tvlister247.conf
+# Coexistencia segura con XUI.one (Nginx del sistema en 80/443 -> TVLister en 127.0.0.1:${PORT})
+server {
+    listen 80;
+    server_name ${domain};
+
+    client_max_body_size 50M;
+
+    location / {
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+    }
+}`;
+  res.json({
+    domain,
+    listenPort: PORT,
+    cliCommand: `sudo tvlister-admin setup-ssl ${domain} admin@${domain}`,
+    nginxConf
   });
 });
 
@@ -1040,18 +1317,72 @@ app.post('/api/system/maintenance', requireAuth, requireAdmin, (req, res) => {
     ).run(newKey);
     return res.json({ ok: true, stalker_key: newKey, message: 'Nueva Stalker Key generada.' });
   }
+  if (action === 'purge_demo_data') {
+    stopAllWorkers();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.exec(`
+        DELETE FROM active_connections;
+        DELETE FROM client_claims;
+        DELETE FROM osd_messages;
+        DELETE FROM series_episodes;
+        DELETE FROM series;
+        DELETE FROM vod_items;
+        DELETE FROM channels_247;
+        DELETE FROM streams;
+        DELETE FROM lines;
+        DELETE FROM epg_programs;
+        DELETE FROM users WHERE role = 'reseller';
+        UPDATE bouquets SET stream_ids_json = '[]', channel247_ids_json = '[]', vod_ids_json = '[]', series_ids_json = '[]';
+        INSERT INTO settings (key, value) VALUES ('demo_purged', 'true')
+          ON CONFLICT(key) DO UPDATE SET value = 'true';
+      `);
+      db.exec('COMMIT;');
+      return res.json({
+        ok: true,
+        message: 'Datos de demostración eliminados. Categorías, perfiles FFmpeg y Super Admin conservados.'
+      });
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK;');
+      } catch {
+        // ignore
+      }
+      return res.status(500).json({ error: err.message });
+    }
+  }
   res.status(400).json({ error: 'Acción no reconocida' });
 });
 
 app.post('/api/servers', requireAuth, requireAdmin, (req, res) => {
-  const { name, host, port = 8080, lb_mode = 'load', max_clients = 2500 } = req.body || {};
+  const {
+    name,
+    host,
+    port = 8096,
+    lb_mode = 'load',
+    max_clients = 2500,
+    region_countries = '',
+    isp_match = ''
+  } = req.body || {};
   if (!name || !host) return res.status(400).json({ error: 'Nombre y Host/IP del servidor requeridos.' });
+  const apiToken = `edge_${crypto.randomBytes(16).toString('hex')}`;
+  const numPort = Number(port) || 8096;
   const info = db
     .prepare(
-      "INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients) VALUES (?, ?, ?, 0, 'online', ?, ?)"
+      `INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, api_token, region_countries, isp_match)
+       VALUES (?, ?, ?, 0, 'standby', ?, ?, ?, ?, ?)`
     )
-    .run(String(name), String(host), Number(port) || 8080, String(lb_mode), Number(max_clients) || 2500);
-  res.json({ id: Number(info.lastInsertRowid), ok: true });
+    .run(
+      String(name),
+      String(host).trim(),
+      numPort,
+      String(lb_mode),
+      Number(max_clients) || 2500,
+      apiToken,
+      String(region_countries || '').trim(),
+      String(isp_match || '').trim()
+    );
+  res.json({ id: Number(info.lastInsertRowid), api_token: apiToken, ok: true });
 });
 
 app.delete('/api/servers/:id', requireAuth, requireAdmin, (req, res) => {
@@ -1112,33 +1443,32 @@ app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
 });
 
 app.get('/api/backup/export', requireAuth, requireAdmin, (req, res) => {
-  const tables = [
-    'categories',
-    'transcode_profiles',
-    'servers',
-    'streams',
-    'channels_247',
-    'vod_items',
-    'bouquets',
-    'packages',
-    'lines',
-    'epg_sources',
-    'epg_programs',
-    'firewall_rules',
-    'settings'
-  ];
-  const dump = {
-    exported_at: new Date().toISOString(),
-    panel: 'TVLister 24/7 Midnight Edition',
-    version: '1.0.0',
-    data: {}
-  };
-  for (const t of tables) {
-    dump.data[t] = db.prepare(`SELECT * FROM ${t}`).all();
-  }
+  const dump = buildFullBackupObject();
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="tvlister247_backup_${Date.now()}.json"`);
   res.send(JSON.stringify(dump, null, 2));
+});
+
+app.get('/api/backups/snapshots', requireAuth, requireAdmin, (req, res) => {
+  res.json(listServerSnapshots());
+});
+
+app.post('/api/backups/snapshots', requireAuth, requireAdmin, (req, res) => {
+  const snap = createServerSnapshot('manual');
+  res.json({ ok: true, snapshot: snap });
+});
+
+app.get('/api/backups/snapshots/:filename/download', requireAuth, requireAdmin, (req, res) => {
+  const raw = readServerSnapshot(req.params.filename);
+  if (!raw) return res.status(404).send('Snapshot no encontrado');
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="${path.basename(req.params.filename)}"`);
+  res.send(raw);
+});
+
+app.delete('/api/backups/snapshots/:filename', requireAuth, requireAdmin, (req, res) => {
+  deleteServerSnapshot(req.params.filename);
+  res.json({ ok: true });
 });
 
 app.get('/api/system/readiness', requireAuth, requireAdmin, (req, res) => {
@@ -1214,22 +1544,27 @@ app.get('/api/system/readiness', requireAuth, requireAdmin, (req, res) => {
   });
 });
 
-app.post('/api/backup/restore', requireAuth, requireAdmin, (req, res) => {
-  const dump = req.body;
-  if (!dump || !dump.data || typeof dump.data !== 'object') {
-    return res.status(400).json({ error: 'Archivo de respaldo inválido.' });
-  }
-  const allowedTables = ['categories', 'streams', 'channels_247', 'vod_items', 'bouquets', 'packages', 'lines', 'firewall_rules'];
+function restoreFromBackupObject(dump) {
+  const allowedTables = [
+    'categories',
+    'streams',
+    'channels_247',
+    'vod_items',
+    'series',
+    'series_episodes',
+    'bouquets',
+    'packages',
+    'lines',
+    'firewall_rules'
+  ];
   let restoredCount = 0;
 
+  db.exec('BEGIN IMMEDIATE;');
   try {
-    db.exec('BEGIN IMMEDIATE;');
     for (const table of allowedTables) {
       const rows = dump.data[table];
       if (Array.isArray(rows) && rows.length > 0) {
-        const schemaCols = new Set(
-          db.prepare(`PRAGMA table_info(${table})`).all().map((col) => col.name)
-        );
+        const schemaCols = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((col) => col.name));
         const validCols = Object.keys(rows[0]).filter((c) => schemaCols.has(c));
         if (validCols.length === 0) continue;
 
@@ -1243,14 +1578,39 @@ app.post('/api/backup/restore', requireAuth, requireAdmin, (req, res) => {
       }
     }
     db.exec('COMMIT;');
-    res.json({ ok: true, restoredCount });
+    return restoredCount;
   } catch (err) {
     try {
       db.exec('ROLLBACK;');
     } catch {
       // ignore
     }
+    throw err;
+  }
+}
+
+app.post('/api/backup/restore', requireAuth, requireAdmin, (req, res) => {
+  const dump = req.body;
+  if (!dump || !dump.data || typeof dump.data !== 'object') {
+    return res.status(400).json({ error: 'Archivo de respaldo inválido.' });
+  }
+  try {
+    const restoredCount = restoreFromBackupObject(dump);
+    res.json({ ok: true, restoredCount });
+  } catch (err) {
     res.status(400).json({ error: `Error restaurando respaldo: ${err.message}` });
+  }
+});
+
+app.post('/api/backups/snapshots/:filename/restore', requireAuth, requireAdmin, (req, res) => {
+  const raw = readServerSnapshot(req.params.filename);
+  if (!raw) return res.status(404).json({ error: 'Snapshot no encontrado en servidor.' });
+  try {
+    const dump = JSON.parse(raw);
+    const restoredCount = restoreFromBackupObject(dump);
+    res.json({ ok: true, restoredCount });
+  } catch (err) {
+    res.status(400).json({ error: `Error restaurando snapshot: ${err.message}` });
   }
 });
 
@@ -1258,7 +1618,7 @@ app.post('/api/backup/restore', requireAuth, requireAdmin, (req, res) => {
 async function startServer() {
   const httpServer = http.createServer(app);
 
-  // Resume active transcode streams if FFmpeg is present on host
+  // Resume active transcode streams, 24/7 FFmpeg channels & TV Archive DVR workers if FFmpeg is present
   if (isFfmpegAvailable()) {
     const activeTranscodes = db
       .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
@@ -1266,7 +1626,31 @@ async function startServer() {
     for (const s of activeTranscodes) {
       launchStreamWorkerIfNeeded(s.id);
     }
+
+    const activeFfmpeg247 = db
+      .prepare("SELECT id FROM channels_247 WHERE status = 'running' AND engine_mode = 'ffmpeg'")
+      .all();
+    for (const ch of activeFfmpeg247) {
+      launchChannel247WorkerIfConfigured(ch.id);
+    }
+
+    const archivedStreams = db.prepare('SELECT * FROM streams WHERE archive_enabled = 1').all();
+    for (const st of archivedStreams) {
+      startArchiveWorker(st);
+    }
   }
+
+  // Background Schedulers: Daily Automated Backups, 12h XMLTV Sync & 30m DVR Retention Cleanup
+  startAutomatedBackupScheduler();
+  startEpgAutoSyncScheduler(PORT);
+  setInterval(() => {
+    try {
+      const allStreams = db.prepare('SELECT id, tv_archive_days FROM streams WHERE archive_enabled = 1').all();
+      pruneArchiveSegmentsForStreams(allStreams);
+    } catch {
+      // ignore
+    }
+  }, 30 * 60 * 1000).unref();
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');

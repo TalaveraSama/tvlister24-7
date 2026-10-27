@@ -30,6 +30,7 @@ export default function Channels247Page({ onPreview }) {
     logo_url: '',
     epg_channel_id: '',
     loop_mode: 'loop',
+    engine_mode: 'virtual',
     transcode_profile_id: 2,
     watermark_text: 'TVLISTER 24/7',
     playlist: []
@@ -69,6 +70,7 @@ export default function Channels247Page({ onPreview }) {
       logo_url: '',
       epg_channel_id: `canal247.${Math.floor(Math.random() * 900 + 100)}.tv`,
       loop_mode: 'loop',
+      engine_mode: 'virtual',
       transcode_profile_id: 2,
       watermark_text: 'TVLISTER 24/7',
       playlist: vodList.slice(0, 2).map((v, idx) => ({
@@ -90,6 +92,7 @@ export default function Channels247Page({ onPreview }) {
       logo_url: ch.logo_url || '',
       epg_channel_id: ch.epg_channel_id || '',
       loop_mode: ch.loop_mode || 'loop',
+      engine_mode: ch.engine_mode || 'virtual',
       transcode_profile_id: ch.transcode_profile_id || 2,
       watermark_text: ch.watermark_text || '',
       playlist: Array.isArray(ch.playlist) ? ch.playlist : []
@@ -224,7 +227,7 @@ export default function Channels247Page({ onPreview }) {
                       )}
                     </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-bold text-white text-sm truncate">{ch.name}</h3>
                         <span
                           className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -234,6 +237,17 @@ export default function Channels247Page({ onPreview }) {
                           }`}
                         >
                           {ch.status === 'running' ? 'AL AIRE 24/7' : 'DETENIDO'}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                            ch.engine_mode === 'ffmpeg'
+                              ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                              : 'bg-slate-800 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          {ch.engine_mode === 'ffmpeg'
+                            ? `FFMPEG AUTO${ch.workerPid ? ` (PID ${ch.workerPid})` : ''}`
+                            : 'RELOJ VIRTUAL'}
                         </span>
                       </div>
                       <div className="text-xs text-slate-400 mt-0.5">
@@ -397,7 +411,18 @@ export default function Channels247Page({ onPreview }) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-slate-300 mb-1 font-medium">Motor Playout 24/7</label>
+                  <select
+                    value={form.engine_mode || 'virtual'}
+                    onChange={(e) => setForm({ ...form, engine_mode: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="virtual">Reloj Virtual (0% CPU)</option>
+                    <option value="ffmpeg">FFmpeg HLS Continuo (Auto-Start)</option>
+                  </select>
+                </div>
                 <div>
                   <label className="block text-slate-300 mb-1 font-medium">ID EPG Automático</label>
                   <input

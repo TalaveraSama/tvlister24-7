@@ -5,7 +5,13 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
 import { extractClientIp } from './auth.js';
-import { computeChannel247LiveState, getLocalHlsManifestPath, HLS_ROOT } from './streamEngine.js';
+import {
+  computeChannel247LiveState,
+  getLocalHlsManifestPath,
+  getArchiveSegmentsInRange,
+  HLS_ROOT,
+  ARCHIVE_ROOT
+} from './streamEngine.js';
 
 export const iptvRouter = express.Router();
 
@@ -70,12 +76,14 @@ function getAllowedContentForLine(line) {
   const streamSet = new Set();
   const ch247Set = new Set();
   const vodSet = new Set();
+  const seriesSet = new Set();
 
   for (const b of matched) {
     try {
       JSON.parse(b.stream_ids_json || '[]').forEach((id) => streamSet.add(Number(id)));
       JSON.parse(b.channel247_ids_json || '[]').forEach((id) => ch247Set.add(Number(id)));
       JSON.parse(b.vod_ids_json || '[]').forEach((id) => vodSet.add(Number(id)));
+      JSON.parse(b.series_ids_json || '[]').forEach((id) => seriesSet.add(Number(id)));
     } catch {
       // ignore
     }
@@ -87,6 +95,8 @@ function getAllowedContentForLine(line) {
   const allStreams = db.prepare('SELECT * FROM streams ORDER BY id ASC').all();
   const allCh247 = db.prepare('SELECT * FROM channels_247 ORDER BY id ASC').all();
   const allVod = db.prepare('SELECT * FROM vod_items ORDER BY id ASC').all();
+  const allSeries = db.prepare('SELECT * FROM series ORDER BY id ASC').all();
+  const allEpisodes = db.prepare('SELECT * FROM series_episodes ORDER BY season_num ASC, episode_num ASC, id ASC').all();
 
   const streams = (streamSet.size > 0 ? allStreams.filter((s) => streamSet.has(s.id)) : allStreams).map((s) => ({
     ...s,
@@ -103,10 +113,68 @@ function getAllowedContentForLine(line) {
     category_name: catMap.get(v.category_id) || 'Películas VOD'
   }));
 
-  return { categories, streams, channels247, vodItems };
+  const seriesItems = (seriesSet.size > 0 ? allSeries.filter((sr) => seriesSet.has(sr.id)) : allSeries).map((sr) => ({
+    ...sr,
+    category_name: catMap.get(sr.category_id) || 'Series TV',
+    episodes: allEpisodes.filter((ep) => ep.series_id === sr.id)
+  }));
+
+  return { categories, streams, channels247, vodItems, seriesItems };
 }
 
-function recordConnection(req, line, targetType, targetId, targetName, protocol = 'HLS') {
+function selectEdgeRedirect(req) {
+  if (String(req.query.edge_origin || '') === '1') return null;
+
+  const healthyEdges = db
+    .prepare(
+      `SELECT * FROM servers
+       WHERE is_main = 0
+         AND status = 'online'
+         AND last_heartbeat_at IS NOT NULL
+         AND datetime(last_heartbeat_at) >= datetime('now', '-90 seconds')`
+    )
+    .all()
+    .filter((srv) => (srv.active_conns || 0) < (srv.max_clients || 1000) && (srv.cpu_usage || 0) < 95);
+
+  if (healthyEdges.length === 0) return null;
+
+  const mode = db.prepare("SELECT value FROM settings WHERE key = 'lb_routing_mode'").get()?.value || 'load';
+  const reqCountry = (req.headers['cf-ipcountry'] || req.headers['x-country-code'] || '').toUpperCase().trim();
+  const reqIsp = (req.headers['x-isp'] || req.headers['user-agent'] || '').toLowerCase();
+
+  let candidates = healthyEdges;
+  if (mode === 'geoip' && reqCountry) {
+    const geoMatched = healthyEdges.filter((srv) =>
+      String(srv.region_countries || '')
+        .toUpperCase()
+        .split(',')
+        .map((c) => c.trim())
+        .includes(reqCountry)
+    );
+    if (geoMatched.length > 0) candidates = geoMatched;
+  } else if (mode === 'isp' && reqIsp) {
+    const ispMatched = healthyEdges.filter(
+      (srv) => srv.isp_match && reqIsp.includes(String(srv.isp_match).toLowerCase().trim())
+    );
+    if (ispMatched.length > 0) candidates = ispMatched;
+  }
+
+  candidates.sort((a, b) => {
+    const scoreA = (a.active_conns || 0) / Math.max(1, a.max_clients || 1000) + (a.cpu_usage || 0) / 100;
+    const scoreB = (b.active_conns || 0) / Math.max(1, b.max_clients || 1000) + (b.cpu_usage || 0) / 100;
+    return scoreA - scoreB;
+  });
+
+  const best = candidates[0];
+  const proto = best.https_port && req.protocol === 'https' ? 'https' : 'http';
+  const port = proto === 'https' ? best.https_port : best.port || 8096;
+  return {
+    serverId: best.id,
+    url: `${proto}://${best.host}:${port}${req.originalUrl}`
+  };
+}
+
+function recordConnection(req, line, targetType, targetId, targetName, protocol = 'HLS', serverId = 1) {
   db.prepare("DELETE FROM active_connections WHERE datetime(last_ping_at) < datetime('now', '-15 minutes')").run();
 
   const ip = extractClientIp(req);
@@ -120,8 +188,8 @@ function recordConnection(req, line, targetType, targetId, targetName, protocol 
 
   if (existing) {
     db.prepare(
-      "UPDATE active_connections SET last_ping_at = datetime('now'), target_name = ?, protocol = ? WHERE id = ?"
-    ).run(targetName, protocol, existing.id);
+      "UPDATE active_connections SET last_ping_at = datetime('now'), target_name = ?, protocol = ?, server_id = ? WHERE id = ?"
+    ).run(targetName, protocol, serverId, existing.id);
     return { allowed: true, connId: existing.id };
   }
 
@@ -135,8 +203,8 @@ function recordConnection(req, line, targetType, targetId, targetName, protocol 
       .get(line.id, ip);
     if (sameIpOldest) {
       db.prepare(
-        "UPDATE active_connections SET target_type = ?, target_id = ?, target_name = ?, protocol = ?, user_agent = ?, last_ping_at = datetime('now') WHERE id = ?"
-      ).run(targetType, targetId, targetName, protocol, ua, sameIpOldest.id);
+        "UPDATE active_connections SET target_type = ?, target_id = ?, target_name = ?, protocol = ?, user_agent = ?, server_id = ?, last_ping_at = datetime('now') WHERE id = ?"
+      ).run(targetType, targetId, targetName, protocol, ua, serverId, sameIpOldest.id);
       return { allowed: true, connId: sameIpOldest.id };
     }
     return { allowed: false, error: 'Límite máximo de conexiones simultáneas alcanzado' };
@@ -144,8 +212,8 @@ function recordConnection(req, line, targetType, targetId, targetName, protocol 
 
   const info = db.prepare(`
     INSERT INTO active_connections (line_id, username, target_type, target_id, target_name, ip_address, country, isp, user_agent, protocol, server_id)
-    VALUES (?, ?, ?, ?, ?, ?, 'NI', 'Client Network', ?, ?, 1)
-  `).run(line.id, line.username, targetType, targetId, targetName, ip, ua, protocol);
+    VALUES (?, ?, ?, ?, ?, ?, 'NI', 'Client Network', ?, ?, ?)
+  `).run(line.id, line.username, targetType, targetId, targetName, ip, ua, protocol, serverId);
 
   return { allowed: true, connId: Number(info.lastInsertRowid) };
 }
@@ -159,14 +227,18 @@ iptvRouter.get('/get.php', (req, res) => {
 
   const baseUrl = getBaseUrl(req);
   const ext = output === 'ts' ? 'ts' : 'm3u8';
-  const { streams, channels247, vodItems } = getAllowedContentForLine(auth.line);
+  const { streams, channels247, vodItems, seriesItems } = getAllowedContentForLine(auth.line);
 
   const epgUrl = `${baseUrl}/xmltv.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
   const linesOut = [`#EXTM3U x-tvg-url="${epgUrl}"`];
 
   for (const s of streams) {
+    const catchupAttr =
+      s.tv_archive_days > 0
+        ? ` catchup="default" catchup-days="${s.tv_archive_days}" catchup-source="${baseUrl}/timeshift/${encodeURIComponent(username)}/${encodeURIComponent(password)}/{duration}/{Y}-{m}-{d}:{H}-{M}/${s.id}.m3u8"`
+        : '';
     linesOut.push(
-      `#EXTINF:-1 tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${s.logo_url || ''}" group-title="${s.category_name}",${s.name}`
+      `#EXTINF:-1 tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${s.logo_url || ''}"${catchupAttr} group-title="${s.category_name}",${s.name}`
     );
     linesOut.push(`${baseUrl}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${s.id}.${ext}`);
   }
@@ -186,6 +258,19 @@ iptvRouter.get('/get.php', (req, res) => {
     linesOut.push(
       `${baseUrl}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${v.id}.${v.container_ext || 'mp4'}`
     );
+  }
+
+  for (const sr of seriesItems) {
+    for (const ep of sr.episodes || []) {
+      const sPad = String(ep.season_num).padStart(2, '0');
+      const ePad = String(ep.episode_num).padStart(2, '0');
+      linesOut.push(
+        `#EXTINF:-1 tvg-id="" tvg-name="${sr.title} S${sPad}E${ePad}" tvg-logo="${sr.poster_url || ''}" group-title="Series - ${sr.title}",${sr.title} S${sPad}E${ePad} - ${ep.title}`
+      );
+      linesOut.push(
+        `${baseUrl}/series/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${ep.id}.${ep.container_ext || 'mp4'}`
+      );
+    }
   }
 
   res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
@@ -265,7 +350,7 @@ const handlePlayerApi = (req, res) => {
   const { line } = auth;
   const baseUrl = getBaseUrl(req);
   const parsedUrl = new URL(baseUrl);
-  const { categories, streams, channels247, vodItems } = getAllowedContentForLine(line);
+  const { categories, streams, channels247, vodItems, seriesItems } = getAllowedContentForLine(line);
   const activeConns = db.prepare('SELECT COUNT(*) as c FROM active_connections WHERE line_id = ?').get(line.id).c;
 
   if (!action) {
@@ -404,12 +489,100 @@ const handlePlayerApi = (req, res) => {
     });
   }
 
-  // Series endpoints required by TiviMate / IPTV Smarters Pro sync
-  if (action === 'get_series_categories' || action === 'get_series') {
-    return res.json([]);
+  // Full Series endpoints for TiviMate / IPTV Smarters Pro / XCIPTV
+  if (action === 'get_series_categories') {
+    const sCats = categories.filter((c) => c.type === 'series');
+    const list = sCats.length > 0 ? sCats : categories.filter((c) => c.type === 'vod');
+    return res.json(
+      list.map((c) => ({
+        category_id: String(c.id),
+        category_name: c.name,
+        parent_id: 0
+      }))
+    );
   }
+
+  if (action === 'get_series') {
+    const catFilter = params.category_id ? String(params.category_id) : null;
+    return res.json(
+      seriesItems
+        .filter((sr) => !catFilter || String(sr.category_id) === catFilter)
+        .map((sr, idx) => ({
+          num: idx + 1,
+          name: sr.title,
+          series_id: sr.id,
+          cover: sr.poster_url || '',
+          plot: sr.plot || '',
+          cast: '',
+          director: '',
+          genre: sr.genre || 'Drama',
+          releaseDate: `${sr.release_year || 2024}-01-01`,
+          last_modified: String(Math.floor(Date.now() / 1000)),
+          rating: String(sr.rating || 8.5),
+          rating_5based: Number(((sr.rating || 8.5) / 2).toFixed(1)),
+          backdrop_path: sr.backdrop_url ? [sr.backdrop_url] : [],
+          youtube_trailer: '',
+          episode_run_time: '45',
+          category_id: String(sr.category_id || 8)
+        }))
+    );
+  }
+
   if (action === 'get_series_info') {
-    return res.json({ seasons: [], info: {}, episodes: {} });
+    const seriesId = Number(params.series_id);
+    const sr = seriesItems.find((x) => x.id === seriesId);
+    if (!sr) return res.json({ seasons: [], info: {}, episodes: {} });
+
+    const episodesBySeason = {};
+    const seasonSet = new Set();
+    for (const ep of sr.episodes || []) {
+      const sKey = String(ep.season_num || 1);
+      seasonSet.add(Number(ep.season_num || 1));
+      if (!episodesBySeason[sKey]) episodesBySeason[sKey] = [];
+      episodesBySeason[sKey].push({
+        id: String(ep.id),
+        episode_num: ep.episode_num,
+        title: ep.title,
+        container_extension: ep.container_ext || 'mp4',
+        info: {
+          duration_secs: ep.duration_sec || 2400,
+          duration: `${Math.round((ep.duration_sec || 2400) / 60)} min`,
+          plot: ep.plot || sr.plot || '',
+          movie_image: sr.poster_url || ''
+        },
+        custom_sid: '',
+        added: String(Math.floor(Date.now() / 1000)),
+        season: Number(ep.season_num || 1),
+        direct_source: ''
+      });
+    }
+
+    const seasons = Array.from(seasonSet)
+      .sort((a, b) => a - b)
+      .map((sNum) => ({
+        air_date: `${sr.release_year || 2024}-01-01`,
+        episode_count: (episodesBySeason[String(sNum)] || []).length,
+        id: sNum,
+        name: `Temporada ${sNum}`,
+        overview: sr.plot || '',
+        season_number: sNum,
+        cover: sr.poster_url || ''
+      }));
+
+    return res.json({
+      seasons,
+      info: {
+        name: sr.title,
+        cover: sr.poster_url || '',
+        plot: sr.plot || '',
+        genre: sr.genre || '',
+        releaseDate: `${sr.release_year || 2024}-01-01`,
+        rating: String(sr.rating || 8.5),
+        backdrop_path: sr.backdrop_url ? [sr.backdrop_url] : [],
+        category_id: String(sr.category_id || 8)
+      },
+      episodes: episodesBySeason
+    });
   }
 
   if (action === 'get_short_epg' || action === 'get_simple_data_table') {
@@ -482,6 +655,27 @@ async function serveLiveStreamRequest(req, res) {
   const rawId = streamSpec.replace(/\.(m3u8|ts)$/i, '');
   const protocol = streamSpec.toLowerCase().endsWith('.ts') ? 'MPEG-TS' : 'HLS';
   const numericId = Number(rawId);
+
+  // Edge Load Balancer Smart Routing (if an active Edge node has a live heartbeat)
+  const edgeTarget = selectEdgeRedirect(req);
+  if (edgeTarget) {
+    // Validate concurrency & record viewer on chosen Edge Server ID before redirecting
+    if (numericId > 10000 || rawId.startsWith('ch247_')) {
+      const chId = rawId.startsWith('ch247_') ? Number(rawId.replace('ch247_', '')) : numericId - 10000;
+      const ch = db.prepare('SELECT id, name FROM channels_247 WHERE id = ?').get(chId);
+      if (ch) {
+        const c = recordConnection(req, auth.line, 'channel247', ch.id, ch.name, protocol, edgeTarget.serverId);
+        if (!c.allowed) return res.status(429).send(c.error);
+      }
+    } else {
+      const st = db.prepare('SELECT id, name FROM streams WHERE id = ?').get(numericId);
+      if (st) {
+        const c = recordConnection(req, auth.line, 'live', st.id, st.name, protocol, edgeTarget.serverId);
+        if (!c.allowed) return res.status(429).send(c.error);
+      }
+    }
+    return res.redirect(302, edgeTarget.url);
+  }
 
   // 24/7 Channel Delivery
   if (numericId > 10000 || rawId.startsWith('ch247_')) {
@@ -590,10 +784,144 @@ iptvRouter.get('/movie/:username/:password/:vodSpec', (req, res) => {
   const vod = db.prepare('SELECT * FROM vod_items WHERE id = ?').get(vodId);
   if (!vod) return res.status(404).send('VOD no encontrado');
 
-  const conn = recordConnection(req, auth.line, 'vod', vod.id, vod.title, 'VOD');
+  const edgeTarget = selectEdgeRedirect(req);
+  const conn = recordConnection(req, auth.line, 'vod', vod.id, vod.title, 'VOD', edgeTarget?.serverId || 1);
   if (!conn.allowed) return res.status(429).send(conn.error);
+  if (edgeTarget) return res.redirect(302, edgeTarget.url);
 
   return res.redirect(302, vod.source_url);
+});
+
+// 5b. Series Episode Delivery (/series/:username/:password/:episodeSpec)
+iptvRouter.get('/series/:username/:password/:episodeSpec', (req, res) => {
+  const { username, password, episodeSpec } = req.params;
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).send(auth.error);
+
+  const epId = Number(episodeSpec.split('.')[0]);
+  const ep = db
+    .prepare(
+      `SELECT e.*, s.title as series_title
+       FROM series_episodes e
+       LEFT JOIN series s ON s.id = e.series_id
+       WHERE e.id = ?`
+    )
+    .get(epId);
+  if (!ep) return res.status(404).send('Episodio no encontrado');
+
+  const edgeTarget = selectEdgeRedirect(req);
+  const label = `${ep.series_title || 'Serie'} S${ep.season_num}E${ep.episode_num}`;
+  const conn = recordConnection(req, auth.line, 'series', ep.id, label, 'Series', edgeTarget?.serverId || 1);
+  if (!conn.allowed) return res.status(429).send(conn.error);
+  if (edgeTarget) return res.redirect(302, edgeTarget.url);
+
+  return res.redirect(302, ep.source_url);
+});
+
+// 5c. TV Archive / Catchup & Timeshift Delivery
+function parseTimeshiftStartEpoch(rawStart = '') {
+  const s = String(rawStart).trim();
+  if (/^\d{10}$/.test(s)) return Number(s);
+  // Xtream format: YYYY-MM-DD:HH-mm
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[:\sT](\d{2})[-:](\d{2})/);
+  if (m) {
+    const [, yr, mo, dy, hr, mi] = m;
+    return Math.floor(Date.UTC(Number(yr), Number(mo) - 1, Number(dy), Number(hr), Number(mi), 0) / 1000);
+  }
+  const parsed = Date.parse(s);
+  return Number.isNaN(parsed) ? Math.floor(Date.now() / 1000) - 1800 : Math.floor(parsed / 1000);
+}
+
+iptvRouter.get('/archive_seg/:username/:password/:streamId/:fileName', (req, res) => {
+  const { username, password, streamId, fileName } = req.params;
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).send(auth.error);
+
+  const safeFile = path.basename(fileName);
+  if (!/^seg_\d+\.ts$/.test(safeFile)) return res.status(400).send('Invalid segment');
+  const fullPath = path.join(ARCHIVE_ROOT, `stream_${Number(streamId)}`, safeFile);
+  if (!fs.existsSync(fullPath)) return res.status(404).send('Archive segment not found');
+
+  res.setHeader('Content-Type', 'video/mp2t');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  fs.createReadStream(fullPath).pipe(res);
+});
+
+async function handleTimeshiftPlayback(req, res, { username, password, streamSpec, startRaw, durationMin }) {
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).send(auth.error);
+
+  const streamId = Number(String(streamSpec).replace(/\.(m3u8|ts)$/i, ''));
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId);
+  if (!stream) return res.status(404).send('Canal no encontrado para Catchup');
+
+  const conn = recordConnection(req, auth.line, 'catchup', stream.id, `[Catchup] ${stream.name}`, 'Timeshift');
+  if (!conn.allowed) return res.status(429).send(conn.error);
+
+  const startEpoch = parseTimeshiftStartEpoch(startRaw);
+  const durationSec = Math.max(60, (Number(durationMin) || 60) * 60);
+  const segments = getArchiveSegmentsInRange(stream.id, startEpoch, durationSec);
+
+  if (segments.length === 0) {
+    // Graceful fallback if recording just started and no segments on disk yet
+    return res.redirect(302, stream.source_url);
+  }
+
+  const wantsRawTs = String(streamSpec).toLowerCase().endsWith('.ts');
+  if (wantsRawTs) {
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Cache-Control', 'no-store');
+    for (const seg of segments) {
+      if (res.writableEnded || res.destroyed) break;
+      await new Promise((resolve) => {
+        const rs = fs.createReadStream(seg.fullPath);
+        rs.on('end', resolve);
+        rs.on('error', resolve);
+        rs.pipe(res, { end: false });
+      });
+    }
+    return res.end();
+  }
+
+  const baseUrl = getBaseUrl(req);
+  const m3u8 = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    '#EXT-X-TARGETDURATION:12',
+    '#EXT-X-MEDIA-SEQUENCE:0',
+    '#EXT-X-PLAYLIST-TYPE:VOD'
+  ];
+  for (const seg of segments) {
+    m3u8.push('#EXTINF:10.0,');
+    m3u8.push(
+      `${baseUrl}/archive_seg/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${stream.id}/${seg.filename}`
+    );
+  }
+  m3u8.push('#EXT-X-ENDLIST');
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  res.send(m3u8.join('\n') + '\n');
+}
+
+iptvRouter.get('/timeshift/:username/:password/:duration/:start/:streamSpec', (req, res) => {
+  const { username, password, duration, start, streamSpec } = req.params;
+  return handleTimeshiftPlayback(req, res, {
+    username,
+    password,
+    streamSpec,
+    startRaw: start,
+    durationMin: duration
+  });
+});
+
+iptvRouter.get('/streaming/timeshift.php', (req, res) => {
+  const { username, password, stream, start, duration } = req.query;
+  return handleTimeshiftPlayback(req, res, {
+    username,
+    password,
+    streamSpec: `${stream || ''}.m3u8`,
+    startRaw: start,
+    durationMin: duration
+  });
 });
 
 // 6. Built-in WebTV HTML5 Client Portal Endpoints (/api/webtv/*)
@@ -620,7 +948,7 @@ iptvRouter.get('/api/webtv/catalog', (req, res) => {
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).json({ error: auth.error });
 
-  const { categories, streams, channels247, vodItems } = getAllowedContentForLine(auth.line);
+  const { categories, streams, channels247, vodItems, seriesItems } = getAllowedContentForLine(auth.line);
   const allPrograms = db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC').all();
 
   const enrichedStreams = streams.map((s) => ({
@@ -644,6 +972,7 @@ iptvRouter.get('/api/webtv/catalog', (req, res) => {
     streams: enrichedStreams,
     channels247: enrichedCh247,
     vodItems,
+    series: seriesItems,
     osdMessages: activeMessages
   });
 });

@@ -111,7 +111,115 @@ cmd_backup() {
   ts=$(date +%Y%m%d_%H%M%S)
   out="/root/tvlister247_backup_${ts}.db"
   cp "${APP_DIR}/data/midnight_tvlister.db" "$out"
+  find /root -maxdepth 1 -name "tvlister247_backup_*.db" -mtime +7 -delete 2>/dev/null || true
   echo "✅ Copia de seguridad guardada en: ${out}"
+}
+
+cmd_enable_cron() {
+  cat > /etc/cron.d/tvlister24-7-backup <<EOF
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+0 3 * * * root /usr/local/bin/tvlister-admin backup >/dev/null 2>&1
+EOF
+  chmod 0644 /etc/cron.d/tvlister24-7-backup
+  echo "✅ Respaldo diario automático programado a las 03:00 AM en /etc/cron.d/tvlister24-7-backup (retención 7 días)."
+}
+
+cmd_purge_demo() {
+  cd "$APP_DIR"
+  "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { db, initDb } from "./server/db.js";
+    initDb();
+    db.exec(`
+      DELETE FROM active_connections;
+      DELETE FROM client_claims;
+      DELETE FROM osd_messages;
+      DELETE FROM series_episodes;
+      DELETE FROM series;
+      DELETE FROM vod_items;
+      DELETE FROM channels_247;
+      DELETE FROM streams;
+      DELETE FROM lines;
+      DELETE FROM epg_programs;
+      DELETE FROM users WHERE role = "reseller";
+      UPDATE bouquets SET stream_ids_json = "[]", channel247_ids_json = "[]", vod_ids_json = "[]", series_ids_json = "[]";
+      INSERT INTO settings (key, value) VALUES ("demo_purged", "true")
+        ON CONFLICT(key) DO UPDATE SET value = "true";
+      PRAGMA wal_checkpoint(PASSIVE);
+    `);
+    console.log("✅ Datos de demostración eliminados. Categorías, perfiles FFmpeg y Super Admin conservados.");
+  '
+  systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+}
+
+cmd_setup_ssl() {
+  local domain="${1:-}"
+  local email="${2:-}"
+  local port
+  port=$(get_current_port)
+  if [ -z "$domain" ]; then
+    read -r -p "Ingresa el dominio apuntando a este servidor (ej. tv.midominio.com): " domain
+  fi
+  if [ -z "$domain" ]; then
+    echo "[ERROR] Dominio requerido."
+    exit 1
+  fi
+  if [ -z "$email" ]; then
+    email="admin@${domain}"
+  fi
+
+  if [ -d "/etc/nginx/sites-available" ]; then
+    cat > /etc/nginx/sites-available/tvlister247.conf <<EOF
+server {
+    listen 80;
+    server_name ${domain};
+    client_max_body_size 50M;
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+    }
+}
+EOF
+    ln -sf /etc/nginx/sites-available/tvlister247.conf /etc/nginx/sites-enabled/tvlister247.conf
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx
+      echo "✅ VirtualHost Nginx activado para http://${domain} -> 127.0.0.1:${port}"
+    else
+      echo "[WARN] nginx -t reportó advertencia. Revisa /etc/nginx/sites-available/tvlister247.conf"
+    fi
+
+    if command -v certbot >/dev/null 2>&1; then
+      certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" --redirect
+      echo "✅ Certificado HTTPS Let's Encrypt activo en https://${domain}"
+    else
+      echo "ℹ️ Nginx ya enruta ${domain}. Para instalar SSL sin tocar apt de XUI.one, ejecuta acme.sh:"
+      echo "   curl https://get.acme.sh | sh -s email=${email} && ~/.acme.sh/acme.sh --issue -d ${domain} --nginx"
+    fi
+  else
+    echo "ℹ️ /etc/nginx/sites-available no detectado (XUI.one usa su propio nginx interno en /home/xui/bin/nginx)."
+    echo "   Archivo generado en /root/tvlister247_${domain}.nginx.conf listo para incluir en tu proxy frontal."
+    cat > "/root/tvlister247_${domain}.nginx.conf" <<EOF
+server {
+    listen 80;
+    server_name ${domain};
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffering off;
+    }
+}
+EOF
+  fi
 }
 
 cmd_update() {
@@ -146,6 +254,15 @@ case "$ACTION" in
   backup)
     cmd_backup
     ;;
+  enable-cron)
+    cmd_enable_cron
+    ;;
+  purge-demo)
+    cmd_purge_demo
+    ;;
+  setup-ssl)
+    cmd_setup_ssl "${2:-}" "${3:-}"
+    ;;
   update)
     cmd_update
     ;;
@@ -159,11 +276,14 @@ case "$ACTION" in
     echo "  4) Abrir puerto en Firewall / iptables (open-firewall)"
     echo "  5) Reiniciar motor TVLister 24/7 (restart)"
     echo "  6) Crear backup de base de datos en /root (backup)"
-    echo "  7) Actualizar panel desde GitHub sin perder datos (update)"
-    echo "  8) Ver logs en vivo (logs)"
+    echo "  7) Programar backup diario automático 03:00 AM (enable-cron)"
+    echo "  8) Purgar datos demo y dejar limpio para producción (purge-demo)"
+    echo "  9) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
+    echo " 10) Actualizar panel desde GitHub sin perder datos (update)"
+    echo " 11) Ver logs en vivo (logs)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-8]: " opt
+    read -r -p "Selecciona una opción [0-11]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_reset_admin "" ;;
@@ -171,8 +291,11 @@ case "$ACTION" in
       4) cmd_open_firewall "" ;;
       5) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
       6) cmd_backup ;;
-      7) cmd_update ;;
-      8) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
+      7) cmd_enable_cron ;;
+      8) cmd_purge_demo ;;
+      9) cmd_setup_ssl "" "" ;;
+      10) cmd_update ;;
+      11) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
       *) exit 0 ;;
     esac
     ;;

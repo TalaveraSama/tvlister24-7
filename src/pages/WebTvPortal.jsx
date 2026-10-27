@@ -23,6 +23,7 @@ export default function WebTvPortal({ onBackToAdmin }) {
     streams: [],
     channels247: [],
     vodItems: [],
+    series: [],
     osdMessages: []
   });
   const [section, setSection] = useState('all'); // all | live | ch247 | vod | favs
@@ -305,11 +306,25 @@ export default function WebTvPortal({ onBackToAdmin }) {
       url: v.source_url,
       seekOffsetSec: 0,
       subtitle: `${v.genre} • ${v.release_year}`
-    }))
+    })),
+    ...(catalog.series || []).flatMap((sr) =>
+      (sr.episodes || []).map((ep) => ({
+        uid: `series-ep-${ep.id}`,
+        kind: 'series',
+        id: ep.id,
+        name: `${sr.title} T${ep.season_num}E${ep.episode_num}`,
+        logo: sr.poster_url,
+        badge: 'SERIE',
+        url: ep.source_url,
+        seekOffsetSec: 0,
+        subtitle: ep.title
+      }))
+    )
   ].filter((it) => {
     if (section === 'live' && it.kind !== 'live') return false;
     if (section === 'ch247' && it.kind !== 'channel247') return false;
     if (section === 'vod' && it.kind !== 'vod') return false;
+    if (section === 'series' && it.kind !== 'series') return false;
     if (section === 'favs' && !favorites.includes(it.uid)) return false;
     if (search && !it.name.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
@@ -371,13 +386,14 @@ export default function WebTvPortal({ onBackToAdmin }) {
               />
             </div>
 
-            <div className="grid grid-cols-5 gap-1 text-[11px] font-semibold">
+            <div className="grid grid-cols-6 gap-1 text-[10px] font-semibold">
               {[
                 { id: 'all', label: 'Todo' },
                 { id: 'ch247', label: '24/7' },
-                { id: 'live', label: 'En Vivo' },
+                { id: 'live', label: 'Vivo' },
                 { id: 'vod', label: 'VOD' },
-                { id: 'favs', label: '★ Fav' }
+                { id: 'series', label: 'Series' },
+                { id: 'favs', label: '★' }
               ].map((t) => (
                 <button
                   key={t.id}

@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_DIR = path.resolve(__dirname, '../streams_runtime');
 export const HLS_ROOT = path.join(RUNTIME_DIR, 'hls');
 export const PLAYLIST_ROOT = path.join(RUNTIME_DIR, 'playlists');
+export const ARCHIVE_ROOT = path.join(RUNTIME_DIR, 'archive');
 
 let ffmpegAvailableCache = null;
 let resolvedFfmpegBin = null;
@@ -323,7 +324,7 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
 
     const bin = getFfmpegBin();
     const env = bin.startsWith('/home/xui/')
-      ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
+      ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
       : process.env;
 
     const child = spawn(bin, args, { stdio: 'ignore', detached: false, env });
@@ -364,3 +365,117 @@ export function stopAllWorkers() {
     stopWorker(key);
   }
 }
+
+// ============================================================================
+// TV ARCHIVE / CATCHUP DISK RECORDER (MPEG-TS Epoch Segments)
+// ============================================================================
+export function buildFfmpegArgsForArchive(stream) {
+  const outDir = path.join(ARCHIVE_ROOT, `stream_${stream.id}`);
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
+  if (stream.user_agent && stream.source_url.startsWith('http')) {
+    args.push('-user_agent', stream.user_agent);
+  }
+  if (stream.source_url.startsWith('http')) {
+    args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+  }
+  args.push(
+    '-i',
+    stream.source_url,
+    '-c',
+    'copy',
+    '-f',
+    'segment',
+    '-segment_time',
+    '10',
+    '-segment_format',
+    'mpegts',
+    '-strftime',
+    '1',
+    '-reset_timestamps',
+    '1',
+    path.join(outDir, 'seg_%s.ts')
+  );
+  return args;
+}
+
+export function startArchiveWorker(stream) {
+  if (!stream || !stream.source_url) return null;
+  return startSupervisedWorker(`archive_${stream.id}`, () => buildFfmpegArgsForArchive(stream));
+}
+
+export function stopArchiveWorker(streamId) {
+  stopWorker(`archive_${streamId}`);
+}
+
+export function getArchiveStats(streamId) {
+  const dir = path.join(ARCHIVE_ROOT, `stream_${streamId}`);
+  const activeWorker = Boolean(getWorkerPid(`archive_${streamId}`));
+  if (!fs.existsSync(dir)) {
+    return { activeWorker, segmentCount: 0, sizeMb: 0, oldestIso: null, newestIso: null };
+  }
+  const files = fs.readdirSync(dir).filter((f) => /^seg_\d+\.ts$/.test(f));
+  let bytes = 0;
+  let minEpoch = Infinity;
+  let maxEpoch = 0;
+  for (const f of files) {
+    try {
+      const st = fs.statSync(path.join(dir, f));
+      bytes += st.size;
+      const ep = Number(f.slice(4, -3));
+      if (ep < minEpoch) minEpoch = ep;
+      if (ep > maxEpoch) maxEpoch = ep;
+    } catch {
+      // ignore race with deletion
+    }
+  }
+  return {
+    activeWorker,
+    segmentCount: files.length,
+    sizeMb: Number((bytes / (1024 * 1024)).toFixed(2)),
+    oldestIso: minEpoch < Infinity ? new Date(minEpoch * 1000).toISOString() : null,
+    newestIso: maxEpoch > 0 ? new Date(maxEpoch * 1000).toISOString() : null
+  };
+}
+
+export function getArchiveSegmentsInRange(streamId, startEpochSec, durationSec = 3600) {
+  const dir = path.join(ARCHIVE_ROOT, `stream_${streamId}`);
+  if (!fs.existsSync(dir)) return [];
+  const endEpochSec = startEpochSec + Math.max(10, durationSec);
+  const all = fs
+    .readdirSync(dir)
+    .filter((f) => /^seg_\d+\.ts$/.test(f))
+    .map((filename) => ({
+      filename,
+      epoch: Number(filename.slice(4, -3)),
+      fullPath: path.join(dir, filename)
+    }))
+    .sort((a, b) => a.epoch - b.epoch);
+
+  const inRange = all.filter((s) => s.epoch >= startEpochSec - 15 && s.epoch <= endEpochSec);
+  if (inRange.length > 0) return inRange;
+  // Fallback to most recent recorded segments if requested window slightly precedes recording start
+  return all.slice(-Math.min(all.length, Math.ceil(durationSec / 10)));
+}
+
+export function pruneArchiveSegmentsForStreams(streams = []) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  for (const s of streams) {
+    const days = Math.max(1, Number(s.tv_archive_days) || 3);
+    const cutoff = nowSec - days * 86400;
+    const dir = path.join(ARCHIVE_ROOT, `stream_${s.id}`);
+    if (!fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir)) {
+      const m = f.match(/^seg_(\d+)\.ts$/);
+      if (m && Number(m[1]) < cutoff) {
+        try {
+          fs.unlinkSync(path.join(dir, f));
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+}
+

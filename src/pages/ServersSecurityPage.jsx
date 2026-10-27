@@ -15,7 +15,11 @@ import {
   Save,
   Terminal,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  Copy,
+  Check,
+  Lock,
+  ExternalLink
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -27,6 +31,7 @@ export default function ServersSecurityPage() {
     firewall: [],
     settings: {},
     admins: [],
+    snapshots: [],
     dbSizeKb: 0,
     listenPort: 8080,
     telemetry: {}
@@ -37,14 +42,22 @@ export default function ServersSecurityPage() {
     server_timezone: 'UTC',
     default_output_format: 'hls',
     anti_restreaming: 'true',
-    flood_limit_per_min: '120'
+    flood_limit_per_min: '120',
+    lb_routing_mode: 'load'
   });
 
   const [newAdmin, setNewAdmin] = useState({ username: '', password: '', email: '', notes: '' });
   const [pwdTargetId, setPwdTargetId] = useState(1);
   const [newPwd, setNewPwd] = useState('');
 
-  const [srvForm, setSrvForm] = useState({ name: '', host: '', port: 8080, lb_mode: 'load' });
+  const [srvForm, setSrvForm] = useState({
+    name: '',
+    host: '',
+    port: 8096,
+    lb_mode: 'load',
+    region_countries: '',
+    isp_match: ''
+  });
   const [fwForm, setFwForm] = useState({ rule_type: 'ip', value: '', description: '' });
   const [profForm, setProfForm] = useState({
     name: '',
@@ -54,6 +67,11 @@ export default function ServersSecurityPage() {
     resolution: '1920x1080',
     hwaccel: 'none'
   });
+
+  const [sslDomain, setSslDomain] = useState('tv.midominio.com');
+  const [sslData, setSslData] = useState(null);
+  const [copiedKey, setCopiedKey] = useState('');
+
   const [notice, setNotice] = useState('');
   const [errMsg, setErrMsg] = useState('');
   const [readiness, setReadiness] = useState(null);
@@ -70,7 +88,8 @@ export default function ServersSecurityPage() {
       server_timezone: data.settings?.server_timezone || 'UTC',
       default_output_format: data.settings?.default_output_format || 'hls',
       anti_restreaming: data.settings?.anti_restreaming || 'true',
-      flood_limit_per_min: data.settings?.flood_limit_per_min || '120'
+      flood_limit_per_min: data.settings?.flood_limit_per_min || '120',
+      lb_routing_mode: data.settings?.lb_routing_mode || 'load'
     });
     if (data.admins?.length > 0 && !pwdTargetId) {
       setPwdTargetId(data.admins[0].id);
@@ -84,7 +103,13 @@ export default function ServersSecurityPage() {
   const flash = (msg) => {
     setErrMsg('');
     setNotice(msg);
-    setTimeout(() => setNotice(''), 3500);
+    setTimeout(() => setNotice(''), 4000);
+  };
+
+  const copyText = (key, text) => {
+    navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(''), 1800);
   };
 
   const handleSaveSettings = async (e) => {
@@ -115,7 +140,7 @@ export default function ServersSecurityPage() {
   const handleChangeAdminPwd = async (e) => {
     e.preventDefault();
     try {
-      const res = await apiFetch(`/api/system/admins/${pwdTargetId}/password`, {
+      await apiFetch(`/api/system/admins/${pwdTargetId}/password`, {
         method: 'PUT',
         body: JSON.stringify({ newPassword: newPwd })
       });
@@ -128,6 +153,14 @@ export default function ServersSecurityPage() {
   };
 
   const runMaintenance = async (action) => {
+    if (
+      action === 'purge_demo_data' &&
+      !window.confirm(
+        '¿Purgar todos los canales/VOD/series/líneas de demostración y dejar el panel limpio para producción? (Se conservará tu cuenta Super Admin, categorías y perfiles FFmpeg).'
+      )
+    ) {
+      return;
+    }
     const res = await apiFetch('/api/system/maintenance', {
       method: 'POST',
       body: JSON.stringify({ action })
@@ -136,12 +169,18 @@ export default function ServersSecurityPage() {
     loadAll();
   };
 
+  const generateSslConfig = async (e) => {
+    e.preventDefault();
+    const res = await apiFetch(`/api/system/ssl-config?domain=${encodeURIComponent(sslDomain)}`);
+    setSslData(res);
+  };
+
   const addServer = async (e) => {
     e.preventDefault();
     if (!srvForm.name || !srvForm.host) return;
     await apiFetch('/api/servers', { method: 'POST', body: JSON.stringify(srvForm) });
-    setSrvForm({ name: '', host: '', port: 8080, lb_mode: 'load' });
-    flash('Nodo Balanceador agregado.');
+    setSrvForm({ name: '', host: '', port: 8096, lb_mode: 'load', region_countries: '', isp_match: '' });
+    flash('Nodo Edge Balanceador registrado. Copia su comando instalador abajo.');
     loadAll();
   };
 
@@ -176,16 +215,37 @@ export default function ServersSecurityPage() {
     loadAll();
   };
 
+  const handleCreateSnapshot = async () => {
+    await apiFetch('/api/backups/snapshots', { method: 'POST' });
+    flash('Snapshot guardado en data/backups/ del servidor.');
+    loadAll();
+  };
+
+  const handleRestoreSnapshot = async (filename) => {
+    if (!window.confirm(`¿Restaurar base de datos desde ${filename}?`)) return;
+    const res = await apiFetch(`/api/backups/snapshots/${encodeURIComponent(filename)}/restore`, {
+      method: 'POST'
+    });
+    flash(`Snapshot restaurado (${res.restoredCount} registros).`);
+    loadAll();
+  };
+
+  const handleDeleteSnapshot = async (filename) => {
+    await apiFetch(`/api/backups/snapshots/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    loadAll();
+  };
+
   const t = sys.telemetry || {};
+  const originBase = typeof window !== 'undefined' ? window.location.origin : `http://127.0.0.1:${sys.listenPort}`;
 
   return (
     <div className="space-y-5">
       {/* Sub-navigation */}
       <div className="flex flex-wrap items-center gap-2 bg-[#0e1526] p-3 rounded-2xl border border-slate-800/80">
         {[
-          { id: 'sysadmin', label: 'Admin del Sistema & Mantenimiento', icon: ShieldCheck },
-          { id: 'cluster', label: 'Nodos Load Balancer & FFmpeg', icon: Server },
-          { id: 'security', label: 'Firewall IPv4/IPv6 & Backups', icon: ShieldAlert }
+          { id: 'sysadmin', label: 'Admin del Sistema, SSL & Producción', icon: ShieldCheck },
+          { id: 'cluster', label: 'Nodos Edge Load Balancer & FFmpeg', icon: Server },
+          { id: 'security', label: 'Firewall, Stalker MAG & Snapshots', icon: ShieldAlert }
         ].map((tab) => {
           const Icon = tab.icon;
           const active = subTab === tab.id;
@@ -217,7 +277,7 @@ export default function ServersSecurityPage() {
         </div>
       )}
 
-      {/* TAB 1: SYSTEM ADMIN & MAINTENANCE */}
+      {/* TAB 1: SYSTEM ADMIN, SSL & PRODUCTION */}
       {subTab === 'sysadmin' && (
         <div className="space-y-6">
           {/* Production Readiness Live Audit */}
@@ -271,7 +331,7 @@ export default function ServersSecurityPage() {
             <div className="lg:col-span-7 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
                 <Terminal className="w-4 h-4 text-indigo-400" />
-                Diagnóstico del Servidor & Entorno Linux
+                Diagnóstico del Servidor & Operaciones de Producción
               </h2>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
@@ -304,7 +364,7 @@ export default function ServersSecurityPage() {
               <div className="pt-2 border-t border-slate-800">
                 <div className="text-xs font-semibold text-slate-300 mb-2.5 flex items-center gap-1.5">
                   <Wrench className="w-3.5 h-3.5 text-amber-400" />
-                  Herramientas de Mantenimiento Rápido (Root / SysAdmin)
+                  Acciones de Mantenimiento & Limpieza para Producción
                 </div>
                 <div className="flex flex-wrap gap-2 text-xs">
                   <button
@@ -327,6 +387,13 @@ export default function ServersSecurityPage() {
                     <Database className="w-3.5 h-3.5" />
                     Optimizar SQLite (VACUUM)
                   </button>
+                  <button
+                    onClick={() => runMaintenance('purge_demo_data')}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-500/20 hover:bg-rose-600 text-rose-200 hover:text-white border border-rose-500/40 font-semibold transition"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Purgar Datos Demo (Modo Limpio)
+                  </button>
                 </div>
               </div>
             </div>
@@ -335,7 +402,7 @@ export default function ServersSecurityPage() {
             <div className="lg:col-span-5 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-cyan-400" />
-                Ajustes Globales del Panel
+                Ajustes Globales & Algoritmo Load Balancer
               </h2>
 
               <form onSubmit={handleSaveSettings} className="space-y-3 text-xs">
@@ -362,14 +429,15 @@ export default function ServersSecurityPage() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-slate-400 mb-1">Anti-Restreaming</label>
+                    <label className="block text-slate-400 mb-1">Enrutamiento Edge LB</label>
                     <select
-                      value={settingsForm.anti_restreaming}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, anti_restreaming: e.target.value })}
+                      value={settingsForm.lb_routing_mode}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, lb_routing_mode: e.target.value })}
                       className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                     >
-                      <option value="true">Activado</option>
-                      <option value="false">Desactivado</option>
+                      <option value="load">Menor Carga CPU/Conns</option>
+                      <option value="geoip">GeoIP por País</option>
+                      <option value="isp">Afinidad por ISP</option>
                     </select>
                   </div>
                 </div>
@@ -403,6 +471,46 @@ export default function ServersSecurityPage() {
                 </button>
               </form>
             </div>
+          </div>
+
+          {/* Nginx + SSL Let's Encrypt Configurator */}
+          <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Lock className="w-4 h-4 text-emerald-400" />
+              Configurador Automático Dominio HTTPS / SSL Let's Encrypt (Compatible XUI.one)
+            </h3>
+            <form onSubmit={generateSslConfig} className="flex flex-wrap gap-2 text-xs">
+              <input
+                type="text"
+                value={sslDomain}
+                onChange={(e) => setSslDomain(e.target.value)}
+                placeholder="Ej. tv.midominio.com"
+                className="flex-1 min-w-[240px] px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
+              >
+                Generar Configuración HTTPS & Comando CLI
+              </button>
+            </form>
+
+            {sslData && (
+              <div className="space-y-3 text-xs">
+                <div className="p-3 rounded-xl bg-[#090e1a] border border-emerald-500/30 flex items-center justify-between gap-2">
+                  <code className="text-emerald-300 font-mono break-all">{sslData.cliCommand}</code>
+                  <button
+                    onClick={() => copyText('ssl-cli', sslData.cliCommand)}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold shrink-0"
+                  >
+                    {copiedKey === 'ssl-cli' ? 'Copiado' : 'Copiar CLI'}
+                  </button>
+                </div>
+                <pre className="p-3.5 rounded-xl bg-[#070b13] border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto">
+                  {sslData.nginxConf}
+                </pre>
+              </div>
+            )}
           </div>
 
           {/* System Administrators Management & Password Change */}
@@ -508,87 +616,124 @@ export default function ServersSecurityPage() {
         </div>
       )}
 
-      {/* TAB 2: CLUSTER & FFMPEG PROFILES */}
+      {/* TAB 2: CLUSTER EDGE LB & FFMPEG PROFILES */}
       {subTab === 'cluster' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-6 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              <Server className="w-4 h-4 text-indigo-400" />
-              Nodos & Load Balancers (Carga, GeoIP, ISP)
-            </h2>
+          <div className="lg:col-span-7 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
+            <div>
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Server className="w-4 h-4 text-indigo-400" />
+                Nodos Edge Load Balancer Reales (Relay + Heartbeat cada 10s)
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Registra un VPS secundario y ejecuta su comando de 1 línea para activar balanceo automático con failover al Master.
+              </p>
+            </div>
 
-            <form onSubmit={addServer} className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <form onSubmit={addServer} className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-xs">
               <input
                 type="text"
                 placeholder="Nombre Nodo"
                 value={srvForm.name}
                 onChange={(e) => setSrvForm({ ...srvForm, name: e.target.value })}
-                className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                className="sm:col-span-2 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
               />
               <input
                 type="text"
-                placeholder="IP / Dominio"
+                placeholder="IP Pública Edge"
                 value={srvForm.host}
                 onChange={(e) => setSrvForm({ ...srvForm, host: e.target.value })}
+                className="sm:col-span-2 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+              />
+              <input
+                type="number"
+                placeholder="Puerto"
+                value={srvForm.port}
+                onChange={(e) => setSrvForm({ ...srvForm, port: Number(e.target.value) })}
                 className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
               />
-              <select
-                value={srvForm.lb_mode}
-                onChange={(e) => setSrvForm({ ...srvForm, lb_mode: e.target.value })}
-                className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
-              >
-                <option value="load">Server Load</option>
-                <option value="geoip">GeoIP</option>
-                <option value="isp">ISP Routing</option>
-              </select>
               <button
                 type="submit"
                 className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold inline-flex items-center justify-center gap-1"
               >
-                <Plus className="w-3.5 h-3.5" /> Añadir LB
+                <Plus className="w-3.5 h-3.5" /> Crear Edge
               </button>
+              <input
+                type="text"
+                placeholder="Países GeoIP (ej. MX,CO,AR)"
+                value={srvForm.region_countries}
+                onChange={(e) => setSrvForm({ ...srvForm, region_countries: e.target.value })}
+                className="sm:col-span-3 px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+              />
+              <input
+                type="text"
+                placeholder="Filtro ISP opcional (ej. claro, telmex)"
+                value={srvForm.isp_match}
+                onChange={(e) => setSrvForm({ ...srvForm, isp_match: e.target.value })}
+                className="sm:col-span-3 px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+              />
             </form>
 
-            <div className="space-y-2 text-xs">
-              {sys.servers.map((s) => (
-                <div
-                  key={s.id}
-                  className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 flex items-center justify-between"
-                >
-                  <div>
-                    <div className="font-semibold text-white">
-                      {s.name}{' '}
-                      <span className="text-[10px] uppercase text-indigo-300 ml-1">
-                        [{s.is_main ? 'MASTER' : `LB-${s.lb_mode}`}]
-                      </span>
+            <div className="space-y-3 text-xs">
+              {sys.servers.map((s) => {
+                const installCmd = `curl -fsSL ${originBase}/api/lb/install.sh | sudo bash -s -- --master ${originBase} --token ${s.api_token} --port ${s.http_port || s.port || 8096}`;
+                return (
+                  <div
+                    key={s.id}
+                    className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 space-y-2"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="font-semibold text-white flex items-center gap-2">
+                          {s.name}
+                          <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[10px] font-bold uppercase">
+                            {s.is_main ? 'MASTER NODE' : `EDGE • ${s.status}`}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+                          {s.host}:{s.http_port || s.port} • CPU {s.cpu_usage || 0}% • RAM {s.ram_usage || 0}% • Conns:{' '}
+                          {s.active_conns || 0}/{s.max_clients}
+                          {s.last_heartbeat_at ? ` • Heartbeat: ${s.last_heartbeat_at}` : ''}
+                        </div>
+                      </div>
+                      {!s.is_main && (
+                        <button
+                          onClick={async () => {
+                            await apiFetch(`/api/servers/${s.id}`, { method: 'DELETE' });
+                            loadAll();
+                          }}
+                          className="p-1.5 rounded bg-rose-500/15 text-rose-300"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
-                    <div className="text-[11px] font-mono text-slate-400">
-                      {s.host}:{s.port} • Max Clientes: {s.max_clients}
-                    </div>
+
+                    {!s.is_main && s.api_token && (
+                      <div className="p-2.5 rounded-lg bg-[#070b13] border border-slate-800 flex items-center justify-between gap-2">
+                        <code className="text-[11px] text-cyan-300 font-mono truncate">{installCmd}</code>
+                        <button
+                          onClick={() => copyText(`edge-${s.id}`, installCmd)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-indigo-600 text-slate-200 hover:text-white shrink-0 font-semibold"
+                        >
+                          {copiedKey === `edge-${s.id}` ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                          {copiedKey === `edge-${s.id}` ? 'Copiado' : '1-Click Install'}
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  {!s.is_main && (
-                    <button
-                      onClick={async () => {
-                        await apiFetch(`/api/servers/${s.id}`, { method: 'DELETE' });
-                        loadAll();
-                      }}
-                      className="p-1.5 rounded bg-rose-500/15 text-rose-300"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
-          <div className="lg:col-span-6 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
+          <div className="lg:col-span-5 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
             <h2 className="text-sm font-bold text-white flex items-center gap-2">
               <Sliders className="w-4 h-4 text-cyan-400" />
-              Perfiles de Transcodificación Hardware (NVENC / Intel QSV / CPU)
+              Perfiles Hardware FFmpeg (NVENC / Intel QSV / CPU)
             </h2>
 
-            <form onSubmit={addProfile} className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+            <form onSubmit={addProfile} className="grid grid-cols-2 gap-2 text-xs">
               <input
                 type="text"
                 placeholder="Nombre perfil"
@@ -606,19 +751,21 @@ export default function ServersSecurityPage() {
                 <option value="h264_qsv">Intel QSV</option>
                 <option value="copy">Direct Copy</option>
               </select>
-              <input
-                type="text"
-                value={profForm.video_bitrate}
-                onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
-                placeholder="4000k"
-                className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-              />
-              <button
-                type="submit"
-                className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
-              >
-                Crear
-              </button>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={profForm.video_bitrate}
+                  onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
+                  placeholder="4000k"
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                />
+                <button
+                  type="submit"
+                  className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
+                >
+                  Crear
+                </button>
+              </div>
             </form>
 
             <div className="space-y-2 text-xs">
@@ -651,10 +798,10 @@ export default function ServersSecurityPage() {
         </div>
       )}
 
-      {/* TAB 3: FIREWALL & BACKUPS */}
+      {/* TAB 3: FIREWALL, STALKER MAG & AUTOMATED SNAPSHOTS */}
       {subTab === 'security' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-7 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
+          <div className="lg:col-span-6 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
             <h2 className="text-sm font-bold text-white flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-rose-400" />
               Firewall IPv4 / IPv6 & Anti-Restreaming
@@ -691,7 +838,7 @@ export default function ServersSecurityPage() {
               </button>
             </form>
 
-            <div className="space-y-2 text-xs max-h-60 overflow-y-auto">
+            <div className="space-y-2 text-xs max-h-72 overflow-y-auto">
               {sys.firewall.map((r) => (
                 <div
                   key={r.id}
@@ -718,39 +865,101 @@ export default function ServersSecurityPage() {
             </div>
           </div>
 
-          <div className="lg:col-span-5 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
+          <div className="lg:col-span-6 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
             <h2 className="text-sm font-bold text-white flex items-center gap-2">
               <Key className="w-4 h-4 text-amber-400" />
-              Stalker Middleware Key & Respaldos
+              Portal MAG Stalker (/c/) & Snapshots Diarios Automáticos
             </h2>
 
             <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 text-xs space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">Dedicated Stalker / Ministra Key:</span>
+                <span className="text-slate-400 font-semibold">Portal Nativo MAG / STBemu Activo:</span>
+                <a
+                  href="/c/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 font-semibold"
+                >
+                  Probar /c/ <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </div>
+              <div className="font-mono text-indigo-300 break-all">{originBase}/c/</div>
+              <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
+                <span className="text-slate-400">Stalker Key: {sys.settings?.stalker_key}</span>
                 <button
                   onClick={() => runMaintenance('regen_stalker_key')}
-                  className="text-[11px] text-indigo-400 hover:text-indigo-300"
+                  className="text-[11px] text-amber-400 hover:text-amber-300"
                 >
-                  Regenerar
+                  Regenerar Key
                 </button>
               </div>
-              <div className="font-mono text-amber-300 break-all">{sys.settings?.stalker_key}</div>
             </div>
 
-            <div className="space-y-2.5 pt-1 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
               <a
                 href={`/api/backup/export?token=${encodeURIComponent(getToken())}`}
-                className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold flex items-center justify-center gap-2 transition"
+                className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold flex items-center justify-center gap-2 transition"
               >
                 <Download className="w-4 h-4" />
-                Descargar Backup Completo (JSON)
+                Exportar JSON Local
               </a>
 
-              <label className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center justify-center gap-2 cursor-pointer transition">
+              <label className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center justify-center gap-2 cursor-pointer transition">
                 <Upload className="w-4 h-4 text-indigo-400" />
-                Restaurar Base de Datos desde Archivo
+                Subir y Restaurar JSON
                 <input type="file" accept=".json" onChange={handleRestoreFile} className="hidden" />
               </label>
+            </div>
+
+            <div className="pt-2 border-t border-slate-800 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-white">
+                  Snapshots Automáticos en Servidor (data/backups/ — Retención 10)
+                </span>
+                <button
+                  onClick={handleCreateSnapshot}
+                  className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
+                >
+                  + Snapshot Ahora
+                </button>
+              </div>
+
+              <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                {(sys.snapshots || []).map((sn) => (
+                  <div
+                    key={sn.filename}
+                    className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-800 flex items-center justify-between gap-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-mono text-slate-200 truncate">{sn.filename}</div>
+                      <div className="text-[10px] text-slate-500">
+                        {sn.sizeKb} KB • {new Date(sn.created_at).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleRestoreSnapshot(sn.filename)}
+                        className="px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 font-semibold text-[10px]"
+                      >
+                        Restaurar
+                      </button>
+                      <a
+                        href={`/api/backups/snapshots/${encodeURIComponent(sn.filename)}/download?token=${encodeURIComponent(getToken())}`}
+                        className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300"
+                        title="Descargar"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </a>
+                      <button
+                        onClick={() => handleDeleteSnapshot(sn.filename)}
+                        className="p-1 rounded bg-rose-500/15 text-rose-300"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>

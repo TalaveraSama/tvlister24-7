@@ -24,8 +24,11 @@ Comandos rápidos:
 - `tvlister-admin status` — Ver IP, puerto activo y estado del servicio.
 - `tvlister-admin reset-admin NUEVA_CLAVE` — Cambiar la contraseña de `admin`.
 - `tvlister-admin set-port 8895` — Cambiar puerto TCP y abrir firewall.
+- `tvlister-admin purge-demo` — Purgar datos de demostración y dejar listo para producción limpia.
+- `tvlister-admin setup-ssl tv.midominio.com` — Configurar proxy inverso Nginx + HTTPS Let's Encrypt sin afectar XUI.one.
+- `tvlister-admin enable-cron` — Programar backup diario automático a las 03:00 AM (retención 7 días).
 - `tvlister-admin backup` — Crear copia de seguridad de SQLite en `/root/`.
-- `tvlister-admin update` — Actualizar desde GitHub sin perder datos.
+- `tvlister-admin update` — Actualizar desde GitHub sin perder datos (con migración automática de esquema SQLite).
 
 ---
 
@@ -42,12 +45,12 @@ docker compose up -d --build
 ## Resumen de Módulos Incluidos
 
 1. **Dashboard & Telemetría en Vivo**: CPU, RAM, conexiones activas con botón *Kick* y monitor de emisión 24/7.
-2. **Canales en Vivo + Importador M3U / XUI.one**: Modos *Direct Stream*, *On-Demand* y *Transcodificación FFmpeg* (`NVENC`, `QSV`, `CPU`) + *failover* a URL de respaldo.
-3. **Estudio de Canales 24/7**: Parrillas continuas desde VOD o URLs externas, reloj en vivo sincronizado, worker HLS FFmpeg 24/7, marca de agua OSD y guía **EPG XMLTV automática**.
-4. **Biblioteca VOD**: Gestión de películas MP4/MKV/M3U8.
-5. **Líneas, MAG & Enigma2**: Control de expiración, conexiones simultáneas, bloqueo por IP y generador automático de `/get.php` (M3U), `/xmltv.php` y `/player_api.php` (TiviMate, IPTV Smarters, VLC, XCIPTV).
-6. **Bouquets & Categorías**: Paquetes de contenido personalizables.
+2. **Canales en Vivo + Catchup DVR + Importador M3U / XUI.one**: Modos *Direct Stream*, *On-Demand*, *Transcodificación FFmpeg* (`NVENC`, `QSV`, `CPU`) + grabador **TV Archive / Timeshift DVR** (`/timeshift/...`) y *failover* automático.
+3. **Estudio de Canales 24/7**: Parrillas continuas desde VOD o URLs externas, reloj virtual o **Worker FFmpeg HLS 24/7 con Auto-Start**, marca de agua OSD y guía **EPG XMLTV automática**.
+4. **Biblioteca VOD & Series Completas**: Gestión de películas y **Series con Temporadas y Episodios** compatibles con TiviMate, IPTV Smarters, M3U y WebTV.
+5. **Líneas, Portal Nativo MAG Stalker (`/c/`) & Enigma2**: Control de expiración, conexiones simultáneas, bloqueo por IP, middleware `/stalker_portal/server/load.php` por MAC y API Xtream completa.
+6. **Bouquets & Categorías**: Paquetes de contenido personalizables (Live, 24/7, Películas y Series).
 7. **Resellers & Créditos**: Subcuentas para distribuidores con descuento automático por plan y bitácora de movimientos.
-8. **EPG, Mensajería OSD & Reportes**: Banners en tiempo real para clientes y bandeja de soporte.
-9. **Admin del Sistema, Firewall & Backups**: Auditoría de producción en vivo, gestión de Super Admins, Firewall IPv4/IPv6 + Anti-Scanners y respaldos JSON transaccionales.
+8. **Importador Automático XMLTV (`.xml` / `.xml.gz`), Mensajería OSD & Reportes**: Auto-sincronización cada 12h de guías externas comprimidas, banners OSD en tiempo real y soporte técnico.
+9. **Clúster Edge Load Balancer Real, SSL, Firewall & Snapshots**: Agente Edge (`scripts/edge-agent.js`) instalable en 1 clic con balanceo por Carga/GeoIP/ISP, generador HTTPS Nginx, Firewall IPv4/IPv6 y snapshots diarios automáticos.
 10. **Portal Cliente WebTV HTML5**: Reproductor web integrado con `hls.js`, favoritos, test de velocidad y envío de reportes.
