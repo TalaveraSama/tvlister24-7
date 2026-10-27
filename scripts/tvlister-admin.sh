@@ -167,6 +167,60 @@ cmd_import_xui() {
   systemctl restart "$SERVICE_NAME" 2>/dev/null || true
 }
 
+cmd_shield() {
+  cd "$APP_DIR"
+  "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { db, initDb } from "./server/db.js";
+    initDb();
+    const upsert = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+    upsert.run("proxy_direct_ts", "true");
+    upsert.run("anti_restreaming", "true");
+    upsert.run("flood_limit_per_min", "240");
+    db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+    console.log("✅ Blindaje Stream Shield Proxy (TS + HLS), Anti-Restreaming y protección CGNAT activados.");
+  '
+  systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+}
+
+cmd_doctor() {
+  local port ip
+  port=$(get_current_port)
+  ip=$(get_server_ip)
+  cd "$APP_DIR"
+  echo "============================================================"
+  echo "  TVLister 24/7 — Auditoría de Producción Total (doctor)    "
+  echo "============================================================"
+  PANEL_PORT="$port" PANEL_IP="$ip" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import fs from "node:fs";
+    import { db, initDb, verifyPassword } from "./server/db.js";
+    import { isFfmpegAvailable, getFfmpegBin } from "./server/streamEngine.js";
+    initDb();
+    const admin = db.prepare("SELECT password_hash FROM users WHERE username = ?").get("admin");
+    const pwdChanged = admin ? !verifyPassword("admin123", admin.password_hash) : true;
+    const shield = db.prepare("SELECT value FROM settings WHERE key = ?").get("proxy_direct_ts")?.value === "true";
+    const streams = db.prepare("SELECT COUNT(*) as c FROM streams").get().c;
+    const vod = db.prepare("SELECT COUNT(*) as c FROM vod_items").get().c;
+    const lines = db.prepare("SELECT COUNT(*) as c FROM lines").get().c;
+    const cronOk = fs.existsSync("/etc/cron.d/tvlister24-7-backup");
+    const ffOk = isFfmpegAvailable();
+
+    console.log(pwdChanged ? "  [OK]   1. Clave Super Admin personalizada" : "  [FALTA] 1. Clave Super Admin sigue en admin123 -> Ejecuta: tvlister-admin reset-admin TU_CLAVE");
+    console.log(shield     ? "  [OK]   2. Stream Shield Proxy activo (oculta fuentes TS/HLS + IP-Lock)" : "  [AVISO] 2. Stream Shield Proxy apagado (modo 302) -> Actívalo con: tvlister-admin shield");
+    console.log((streams > 0 || vod > 0) && lines > 0
+      ? `  [OK]   3. Catálogo cargado (${streams} canales, ${vod} VOD, ${lines} líneas)`
+      : `  [AVISO] 3. Catálogo vacío (${streams} canales, ${lines} líneas) -> Ejecuta: tvlister-admin import-xui`);
+    console.log(ffOk       ? `  [OK]   4. Motor FFmpeg operativo (${getFfmpegBin()})` : "  [AVISO] 4. FFmpeg no detectado (modo Direct Stream)");
+    console.log(cronOk     ? "  [OK]   5. Respaldo diario automático 03:00 AM activo" : "  [AVISO] 5. Cron diario aún no activado -> Ejecuta: tvlister-admin enable-cron");
+    console.log(fs.existsSync("./dist/index.html") ? "  [OK]   6. Build de producción compilado (dist/)" : "  [FALTA] 6. Ejecuta npm run build");
+  '
+  if curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then
+    echo "  [OK]   7. Endpoint /api/health respondiendo en http://${ip}:${port}"
+  else
+    echo "  [FALTA] 7. Servicio no responde en 127.0.0.1:${port} -> Ejecuta: tvlister-admin restart"
+  fi
+  echo "============================================================"
+}
+
 cmd_setup_ssl() {
   local domain="${1:-}"
   local email="${2:-}"
@@ -188,7 +242,7 @@ cmd_setup_ssl() {
 server {
     listen 80;
     server_name ${domain};
-    client_max_body_size 50M;
+    client_max_body_size 250M;
 
     location / {
         proxy_pass http://127.0.0.1:${port};
@@ -280,6 +334,12 @@ case "$ACTION" in
   import-xui)
     cmd_import_xui "${2:-}"
     ;;
+  shield)
+    cmd_shield
+    ;;
+  doctor)
+    cmd_doctor
+    ;;
   setup-ssl)
     cmd_setup_ssl "${2:-}" "${3:-}"
     ;;
@@ -291,33 +351,37 @@ case "$ACTION" in
     echo "  TVLister 24/7 — Consola de Administración del Sistema     "
     echo "============================================================"
     echo "  1) Ver estado, IP y puerto actual (status)"
-    echo "  2) Cambiar contraseña de 'admin' (reset-admin)"
-    echo "  3) Cambiar puerto TCP del panel (set-port)"
-    echo "  4) Abrir puerto en Firewall / iptables (open-firewall)"
-    echo "  5) Reiniciar motor TVLister 24/7 (restart)"
-    echo "  6) Crear backup de base de datos en /root (backup)"
+    echo "  2) Auditoría de Producción Total ¿Qué falta? (doctor)"
+    echo "  3) Cambiar contraseña de 'admin' (reset-admin)"
+    echo "  4) Activar Blindaje Stream Shield Proxy TS/HLS (shield)"
+    echo "  5) Importar Streams y Usuarios desde XUI.one (import-xui)"
+    echo "  6) Dejar panel 100% limpio para producción (clean)"
     echo "  7) Programar backup diario automático 03:00 AM (enable-cron)"
-    echo "  8) Dejar panel 100% limpio para producción (clean)"
-    echo "  9) Importar Streams y Usuarios desde XUI.one local (import-xui)"
-    echo " 10) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
-    echo " 11) Actualizar panel desde GitHub sin perder datos (update)"
-    echo " 12) Ver logs en vivo (logs)"
+    echo "  8) Crear backup manual en /root (backup)"
+    echo "  9) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
+    echo " 10) Cambiar puerto TCP del panel (set-port)"
+    echo " 11) Abrir puerto en Firewall / iptables (open-firewall)"
+    echo " 12) Actualizar panel desde GitHub sin perder datos (update)"
+    echo " 13) Reiniciar motor TVLister 24/7 (restart)"
+    echo " 14) Ver logs en vivo (logs)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-12]: " opt
+    read -r -p "Selecciona una opción [0-14]: " opt
     case "$opt" in
       1) cmd_status ;;
-      2) cmd_reset_admin "" ;;
-      3) cmd_set_port "" ;;
-      4) cmd_open_firewall "" ;;
-      5) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
-      6) cmd_backup ;;
+      2) cmd_doctor ;;
+      3) cmd_reset_admin "" ;;
+      4) cmd_shield ;;
+      5) cmd_import_xui "" ;;
+      6) cmd_purge_demo ;;
       7) cmd_enable_cron ;;
-      8) cmd_purge_demo ;;
-      9) cmd_import_xui "" ;;
-      10) cmd_setup_ssl "" "" ;;
-      11) cmd_update ;;
-      12) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
+      8) cmd_backup ;;
+      9) cmd_setup_ssl "" "" ;;
+      10) cmd_set_port "" ;;
+      11) cmd_open_firewall "" ;;
+      12) cmd_update ;;
+      13) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
+      14) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
       *) exit 0 ;;
     esac
     ;;

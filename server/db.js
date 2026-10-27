@@ -574,8 +574,9 @@ function seedInitialData() {
   insertSetting.run('server_timezone', 'UTC');
   insertSetting.run('stalker_key', crypto.randomBytes(16).toString('hex'));
   insertSetting.run('anti_restreaming', 'true');
+  insertSetting.run('proxy_direct_ts', 'true');
   insertSetting.run('default_output_format', 'hls');
-  insertSetting.run('flood_limit_per_min', '120');
+  insertSetting.run('flood_limit_per_min', '240');
   insertSetting.run('clean_panel_v22', 'true');
   insertSetting.run('demo_purged', 'true');
 }

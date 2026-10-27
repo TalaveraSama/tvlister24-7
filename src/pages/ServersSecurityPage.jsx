@@ -42,7 +42,8 @@ export default function ServersSecurityPage() {
     server_timezone: 'UTC',
     default_output_format: 'hls',
     anti_restreaming: 'true',
-    flood_limit_per_min: '120',
+    proxy_direct_ts: 'false',
+    flood_limit_per_min: '240',
     lb_routing_mode: 'load'
   });
 
@@ -88,7 +89,8 @@ export default function ServersSecurityPage() {
       server_timezone: data.settings?.server_timezone || 'UTC',
       default_output_format: data.settings?.default_output_format || 'hls',
       anti_restreaming: data.settings?.anti_restreaming || 'true',
-      flood_limit_per_min: data.settings?.flood_limit_per_min || '120',
+      proxy_direct_ts: data.settings?.proxy_direct_ts || 'false',
+      flood_limit_per_min: data.settings?.flood_limit_per_min || '240',
       lb_routing_mode: data.settings?.lb_routing_mode || 'load'
     });
     if (data.admins?.length > 0 && !pwdTargetId) {
@@ -288,17 +290,35 @@ export default function ServersSecurityPage() {
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   Auditoría de Preparación para Producción (Tiempo Real)
                 </h2>
-                <span
-                  className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                    readiness.actionNeeded
-                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                      : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                  }`}
-                >
-                  {readiness.actionNeeded
-                    ? 'Listo • Cambia la clave inicial admin123'
-                    : '100% Listo para Producción'}
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {!readiness.streamShieldActive && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const r = await apiFetch('/api/system/maintenance', {
+                          method: 'POST',
+                          body: JSON.stringify({ action: 'enable_production_shield' })
+                        });
+                        flash(r.message);
+                        loadAll();
+                      }}
+                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow transition"
+                    >
+                      Activar Blindaje Producción Total (1 Clic)
+                    </button>
+                  )}
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                      readiness.actionNeeded
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                    }`}
+                  >
+                    {readiness.actionNeeded
+                      ? `${readiness.pendingWarnings || 1} ajuste(s) pendiente(s)`
+                      : '100% Listo para Producción Total'}
+                  </span>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 text-xs">
@@ -440,6 +460,18 @@ export default function ServersSecurityPage() {
                       <option value="isp">Afinidad por ISP</option>
                     </select>
                   </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 mb-1">Modo Entrega Canales en Vivo (Stream Shield)</label>
+                  <select
+                    value={settingsForm.proxy_direct_ts}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, proxy_direct_ts: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="true">Stream Shield Proxy Activo (Oculta URLs de Proveedor & Resuelve IP-Lock)</option>
+                    <option value="false">Redirección Directa 302 (Ahorro de Ancho de Banda del VPS)</option>
+                  </select>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">

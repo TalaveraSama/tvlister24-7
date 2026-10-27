@@ -28,9 +28,31 @@ function loadOrCreateSecret() {
 
 const SECRET_KEY = loadOrCreateSecret();
 
+// Short-TTL in-memory cache for firewall rules & flood settings (avoids SQLite hit per HLS segment)
+let fwCache = { expiresAt: 0, rules: [], maxPerMin: 240, antiRestream: true };
+
+export function invalidateFirewallCache() {
+  fwCache.expiresAt = 0;
+}
+
+function getFirewallSnapshot() {
+  const now = Date.now();
+  if (fwCache.expiresAt > now) return fwCache;
+  const rules = db.prepare("SELECT * FROM firewall_rules WHERE action = 'block'").all();
+  const floodRow = db.prepare("SELECT value FROM settings WHERE key = 'flood_limit_per_min'").get();
+  const antiRow = db.prepare("SELECT value FROM settings WHERE key = 'anti_restreaming'").get();
+  fwCache = {
+    expiresAt: now + 5000,
+    rules,
+    maxPerMin: Math.max(60, Number(floodRow?.value) || 240),
+    antiRestream: antiRow?.value !== 'false'
+  };
+  return fwCache;
+}
+
 // In-memory rate limiters (auto-pruned)
 const loginAttempts = new Map(); // ip -> { count, resetAt }
-const requestRates = new Map(); // ip -> { count, resetAt }
+const requestRates = new Map(); // bucketKey -> { count, resetAt }
 
 setInterval(() => {
   const now = Date.now();
@@ -86,6 +108,35 @@ export function verifyToken(token) {
   }
 }
 
+// Cryptographic HMAC signing for Upstream HLS Stream Shield URLs (prevents SSRF & hides upstream credentials)
+export function signUpstreamUrl(targetUrl, streamId) {
+  const encoded = Buffer.from(String(targetUrl), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SECRET_KEY)
+    .update(`${streamId}:${encoded}`)
+    .digest('base64url')
+    .slice(0, 22);
+  return { u: encoded, sig };
+}
+
+export function verifyUpstreamUrl(encoded, sig, streamId) {
+  if (!encoded || !sig) return null;
+  const expected = crypto
+    .createHmac('sha256', SECRET_KEY)
+    .update(`${streamId}:${encoded}`)
+    .digest('base64url')
+    .slice(0, 22);
+  if (sig.length !== expected.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    const url = Buffer.from(encoded, 'base64url').toString('utf8');
+    if (!/^https?:\/\//i.test(url)) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 export function extractClientIp(req) {
   const xff = req.headers['x-forwarded-for'];
   if (typeof xff === 'string' && xff.length > 0) {
@@ -97,45 +148,45 @@ export function extractClientIp(req) {
 const KNOWN_RESTREAM_SCANNERS = ['masscan', 'zgrab', 'censys', 'nmap', 'nikto', 'sqlmap'];
 
 export function firewallMiddleware(req, res, next) {
-  if (req.path.startsWith('/api/auth') || req.path.startsWith('/api/firewall')) {
+  if (req.path === '/api/health' || req.path.startsWith('/api/auth') || req.path.startsWith('/api/firewall')) {
     return next();
   }
 
   const clientIp = extractClientIp(req);
   const ua = (req.headers['user-agent'] || '').toLowerCase();
+  const snap = getFirewallSnapshot();
 
-  // Flood protection per minute on public IPTV endpoints
+  // CGNAT-safe flood protection on public IPTV discovery endpoints
   if (
     req.path === '/get.php' ||
     req.path === '/player_api.php' ||
+    req.path === '/panel_api.php' ||
     req.path === '/xmltv.php' ||
-    req.path.startsWith('/live/')
+    req.path === '/enigma2.php'
   ) {
-    const floodSetting = db.prepare("SELECT value FROM settings WHERE key = 'flood_limit_per_min'").get();
-    const maxPerMin = Math.max(30, Number(floodSetting?.value) || 180);
+    const uKey = String(req.query?.username || 'anon').slice(0, 48);
+    const bucketKey = `${clientIp}:${uKey}`;
     const now = Date.now();
-    const rate = requestRates.get(clientIp);
+    const rate = requestRates.get(bucketKey);
     if (!rate || rate.resetAt < now) {
-      requestRates.set(clientIp, { count: 1, resetAt: now + 60_000 });
+      requestRates.set(bucketKey, { count: 1, resetAt: now + 60_000 });
     } else {
       rate.count += 1;
-      if (rate.count > maxPerMin) {
+      if (rate.count > snap.maxPerMin) {
         return res.status(429).json({ error: 'Too many requests (Midnight Flood Protection)' });
-      }
-    }
-
-    const antiRestream = db.prepare("SELECT value FROM settings WHERE key = 'anti_restreaming'").get();
-    if (antiRestream?.value === 'true') {
-      for (const sig of KNOWN_RESTREAM_SCANNERS) {
-        if (ua.includes(sig)) {
-          return res.status(403).send('Forbidden (Scanner Blocked)');
-        }
       }
     }
   }
 
-  const rules = db.prepare("SELECT * FROM firewall_rules WHERE action = 'block'").all();
-  for (const rule of rules) {
+  if (snap.antiRestream) {
+    for (const sig of KNOWN_RESTREAM_SCANNERS) {
+      if (ua.includes(sig)) {
+        return res.status(403).send('Forbidden (Scanner Blocked)');
+      }
+    }
+  }
+
+  for (const rule of snap.rules) {
     if (rule.rule_type === 'ip' && rule.value && clientIp === rule.value.trim()) {
       return res.status(403).json({ error: 'Access denied by Midnight Firewall (IP Blocked)' });
     }

@@ -245,7 +245,8 @@ Environment=FFMPEG_PATH=${RUNTIME_BIN}/ffmpeg
 ExecStart=${NODE_DIR}/bin/node --no-warnings server/index.js
 Restart=always
 RestartSec=3
-LimitNOFILE=65535
+LimitNOFILE=524288
+TasksMax=infinity
 
 [Install]
 WantedBy=multi-user.target
@@ -267,8 +268,8 @@ if command -v iptables >/dev/null 2>&1; then
 fi
 
 sleep 2
-if curl -fsS "http://127.0.0.1:${FINAL_PORT}/" >/dev/null 2>&1; then
-  STATUS_MSG="✅ Servicio respondiendo correctamente en el puerto ${FINAL_PORT}"
+if curl -fsS "http://127.0.0.1:${FINAL_PORT}/api/health" >/dev/null 2>&1; then
+  STATUS_MSG="✅ Producción activa y verificada (/api/health OK) en el puerto ${FINAL_PORT}"
 else
   STATUS_MSG="⚠️ Servicio iniciado; revisa logs con: journalctl -u ${SERVICE_NAME} -n 30"
 fi
@@ -287,7 +288,8 @@ echo "  ${STATUS_MSG}"
 echo "============================================================"
 echo "  🌐 Panel Admin & WebTV : http://${SERVER_IP}:${FINAL_PORT}"
 echo "  👤 Usuario Admin       : admin"
-echo "  🛠️  Consola SysAdmin    : tvlister-admin (ya instalado en /usr/bin)"
+echo "  🛠️  Consola SysAdmin    : tvlister-admin"
 echo "  🔑 Cambiar clave Admin : tvlister-admin reset-admin TU_NUEVA_CLAVE"
-echo "  📺 Lista M3U Demo      : http://${SERVER_IP}:${FINAL_PORT}/get.php?username=demo&password=demo123&type=m3u_plus&output=hls"
+echo "  📥 Importar BD XUI.one : tvlister-admin import-xui"
+echo "  🩺 Auditoría Producción: tvlister-admin doctor"
 echo "============================================================"

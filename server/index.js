@@ -16,6 +16,7 @@ import {
 import {
   signToken,
   firewallMiddleware,
+  invalidateFirewallCache,
   requireAuth,
   requireAdmin,
   extractClientIp,
@@ -67,6 +68,26 @@ app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Application-level firewall check
 app.use(firewallMiddleware);
+
+// Production Healthcheck Probe (Nginx / Systemd / Uptime Monitors)
+app.get('/api/health', (_req, res) => {
+  try {
+    const streamsCount = db.prepare('SELECT COUNT(*) as c FROM streams').get().c;
+    const activeConns = db.prepare('SELECT COUNT(*) as c FROM active_connections').get().c;
+    res.json({
+      status: 'ok',
+      version: '2.2.0',
+      env: isProd ? 'production' : 'development',
+      uptimeSec: Math.floor(process.uptime()),
+      db: 'wal_ok',
+      ffmpeg: isFfmpegAvailable(),
+      streams: streamsCount,
+      activeConnections: activeConns
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
 
 // Mount Stalker / Ministra MAG STB Middleware (/c/, /stalker_portal/c/, /server/load.php)
 app.use(stalkerRouter);
@@ -1323,6 +1344,22 @@ app.post('/api/system/maintenance', requireAuth, requireAdmin, (req, res) => {
     ).run(newKey);
     return res.json({ ok: true, stalker_key: newKey, message: 'Nueva Stalker Key generada.' });
   }
+  if (action === 'enable_production_shield') {
+    const upsert = db.prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    );
+    upsert.run('proxy_direct_ts', 'true');
+    upsert.run('anti_restreaming', 'true');
+    upsert.run('flood_limit_per_min', '240');
+    invalidateFirewallCache();
+    const snap = createServerSnapshot('prod_shield');
+    return res.json({
+      ok: true,
+      snapshot: snap,
+      message:
+        'Modo Producción Total activado: Stream Shield Proxy (oculta fuentes TS/HLS y resuelve IP-Lock), Anti-Restreaming y Snapshot de respaldo creados.'
+    });
+  }
   if (action === 'purge_demo_data' || action === 'clean_panel') {
     stopAllWorkers();
     try {
@@ -1503,11 +1540,13 @@ app.post('/api/firewall', requireAuth, requireAdmin, (req, res) => {
   const info = db
     .prepare('INSERT INTO firewall_rules (rule_type, value, action, description) VALUES (?, ?, ?, ?)')
     .run(String(rule_type), String(value).trim(), String(action), String(description));
+  invalidateFirewallCache();
   res.json({ id: Number(info.lastInsertRowid), ok: true });
 });
 
 app.delete('/api/firewall/:id', requireAuth, requireAdmin, (req, res) => {
   db.prepare('DELETE FROM firewall_rules WHERE id = ?').run(Number(req.params.id));
+  invalidateFirewallCache();
   res.json({ ok: true });
 });
 
@@ -1517,6 +1556,7 @@ app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
   for (const [k, v] of Object.entries(updates)) {
     upsert.run(String(k), String(v));
   }
+  invalidateFirewallCache();
   res.json({ ok: true });
 });
 
@@ -1558,65 +1598,107 @@ app.get('/api/system/readiness', requireAuth, requireAdmin, (req, res) => {
   const distCompiled = fs.existsSync(distIndex);
   const ffmpegReady = isFfmpegAvailable();
 
+  const streamShieldRow = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
+  const streamShieldActive = streamShieldRow?.value === 'true';
+
+  const streamsCount = db.prepare('SELECT COUNT(*) as c FROM streams').get().c;
+  const vodCount = db.prepare('SELECT COUNT(*) as c FROM vod_items').get().c;
+  const linesCount = db.prepare('SELECT COUNT(*) as c FROM lines').get().c;
+  const catalogReady = (streamsCount > 0 || vodCount > 0) && linesCount > 0;
+
+  const snapshots = listServerSnapshots();
+  const hasSnapshots = snapshots.length > 0 || fs.existsSync('/etc/cron.d/tvlister24-7-backup');
+
+  const proto = req.headers['x-forwarded-proto']?.split(',')[0]?.trim() || req.protocol || 'http';
+  const httpsActive = proto === 'https' || fs.existsSync('/etc/nginx/sites-enabled/tvlister247.conf');
+
   const checks = [
     {
       id: 'admin_pwd',
-      label: 'Contraseña por defecto (admin123) reemplazada',
+      label: '1. Clave Super Admin personalizada',
       ok: defaultPasswordChanged,
       severity: defaultPasswordChanged ? 'ok' : 'warn',
       hint: defaultPasswordChanged
-        ? 'Contraseña personalizada activa.'
-        : 'Cambia la clave inicial admin123 antes de exponer el panel en Internet.'
+        ? 'Contraseña segura configurada.'
+        : 'FALTA: Cambia la clave inicial admin123 abajo o con: tvlister-admin reset-admin TU_CLAVE'
     },
     {
-      id: 'hmac_secret',
-      label: 'Firma Criptográfica HMAC-SHA256 de 256 bits persistente',
-      ok: secretKeyStrong,
-      severity: 'ok',
-      hint: 'Tokens de sesión protegidos con llave única del servidor.'
+      id: 'stream_shield',
+      label: '2. Blindaje Stream Shield Proxy (TS + HLS)',
+      ok: streamShieldActive,
+      severity: streamShieldActive ? 'ok' : 'warn',
+      hint: streamShieldActive
+        ? 'Activo: Oculta URLs de tus proveedores y resuelve IP-Lock en vivo.'
+        : 'RECOMENDADO: Activa "Blindaje Stream Shield" para no exponer las URLs originales al cliente.'
     },
     {
-      id: 'sqlite_wal',
-      label: 'Base de Datos SQLite en modo WAL Transaccional (ACID)',
-      ok: true,
-      severity: 'ok',
-      hint: 'Lecturas y escrituras concurrentes sin bloqueo activas.'
+      id: 'catalog_ready',
+      label: '3. Catálogo de Streams & Líneas de Usuarios',
+      ok: catalogReady,
+      severity: catalogReady ? 'ok' : 'warn',
+      hint: catalogReady
+        ? `${streamsCount} canales, ${vodCount} VOD y ${linesCount} líneas activas en producción.`
+        : 'Panel limpio (0 canales/líneas). Importa desde XUI.one o agrega tu contenido.'
     },
     {
-      id: 'rate_limit',
-      label: 'Protección Anti-Fuerza Bruta, Anti-Flood & Firewall IP/UA',
-      ok: true,
-      severity: 'ok',
-      hint: 'Límite de intentos en login y filtrado de escáneres activos.'
+      id: 'backups_ready',
+      label: '4. Respaldos Automáticos & Snapshots',
+      ok: hasSnapshots,
+      severity: hasSnapshots ? 'ok' : 'info',
+      hint: hasSnapshots
+        ? `${snapshots.length} snapshot(s) disponibles + programador diario activo.`
+        : 'Crea tu primer Snapshot inicial o activa cron con: tvlister-admin enable-cron'
     },
     {
-      id: 'xtream_compat',
-      label: 'Compatibilidad Producción TiviMate, Smarters, VLC, M3U & XMLTV',
-      ok: true,
-      severity: 'ok',
-      hint: 'Endpoints /get.php, /player_api.php, /panel_api.php, /xmltv.php y /live activos.'
+      id: 'https_ssl',
+      label: '5. Dominio HTTPS / SSL (Opcional SmartTV/WebTV)',
+      ok: httpsActive,
+      severity: httpsActive ? 'ok' : 'info',
+      hint: httpsActive
+        ? 'Conexión cifrada HTTPS / Proxy Nginx detectada.'
+        : 'Opcional: Si usarás WebTV en navegadores HTTPS o Smart TVs, vincula un dominio SSL.'
     },
     {
       id: 'ffmpeg_bin',
-      label: 'Motor FFmpeg para Transcodificación & HLS 24/7',
+      label: '6. Motor FFmpeg + Auto-Wake On-Demand',
       ok: ffmpegReady,
       severity: ffmpegReady ? 'ok' : 'info',
       hint: ffmpegReady
-        ? 'FFmpeg detectado y supervisor de auto-reconexión listo.'
-        : 'En este entorno opera en Direct Stream; en tu VPS Ubuntu usa FFmpeg automáticamente.'
+        ? 'FFmpeg vinculado y supervisor de auto-reconexión / reposo On-Demand activo.'
+        : 'En modo Direct Stream; en tu VPS Ubuntu vincula /home/xui/bin/ffmpeg automáticamente.'
+    },
+    {
+      id: 'xtream_compat',
+      label: '7. API Producción Xtream, M3U, MAG Stalker, Enigma2 & Byte-Range 206',
+      ok: true,
+      severity: 'ok',
+      hint: 'Soporta TiviMate, Smarters, XCIPTV, MAG, Enigma2 y archivos locales /home/xui.'
+    },
+    {
+      id: 'hmac_secret',
+      label: '8. Firma Criptográfica HMAC-SHA256 & Anti-Flood CGNAT',
+      ok: secretKeyStrong,
+      severity: 'ok',
+      hint: 'Sesiones, segmentos HLS y rate-limit compatibles con redes móviles/CGNAT.'
     },
     {
       id: 'prod_bundle',
-      label: 'Build Estático Optimizado (dist/) generado',
+      label: '9. Build Compilado (dist/) & SQLite WAL ACID',
       ok: distCompiled,
       severity: distCompiled ? 'ok' : 'info',
-      hint: distCompiled ? 'Assets compilados y minificados listos.' : 'Ejecuta npm run build para producción.'
+      hint: distCompiled ? 'Assets compilados y timeouts HTTP ajustados para streaming 24/7.' : 'Ejecuta npm run build.'
     }
   ];
 
+  const pendingWarnings = checks.filter((c) => c.severity === 'warn').length;
+
   res.json({
-    readyForProduction: true,
-    actionNeeded: !defaultPasswordChanged,
+    readyForProduction: pendingWarnings === 0,
+    actionNeeded: pendingWarnings > 0,
+    pendingWarnings,
+    streamShieldActive,
+    defaultPasswordChanged,
+    catalogReady,
     isProdEnv: isProd,
     checks
   });
@@ -1718,9 +1800,38 @@ async function startServer() {
     }
   }
 
-  // Background Schedulers: Daily Automated Backups, 12h XMLTV Sync & 30m DVR Retention Cleanup
+  // Background Schedulers: Daily Automated Backups, 12h XMLTV Sync, 60s On-Demand Idle Reaper & 30m DVR Cleanup
   startAutomatedBackupScheduler();
   startEpgAutoSyncScheduler(PORT);
+
+  setInterval(() => {
+    try {
+      // Put On-Demand streams back to sleep if 0 viewers are connected for > 3 minutes
+      const idleOnDemand = db
+        .prepare(
+          `SELECT s.id
+           FROM streams s
+           WHERE s.stream_mode = 'ondemand'
+             AND s.status = 'running'
+             AND datetime(COALESCE(s.uptime_started_at, datetime('now'))) <= datetime('now', '-3 minutes')
+             AND NOT EXISTS (
+               SELECT 1 FROM active_connections ac
+               WHERE ac.target_type = 'live'
+                 AND ac.target_id = s.id
+                 AND datetime(ac.last_ping_at) >= datetime('now', '-3 minutes')
+             )`
+        )
+        .all();
+
+      for (const s of idleOnDemand) {
+        stopWorker(`stream_${s.id}`);
+        db.prepare("UPDATE streams SET status = 'ondemand_idle', pid = NULL WHERE id = ?").run(s.id);
+      }
+    } catch {
+      // ignore transient lock
+    }
+  }, 60 * 1000).unref();
+
   setInterval(() => {
     try {
       const allStreams = db.prepare('SELECT id, tv_archive_days FROM streams WHERE archive_enabled = 1').all();
@@ -1753,6 +1864,19 @@ async function startServer() {
       }
     });
   }
+
+  // Tune HTTP server timeouts for uninterrupted 24/7 MPEG-TS / HLS live streaming & Nginx reverse proxies
+  httpServer.timeout = 0;
+  httpServer.requestTimeout = 0;
+  httpServer.keepAliveTimeout = 65000;
+  httpServer.headersTimeout = 66000;
+
+  process.on('uncaughtException', (err) => {
+    console.error('[TVLister Production Guard] uncaughtException:', err?.message || err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[TVLister Production Guard] unhandledRejection:', reason);
+  });
 
   const gracefulShutdown = () => {
     stopAllWorkers();

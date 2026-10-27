@@ -1,19 +1,34 @@
 import express from 'express';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
-import { extractClientIp } from './auth.js';
+import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl } from './auth.js';
 import {
   computeChannel247LiveState,
   getLocalHlsManifestPath,
   getArchiveSegmentsInRange,
+  buildFfmpegArgsForStream,
+  startSupervisedWorker,
+  getWorkerPid,
+  isFfmpegAvailable,
   HLS_ROOT,
   ARCHIVE_ROOT
 } from './streamEngine.js';
 
 export const iptvRouter = express.Router();
+
+// Ensure CORS headers on all IPTV / WebTV / HLS player endpoints
+iptvRouter.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization, Origin, Accept');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
 
 function xmlEscape(str = '') {
   return String(str)
@@ -52,7 +67,7 @@ function authenticateLine(username, password, req = null) {
   if (line.exp_date && new Date(line.exp_date).getTime() < Date.now()) {
     return { error: 'Suscripción expirada', code: 403 };
   }
-  if (req && line.allowed_ips && line.allowed_ips.trim().length > 0) {
+  if (req && line.allowed_ips && line.allowed_ips.trim().length > 0 && line.allowed_ips.trim() !== '[]') {
     const clientIp = extractClientIp(req);
     const allowedList = line.allowed_ips.split(',').map((s) => s.trim()).filter(Boolean);
     if (allowedList.length > 0 && !allowedList.includes(clientIp)) {
@@ -62,10 +77,10 @@ function authenticateLine(username, password, req = null) {
   return { line };
 }
 
-function getAllowedContentForLine(line) {
+function getAllowedIdSetsForLine(line) {
   let bouquetIds = [];
   try {
-    bouquetIds = JSON.parse(line.bouquet_ids_json || '[]');
+    bouquetIds = JSON.parse(line.bouquet_ids_json || '[]').map(Number).filter(Boolean);
   } catch {
     bouquetIds = [];
   }
@@ -85,9 +100,25 @@ function getAllowedContentForLine(line) {
       JSON.parse(b.vod_ids_json || '[]').forEach((id) => vodSet.add(Number(id)));
       JSON.parse(b.series_ids_json || '[]').forEach((id) => seriesSet.add(Number(id)));
     } catch {
-      // ignore
+      // ignore malformed JSON
     }
   }
+
+  return { streamSet, ch247Set, vodSet, seriesSet };
+}
+
+function isItemAllowedForLine(line, kind, itemId) {
+  const { streamSet, ch247Set, vodSet, seriesSet } = getAllowedIdSetsForLine(line);
+  const idNum = Number(itemId);
+  if (kind === 'live') return streamSet.size === 0 || streamSet.has(idNum);
+  if (kind === 'channel247') return ch247Set.size === 0 || ch247Set.has(idNum);
+  if (kind === 'vod') return vodSet.size === 0 || vodSet.has(idNum);
+  if (kind === 'series') return seriesSet.size === 0 || seriesSet.has(idNum);
+  return true;
+}
+
+function getAllowedContentForLine(line) {
+  const { streamSet, ch247Set, vodSet, seriesSet } = getAllowedIdSetsForLine(line);
 
   const categories = db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, id ASC').all();
   const catMap = new Map(categories.map((c) => [c.id, c.name]));
@@ -120,6 +151,103 @@ function getAllowedContentForLine(line) {
   }));
 
   return { categories, streams, channels247, vodItems, seriesItems };
+}
+
+// HTTP 206 Byte-Range Media Streamer for local files (e.g. /home/xui/content/... or local disk VOD)
+function getMediaMimeType(filePath = '') {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.mp4' || ext === '.m4v') return 'video/mp4';
+  if (ext === '.mkv') return 'video/x-matroska';
+  if (ext === '.ts') return 'video/mp2t';
+  if (ext === '.m3u8') return 'application/vnd.apple.mpegurl';
+  if (ext === '.webm') return 'video/webm';
+  if (ext === '.avi') return 'video/x-msvideo';
+  if (ext === '.mov') return 'video/quicktime';
+  return 'application/octet-stream';
+}
+
+function serveLocalMediaFileWithRange(req, res, filePath, connId = null) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+    if (!stat.isFile()) return res.status(404).send('Archivo multimedia no válido');
+  } catch {
+    return res.status(404).send('Archivo multimedia local no encontrado');
+  }
+
+  const totalSize = stat.size;
+  const contentType = getMediaMimeType(filePath);
+  const range = req.headers.range;
+
+  if (req.socket) req.socket.setTimeout(0);
+  if (connId) {
+    req.on('close', () => {
+      db.prepare('DELETE FROM active_connections WHERE id = ?').run(connId);
+    });
+  }
+
+  if (req.method === 'HEAD') {
+    res.writeHead(200, {
+      'Content-Length': totalSize,
+      'Content-Type': contentType,
+      'Accept-Ranges': 'bytes'
+    });
+    return res.end();
+  }
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : totalSize - 1;
+    if (Number.isNaN(start) || start >= totalSize || end >= totalSize || start > end) {
+      res.writeHead(416, { 'Content-Range': `bytes */${totalSize}` });
+      return res.end();
+    }
+    const chunkSize = end - start + 1;
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunkSize,
+      'Content-Type': contentType
+    });
+    return fs.createReadStream(filePath, { start, end }).pipe(res);
+  }
+
+  res.writeHead(200, {
+    'Content-Length': totalSize,
+    'Content-Type': contentType,
+    'Accept-Ranges': 'bytes'
+  });
+  return fs.createReadStream(filePath).pipe(res);
+}
+
+// Rewrite upstream HLS .m3u8 manifest so all segments & sub-playlists route through Stream Shield proxy
+function rewriteHlsManifestForProxy(manifestText, manifestFinalUrl, proxyPrefix, streamId) {
+  const resolveAndSign = (rawUri) => {
+    const trimmed = rawUri.trim();
+    if (!trimmed) return trimmed;
+    let absUrl;
+    try {
+      absUrl = new URL(trimmed, manifestFinalUrl).toString();
+    } catch {
+      return trimmed;
+    }
+    const { u, sig } = signUpstreamUrl(absUrl, streamId);
+    return `${proxyPrefix}?u=${encodeURIComponent(u)}&sig=${encodeURIComponent(sig)}`;
+  };
+
+  return manifestText
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+      if (trimmed.startsWith('#')) {
+        // Rewrite URI="..." inside #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA
+        return line.replace(/URI="([^"]+)"/g, (_m, uriVal) => `URI="${resolveAndSign(uriVal)}"`);
+      }
+      return resolveAndSign(trimmed);
+    })
+    .join('\n');
 }
 
 function selectEdgeRedirect(req) {
@@ -218,6 +346,37 @@ function recordConnection(req, line, targetType, targetId, targetName, protocol 
   return { allowed: true, connId: Number(info.lastInsertRowid) };
 }
 
+function wakeOnDemandTranscodeIfNeeded(stream) {
+  if (!isFfmpegAvailable()) return;
+  const workerKey = `stream_${stream.id}`;
+  if (getWorkerPid(workerKey)) return;
+
+  const profile = stream.transcode_profile_id
+    ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(stream.transcode_profile_id)
+    : null;
+
+  const needsFfmpeg =
+    stream.stream_mode === 'transcode' ||
+    (stream.stream_mode === 'ondemand' && profile && profile.video_codec && profile.video_codec !== 'copy');
+
+  if (!needsFfmpeg) return;
+
+  startSupervisedWorker(
+    workerKey,
+    () => {
+      const fresh = db.prepare('SELECT * FROM streams WHERE id = ?').get(stream.id);
+      if (!fresh || fresh.status !== 'running') return null;
+      const prof = fresh.transcode_profile_id
+        ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(fresh.transcode_profile_id)
+        : null;
+      return buildFfmpegArgsForStream(fresh, prof);
+    },
+    (pid) => {
+      db.prepare('UPDATE streams SET pid = ? WHERE id = ?').run(pid, stream.id);
+    }
+  );
+}
+
 // 1. Standard M3U / M3U_Plus Playlist Generator (/get.php)
 iptvRouter.get('/get.php', (req, res) => {
   const defaultFmtRow = db.prepare("SELECT value FROM settings WHERE key = 'default_output_format'").get();
@@ -278,14 +437,45 @@ iptvRouter.get('/get.php', (req, res) => {
   res.send(linesOut.join('\n') + '\n');
 });
 
-// 2. Standard XMLTV Electronic Program Guide (/xmltv.php)
-iptvRouter.get('/xmltv.php', (req, res) => {
-  const { username, password } = req.query;
-  if (username || password) {
-    const auth = authenticateLine(username, password, req);
-    if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
-  }
+// 1b. Enigma2 Bouquet Feed (/enigma2.php)
+iptvRouter.get('/enigma2.php', (req, res) => {
+  const { username, password, type = 'get_live_streams' } = req.query;
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
 
+  const baseUrl = getBaseUrl(req);
+  const { streams, channels247, vodItems } = getAllowedContentForLine(auth.line);
+
+  const xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<items>'];
+  if (type === 'get_vod_streams') {
+    for (const v of vodItems) {
+      xml.push('  <channel>');
+      xml.push(`    <title>${Buffer.from(v.title).toString('base64')}</title>`);
+      xml.push(`    <description>${Buffer.from(v.plot || '').toString('base64')}</description>`);
+      xml.push(`    <stream_url><![CDATA[${baseUrl}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${v.id}.${v.container_ext || 'mp4'}]]></stream_url>`);
+      xml.push('  </channel>');
+    }
+  } else {
+    for (const s of streams) {
+      xml.push('  <channel>');
+      xml.push(`    <title>${Buffer.from(s.name).toString('base64')}</title>`);
+      xml.push(`    <stream_url><![CDATA[${baseUrl}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${s.id}.ts]]></stream_url>`);
+      xml.push('  </channel>');
+    }
+    for (const ch of channels247) {
+      xml.push('  <channel>');
+      xml.push(`    <title>${Buffer.from(`[24/7] ${ch.name}`).toString('base64')}</title>`);
+      xml.push(`    <stream_url><![CDATA[${baseUrl}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${10000 + ch.id}.m3u8]]></stream_url>`);
+      xml.push('  </channel>');
+    }
+  }
+  xml.push('</items>');
+  res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+  res.send(xml.join('\n'));
+});
+
+// 2. Standard XMLTV Electronic Program Guide (/xmltv.php & /xmltv.xml.gz)
+function buildXmltvPayload() {
   const streams = db.prepare('SELECT * FROM streams').all();
   const channels247 = db.prepare('SELECT * FROM channels_247').all();
   const staticPrograms = db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC').all();
@@ -334,8 +524,26 @@ iptvRouter.get('/xmltv.php', (req, res) => {
   }
 
   xml.push('</tv>');
+  return xml.join('\n');
+}
+
+iptvRouter.get(['/xmltv.php', '/xmltv.xml.gz'], (req, res) => {
+  const { username, password, gzip } = req.query;
+  if (username || password) {
+    const auth = authenticateLine(username, password, req);
+    if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
+  }
+
+  const xmlBody = buildXmltvPayload();
+  if (req.path.endsWith('.gz') || gzip === '1' || gzip === 'true') {
+    const compressed = zlib.gzipSync(Buffer.from(xmlBody, 'utf8'));
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', 'inline; filename="xmltv.xml.gz"');
+    return res.send(compressed);
+  }
+
   res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-  res.send(xml.join('\n'));
+  res.send(xmlBody);
 });
 
 // 3. Xtream / MidnightStreamer Compatible Player & Panel API (/player_api.php & /panel_api.php)
@@ -382,9 +590,10 @@ const handlePlayerApi = (req, res) => {
   }
 
   if (action === 'get_live_categories') {
+    const usedCatIds = new Set([...streams.map((s) => s.category_id), ...channels247.map((c) => c.category_id)]);
     return res.json(
       categories
-        .filter((c) => c.type === 'live' || c.type === 'channel247')
+        .filter((c) => (c.type === 'live' || c.type === 'channel247') && (usedCatIds.size === 0 || usedCatIds.has(c.id)))
         .map((c) => ({
           category_id: String(c.id),
           category_name: c.name,
@@ -435,9 +644,10 @@ const handlePlayerApi = (req, res) => {
   }
 
   if (action === 'get_vod_categories') {
+    const usedVodCats = new Set(vodItems.map((v) => v.category_id));
     return res.json(
       categories
-        .filter((c) => c.type === 'vod')
+        .filter((c) => c.type === 'vod' && (usedVodCats.size === 0 || usedVodCats.has(c.id)))
         .map((c) => ({
           category_id: String(c.id),
           category_name: c.name,
@@ -470,7 +680,7 @@ const handlePlayerApi = (req, res) => {
 
   if (action === 'get_vod_info') {
     const vodId = Number(params.vod_id);
-    const v = db.prepare('SELECT * FROM vod_items WHERE id = ?').get(vodId);
+    const v = vodItems.find((x) => x.id === vodId);
     if (!v) return res.json({ info: {}, movie_data: {} });
     return res.json({
       info: {
@@ -489,9 +699,9 @@ const handlePlayerApi = (req, res) => {
     });
   }
 
-  // Full Series endpoints for TiviMate / IPTV Smarters Pro / XCIPTV
   if (action === 'get_series_categories') {
-    const sCats = categories.filter((c) => c.type === 'series');
+    const usedSeriesCats = new Set(seriesItems.map((sr) => sr.category_id));
+    const sCats = categories.filter((c) => c.type === 'series' && (usedSeriesCats.size === 0 || usedSeriesCats.has(c.id)));
     const list = sCats.length > 0 ? sCats : categories.filter((c) => c.type === 'vod');
     return res.json(
       list.map((c) => ({
@@ -647,6 +857,71 @@ iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) =
   fs.createReadStream(fullPath).pipe(res);
 });
 
+// Stream Shield HLS Upstream Proxy (hides upstream provider URLs/credentials & solves upstream IP-Lock)
+iptvRouter.get('/hls_proxy/:username/:password/:streamId', async (req, res) => {
+  const { username, password, streamId } = req.params;
+  const { u, sig } = req.query;
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).send(auth.error);
+
+  const sid = Number(streamId);
+  if (!isItemAllowedForLine(auth.line, 'live', sid)) {
+    return res.status(403).send('Canal fuera de tu bouquet');
+  }
+
+  const targetUrl = verifyUpstreamUrl(String(u || ''), String(sig || ''), sid);
+  if (!targetUrl) {
+    return res.status(400).send('Firma de segmento HLS inválida');
+  }
+
+  const stream = db.prepare('SELECT id, name, user_agent FROM streams WHERE id = ?').get(sid);
+  const ua = stream?.user_agent || 'MidnightStreamer/5.3';
+
+  // Refresh viewer heartbeat while fetching HLS sub-playlists/segments
+  if (stream) {
+    recordConnection(req, auth.line, 'live', stream.id, stream.name, 'HLS');
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 12000);
+  req.on('close', () => ac.abort());
+
+  try {
+    const upRes = await fetch(targetUrl, {
+      headers: { 'User-Agent': ua },
+      redirect: 'follow',
+      signal: ac.signal
+    });
+    clearTimeout(timer);
+    if (!upRes.ok || !upRes.body) {
+      return res.status(upRes.status || 502).send('Upstream HLS no disponible');
+    }
+
+    const cType = (upRes.headers.get('content-type') || '').toLowerCase();
+    const isSubManifest =
+      cType.includes('mpegurl') ||
+      targetUrl.split('?')[0].toLowerCase().endsWith('.m3u8');
+
+    if (isSubManifest) {
+      const text = await upRes.text();
+      if (text.includes('#EXTM3U')) {
+        const proxyPrefix = `${getBaseUrl(req)}/hls_proxy/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${sid}`;
+        const rewritten = rewriteHlsManifestForProxy(text, upRes.url || targetUrl, proxyPrefix, sid);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.send(rewritten);
+      }
+    }
+
+    res.setHeader('Content-Type', upRes.headers.get('content-type') || 'video/mp2t');
+    res.setHeader('Cache-Control', 'no-store');
+    return Readable.fromWeb(upRes.body).pipe(res);
+  } catch {
+    clearTimeout(timer);
+    if (!res.headersSent) res.status(502).send('Error conectando con proveedor HLS');
+  }
+});
+
 async function serveLiveStreamRequest(req, res) {
   const { username, password, streamSpec } = req.params;
   const auth = authenticateLine(username, password, req);
@@ -656,10 +931,19 @@ async function serveLiveStreamRequest(req, res) {
   const protocol = streamSpec.toLowerCase().endsWith('.ts') ? 'MPEG-TS' : 'HLS';
   const numericId = Number(rawId);
 
+  // Enforce Bouquet Entitlement
+  if (numericId > 10000 || rawId.startsWith('ch247_')) {
+    const chId = rawId.startsWith('ch247_') ? Number(rawId.replace('ch247_', '')) : numericId - 10000;
+    if (!isItemAllowedForLine(auth.line, 'channel247', chId)) {
+      return res.status(403).send('Canal 24/7 no incluido en el paquete contratado');
+    }
+  } else if (!isItemAllowedForLine(auth.line, 'live', numericId)) {
+    return res.status(403).send('Canal no incluido en el paquete contratado');
+  }
+
   // Edge Load Balancer Smart Routing (if an active Edge node has a live heartbeat)
   const edgeTarget = selectEdgeRedirect(req);
   if (edgeTarget) {
-    // Validate concurrency & record viewer on chosen Edge Server ID before redirecting
     if (numericId > 10000 || rawId.startsWith('ch247_')) {
       const chId = rawId.startsWith('ch247_') ? Number(rawId.replace('ch247_', '')) : numericId - 10000;
       const ch = db.prepare('SELECT id, name FROM channels_247 WHERE id = ?').get(chId);
@@ -687,7 +971,6 @@ async function serveLiveStreamRequest(req, res) {
     const conn = recordConnection(req, auth.line, 'channel247', ch.id, ch.name, protocol);
     if (!conn.allowed) return res.status(429).send(conn.error);
 
-    // If local FFmpeg 24/7 HLS worker is active and has written segments, serve live HLS manifest!
     const workerKey = `ch247_${ch.id}`;
     const localManifest = getLocalHlsManifestPath(workerKey);
     if (localManifest) {
@@ -703,6 +986,9 @@ async function serveLiveStreamRequest(req, res) {
     if (!state.currentItem?.url) {
       return res.status(404).send('Playlist 24/7 vacía');
     }
+    if (state.currentItem.url.startsWith('/') && fs.existsSync(state.currentItem.url)) {
+      return serveLocalMediaFileWithRange(req, res, state.currentItem.url, conn.connId);
+    }
     return res.redirect(302, state.currentItem.url);
   }
 
@@ -713,12 +999,15 @@ async function serveLiveStreamRequest(req, res) {
 
   if (stream.status === 'ondemand_idle') {
     db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(stream.id);
+    stream.status = 'running';
   }
+
+  wakeOnDemandTranscodeIfNeeded(stream);
 
   const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, protocol);
   if (!conn.allowed) return res.status(429).send(conn.error);
 
-  // 1) If local FFmpeg transcoder has generated HLS manifest, serve local HLS
+  // 1) Local FFmpeg-transcoded HLS manifest if active
   const workerKey = `stream_${stream.id}`;
   const localManifest = getLocalHlsManifestPath(workerKey);
   if (localManifest) {
@@ -730,31 +1019,71 @@ async function serveLiveStreamRequest(req, res) {
     return res.send(rewritten);
   }
 
-  // 2) Optional Direct MPEG-TS Reverse Proxy with automatic Backup URL Failover
-  const proxySetting = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
-  if (proxySetting?.value === 'true' && !stream.source_url.toLowerCase().includes('.m3u8')) {
-    const ac = new AbortController();
-    req.on('close', () => {
-      ac.abort();
-      if (conn.connId) {
-        db.prepare('DELETE FROM active_connections WHERE id = ?').run(conn.connId);
-      }
-    });
+  // 2) Local file path on server disk (e.g. XUI.one local media)
+  if (stream.source_url.startsWith('/') && fs.existsSync(stream.source_url)) {
+    return serveLocalMediaFileWithRange(req, res, stream.source_url, conn.connId);
+  }
 
+  // 3) Stream Shield Reverse Proxy (both HLS .m3u8 rewriting + progressive MPEG-TS with automatic Backup URL Failover)
+  const proxySetting = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
+  if (proxySetting?.value === 'true') {
+    if (req.socket) req.socket.setTimeout(0);
     const candidates = [stream.source_url, stream.backup_url].filter(Boolean);
+
     for (const upstreamUrl of candidates) {
-      try {
-        const upRes = await fetch(upstreamUrl, {
-          headers: { 'User-Agent': stream.user_agent || 'MidnightStreamer/5.3' },
-          signal: ac.signal
-        });
-        if (upRes.ok && upRes.body) {
-          res.setHeader('Content-Type', upRes.headers.get('content-type') || 'video/mp2t');
-          res.setHeader('Cache-Control', 'no-store');
-          return Readable.fromWeb(upRes.body).pipe(res);
+      const isLikelyHls = upstreamUrl.split('?')[0].toLowerCase().endsWith('.m3u8');
+
+      if (isLikelyHls) {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 8000);
+        try {
+          const upRes = await fetch(upstreamUrl, {
+            headers: { 'User-Agent': stream.user_agent || 'MidnightStreamer/5.3' },
+            redirect: 'follow',
+            signal: ac.signal
+          });
+          clearTimeout(timer);
+          if (upRes.ok) {
+            const manifestText = await upRes.text();
+            if (manifestText.includes('#EXTM3U')) {
+              const proxyPrefix = `${getBaseUrl(req)}/hls_proxy/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${stream.id}`;
+              const rewritten = rewriteHlsManifestForProxy(
+                manifestText,
+                upRes.url || upstreamUrl,
+                proxyPrefix,
+                stream.id
+              );
+              res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+              res.setHeader('Cache-Control', 'no-store');
+              return res.send(rewritten);
+            }
+          }
+        } catch {
+          clearTimeout(timer);
+          // failover to backup_url
         }
-      } catch {
-        // failover to backup_url
+      } else {
+        const ac = new AbortController();
+        req.on('close', () => {
+          ac.abort();
+          if (conn.connId) {
+            db.prepare('DELETE FROM active_connections WHERE id = ?').run(conn.connId);
+          }
+        });
+        try {
+          const upRes = await fetch(upstreamUrl, {
+            headers: { 'User-Agent': stream.user_agent || 'MidnightStreamer/5.3' },
+            redirect: 'follow',
+            signal: ac.signal
+          });
+          if (upRes.ok && upRes.body) {
+            res.setHeader('Content-Type', upRes.headers.get('content-type') || 'video/mp2t');
+            res.setHeader('Cache-Control', 'no-store');
+            return Readable.fromWeb(upRes.body).pipe(res);
+          }
+        } catch {
+          // failover to backup_url
+        }
       }
     }
   }
@@ -775,7 +1104,8 @@ iptvRouter.get(/^\/([^/]+)\/([^/]+)\/(\d+(?:\.(?:ts|m3u8))?)$/i, (req, res) => {
 });
 
 // 5. Movie VOD Delivery (/movie/:username/:password/:vodSpec)
-iptvRouter.get('/movie/:username/:password/:vodSpec', (req, res) => {
+iptvRouter.all('/movie/:username/:password/:vodSpec', (req, res) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).end();
   const { username, password, vodSpec } = req.params;
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).send(auth.error);
@@ -783,17 +1113,24 @@ iptvRouter.get('/movie/:username/:password/:vodSpec', (req, res) => {
   const vodId = Number(vodSpec.split('.')[0]);
   const vod = db.prepare('SELECT * FROM vod_items WHERE id = ?').get(vodId);
   if (!vod) return res.status(404).send('VOD no encontrado');
+  if (!isItemAllowedForLine(auth.line, 'vod', vod.id)) {
+    return res.status(403).send('Película VOD no incluida en tu paquete');
+  }
 
   const edgeTarget = selectEdgeRedirect(req);
   const conn = recordConnection(req, auth.line, 'vod', vod.id, vod.title, 'VOD', edgeTarget?.serverId || 1);
   if (!conn.allowed) return res.status(429).send(conn.error);
   if (edgeTarget) return res.redirect(302, edgeTarget.url);
 
+  if (vod.source_url.startsWith('/')) {
+    return serveLocalMediaFileWithRange(req, res, vod.source_url, conn.connId);
+  }
   return res.redirect(302, vod.source_url);
 });
 
 // 5b. Series Episode Delivery (/series/:username/:password/:episodeSpec)
-iptvRouter.get('/series/:username/:password/:episodeSpec', (req, res) => {
+iptvRouter.all('/series/:username/:password/:episodeSpec', (req, res) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).end();
   const { username, password, episodeSpec } = req.params;
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).send(auth.error);
@@ -808,6 +1145,9 @@ iptvRouter.get('/series/:username/:password/:episodeSpec', (req, res) => {
     )
     .get(epId);
   if (!ep) return res.status(404).send('Episodio no encontrado');
+  if (!isItemAllowedForLine(auth.line, 'series', ep.series_id)) {
+    return res.status(403).send('Serie no incluida en tu paquete');
+  }
 
   const edgeTarget = selectEdgeRedirect(req);
   const label = `${ep.series_title || 'Serie'} S${ep.season_num}E${ep.episode_num}`;
@@ -815,6 +1155,9 @@ iptvRouter.get('/series/:username/:password/:episodeSpec', (req, res) => {
   if (!conn.allowed) return res.status(429).send(conn.error);
   if (edgeTarget) return res.redirect(302, edgeTarget.url);
 
+  if (ep.source_url.startsWith('/')) {
+    return serveLocalMediaFileWithRange(req, res, ep.source_url, conn.connId);
+  }
   return res.redirect(302, ep.source_url);
 });
 
@@ -822,7 +1165,6 @@ iptvRouter.get('/series/:username/:password/:episodeSpec', (req, res) => {
 function parseTimeshiftStartEpoch(rawStart = '') {
   const s = String(rawStart).trim();
   if (/^\d{10}$/.test(s)) return Number(s);
-  // Xtream format: YYYY-MM-DD:HH-mm
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[:\sT](\d{2})[-:](\d{2})/);
   if (m) {
     const [, yr, mo, dy, hr, mi] = m;
@@ -854,6 +1196,9 @@ async function handleTimeshiftPlayback(req, res, { username, password, streamSpe
   const streamId = Number(String(streamSpec).replace(/\.(m3u8|ts)$/i, ''));
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId);
   if (!stream) return res.status(404).send('Canal no encontrado para Catchup');
+  if (!isItemAllowedForLine(auth.line, 'live', stream.id)) {
+    return res.status(403).send('Canal no incluido en tu paquete');
+  }
 
   const conn = recordConnection(req, auth.line, 'catchup', stream.id, `[Catchup] ${stream.name}`, 'Timeshift');
   if (!conn.allowed) return res.status(429).send(conn.error);
@@ -863,7 +1208,6 @@ async function handleTimeshiftPlayback(req, res, { username, password, streamSpe
   const segments = getArchiveSegmentsInRange(stream.id, startEpoch, durationSec);
 
   if (segments.length === 0) {
-    // Graceful fallback if recording just started and no segments on disk yet
     return res.redirect(302, stream.source_url);
   }
 
