@@ -12,7 +12,8 @@ import {
   X,
   Copy,
   Check,
-  Upload
+  Upload,
+  Database
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -31,7 +32,7 @@ const EMPTY_FORM = {
   user_agent: 'MidnightStreamer/5.3 (MPEG-TS; Linux)'
 };
 
-export default function LiveStreamsPage({ onPreview }) {
+export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [streams, setStreams] = useState([]);
   const [categories, setCategories] = useState([]);
   const [profiles, setProfiles] = useState([]);
@@ -198,7 +199,16 @@ export default function LiveStreamsPage({ onPreview }) {
           </select>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenXuiImport && (
+            <button
+              onClick={onOpenXuiImport}
+              className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold transition"
+            >
+              <Database className="w-3.5 h-3.5" />
+              Importar BD XUI.one
+            </button>
+          )}
           <button
             onClick={() => setImportOpen(true)}
             className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold transition"

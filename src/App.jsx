@@ -13,6 +13,7 @@ import BouquetsPage from './pages/BouquetsPage.jsx';
 import ResellersPage from './pages/ResellersPage.jsx';
 import EpgMessagesPage from './pages/EpgMessagesPage.jsx';
 import ServersSecurityPage from './pages/ServersSecurityPage.jsx';
+import XuiImportPage from './pages/XuiImportPage.jsx';
 import WebTvPortal from './pages/WebTvPortal.jsx';
 
 export default function App() {
@@ -85,18 +86,25 @@ export default function App() {
           <DashboardPage user={user} onPreview={setPreviewItem} setActiveTab={setActiveTab} />
         )}
         {activeTab === 'streams' && user.role === 'admin' && (
-          <LiveStreamsPage onPreview={setPreviewItem} />
+          <LiveStreamsPage onPreview={setPreviewItem} onOpenXuiImport={() => setActiveTab('xui-import')} />
         )}
         {activeTab === 'channels247' && user.role === 'admin' && (
           <Channels247Page onPreview={setPreviewItem} />
         )}
         {activeTab === 'vod' && user.role === 'admin' && <VodPage onPreview={setPreviewItem} />}
         {activeTab === 'lines' && (
-          <UsersDevicesPage user={user} onRefreshUser={refreshUser} />
+          <UsersDevicesPage
+            user={user}
+            onRefreshUser={refreshUser}
+            onOpenXuiImport={user.role === 'admin' ? () => setActiveTab('xui-import') : null}
+          />
         )}
         {activeTab === 'bouquets' && user.role === 'admin' && <BouquetsPage />}
         {activeTab === 'resellers' && user.role === 'admin' && <ResellersPage />}
         {activeTab === 'epg' && user.role === 'admin' && <EpgMessagesPage />}
+        {activeTab === 'xui-import' && user.role === 'admin' && (
+          <XuiImportPage setActiveTab={setActiveTab} />
+        )}
         {activeTab === 'system' && user.role === 'admin' && <ServersSecurityPage />}
       </Layout>
 

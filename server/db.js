@@ -75,10 +75,10 @@ export function initDb() {
       is_main INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'online',
       lb_mode TEXT NOT NULL DEFAULT 'load',
-      max_clients INTEGER NOT NULL DEFAULT 1000,
-      cpu_usage REAL NOT NULL DEFAULT 12.5,
-      ram_usage REAL NOT NULL DEFAULT 28.4,
-      bandwidth_mbps REAL NOT NULL DEFAULT 85.0,
+      max_clients INTEGER NOT NULL DEFAULT 5000,
+      cpu_usage REAL NOT NULL DEFAULT 0,
+      ram_usage REAL NOT NULL DEFAULT 0,
+      bandwidth_mbps REAL NOT NULL DEFAULT 0,
       ssh_port INTEGER NOT NULL DEFAULT 22,
       stalker_enabled INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -261,9 +261,9 @@ export function initDb() {
       poster_url TEXT DEFAULT '',
       backdrop_url TEXT DEFAULT '',
       plot TEXT DEFAULT '',
-      genre TEXT DEFAULT 'Drama, Ciencia Ficción',
+      genre TEXT DEFAULT 'General',
       release_year INTEGER DEFAULT 2025,
-      rating REAL DEFAULT 8.4,
+      rating REAL DEFAULT 8.0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -296,10 +296,18 @@ export function initDb() {
   ensureColumn('servers', 'isp_match', "TEXT DEFAULT ''");
   ensureColumn('servers', 'https_port', 'INTEGER');
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('streams', 'xui_id', 'INTEGER');
+  ensureColumn('vod_items', 'xui_id', 'INTEGER');
+  ensureColumn('series', 'xui_id', 'INTEGER');
+  ensureColumn('series_episodes', 'xui_id', 'INTEGER');
+  ensureColumn('categories', 'xui_id', 'INTEGER');
+  ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn('bouquets', 'xui_id', 'INTEGER');
+  ensureColumn('lines', 'xui_id', 'INTEGER');
+  ensureColumn('users', 'xui_id', 'INTEGER');
   ensureColumn('channels_247', 'engine_mode', "TEXT NOT NULL DEFAULT 'virtual'");
   ensureColumn('epg_sources', 'program_count', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('epg_programs', 'source_id', 'INTEGER');
-  ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
 
   // Ensure every LB server has a unique Edge API token
   const serversWithoutToken = db.prepare("SELECT id FROM servers WHERE api_token IS NULL OR api_token = ''").all();
@@ -312,103 +320,218 @@ export function initDb() {
     seedInitialData();
   }
 
-  // Seed initial demo Series on upgraded DBs if not purged yet
-  const demoPurged = db.prepare("SELECT value FROM settings WHERE key = 'demo_purged'").get();
-  const seriesCount = db.prepare('SELECT COUNT(*) as c FROM series').get().c;
-  if (seriesCount === 0 && demoPurged?.value !== 'true') {
-    seedInitialSeries();
+  // Automatic one-time cleanup of legacy demo seed data on existing installations
+  const cleanV22 = db.prepare("SELECT value FROM settings WHERE key = 'clean_panel_v22'").get();
+  if (cleanV22?.value !== 'true') {
+    cleanLegacyDemoSeedOnce();
   }
 }
 
-function seedInitialSeries() {
-  let seriesCat = db.prepare("SELECT id FROM categories WHERE type = 'series' LIMIT 1").get();
-  if (!seriesCat) {
-    const info = db
-      .prepare("INSERT INTO categories (name, type, sort_order) VALUES ('Series & Antologías HD', 'series', 8)")
-      .run();
-    seriesCat = { id: Number(info.lastInsertRowid) };
+function sanitizeJsonIdArray(rawJson, validIdsSet) {
+  try {
+    const parsed = JSON.parse(rawJson || '[]');
+    if (!Array.isArray(parsed)) return '[]';
+    return JSON.stringify(parsed.map(Number).filter((id) => validIdsSet.has(id)));
+  } catch {
+    return '[]';
   }
+}
 
-  const sInfo = db
-    .prepare(
-      `INSERT INTO series (title, category_id, poster_url, plot, genre, release_year, rating)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      'Crónicas Blender Open Studio',
-      seriesCat.id,
-      'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/Sintel_poster.jpg/440px-Sintel_poster.jpg',
-      'Antología remasterizada de historias animadas y ciencia ficción producida en código abierto.',
-      'Ciencia Ficción, Animación',
-      2024,
-      8.7
-    );
+export function cleanLegacyDemoSeedOnce() {
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.exec(`
+      DELETE FROM active_connections
+      WHERE username IN ('demo', 'hotel_suite_101', 'cliente_managua', 'enigma_box_01');
 
-  const seriesId = Number(sInfo.lastInsertRowid);
-  const insertEp = db.prepare(
-    `INSERT INTO series_episodes (series_id, season_num, episode_num, title, source_url, plot, duration_sec, container_ext)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  insertEp.run(
-    seriesId,
-    1,
-    1,
-    'Episodio 1: El Bosque de Big Buck Bunny',
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-    'Capítulo inaugural de la primera temporada.',
-    596,
-    'mp4'
-  );
-  insertEp.run(
-    seriesId,
-    1,
-    2,
-    'Episodio 2: El Viaje de Sintel',
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
-    'Sintel cruza las montañas heladas en busca de Scales.',
-    888,
-    'mp4'
-  );
-  insertEp.run(
-    seriesId,
-    2,
-    1,
-    'Episodio 1: Tears of Steel en Ámsterdam',
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
-    'Inicio de la segunda temporada futurista.',
-    734,
-    'mp4'
-  );
+      DELETE FROM client_claims
+      WHERE line_username = 'cliente_managua';
 
-  const b1 = db.prepare('SELECT id, series_ids_json FROM bouquets WHERE id = 1').get();
-  if (b1) {
-    const arr = JSON.parse(b1.series_ids_json || '[]');
-    if (!arr.includes(seriesId)) {
-      arr.push(seriesId);
-      db.prepare('UPDATE bouquets SET series_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
+      DELETE FROM osd_messages
+      WHERE message LIKE 'Bienvenido a TVLister 24/7%';
+
+      DELETE FROM firewall_rules
+      WHERE value IN ('203.0.113.99');
+
+      DELETE FROM epg_programs
+      WHERE channel_epg_id IN ('bbb.hd.tv', 'sintel.cinema.tv', 'tos.scifi.tv', 'abr.test.tv');
+
+      UPDATE epg_sources
+      SET xmltv_url = '/xmltv.php'
+      WHERE xmltv_url = '/xmltv.php?username=demo&password=demo123';
+
+      DELETE FROM series_episodes
+      WHERE series_id IN (SELECT id FROM series WHERE title = 'Crónicas Blender Open Studio')
+         OR source_url LIKE '%commondatastorage.googleapis.com/gtv-videos-bucket/sample/%';
+
+      DELETE FROM series
+      WHERE title = 'Crónicas Blender Open Studio';
+
+      DELETE FROM vod_items
+      WHERE source_url LIKE '%commondatastorage.googleapis.com/gtv-videos-bucket/sample/%';
+
+      DELETE FROM channels_247
+      WHERE name IN ('TVLister Cine Abierto 24/7', 'Midnight Animación 24/7')
+        AND playlist_json LIKE '%gtv-videos-bucket/sample/%';
+
+      DELETE FROM streams
+      WHERE source_url IN (
+        'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+        'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8',
+        'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8',
+        'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8'
+      );
+
+      DELETE FROM lines
+      WHERE username IN ('demo', 'hotel_suite_101', 'cliente_managua', 'enigma_box_01');
+
+      DELETE FROM users
+      WHERE username = 'reseller_latam'
+        AND role = 'reseller'
+        AND id NOT IN (SELECT DISTINCT owner_id FROM lines WHERE owner_id IS NOT NULL);
+
+      DELETE FROM servers
+      WHERE host IN ('lb-us-east.tvlister.internal', 'lb-eu-ams.tvlister.internal')
+        AND is_main = 0;
+
+      UPDATE servers
+      SET cpu_usage = 0, ram_usage = 0, bandwidth_mbps = 0
+      WHERE is_main = 1 AND host = '0.0.0.0';
+
+      DELETE FROM bouquets
+      WHERE name IN ('Paquete Básico + 24/7', 'Paquete Hospitalidad / Hotel TV');
+    `);
+
+    const demoCatNames = [
+      'Entretenimiento HD',
+      'Cine & Cultura',
+      'Tecnología & Pruebas ABR',
+      'Canales 24/7 Cine Continuo',
+      'Canales 24/7 Animación',
+      'Películas Open Cinema',
+      'Ciencia Ficción & Acción',
+      'Series & Antologías HD'
+    ];
+    const findCatRefs = db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM streams WHERE category_id = ?) +
+        (SELECT COUNT(*) FROM channels_247 WHERE category_id = ?) +
+        (SELECT COUNT(*) FROM vod_items WHERE category_id = ?) +
+        (SELECT COUNT(*) FROM series WHERE category_id = ?) AS refs
+    `);
+    const delCat = db.prepare('DELETE FROM categories WHERE id = ?');
+    for (const catName of demoCatNames) {
+      const cats = db.prepare('SELECT id FROM categories WHERE name = ?').all(catName);
+      for (const c of cats) {
+        const { refs } = findCatRefs.get(c.id, c.id, c.id, c.id);
+        if (!refs) delCat.run(c.id);
+      }
     }
+
+    const validStreams = new Set(db.prepare('SELECT id FROM streams').all().map((r) => Number(r.id)));
+    const validCh247 = new Set(db.prepare('SELECT id FROM channels_247').all().map((r) => Number(r.id)));
+    const validVod = new Set(db.prepare('SELECT id FROM vod_items').all().map((r) => Number(r.id)));
+    const validSeries = new Set(db.prepare('SELECT id FROM series').all().map((r) => Number(r.id)));
+
+    const bouquets = db.prepare('SELECT * FROM bouquets').all();
+    const updBouquet = db.prepare(`
+      UPDATE bouquets
+      SET name = ?, description = ?, stream_ids_json = ?, channel247_ids_json = ?, vod_ids_json = ?, series_ids_json = ?
+      WHERE id = ?
+    `);
+    for (const b of bouquets) {
+      const sJson = sanitizeJsonIdArray(b.stream_ids_json, validStreams);
+      const cJson = sanitizeJsonIdArray(b.channel247_ids_json, validCh247);
+      const vJson = sanitizeJsonIdArray(b.vod_ids_json, validVod);
+      const srJson = sanitizeJsonIdArray(b.series_ids_json, validSeries);
+      const isLegacyDefault = b.id === 1 && b.name === 'Paquete Full Total VIP';
+      updBouquet.run(
+        isLegacyDefault ? 'Bouquet General' : b.name,
+        isLegacyDefault ? 'Paquete principal del panel' : b.description,
+        sJson,
+        cJson,
+        vJson,
+        srJson,
+        b.id
+      );
+    }
+
+    if (bouquets.length === 0) {
+      db.prepare(
+        "INSERT INTO bouquets (id, name, description, stream_ids_json, channel247_ids_json, vod_ids_json, series_ids_json, sort_order) VALUES (1, 'Bouquet General', 'Paquete principal del panel', '[]', '[]', '[]', '[]', 1)"
+      ).run();
+    }
+
+    db.exec(`
+      INSERT INTO settings (key, value) VALUES ('clean_panel_v22', 'true')
+        ON CONFLICT(key) DO UPDATE SET value = 'true';
+      INSERT INTO settings (key, value) VALUES ('demo_purged', 'true')
+        ON CONFLICT(key) DO UPDATE SET value = 'true';
+    `);
+    db.exec('COMMIT;');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    console.error('[TVLister DB] cleanLegacyDemoSeedOnce error:', err.message);
+  }
+}
+
+export function resetPanelCatalog({ wipeCategories = true, wipeResellers = true } = {}) {
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.exec(`
+      DELETE FROM active_connections;
+      DELETE FROM client_claims;
+      DELETE FROM osd_messages;
+      DELETE FROM series_episodes;
+      DELETE FROM series;
+      DELETE FROM vod_items;
+      DELETE FROM channels_247;
+      DELETE FROM streams;
+      DELETE FROM lines;
+      DELETE FROM epg_programs;
+    `);
+    if (wipeResellers) {
+      db.exec("DELETE FROM users WHERE role = 'reseller';");
+    }
+    if (wipeCategories) {
+      db.exec('DELETE FROM categories;');
+      db.exec('DELETE FROM bouquets WHERE id != 1;');
+    }
+    db.exec(`
+      INSERT INTO bouquets (id, name, description, stream_ids_json, channel247_ids_json, vod_ids_json, series_ids_json, sort_order)
+      VALUES (1, 'Bouquet General', 'Paquete principal del panel', '[]', '[]', '[]', '[]', 1)
+      ON CONFLICT(id) DO UPDATE SET
+        stream_ids_json = '[]',
+        channel247_ids_json = '[]',
+        vod_ids_json = '[]',
+        series_ids_json = '[]';
+
+      INSERT INTO settings (key, value) VALUES ('clean_panel_v22', 'true')
+        ON CONFLICT(key) DO UPDATE SET value = 'true';
+      INSERT INTO settings (key, value) VALUES ('demo_purged', 'true')
+        ON CONFLICT(key) DO UPDATE SET value = 'true';
+    `);
+    db.exec('COMMIT;');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    throw err;
   }
 }
 
 function seedInitialData() {
-  // 1. Users (Admin + Demo Reseller)
-  const insertUser = db.prepare(
+  // Clean Production Panel Seed — Only essential system records, zero demo channels/lines
+  db.prepare(
     'INSERT INTO users (username, password_hash, role, credits, email, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  );
-  insertUser.run('admin', hashPassword('admin123'), 'admin', 999999, 'admin@tvlister247.local', 'active', 'Super Administrador Principal');
-  insertUser.run('reseller_latam', hashPassword('reseller123'), 'reseller', 45, 'ventas@latamstream.local', 'active', 'Distribuidor Oficial Centroamérica');
+  ).run('admin', hashPassword('admin123'), 'admin', 999999, 'admin@tvlister247.local', 'active', 'Super Administrador Principal');
 
-  // 2. Categories
-  const insertCat = db.prepare('INSERT INTO categories (name, type, sort_order) VALUES (?, ?, ?)');
-  insertCat.run('Entretenimiento HD', 'live', 1);
-  insertCat.run('Cine & Cultura', 'live', 2);
-  insertCat.run('Tecnología & Pruebas ABR', 'live', 3);
-  insertCat.run('Canales 24/7 Cine Continuo', 'channel247', 4);
-  insertCat.run('Canales 24/7 Animación', 'channel247', 5);
-  insertCat.run('Películas Open Cinema', 'vod', 6);
-  insertCat.run('Ciencia Ficción & Acción', 'vod', 7);
-
-  // 3. Transcode Profiles (Direct, CPU x264, NVIDIA NVENC, Intel QSV)
   const insertProf = db.prepare(
     'INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
@@ -417,300 +540,35 @@ function seedInitialData() {
   insertProf.run('NVIDIA NVENC 1080p Low-Latency', 'h264_nvenc', 'aac', '4500k', '160k', '1920x1080', 'p4', 'nvenc', '-rc cbr -zerolatency 1');
   insertProf.run('Intel QuickSync QSV 720p Eco', 'h264_qsv', 'aac', '2200k', '128k', '1280x720', 'faster', 'qsv', '-look_ahead 0');
 
-  // 4. Servers (Main + Load Balancers)
-  const insertSrv = db.prepare(
+  db.prepare(
     'INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, cpu_usage, ram_usage, bandwidth_mbps, stalker_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  );
-  insertSrv.run('Core Master Node #1', '0.0.0.0', 8080, 1, 'online', 'load', 2500, 14.2, 31.8, 128.4, 1);
-  insertSrv.run('Edge Load Balancer US-East', 'lb-us-east.tvlister.internal', 8080, 0, 'online', 'geoip', 5000, 22.7, 41.0, 340.2, 0);
-  insertSrv.run('Edge Load Balancer EU-AMS', 'lb-eu-ams.tvlister.internal', 8080, 0, 'online', 'isp', 5000, 18.5, 35.2, 215.9, 0);
+  ).run('Core Master Node #1', '0.0.0.0', 8080, 1, 'online', 'load', 5000, 0, 0, 0, 1);
 
-  // 5. Live Streams (Open, public, royalty-free HLS test feeds)
-  const insertStream = db.prepare(`
-    INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, tv_archive_days, bitrate_kbps)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  insertStream.run(
-    'Big Buck Bunny Live HD',
-    1,
-    'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
-    'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/220px-Big_buck_bunny_poster_big.jpg',
-    'bbb.hd.tv',
-    'direct',
-    1,
-    1,
-    'running',
-    3,
-    4500
-  );
-  insertStream.run(
-    'Sintel Open Cinema TV',
-    2,
-    'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8',
-    'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/Sintel_poster.jpg/220px-Sintel_poster.jpg',
-    'sintel.cinema.tv',
-    'direct',
-    1,
-    1,
-    'running',
-    7,
-    5200
-  );
-  insertStream.run(
-    'Tears of Steel Sci-Fi Live',
-    2,
-    'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8',
-    '',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/7/70/Tos-poster.png/220px-Tos-poster.png',
-    'tos.scifi.tv',
-    'ondemand',
-    2,
-    2,
-    'running',
-    3,
-    6100
-  );
-  insertStream.run(
-    'Apple Multi-Bitrate ABR Feed',
-    3,
-    'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8',
-    '',
-    '',
-    'abr.test.tv',
-    'direct',
-    1,
-    1,
-    'ondemand_idle',
-    0,
-    2800
-  );
+  db.prepare(
+    'INSERT INTO bouquets (name, description, stream_ids_json, channel247_ids_json, vod_ids_json, series_ids_json, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run('Bouquet General', 'Paquete principal del panel', '[]', '[]', '[]', '[]', 1);
 
-  // 6. VOD Library (Blender Open Movies MP4)
-  const insertVod = db.prepare(`
-    INSERT INTO vod_items (title, type, category_id, source_url, poster_url, plot, genre, release_year, rating, duration_sec, container_ext)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  insertVod.run(
-    'Big Buck Bunny',
-    'movie',
-    6,
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/440px-Big_buck_bunny_poster_big.jpg',
-    'Un conejo gigante de gran corazón se enfrenta a tres ardillas traviesas en el bosque. Cortometraje abierto de Blender Institute.',
-    'Animación, Comedia',
-    2008,
-    8.1,
-    596,
-    'mp4'
-  );
-  insertVod.run(
-    'Sintel',
-    'movie',
-    6,
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/Sintel_poster.jpg/440px-Sintel_poster.jpg',
-    'Una joven guerrera llamada Sintel emprende un peligroso viaje en busca de su pequeño dragón amigo Scales.',
-    'Fantasía, Aventura',
-    2010,
-    8.5,
-    888,
-    'mp4'
-  );
-  insertVod.run(
-    'Tears of Steel',
-    'movie',
-    7,
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/7/70/Tos-poster.png/440px-Tos-poster.png',
-    'En una Ámsterdam futurista, un grupo de guerreros y científicos intenta salvar el mundo de robots destructivos reviviendo un recuerdo clave.',
-    'Ciencia Ficción, Acción',
-    2012,
-    8.0,
-    734,
-    'mp4'
-  );
-  insertVod.run(
-    'Elephants Dream',
-    'movie',
-    7,
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Elephants_Dream_s5_both.jpg/440px-Elephants_Dream_s5_both.jpg',
-    'Proog y Emo exploran las profundidades surrealistas de una gigantesca máquina viviente.',
-    'Ciencia Ficción, Experimental',
-    2006,
-    7.6,
-    653,
-    'mp4'
-  );
-
-  // 7. 24/7 Custom Dynamic Channels
-  const insertCh247 = db.prepare(`
-    INSERT INTO channels_247 (name, category_id, logo_url, epg_channel_id, loop_mode, transcode_profile_id, server_id, watermark_text, status, playlist_json, schedule_anchor_epoch)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const playlistCine = JSON.stringify([
-    {
-      id: 'item-1',
-      vod_id: 2,
-      title: 'Sintel — Edición Especial HD',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
-      duration_sec: 888
-    },
-    {
-      id: 'item-2',
-      vod_id: 3,
-      title: 'Tears of Steel — Sci-Fi Amsterdam',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
-      duration_sec: 734
-    },
-    {
-      id: 'item-3',
-      vod_id: 1,
-      title: 'Big Buck Bunny — Clásico Animado',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-      duration_sec: 596
-    },
-    {
-      id: 'item-4',
-      vod_id: 4,
-      title: 'Elephants Dream — Proog & Emo',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-      duration_sec: 653
-    }
-  ]);
-
-  const playlistAnim = JSON.stringify([
-    {
-      id: 'anim-1',
-      vod_id: 1,
-      title: 'Big Buck Bunny — Maratón 24/7',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-      duration_sec: 596
-    },
-    {
-      id: 'anim-2',
-      vod_id: 4,
-      title: 'Elephants Dream — Mundo Máquina',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-      duration_sec: 653
-    },
-    {
-      id: 'anim-3',
-      vod_id: 2,
-      title: 'Sintel — Crónicas del Dragón',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
-      duration_sec: 888
-    }
-  ]);
-
-  insertCh247.run(
-    'TVLister Cine Abierto 24/7',
-    4,
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/Sintel_poster.jpg/220px-Sintel_poster.jpg',
-    'cine247.tvlister.tv',
-    'loop',
-    2,
-    1,
-    'TVLISTER 24/7 HD',
-    'running',
-    playlistCine,
-    1704067200
-  );
-
-  insertCh247.run(
-    'Midnight Animación 24/7',
-    5,
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/220px-Big_buck_bunny_poster_big.jpg',
-    'anim247.tvlister.tv',
-    'loop',
-    2,
-    1,
-    'ANIM 24/7',
-    'running',
-    playlistAnim,
-    1704069000
-  );
-
-  // 8. Bouquets
-  const insertBouquet = db.prepare(
-    'INSERT INTO bouquets (name, description, stream_ids_json, channel247_ids_json, vod_ids_json, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
-  );
-  insertBouquet.run('Paquete Full Total VIP', 'Acceso completo a Canales en Vivo, Canales 24/7 y Catálogo VOD', '[1,2,3,4]', '[1,2]', '[1,2,3,4]', 1);
-  insertBouquet.run('Paquete Básico + 24/7', 'Canales principales y señal continua 24/7', '[1,2]', '[1,2]', '[1,2]', 2);
-  insertBouquet.run('Paquete Hospitalidad / Hotel TV', 'Selección para hoteles, salas de espera y circuitos corporativos', '[1,2,3]', '[1]', '[1,2,3]', 3);
-
-  // 9. Reseller Packages
   const insertPkg = db.prepare(
     'INSERT INTO packages (name, is_trial, duration_days, cost_credits, max_connections, bouquet_ids_json) VALUES (?, ?, ?, ?, ?, ?)'
   );
-  insertPkg.run('Demo Prueba 24 Horas', 1, 1, 0, 1, '[1]');
-  insertPkg.run('Plan Mensual VIP (1 Mes)', 0, 30, 1, 2, '[1]');
-  insertPkg.run('Plan Trimestral Familiar (3 Meses)', 0, 90, 3, 3, '[1]');
-  insertPkg.run('Plan Anual Premium (12 Meses)', 0, 365, 10, 4, '[1]');
+  insertPkg.run('Prueba 24 Horas', 1, 1, 0, 1, '[1]');
+  insertPkg.run('Plan Mensual (1 Mes)', 0, 30, 1, 2, '[1]');
+  insertPkg.run('Plan Trimestral (3 Meses)', 0, 90, 3, 3, '[1]');
+  insertPkg.run('Plan Anual (12 Meses)', 0, 365, 10, 4, '[1]');
 
-  // 10. Subscriber Lines & Devices
-  const insertLine = db.prepare(`
-    INSERT INTO lines (username, password, owner_id, exp_date, max_connections, is_trial, status, device_type, mac_address, bouquet_ids_json, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  insertLine.run('demo', 'demo123', 1, '2027-12-31T23:59:59Z', 3, 0, 'active', 'm3u', '', '[1]', 'Cuenta Demo Principal (WebTV / M3U / Xtream API)');
-  insertLine.run('hotel_suite_101', 'suite101', 1, '2027-06-30T23:59:59Z', 5, 0, 'active', 'mag', '00:1A:79:4B:88:10', '[1,3]', 'STB MAG Habitación 101');
-  insertLine.run('cliente_managua', 'nic2026', 2, '2026-12-15T23:59:59Z', 2, 0, 'active', 'm3u', '', '[1]', 'Cliente Reseller Latam');
-  insertLine.run('enigma_box_01', 'sat2026', 1, '2027-03-01T23:59:59Z', 1, 0, 'active', 'enigma2', '00:09:34:AA:12:4F', '[2]', 'Receptor Enigma2 Sala');
-
-  // 11. Active Connections (Realistic telemetry)
-  const insertConn = db.prepare(`
-    INSERT INTO active_connections (line_id, username, target_type, target_id, target_name, ip_address, country, isp, user_agent, protocol, server_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  insertConn.run(1, 'demo', 'channel247', 1, 'TVLister Cine Abierto 24/7', '190.212.44.18', 'NI', 'Claro Nicaragua', 'MidnightStreamer WebTV/5.3', 'HLS', 1);
-  insertConn.run(2, 'hotel_suite_101', 'live', 1, 'Big Buck Bunny Live HD', '186.77.120.9', 'NI', 'Tigo Business', 'MAG254/StalkerMiddleware', 'MPEG-TS', 1);
-  insertConn.run(3, 'cliente_managua', 'live', 2, 'Sintel Open Cinema TV', '190.184.22.104', 'CR', 'Kolbi ICE', 'TiviMate/4.7.0 (Android TV)', 'HLS', 2);
-
-  // 12. EPG Sources & Programs
   db.prepare('INSERT INTO epg_sources (name, xmltv_url, status) VALUES (?, ?, ?)').run(
     'EPG Interno Dinámico TVLister 24/7',
-    '/xmltv.php?username=demo&password=demo123',
+    '/xmltv.php',
     'synced'
   );
 
-  const now = new Date();
-  const startIso = new Date(now.getTime() - 15 * 60000).toISOString();
-  const midIso = new Date(now.getTime() + 45 * 60000).toISOString();
-  const endIso = new Date(now.getTime() + 105 * 60000).toISOString();
-  const insertEpg = db.prepare(
-    'INSERT INTO epg_programs (channel_epg_id, title, description, start_time, end_time, lang) VALUES (?, ?, ?, ?, ?, ?)'
-  );
-  insertEpg.run('bbb.hd.tv', 'Big Buck Bunny — Emisión Estelar', ' Transmisión continua en alta definición del clásico de animación abierta.', startIso, midIso, 'es');
-  insertEpg.run('bbb.hd.tv', 'Detrás de Cámaras: Blender Studio', 'Documental técnico sobre el proceso de renderizado y animación 3D.', midIso, endIso, 'es');
-  insertEpg.run('sintel.cinema.tv', 'Sintel: La Búsqueda de Scales', 'Aventura épica de fantasía producida por Blender Foundation.', startIso, midIso, 'es');
-  insertEpg.run('tos.scifi.tv', 'Tears of Steel (4K Remaster)', 'Ciencia ficción y efectos visuales en Ámsterdam.', startIso, midIso, 'es');
-
-  // 13. OSD Broadcast & Claims
-  db.prepare('INSERT INTO osd_messages (target_line_id, message, display_seconds, style, active) VALUES (?, ?, ?, ?, ?)').run(
-    null,
-    'Bienvenido a TVLister 24/7 — Señal estable y programación continua activa.',
-    12,
-    'banner',
-    0
+  db.prepare('INSERT INTO firewall_rules (rule_type, value, action, description) VALUES (?, ?, ?, ?)').run(
+    'user_agent',
+    'python-requests/scanner',
+    'block',
+    'Bloqueo automático de escáneres de restreaming'
   );
 
-  db.prepare('INSERT INTO client_claims (line_username, stream_name, issue_type, message, status) VALUES (?, ?, ?, ?, ?)').run(
-    'cliente_managua',
-    'Apple Multi-Bitrate ABR Feed',
-    'ondemand_standby',
-    'Solicita activar el canal ABR en modo permanente.',
-    'open'
-  );
-
-  // 14. Firewall Rules
-  const insertFw = db.prepare('INSERT INTO firewall_rules (rule_type, value, action, description) VALUES (?, ?, ?, ?)');
-  insertFw.run('user_agent', 'python-requests/scanner', 'block', 'Bloqueo automático de escáneres de restreaming');
-  insertFw.run('ip', '203.0.113.99', 'block', 'IP de prueba bloqueada por exceso de intentos fallidos');
-
-  // 15. General Settings
   const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
   insertSetting.run('panel_name', 'TVLister 24/7 — Midnight Streamer Panel');
   insertSetting.run('server_timezone', 'UTC');
@@ -718,6 +576,8 @@ function seedInitialData() {
   insertSetting.run('anti_restreaming', 'true');
   insertSetting.run('default_output_format', 'hls');
   insertSetting.run('flood_limit_per_min', '120');
+  insertSetting.run('clean_panel_v22', 'true');
+  insertSetting.run('demo_purged', 'true');
 }
 
 initDb();

@@ -12,7 +12,8 @@ import {
   Trash2,
   RefreshCw,
   AlertCircle,
-  Clock
+  Clock,
+  Database
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -87,8 +88,54 @@ export default function DashboardPage({ user, onPreview, setActiveTab }) {
     }
   ];
 
+  const isCleanEmptyPanel =
+    user?.role === 'admin' &&
+    (kpis.totalStreams ?? 0) === 0 &&
+    (kpis.totalLines ?? 0) === 0 &&
+    (kpis.totalVod ?? 0) === 0;
+
   return (
     <div className="space-y-6">
+      {isCleanEmptyPanel && (
+        <div className="rounded-2xl bg-gradient-to-r from-indigo-600/20 via-[#0e1526] to-emerald-500/15 border border-indigo-500/35 p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4 shadow-lg">
+          <div>
+            <div className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+              Panel 100% Limpio • Listo para Producción
+            </div>
+            <h2 className="text-base sm:text-lg font-bold text-white mt-0.5">
+              Sin canales ni usuarios demo precargados
+            </h2>
+            <p className="text-xs text-slate-300 mt-1">
+              Puedes importar todos tus streams, bouquets y líneas directamente desde tu base de datos de XUI.one en 1 clic, o comenzar a crear tus propios canales.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setActiveTab('xui-import')}
+              className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-600/25 transition"
+            >
+              <Database className="w-4 h-4" />
+              Importar desde XUI.one
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('streams')}
+              className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition"
+            >
+              Agregar Canal
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('lines')}
+              className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition"
+            >
+              Crear Línea
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         {kpiCards.map((c, idx) => {

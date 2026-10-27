@@ -6,7 +6,13 @@ import express from 'express';
 import cors from 'cors';
 
 import crypto from 'node:crypto';
-import { db, DB_PATH, initDb, hashPassword, verifyPassword } from './db.js';
+import zlib from 'node:zlib';
+import { db, DB_PATH, initDb, hashPassword, verifyPassword, resetPanelCatalog } from './db.js';
+import {
+  inspectLocalXuiEnvironment,
+  previewXuiImport,
+  executeXuiImport
+} from './xuiImporter.js';
 import {
   signToken,
   firewallMiddleware,
@@ -56,8 +62,8 @@ const app = express();
 app.set('trust proxy', true);
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Application-level firewall check
 app.use(firewallMiddleware);
@@ -1317,41 +1323,113 @@ app.post('/api/system/maintenance', requireAuth, requireAdmin, (req, res) => {
     ).run(newKey);
     return res.json({ ok: true, stalker_key: newKey, message: 'Nueva Stalker Key generada.' });
   }
-  if (action === 'purge_demo_data') {
+  if (action === 'purge_demo_data' || action === 'clean_panel') {
     stopAllWorkers();
-    db.exec('BEGIN IMMEDIATE;');
     try {
-      db.exec(`
-        DELETE FROM active_connections;
-        DELETE FROM client_claims;
-        DELETE FROM osd_messages;
-        DELETE FROM series_episodes;
-        DELETE FROM series;
-        DELETE FROM vod_items;
-        DELETE FROM channels_247;
-        DELETE FROM streams;
-        DELETE FROM lines;
-        DELETE FROM epg_programs;
-        DELETE FROM users WHERE role = 'reseller';
-        UPDATE bouquets SET stream_ids_json = '[]', channel247_ids_json = '[]', vod_ids_json = '[]', series_ids_json = '[]';
-        INSERT INTO settings (key, value) VALUES ('demo_purged', 'true')
-          ON CONFLICT(key) DO UPDATE SET value = 'true';
-      `);
-      db.exec('COMMIT;');
+      resetPanelCatalog({
+        wipeCategories: req.body?.wipeCategories !== false,
+        wipeResellers: req.body?.wipeResellers !== false
+      });
       return res.json({
         ok: true,
-        message: 'Datos de demostración eliminados. Categorías, perfiles FFmpeg y Super Admin conservados.'
+        message: 'Panel dejado 100% limpio. Super Admin, nodo principal y perfiles FFmpeg conservados.'
       });
     } catch (err) {
-      try {
-        db.exec('ROLLBACK;');
-      } catch {
-        // ignore
-      }
       return res.status(500).json({ error: err.message });
     }
   }
   res.status(400).json({ error: 'Acción no reconocida' });
+});
+
+// ==================== XUI.ONE / XTREAM UI DATABASE IMPORTER ====================
+app.get('/api/xui/detect', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    const info = inspectLocalXuiEnvironment();
+    res.json({ ok: true, ...info });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Error inspeccionando entorno XUI.one' });
+  }
+});
+
+app.post(
+  '/api/xui/upload-sql',
+  requireAuth,
+  requireAdmin,
+  express.raw({ type: 'application/octet-stream', limit: '250mb' }),
+  async (req, res) => {
+    try {
+      const buf = req.body;
+      if (!Buffer.isBuffer(buf) || buf.length === 0) {
+        return res.status(400).json({ error: 'Archivo SQL vacío o inválido.' });
+      }
+      const rawName = String(req.headers['x-file-name'] || 'xui_dump.sql').replace(/[^a-zA-Z0-9._-]/g, '_');
+      const uploadDir = path.join(path.dirname(DB_PATH), 'xui_uploads');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      const savedPath = path.join(uploadDir, `upload_${Date.now()}_${rawName}`);
+      fs.writeFileSync(savedPath, buf);
+
+      const preview = await previewXuiImport({
+        mode: 'sql',
+        sqlFilePath: savedPath,
+        fileName: rawName
+      });
+
+      res.json({
+        ...preview,
+        uploadedSqlPath: savedPath,
+        uploadedFileName: rawName,
+        uploadedBytes: buf.length
+      });
+    } catch (err) {
+      res.status(400).json({ error: err.message || 'No se pudo analizar el respaldo SQL de XUI.one' });
+    }
+  }
+);
+
+app.post('/api/xui/preview', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    let sqlContent = body.sqlContent;
+    if (!sqlContent && body.fileBase64) {
+      const rawBuf = Buffer.from(String(body.fileBase64), 'base64');
+      const isGzip = rawBuf.length >= 2 && rawBuf[0] === 0x1f && rawBuf[1] === 0x8b;
+      sqlContent = isGzip ? zlib.gunzipSync(rawBuf).toString('utf8') : rawBuf.toString('utf8');
+    }
+    const result = await previewXuiImport({
+      ...body,
+      ...(sqlContent ? { sqlContent } : {})
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error al conectar o previsualizar base de datos XUI.one' });
+  }
+});
+
+app.post('/api/xui/import', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { connection = {}, flags = {} } = req.body || {};
+    if (flags.replaceExisting) {
+      stopAllWorkers();
+    }
+    let sqlContent = connection.sqlContent;
+    if (!sqlContent && connection.fileBase64) {
+      const rawBuf = Buffer.from(String(connection.fileBase64), 'base64');
+      const isGzip = rawBuf.length >= 2 && rawBuf[0] === 0x1f && rawBuf[1] === 0x8b;
+      sqlContent = isGzip ? zlib.gunzipSync(rawBuf).toString('utf8') : rawBuf.toString('utf8');
+    }
+    const result = await executeXuiImport(
+      {
+        ...connection,
+        ...(sqlContent ? { sqlContent } : {})
+      },
+      flags
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error al importar base de datos de XUI.one' });
+  }
 });
 
 app.post('/api/servers', requireAuth, requireAdmin, (req, res) => {

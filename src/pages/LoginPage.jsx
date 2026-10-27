@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { Moon, Lock, User, MonitorPlay, ShieldCheck, KeyRound } from 'lucide-react';
+import { Moon, Lock, User, MonitorPlay } from 'lucide-react';
 import { apiFetch, setToken } from '../lib/api.js';
 
 export default function LoginPage({ onLoginSuccess, onOpenWebTv }) {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -26,12 +26,6 @@ export default function LoginPage({ onLoginSuccess, onOpenWebTv }) {
     }
   };
 
-  const fillDemo = (u, p) => {
-    setUsername(u);
-    setPassword(p);
-    setError('');
-  };
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-[#070b13] relative overflow-hidden p-4">
       <div className="absolute -top-40 -left-40 w-96 h-96 rounded-full bg-indigo-600/15 blur-3xl pointer-events-none" />
@@ -46,7 +40,7 @@ export default function LoginPage({ onLoginSuccess, onOpenWebTv }) {
             TVLister <span className="text-indigo-400">24/7</span> — Midnight Panel
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Plataforma Integral OTT / VOD, Canales Dinámicos 24/7 & Gestión de Clientes
+            Plataforma Profesional OTT / VOD, Canales 24/7 & Gestión de Suscriptores
           </p>
         </div>
 
@@ -68,6 +62,7 @@ export default function LoginPage({ onLoginSuccess, onOpenWebTv }) {
                   onChange={(e) => setUsername(e.target.value)}
                   className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#090e1a] border border-slate-700/80 text-sm text-white focus:outline-none focus:border-indigo-500"
                   placeholder="admin"
+                  autoComplete="username"
                   required
                 />
               </div>
@@ -83,6 +78,7 @@ export default function LoginPage({ onLoginSuccess, onOpenWebTv }) {
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#090e1a] border border-slate-700/80 text-sm text-white focus:outline-none focus:border-indigo-500"
                   placeholder="••••••••"
+                  autoComplete="current-password"
                   required
                 />
               </div>
@@ -97,40 +93,14 @@ export default function LoginPage({ onLoginSuccess, onOpenWebTv }) {
             </button>
           </form>
 
-          {/* Quick Role Switcher for Instant Testing */}
           <div className="mt-5 pt-5 border-t border-slate-800/80">
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2.5 flex items-center gap-1.5">
-              <KeyRound className="w-3.5 h-3.5 text-indigo-400" />
-              Accesos Rápidos de Demostración
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => fillDemo('admin', 'admin123')}
-                className="px-3 py-2 rounded-xl bg-slate-800/70 hover:bg-slate-800 border border-slate-700/70 text-left transition"
-              >
-                <div className="text-xs font-semibold text-indigo-300 flex items-center gap-1">
-                  <ShieldCheck className="w-3.5 h-3.5" /> Super Admin
-                </div>
-                <div className="text-[11px] text-slate-400 font-mono">admin / admin123</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => fillDemo('reseller_latam', 'reseller123')}
-                className="px-3 py-2 rounded-xl bg-slate-800/70 hover:bg-slate-800 border border-slate-700/70 text-left transition"
-              >
-                <div className="text-xs font-semibold text-amber-300">Panel Reseller</div>
-                <div className="text-[11px] text-slate-400 font-mono">reseller_latam</div>
-              </button>
-            </div>
-
             <button
               type="button"
               onClick={onOpenWebTv}
-              className="mt-3 w-full py-2.5 px-4 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center justify-center gap-2 transition"
+              className="w-full py-2.5 px-4 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center justify-center gap-2 transition"
             >
               <MonitorPlay className="w-4 h-4" />
-              Abrir Reproductor WebTV para Clientes (demo / demo123)
+              Abrir Portal Reproductor WebTV para Clientes
             </button>
           </div>
         </div>

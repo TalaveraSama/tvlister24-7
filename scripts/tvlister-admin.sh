@@ -129,26 +129,40 @@ EOF
 cmd_purge_demo() {
   cd "$APP_DIR"
   "$NODE_BIN" --no-warnings --input-type=module -e '
-    import { db, initDb } from "./server/db.js";
+    import { db, initDb, resetPanelCatalog } from "./server/db.js";
     initDb();
-    db.exec(`
-      DELETE FROM active_connections;
-      DELETE FROM client_claims;
-      DELETE FROM osd_messages;
-      DELETE FROM series_episodes;
-      DELETE FROM series;
-      DELETE FROM vod_items;
-      DELETE FROM channels_247;
-      DELETE FROM streams;
-      DELETE FROM lines;
-      DELETE FROM epg_programs;
-      DELETE FROM users WHERE role = "reseller";
-      UPDATE bouquets SET stream_ids_json = "[]", channel247_ids_json = "[]", vod_ids_json = "[]", series_ids_json = "[]";
-      INSERT INTO settings (key, value) VALUES ("demo_purged", "true")
-        ON CONFLICT(key) DO UPDATE SET value = "true";
-      PRAGMA wal_checkpoint(PASSIVE);
-    `);
-    console.log("✅ Datos de demostración eliminados. Categorías, perfiles FFmpeg y Super Admin conservados.");
+    resetPanelCatalog({ wipeCategories: true, wipeResellers: true });
+    db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+    console.log("✅ Panel dejado 100% limpio para producción. Super Admin y perfiles FFmpeg conservados.");
+  '
+  systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+}
+
+cmd_import_xui() {
+  local sql_arg="${1:-}"
+  cd "$APP_DIR"
+  echo "🔄 Iniciando importación de Streams y Usuarios desde XUI.one..."
+  XUI_SQL_FILE="$sql_arg" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { db, initDb } from "./server/db.js";
+    import { executeXuiImport } from "./server/xuiImporter.js";
+    initDb();
+    const sqlPath = process.env.XUI_SQL_FILE || "";
+    const conn = sqlPath ? { mode: "sql", sqlFilePath: sqlPath } : { mode: "auto" };
+    const res = await executeXuiImport(conn, {
+      importCategories: true,
+      importStreams: true,
+      importVod: true,
+      importSeries: true,
+      importBouquets: true,
+      importLines: true,
+      importResellers: true
+    });
+    db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+    console.log("✅ Importación XUI.one completada desde:", res.sourceLabel);
+    console.log("   • Streams nuevos/actualizados :", res.stats.streamsCreated, "/", res.stats.streamsUpdated);
+    console.log("   • Líneas nuevas/actualizadas  :", res.stats.linesCreated, "/", res.stats.linesUpdated);
+    console.log("   • Categorías / Bouquets       :", res.stats.categoriesCreated + res.stats.categoriesUpdated, "/", res.stats.bouquetsSynced);
+    console.log("   • Películas VOD / Series      :", res.stats.vodCreated + res.stats.vodUpdated, "/", res.stats.seriesCreated + res.stats.seriesUpdated);
   '
   systemctl restart "$SERVICE_NAME" 2>/dev/null || true
 }
@@ -260,8 +274,11 @@ case "$ACTION" in
   enable-cron)
     cmd_enable_cron
     ;;
-  purge-demo)
+  purge-demo|clean)
     cmd_purge_demo
+    ;;
+  import-xui)
+    cmd_import_xui "${2:-}"
     ;;
   setup-ssl)
     cmd_setup_ssl "${2:-}" "${3:-}"
@@ -280,13 +297,14 @@ case "$ACTION" in
     echo "  5) Reiniciar motor TVLister 24/7 (restart)"
     echo "  6) Crear backup de base de datos en /root (backup)"
     echo "  7) Programar backup diario automático 03:00 AM (enable-cron)"
-    echo "  8) Purgar datos demo y dejar limpio para producción (purge-demo)"
-    echo "  9) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
-    echo " 10) Actualizar panel desde GitHub sin perder datos (update)"
-    echo " 11) Ver logs en vivo (logs)"
+    echo "  8) Dejar panel 100% limpio para producción (clean)"
+    echo "  9) Importar Streams y Usuarios desde XUI.one local (import-xui)"
+    echo " 10) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
+    echo " 11) Actualizar panel desde GitHub sin perder datos (update)"
+    echo " 12) Ver logs en vivo (logs)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-11]: " opt
+    read -r -p "Selecciona una opción [0-12]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_reset_admin "" ;;
@@ -296,9 +314,10 @@ case "$ACTION" in
       6) cmd_backup ;;
       7) cmd_enable_cron ;;
       8) cmd_purge_demo ;;
-      9) cmd_setup_ssl "" "" ;;
-      10) cmd_update ;;
-      11) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
+      9) cmd_import_xui "" ;;
+      10) cmd_setup_ssl "" "" ;;
+      11) cmd_update ;;
+      12) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
       *) exit 0 ;;
     esac
     ;;

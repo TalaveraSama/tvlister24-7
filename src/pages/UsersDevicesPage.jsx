@@ -10,11 +10,12 @@ import {
   X,
   Tv,
   Cpu,
-  Check
+  Check,
+  Database
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
-export default function UsersDevicesPage({ user, onRefreshUser }) {
+export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport }) {
   const [lines, setLines] = useState([]);
   const [bouquets, setBouquets] = useState([]);
   const [packages, setPackages] = useState([]);
@@ -169,7 +170,16 @@ export default function UsersDevicesPage({ user, onRefreshUser }) {
           ))}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenXuiImport && (
+            <button
+              onClick={onOpenXuiImport}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold transition"
+            >
+              <Database className="w-3.5 h-3.5" />
+              Importar Usuarios XUI.one
+            </button>
+          )}
           <button
             onClick={() => openCreate('m3u')}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition"

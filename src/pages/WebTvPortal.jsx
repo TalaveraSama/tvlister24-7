@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 export default function WebTvPortal({ onBackToAdmin }) {
-  const [creds, setCreds] = useState({ username: 'demo', password: 'demo123' });
+  const [creds, setCreds] = useState({ username: '', password: '' });
   const [loggedLine, setLoggedLine] = useState(null);
   const [loginError, setLoginError] = useState('');
 
@@ -263,7 +263,7 @@ export default function WebTvPortal({ onBackToAdmin }) {
               type="submit"
               className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
             >
-              Entrar a WebTV (demo / demo123)
+              Iniciar Sesión en WebTV
             </button>
           </form>
         </div>
