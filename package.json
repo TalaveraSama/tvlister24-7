@@ -1,0 +1,27 @@
+{
+  "name": "proca-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Proca Automation + OBS - Automatizacion televisiva 24/7 sobre OBS Studio",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "seed": "node scripts/seed-demo.js",
+    "test": "node --test \"test/*.test.js\"",
+    "test:ui": "node scripts/ui-smoke.mjs && node scripts/ui-actions.mjs",
+    "check": "node scripts/check-syntax.mjs ."
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "obs-websocket-js": "^5.0.8"
+  },
+  "devDependencies": {
+    "acorn": "^8.19.0",
+    "jsdom": "^30.1.3"
+  }
+}

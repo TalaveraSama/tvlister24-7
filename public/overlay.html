@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Proca Overlay</title>
+  <link rel="stylesheet" href="/css/overlay.css" />
+</head>
+<body>
+  <div class="overlay" id="overlay">
+    <div class="logo pos-top-right" id="logo"><span class="logo-text">CANAL</span></div>
+    <div class="clock pos-top-left" id="clock"><span id="clock-text">--:--:--</span></div>
+    <div class="lower" id="lower">
+      <div class="lower-label" id="lower-label">ESTÁS VIENDO</div>
+      <div class="lower-title" id="lower-title">—</div>
+    </div>
+    <div class="ticker" id="ticker">
+      <div class="ticker-tag">PROCA</div>
+      <div class="ticker-viewport"><div class="ticker-track" id="ticker-track"></div></div>
+    </div>
+    <div class="ads-flag" id="ads-flag">PUBLICIDAD</div>
+  </div>
+  <script type="module" src="/js/overlay.js"></script>
+</body>
+</html>
