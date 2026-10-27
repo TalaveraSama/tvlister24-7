@@ -343,6 +343,73 @@ case "$ACTION" in
   setup-ssl)
     cmd_setup_ssl "${2:-}" "${3:-}"
     ;;
+  add-port)
+    EXTRA_P="${2:-}"
+    if [ -z "$EXTRA_P" ]; then
+      read -r -p "Ingresa el puerto adicional a habilitar (ej. 8880, 25461): " EXTRA_P
+    fi
+    cmd_open_firewall "$EXTRA_P"
+    cd "$APP_DIR"
+    EXTRA_PORT_VAL="$EXTRA_P" "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { db, initDb } from "./server/db.js";
+      initDb();
+      const p = Number(process.env.EXTRA_PORT_VAL);
+      if (!Number.isInteger(p) || p < 80 || p > 65535) { console.error("Puerto inválido"); process.exit(1); }
+      const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
+      const set = new Set((row?.value || "").split(",").map(s => Number(s.trim())).filter(Boolean));
+      set.add(p);
+      const val = Array.from(set).sort((a,b)=>a-b).join(",");
+      db.prepare("INSERT INTO settings (key, value) VALUES (\x27extra_http_ports\x27, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(val);
+      console.log("✅ Puertos adicionales configurados:", val);
+    '
+    systemctl restart "$SERVICE_NAME"
+    echo "✅ Servicio reiniciado con el nuevo puerto activo."
+    ;;
+  remove-port)
+    REM_P="${2:-}"
+    if [ -z "$REM_P" ]; then
+      read -r -p "Ingresa el puerto adicional a cerrar: " REM_P
+    fi
+    cd "$APP_DIR"
+    REM_PORT_VAL="$REM_P" "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { db, initDb } from "./server/db.js";
+      initDb();
+      const p = Number(process.env.REM_PORT_VAL);
+      const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
+      const val = (row?.value || "").split(",").map(s => Number(s.trim())).filter(n => n && n !== p).join(",");
+      db.prepare("INSERT INTO settings (key, value) VALUES (\x27extra_http_ports\x27, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(val);
+      console.log("✅ Puertos adicionales restantes:", val || "(ninguno)");
+    '
+    systemctl restart "$SERVICE_NAME"
+    ;;
+  list-ports)
+    echo "Puerto Principal : $(get_current_port)"
+    cd "$APP_DIR"
+    "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { db } from "./server/db.js";
+      const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
+      console.log("Puertos Extra    :", row?.value || "(ninguno)");
+    '
+    ;;
+  install-ingest)
+    echo "Instalando motor aislado MediaMTX v1.21.3 (RTMP :1935, SRT :8890 UDP, RTSP :8554)..."
+    cd "$APP_DIR"
+    "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { installMediaMtxBinary } from "./server/ingestHub.js";
+      const bin = await installMediaMtxBinary();
+      console.log("✅ Binario instalado en:", bin);
+    '
+    cmd_open_firewall 1935
+    cmd_open_firewall 8554
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+      ufw allow 8890/udp >/dev/null 2>&1 || true
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+      iptables -C INPUT -p udp --dport 8890 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport 8890 -j ACCEPT
+    fi
+    systemctl restart "$SERVICE_NAME"
+    echo "✅ Servidor RTMP + SRT + RTSP activado y escuchando."
+    ;;
   update)
     cmd_update
     ;;
@@ -359,14 +426,15 @@ case "$ACTION" in
     echo "  7) Programar backup diario automático 03:00 AM (enable-cron)"
     echo "  8) Crear backup manual en /root (backup)"
     echo "  9) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
-    echo " 10) Cambiar puerto TCP del panel (set-port)"
-    echo " 11) Abrir puerto en Firewall / iptables (open-firewall)"
-    echo " 12) Actualizar panel desde GitHub sin perder datos (update)"
-    echo " 13) Reiniciar motor TVLister 24/7 (restart)"
-    echo " 14) Ver logs en vivo (logs)"
+    echo " 10) Cambiar puerto principal TCP (set-port)"
+    echo " 11) Agregar puerto adicional simultáneo (add-port)"
+    echo " 12) Activar Servidor Ingesta RTMP/SRT/RTSP (install-ingest)"
+    echo " 13) Actualizar panel desde GitHub sin perder datos (update)"
+    echo " 14) Reiniciar motor TVLister 24/7 (restart)"
+    echo " 15) Ver logs en vivo (logs)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-14]: " opt
+    read -r -p "Selecciona una opción [0-15]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -378,10 +446,11 @@ case "$ACTION" in
       8) cmd_backup ;;
       9) cmd_setup_ssl "" "" ;;
       10) cmd_set_port "" ;;
-      11) cmd_open_firewall "" ;;
-      12) cmd_update ;;
-      13) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
-      14) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
+      11) "$0" add-port ;;
+      12) "$0" install-ingest ;;
+      13) cmd_update ;;
+      14) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
+      15) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
       *) exit 0 ;;
     esac
     ;;

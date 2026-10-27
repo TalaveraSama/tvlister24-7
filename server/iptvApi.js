@@ -6,6 +6,8 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl } from './auth.js';
+import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
+import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import {
   computeChannel247LiveState,
   getLocalHlsManifestPath,
@@ -59,7 +61,7 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-function authenticateLine(username, password, req = null) {
+export function authenticateLine(username, password, req = null) {
   if (!username || !password) return { error: 'Credenciales requeridas', code: 401 };
   const line = db.prepare('SELECT * FROM lines WHERE username = ? AND password = ?').get(username, password);
   if (!line) return { error: 'Usuario o contraseña inválidos', code: 401 };
@@ -107,7 +109,7 @@ function getAllowedIdSetsForLine(line) {
   return { streamSet, ch247Set, vodSet, seriesSet };
 }
 
-function isItemAllowedForLine(line, kind, itemId) {
+export function isItemAllowedForLine(line, kind, itemId) {
   const { streamSet, ch247Set, vodSet, seriesSet } = getAllowedIdSetsForLine(line);
   const idNum = Number(itemId);
   if (kind === 'live') return streamSet.size === 0 || streamSet.has(idNum);
@@ -115,6 +117,22 @@ function isItemAllowedForLine(line, kind, itemId) {
   if (kind === 'vod') return vodSet.size === 0 || vodSet.has(idNum);
   if (kind === 'series') return seriesSet.size === 0 || seriesSet.has(idNum);
   return true;
+}
+
+export function expandStreamUpstreamUrls(stream) {
+  const rawList = [stream?.source_url, stream?.backup_url].filter(Boolean);
+  const expanded = [];
+  for (const raw of rawList) {
+    const trimmed = String(raw).trim();
+    if (/^mnfs?:\/\//i.test(trimmed)) {
+      expanded.push(trimmed.replace(/^mnf(s?):\/\//i, 'http$1://'));
+    } else {
+      for (const cand of resolveFlussonicUrlCandidates(trimmed)) {
+        if (cand && !expanded.includes(cand)) expanded.push(cand);
+      }
+    }
+  }
+  return expanded;
 }
 
 function getAllowedContentForLine(line) {
@@ -302,7 +320,7 @@ function selectEdgeRedirect(req) {
   };
 }
 
-function recordConnection(req, line, targetType, targetId, targetName, protocol = 'HLS', serverId = 1) {
+export function recordConnection(req, line, targetType, targetId, targetName, protocol = 'HLS', serverId = 1) {
   db.prepare("DELETE FROM active_connections WHERE datetime(last_ping_at) < datetime('now', '-15 minutes')").run();
 
   const ip = extractClientIp(req);
@@ -385,7 +403,9 @@ iptvRouter.get('/get.php', (req, res) => {
   if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
 
   const baseUrl = getBaseUrl(req);
-  const ext = output === 'ts' ? 'ts' : 'm3u8';
+  const isMnfOutput = output === 'mnf';
+  const ext = isMnfOutput ? 'mnf' : output === 'ts' ? 'ts' : 'm3u8';
+  const livePrefix = isMnfOutput ? 'mnf' : 'live';
   const { streams, channels247, vodItems, seriesItems } = getAllowedContentForLine(auth.line);
 
   const epgUrl = `${baseUrl}/xmltv.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
@@ -399,7 +419,7 @@ iptvRouter.get('/get.php', (req, res) => {
     linesOut.push(
       `#EXTINF:-1 tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${s.logo_url || ''}"${catchupAttr} group-title="${s.category_name}",${s.name}`
     );
-    linesOut.push(`${baseUrl}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${s.id}.${ext}`);
+    linesOut.push(`${baseUrl}/${livePrefix}/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${s.id}.${ext}`);
   }
 
   for (const ch of channels247) {
@@ -574,7 +594,7 @@ const handlePlayerApi = (req, res) => {
         active_cons: String(activeConns),
         created_at: String(Math.floor(new Date(line.created_at).getTime() / 1000 || Date.now() / 1000)),
         max_connections: String(line.max_connections),
-        allowed_output_formats: ['m3u8', 'ts']
+        allowed_output_formats: ['m3u8', 'ts', 'mnf']
       },
       server_info: {
         url: parsedUrl.hostname,
@@ -1024,14 +1044,17 @@ async function serveLiveStreamRequest(req, res) {
     return serveLocalMediaFileWithRange(req, res, stream.source_url, conn.connId);
   }
 
-  // 3) Stream Shield Reverse Proxy (both HLS .m3u8 rewriting + progressive MPEG-TS with automatic Backup URL Failover)
+  // 3) Stream Shield Reverse Proxy (Flussonic M4F/CMAF, HLS .m3u8 rewriting, MNF->TS remux, and MPEG-TS Failover)
   const proxySetting = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
-  if (proxySetting?.value === 'true') {
+  const candidates = expandStreamUpstreamUrls(stream);
+
+  if (proxySetting?.value === 'true' || stream.source_url.startsWith('m4f') || stream.source_url.startsWith('mnf')) {
     if (req.socket) req.socket.setTimeout(0);
-    const candidates = [stream.source_url, stream.backup_url].filter(Boolean);
 
     for (const upstreamUrl of candidates) {
-      const isLikelyHls = upstreamUrl.split('?')[0].toLowerCase().endsWith('.m3u8');
+      const cleanPath = upstreamUrl.split('?')[0].toLowerCase();
+      const isLikelyHls = cleanPath.endsWith('.m3u8');
+      const isLikelyMnf = cleanPath.endsWith('.mnf') || /^mnfs?:\/\//i.test(stream.source_url);
 
       if (isLikelyHls) {
         const ac = new AbortController();
@@ -1060,7 +1083,7 @@ async function serveLiveStreamRequest(req, res) {
           }
         } catch {
           clearTimeout(timer);
-          // failover to backup_url
+          // failover to next candidate / backup_url
         }
       } else {
         const ac = new AbortController();
@@ -1077,22 +1100,102 @@ async function serveLiveStreamRequest(req, res) {
             signal: ac.signal
           });
           if (upRes.ok && upRes.body) {
+            const upstreamType = (upRes.headers.get('content-type') || '').toLowerCase();
+
+            // If upstream is Midnight NanoFrame (MNF v1), remux on-the-fly to standard 188-byte MPEG-TS for legacy players!
+            if (isLikelyMnf || upstreamType.includes('midnight-mnf')) {
+              res.setHeader('Content-Type', 'video/mp2t');
+              res.setHeader('Cache-Control', 'no-store');
+              res.setHeader('X-Upstream-Protocol', 'MNF/1.0');
+              const remuxer = new MnfToTsRemuxer();
+              remuxer.on('ts', (tsBuf) => {
+                if (!res.writableEnded) res.write(tsBuf);
+              });
+              const reader = upRes.body.getReader();
+              (async () => {
+                try {
+                  while (!res.writableEnded) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (value) remuxer.push(Buffer.from(value));
+                  }
+                } catch {
+                  // client closed or upstream ended
+                } finally {
+                  if (!res.writableEnded) res.end();
+                }
+              })();
+              return;
+            }
+
             res.setHeader('Content-Type', upRes.headers.get('content-type') || 'video/mp2t');
             res.setHeader('Cache-Control', 'no-store');
             return Readable.fromWeb(upRes.body).pipe(res);
           }
         } catch {
-          // failover to backup_url
+          // failover to next candidate / backup_url
         }
       }
     }
   }
 
-  return res.redirect(302, stream.source_url);
+  return res.redirect(302, candidates[0] || stream.source_url);
 }
 
 // 4. Live Stream Delivery (/live/:username/:password/:streamSpec AND short Xtream /:username/:password/:numericId)
 iptvRouter.get('/live/:username/:password/:streamSpec', serveLiveStreamRequest);
+
+// 4b. Native Ultra-Light MNF v1 (Midnight NanoFrame) Delivery (/mnf/:username/:password/:streamSpec)
+iptvRouter.get('/mnf/:username/:password/:streamSpec', (req, res) => {
+  const { username, password, streamSpec } = req.params;
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).send(auth.error);
+
+  const numericId = Number(String(streamSpec).replace(/\.(mnf|ts|m3u8)$/i, ''));
+  if (!isItemAllowedForLine(auth.line, 'live', numericId)) {
+    return res.status(403).send('Canal no incluido en tu paquete');
+  }
+
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(numericId);
+  if (!stream) return res.status(404).send('Canal no encontrado');
+  if (stream.status === 'stopped') return res.status(503).send('Canal detenido');
+
+  const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, 'MNF');
+  if (!conn.allowed) return res.status(429).send(conn.error);
+
+  if (req.socket) {
+    req.socket.setTimeout(0);
+    req.socket.setNoDelay(true);
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'application/x-midnight-mnf',
+    'Cache-Control': 'no-store, no-transform',
+    'Connection': 'keep-alive',
+    'X-Protocol': 'MNF/1.0 (Midnight NanoFrame)',
+  });
+
+  const upstreamUrls = expandStreamUpstreamUrls(stream);
+  const { session, release } = getOrCreateMnfSession({
+    streamId: stream.id,
+    upstreamUrls,
+  });
+
+  const sendChunk = (buf) => {
+    if (!res.writableEnded) {
+      res.write(buf);
+    }
+  };
+
+  session.addSubscriber(sendChunk);
+
+  req.on('close', () => {
+    release(sendChunk);
+    if (conn.connId) {
+      db.prepare('DELETE FROM active_connections WHERE id = ?').run(conn.connId);
+    }
+  });
+});
 
 iptvRouter.get(/^\/([^/]+)\/([^/]+)\/(\d+(?:\.(?:ts|m3u8))?)$/i, (req, res) => {
   req.params = {

@@ -16,7 +16,8 @@ import {
   Menu,
   X,
   ArrowUp,
-  Database
+  Database,
+  Zap
 } from 'lucide-react';
 
 export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpenWebTv, children }) {
@@ -33,6 +34,7 @@ export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpen
     { id: 'bouquets', label: 'Bouquets & Categorías', icon: Layers, roles: ['admin'] },
     { id: 'resellers', label: 'Resellers & Paquetes', icon: UserCheck, roles: ['admin'] },
     { id: 'epg', label: 'EPG, OSD & Reportes', icon: CalendarClock, roles: ['admin'] },
+    { id: 'ingest-protocols', label: 'Ingesta, Flussonic & MNF', icon: Zap, badge: 'MNF', roles: ['admin'] },
     { id: 'xui-import', label: 'Importar XUI.one', icon: Database, badge: 'XUI', roles: ['admin'] },
     { id: 'system', label: 'Admin del Sistema', icon: Server, roles: ['admin'] }
   ].filter((item) => item.roles.includes(user?.role || 'admin'));

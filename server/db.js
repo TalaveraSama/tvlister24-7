@@ -280,6 +280,19 @@ export function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS ingest_endpoints (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      stream_key TEXT UNIQUE NOT NULL,
+      protocol_hint TEXT NOT NULL DEFAULT 'rtmp',
+      passphrase TEXT DEFAULT '',
+      linked_stream_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'idle',
+      publisher_ip TEXT DEFAULT '',
+      started_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const ensureColumn = (table, column, def) => {
@@ -490,6 +503,7 @@ export function resetPanelCatalog({ wipeCategories = true, wipeResellers = true 
       DELETE FROM series;
       DELETE FROM vod_items;
       DELETE FROM channels_247;
+      DELETE FROM ingest_endpoints;
       DELETE FROM streams;
       DELETE FROM lines;
       DELETE FROM epg_programs;

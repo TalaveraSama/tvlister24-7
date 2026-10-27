@@ -149,6 +149,21 @@ if [ "$FFMPEG_READY" -eq 0 ]; then
   echo "      [AVISO] No se encontró FFmpeg; el panel funcionará en modo Direct Stream / Reloj 24-7 Virtual."
 fi
 
+# Instalar binario estático aislado MediaMTX v1.21.3 para ingesta RTMP/SRT/RTSP + CMAF fMP4 (Zero-Apt)
+if [ ! -x "${RUNTIME_BIN}/mediamtx" ]; then
+  MTX_ARCH="amd64"
+  if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MTX_ARCH="arm64"; fi
+  TMP_MTX=$(mktemp -d)
+  if curl -fsSL --max-time 45 "https://github.com/bluenviron/mediamtx/releases/download/v1.21.3/mediamtx_v1.21.3_linux_${MTX_ARCH}.tar.gz" -o "${TMP_MTX}/mtx.tar.gz" 2>/dev/null; then
+    tar -xzf "${TMP_MTX}/mtx.tar.gz" -C "${RUNTIME_BIN}" mediamtx 2>/dev/null || true
+    chmod +x "${RUNTIME_BIN}/mediamtx" 2>/dev/null || true
+    if [ -x "${RUNTIME_BIN}/mediamtx" ]; then
+      echo "      Motor RTMP/SRT/RTSP (MediaMTX v1.21.3) instalado en ${RUNTIME_BIN}/mediamtx."
+    fi
+  fi
+  rm -rf "$TMP_MTX"
+fi
+
 export PATH="${RUNTIME_BIN}:${NODE_DIR}/bin:${PATH}"
 
 # 4. Descargar código fuente actualizado preservando .runtime y data

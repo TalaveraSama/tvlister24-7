@@ -14,6 +14,7 @@ import ResellersPage from './pages/ResellersPage.jsx';
 import EpgMessagesPage from './pages/EpgMessagesPage.jsx';
 import ServersSecurityPage from './pages/ServersSecurityPage.jsx';
 import XuiImportPage from './pages/XuiImportPage.jsx';
+import IngestProtocolsPage from './pages/IngestProtocolsPage.jsx';
 import WebTvPortal from './pages/WebTvPortal.jsx';
 
 export default function App() {
@@ -102,6 +103,7 @@ export default function App() {
         {activeTab === 'bouquets' && user.role === 'admin' && <BouquetsPage />}
         {activeTab === 'resellers' && user.role === 'admin' && <ResellersPage />}
         {activeTab === 'epg' && user.role === 'admin' && <EpgMessagesPage />}
+        {activeTab === 'ingest-protocols' && user.role === 'admin' && <IngestProtocolsPage />}
         {activeTab === 'xui-import' && user.role === 'admin' && (
           <XuiImportPage setActiveTab={setActiveTab} />
         )}
