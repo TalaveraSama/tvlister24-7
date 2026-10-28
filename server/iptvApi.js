@@ -8,6 +8,7 @@ import { db } from './db.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl } from './auth.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
+import { resolvePublicPosterUrl, normalizeXuiOrTmdbImageUrl, verifyLocalPosterPath } from './vodSyncTmdb.js';
 import {
   computeChannel247LiveState,
   getLocalHlsManifestPath,
@@ -681,20 +682,24 @@ const handlePlayerApi = (req, res) => {
     return res.json(
       vodItems
         .filter((v) => !catFilter || String(v.category_id) === catFilter)
-        .map((v, idx) => ({
-          num: idx + 1,
-          name: v.title,
-          stream_type: 'movie',
-          stream_id: v.id,
-          stream_icon: v.poster_url || '',
-          rating: String(v.rating || 8.0),
-          rating_5based: Number(((v.rating || 8) / 2).toFixed(1)),
-          added: String(Math.floor(Date.now() / 1000)),
-          category_id: String(v.category_id || 6),
-          container_extension: v.container_ext || 'mp4',
-          custom_sid: '',
-          direct_source: ''
-        }))
+        .map((v, idx) => {
+          const poster = resolvePublicPosterUrl(v.poster_url, baseUrl);
+          return {
+            num: idx + 1,
+            name: v.title,
+            stream_type: 'movie',
+            stream_id: v.id,
+            stream_icon: poster,
+            cover: poster,
+            rating: String(v.rating || 8.0),
+            rating_5based: Number(((v.rating || 8) / 2).toFixed(1)),
+            added: String(Math.floor(Date.now() / 1000)),
+            category_id: String(v.category_id || 6),
+            container_extension: v.container_ext || 'mp4',
+            custom_sid: '',
+            direct_source: ''
+          };
+        })
     );
   }
 
@@ -702,18 +707,34 @@ const handlePlayerApi = (req, res) => {
     const vodId = Number(params.vod_id);
     const v = vodItems.find((x) => x.id === vodId);
     if (!v) return res.json({ info: {}, movie_data: {} });
+    const poster = resolvePublicPosterUrl(v.poster_url, baseUrl);
+    const backdropRaw = normalizeXuiOrTmdbImageUrl(v.backdrop_url || '', 'backdrop');
+    const backdrop = backdropRaw.startsWith('/') ? `${baseUrl}${backdropRaw}` : backdropRaw;
+    const durSecs = Number(v.duration_sec) || 5400;
+    const hh = String(Math.floor(durSecs / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((durSecs % 3600) / 60)).padStart(2, '0');
+    const ss = String(durSecs % 60).padStart(2, '0');
     return res.json({
       info: {
-        movie_image: v.poster_url,
-        plot: v.plot,
-        genre: v.genre,
-        releasedate: String(v.release_year),
-        rating: String(v.rating),
-        duration_secs: v.duration_sec
+        tmdb_id: v.tmdb_id || '',
+        name: v.title,
+        o_name: v.title,
+        cover_big: poster,
+        movie_image: poster,
+        releasedate: String(v.release_year || 2024),
+        plot: v.plot || '',
+        description: v.plot || '',
+        genre: v.genre || 'General',
+        rating: String(v.rating || 8.0),
+        duration_secs: durSecs,
+        duration: `${hh}:${mm}:${ss}`,
+        backdrop_path: backdrop ? [backdrop] : poster ? [poster] : []
       },
       movie_data: {
         stream_id: v.id,
         name: v.title,
+        added: String(Math.floor(Date.now() / 1000)),
+        category_id: String(v.category_id || 6),
         container_extension: v.container_ext || 'mp4'
       }
     });
@@ -737,24 +758,29 @@ const handlePlayerApi = (req, res) => {
     return res.json(
       seriesItems
         .filter((sr) => !catFilter || String(sr.category_id) === catFilter)
-        .map((sr, idx) => ({
-          num: idx + 1,
-          name: sr.title,
-          series_id: sr.id,
-          cover: sr.poster_url || '',
-          plot: sr.plot || '',
-          cast: '',
-          director: '',
-          genre: sr.genre || 'Drama',
-          releaseDate: `${sr.release_year || 2024}-01-01`,
-          last_modified: String(Math.floor(Date.now() / 1000)),
-          rating: String(sr.rating || 8.5),
-          rating_5based: Number(((sr.rating || 8.5) / 2).toFixed(1)),
-          backdrop_path: sr.backdrop_url ? [sr.backdrop_url] : [],
-          youtube_trailer: '',
-          episode_run_time: '45',
-          category_id: String(sr.category_id || 8)
-        }))
+        .map((sr, idx) => {
+          const poster = resolvePublicPosterUrl(sr.poster_url, baseUrl);
+          const backdropRaw = normalizeXuiOrTmdbImageUrl(sr.backdrop_url || '', 'backdrop');
+          const backdrop = backdropRaw.startsWith('/') ? `${baseUrl}${backdropRaw}` : backdropRaw;
+          return {
+            num: idx + 1,
+            name: sr.title,
+            series_id: sr.id,
+            cover: poster,
+            plot: sr.plot || '',
+            cast: '',
+            director: '',
+            genre: sr.genre || 'Drama',
+            releaseDate: `${sr.release_year || 2024}-01-01`,
+            last_modified: String(Math.floor(Date.now() / 1000)),
+            rating: String(sr.rating || 8.5),
+            rating_5based: Number(((sr.rating || 8.5) / 2).toFixed(1)),
+            backdrop_path: backdrop ? [backdrop] : [],
+            youtube_trailer: '',
+            episode_run_time: '45',
+            category_id: String(sr.category_id || 8)
+          };
+        })
     );
   }
 
@@ -762,6 +788,9 @@ const handlePlayerApi = (req, res) => {
     const seriesId = Number(params.series_id);
     const sr = seriesItems.find((x) => x.id === seriesId);
     if (!sr) return res.json({ seasons: [], info: {}, episodes: {} });
+    const poster = resolvePublicPosterUrl(sr.poster_url, baseUrl);
+    const backdropRaw = normalizeXuiOrTmdbImageUrl(sr.backdrop_url || '', 'backdrop');
+    const backdrop = backdropRaw.startsWith('/') ? `${baseUrl}${backdropRaw}` : backdropRaw;
 
     const episodesBySeason = {};
     const seasonSet = new Set();
@@ -778,7 +807,7 @@ const handlePlayerApi = (req, res) => {
           duration_secs: ep.duration_sec || 2400,
           duration: `${Math.round((ep.duration_sec || 2400) / 60)} min`,
           plot: ep.plot || sr.plot || '',
-          movie_image: sr.poster_url || ''
+          movie_image: poster
         },
         custom_sid: '',
         added: String(Math.floor(Date.now() / 1000)),
@@ -796,19 +825,20 @@ const handlePlayerApi = (req, res) => {
         name: `Temporada ${sNum}`,
         overview: sr.plot || '',
         season_number: sNum,
-        cover: sr.poster_url || ''
+        cover: poster
       }));
 
     return res.json({
       seasons,
       info: {
+        tmdb_id: sr.tmdb_id || '',
         name: sr.title,
-        cover: sr.poster_url || '',
+        cover: poster,
         plot: sr.plot || '',
         genre: sr.genre || '',
         releaseDate: `${sr.release_year || 2024}-01-01`,
         rating: String(sr.rating || 8.5),
-        backdrop_path: sr.backdrop_url ? [sr.backdrop_url] : [],
+        backdrop_path: backdrop ? [backdrop] : [],
         category_id: String(sr.category_id || 8)
       },
       episodes: episodesBySeason
@@ -1418,8 +1448,16 @@ iptvRouter.get('/api/webtv/catalog', (req, res) => {
     categories,
     streams: enrichedStreams,
     channels247: enrichedCh247,
-    vodItems,
-    series: seriesItems,
+    vodItems: vodItems.map((v) => ({
+      ...v,
+      poster_url: normalizeXuiOrTmdbImageUrl(v.poster_url || '', 'poster'),
+      backdrop_url: normalizeXuiOrTmdbImageUrl(v.backdrop_url || '', 'backdrop')
+    })),
+    series: seriesItems.map((sr) => ({
+      ...sr,
+      poster_url: normalizeXuiOrTmdbImageUrl(sr.poster_url || '', 'poster'),
+      backdrop_url: normalizeXuiOrTmdbImageUrl(sr.backdrop_url || '', 'backdrop')
+    })),
     osdMessages: activeMessages
   });
 });
@@ -1474,3 +1512,33 @@ iptvRouter.get('/api/webtv/speedtest', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.send(payload);
 });
+
+// Read-only bridge for XUI.one local movie/series covers stored in /home/xui/wwwdir/images/
+iptvRouter.get('/xui_images/:fileName', (req, res) => {
+  const safeName = path.basename(String(req.params.fileName || ''));
+  if (!safeName || !/\.(jpg|jpeg|png|webp|gif)$/i.test(safeName)) {
+    return res.status(404).end();
+  }
+  const candidates = [
+    path.join('/home/xui/wwwdir/images', safeName),
+    path.join('/home/xui/content/images', safeName),
+  ];
+  for (const fullPath of candidates) {
+    if (fs.existsSync(fullPath)) {
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.sendFile(fullPath);
+    }
+  }
+  return res.status(404).end();
+});
+
+// Read-only HMAC-signed local sidecar movie poster (e.g. Movie.jpg / poster.jpg inside a Watch Folder)
+iptvRouter.get('/vod_local_poster', (req, res) => {
+  const filePath = verifyLocalPosterPath(String(req.query.p || ''), String(req.query.sig || ''));
+  if (!filePath || !fs.existsSync(filePath)) {
+    return res.status(404).end();
+  }
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  return res.sendFile(filePath);
+});
+

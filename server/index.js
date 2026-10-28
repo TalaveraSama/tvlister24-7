@@ -11,8 +11,23 @@ import { db, DB_PATH, initDb, hashPassword, verifyPassword, resetPanelCatalog } 
 import {
   inspectLocalXuiEnvironment,
   previewXuiImport,
-  executeXuiImport
+  executeXuiImport,
+  extractXuiTmdbSettings
 } from './xuiImporter.js';
+import {
+  normalizeXuiOrTmdbImageUrl,
+  getTmdbConfig,
+  saveTmdbConfig,
+  testTmdbConnection,
+  searchTmdb,
+  enrichMissingVodWithTmdb,
+  browseServerDirectories,
+  scanMediaDirectoryFiles,
+  syncLocalVodFolder,
+  listWatchFolders,
+  deleteWatchFolder,
+  startVodFolderAutoSyncScheduler
+} from './vodSyncTmdb.js';
 import {
   signToken,
   firewallMiddleware,
@@ -700,41 +715,50 @@ app.get('/api/vod', requireAuth, (req, res) => {
        LEFT JOIN categories c ON c.id = v.category_id
        ORDER BY v.id DESC`
     )
-    .all();
+    .all()
+    .map((v) => ({
+      ...v,
+      poster_url: normalizeXuiOrTmdbImageUrl(v.poster_url || '', 'poster'),
+      backdrop_url: normalizeXuiOrTmdbImageUrl(v.backdrop_url || '', 'backdrop')
+    }));
   res.json(rows);
 });
 
 app.post('/api/vod', requireAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
   if (!b.title || !b.source_url) {
-    return res.status(400).json({ error: 'Título y URL del archivo de video son obligatorios.' });
+    return res.status(400).json({ error: 'Título y URL/Ruta del archivo de video son obligatorios.' });
   }
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
   const info = db
     .prepare(
-      `INSERT INTO vod_items (title, type, category_id, source_url, poster_url, plot, genre, release_year, rating, duration_sec, container_ext)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO vod_items (title, type, category_id, source_url, poster_url, backdrop_url, tmdb_id, plot, genre, release_year, rating, duration_sec, container_ext)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       String(b.title),
       String(b.type || 'movie'),
       b.category_id ? Number(b.category_id) : 6,
       String(b.source_url),
-      String(b.poster_url || ''),
+      posterUrl,
+      backdropUrl,
+      String(b.tmdb_id || ''),
       String(b.plot || ''),
       String(b.genre || 'General'),
       Number(b.release_year) || 2025,
       Number(b.rating) || 8.0,
-      Number(b.duration_sec) || 600,
+      Number(b.duration_sec) || 5400,
       String(b.container_ext || 'mp4')
     );
 
   const newId = Number(info.lastInsertRowid);
-  const b1 = db.prepare('SELECT * FROM bouquets WHERE id = 1').get();
+  const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
   if (b1) {
     const arr = JSON.parse(b1.vod_ids_json || '[]');
     if (!arr.includes(newId)) {
       arr.push(newId);
-      db.prepare('UPDATE bouquets SET vod_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
+      db.prepare('UPDATE bouquets SET vod_ids_json = ? WHERE id = ?').run(JSON.stringify(arr), b1.id);
     }
   }
   res.json({ id: newId, ok: true });
@@ -743,9 +767,11 @@ app.post('/api/vod', requireAuth, requireAdmin, (req, res) => {
 app.put('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
   db.prepare(
     `UPDATE vod_items SET
-       title = ?, type = ?, category_id = ?, source_url = ?, poster_url = ?,
+       title = ?, type = ?, category_id = ?, source_url = ?, poster_url = ?, backdrop_url = ?, tmdb_id = ?,
        plot = ?, genre = ?, release_year = ?, rating = ?, duration_sec = ?, container_ext = ?
      WHERE id = ?`
   ).run(
@@ -753,12 +779,14 @@ app.put('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
     String(b.type || 'movie'),
     b.category_id ? Number(b.category_id) : 6,
     String(b.source_url || ''),
-    String(b.poster_url || ''),
+    posterUrl,
+    backdropUrl,
+    String(b.tmdb_id || ''),
     String(b.plot || ''),
     String(b.genre || 'General'),
     Number(b.release_year) || 2025,
     Number(b.rating) || 8.0,
-    Number(b.duration_sec) || 600,
+    Number(b.duration_sec) || 5400,
     String(b.container_ext || 'mp4'),
     id
   );
@@ -767,6 +795,132 @@ app.put('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
 
 app.delete('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
   db.prepare('DELETE FROM vod_items WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+// ==================== LOCAL WATCH FOLDERS & TMDB (themoviedb.org) ====================
+app.get('/api/tmdb/config', requireAuth, requireAdmin, (req, res) => {
+  const cfg = getTmdbConfig();
+  res.json({
+    configured: cfg.configured,
+    apiKeyMasked: cfg.apiKeyMasked,
+    language: cfg.language,
+    xuiLocalImagesDirExists: fs.existsSync('/home/xui/wwwdir/images') || fs.existsSync('/home/xui/content/images')
+  });
+});
+
+app.post('/api/tmdb/config', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { apiKey, language, testConnection } = req.body || {};
+    const saved = saveTmdbConfig({ apiKey, language });
+    if (testConnection && saved.configured) {
+      await testTmdbConnection();
+    }
+    res.json({
+      ok: true,
+      configured: saved.configured,
+      apiKeyMasked: saved.apiKeyMasked,
+      language: saved.language
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error guardando configuración TMDB' });
+  }
+});
+
+app.post('/api/tmdb/import-from-xui', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const xuiTmdb = await extractXuiTmdbSettings();
+    if (!xuiTmdb.found) {
+      return res.status(404).json({ error: 'Tu instalación de XUI.one no tiene una API Key de TMDB guardada en su tabla settings.' });
+    }
+    const saved = saveTmdbConfig({ apiKey: xuiTmdb.apiKey, language: xuiTmdb.language });
+    res.json({
+      ok: true,
+      configured: saved.configured,
+      apiKeyMasked: saved.apiKeyMasked,
+      language: saved.language,
+      sourceLabel: xuiTmdb.sourceLabel
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo leer la clave TMDB desde XUI.one' });
+  }
+});
+
+app.get('/api/tmdb/search', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const results = await searchTmdb({
+      query: req.query.q,
+      type: req.query.type || 'movie',
+      year: req.query.year || null
+    });
+    res.json({ results });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error buscando en TMDB' });
+  }
+});
+
+app.post('/api/tmdb/enrich-missing', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { overwriteAll } = req.body || {};
+    const summary = await enrichMissingVodWithTmdb({ overwriteAll: Boolean(overwriteAll) });
+    res.json({ ok: true, ...summary });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error sincronizando carátulas con TMDB' });
+  }
+});
+
+app.get('/api/vod/folders', requireAuth, requireAdmin, (req, res) => {
+  res.json(listWatchFolders());
+});
+
+app.get('/api/vod/folders/browse', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json(browseServerDirectories(req.query.path || '/'));
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo explorar la carpeta' });
+  }
+});
+
+app.post('/api/vod/folders/preview', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const { folderPath, contentMode } = req.body || {};
+    const { rootFolder, files } = scanMediaDirectoryFiles(folderPath, contentMode || 'auto', 1000);
+    const movies = files.filter((f) => f.kind === 'movie');
+    const episodes = files.filter((f) => f.kind === 'series_episode');
+    res.json({
+      ok: true,
+      rootFolder,
+      totalFiles: files.length,
+      moviesCount: movies.length,
+      episodesCount: episodes.length,
+      sample: files.slice(0, 30)
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error escaneando carpeta' });
+  }
+});
+
+app.post('/api/vod/folders/sync', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const stats = await syncLocalVodFolder({
+      folderPath: b.folderPath,
+      contentMode: b.contentMode || 'auto',
+      defaultCategoryId: b.defaultCategoryId || null,
+      useSubfoldersAsCategories: b.useSubfoldersAsCategories !== false,
+      autoTmdb: b.autoTmdb !== false,
+      autoSyncMinutes: Number(b.autoSyncMinutes) || 0,
+      removeMissing: Boolean(b.removeMissing),
+      saveWatchFolder: b.saveWatchFolder !== false
+    });
+    res.json({ ok: true, stats });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error sincronizando carpeta de películas' });
+  }
+});
+
+app.delete('/api/vod/folders/:id', requireAuth, requireAdmin, (req, res) => {
+  deleteWatchFolder(req.params.id);
   res.json({ ok: true });
 });
 
@@ -784,6 +938,8 @@ app.get('/api/series', requireAuth, (req, res) => {
   res.json(
     seriesRows.map((sr) => ({
       ...sr,
+      poster_url: normalizeXuiOrTmdbImageUrl(sr.poster_url || '', 'poster'),
+      backdrop_url: normalizeXuiOrTmdbImageUrl(sr.backdrop_url || '', 'backdrop'),
       episodes: episodes.filter((ep) => ep.series_id === sr.id)
     }))
   );
@@ -794,16 +950,19 @@ app.post('/api/series', requireAuth, requireAdmin, (req, res) => {
   if (!b.title) return res.status(400).json({ error: 'El título de la serie es obligatorio.' });
 
   const defaultCat = db.prepare("SELECT id FROM categories WHERE type = 'series' LIMIT 1").get()?.id || 6;
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
   const info = db
     .prepare(
-      `INSERT INTO series (title, category_id, poster_url, backdrop_url, plot, genre, release_year, rating)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO series (title, category_id, poster_url, backdrop_url, tmdb_id, plot, genre, release_year, rating)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       String(b.title),
       b.category_id ? Number(b.category_id) : defaultCat,
-      String(b.poster_url || ''),
-      String(b.backdrop_url || ''),
+      posterUrl,
+      backdropUrl,
+      String(b.tmdb_id || ''),
       String(b.plot || ''),
       String(b.genre || 'Drama'),
       Number(b.release_year) || 2025,
@@ -811,12 +970,12 @@ app.post('/api/series', requireAuth, requireAdmin, (req, res) => {
     );
 
   const newId = Number(info.lastInsertRowid);
-  const b1 = db.prepare('SELECT * FROM bouquets WHERE id = 1').get();
+  const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
   if (b1) {
     const arr = JSON.parse(b1.series_ids_json || '[]');
     if (!arr.includes(newId)) {
       arr.push(newId);
-      db.prepare('UPDATE bouquets SET series_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
+      db.prepare('UPDATE bouquets SET series_ids_json = ? WHERE id = ?').run(JSON.stringify(arr), b1.id);
     }
   }
   res.json({ id: newId, ok: true });
@@ -825,16 +984,19 @@ app.post('/api/series', requireAuth, requireAdmin, (req, res) => {
 app.put('/api/series/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
   db.prepare(
     `UPDATE series SET
-       title = ?, category_id = ?, poster_url = ?, backdrop_url = ?,
+       title = ?, category_id = ?, poster_url = ?, backdrop_url = ?, tmdb_id = ?,
        plot = ?, genre = ?, release_year = ?, rating = ?
      WHERE id = ?`
   ).run(
     String(b.title || ''),
     b.category_id ? Number(b.category_id) : 6,
-    String(b.poster_url || ''),
-    String(b.backdrop_url || ''),
+    posterUrl,
+    backdropUrl,
+    String(b.tmdb_id || ''),
     String(b.plot || ''),
     String(b.genre || 'Drama'),
     Number(b.release_year) || 2025,
@@ -2245,6 +2407,7 @@ async function startServer() {
     if (getIngestConfig().enabled) {
       await startIngestServer(PORT);
     }
+    startVodFolderAutoSyncScheduler();
   });
 }
 

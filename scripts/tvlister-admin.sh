@@ -414,6 +414,30 @@ case "$ACTION" in
     systemctl restart "$SERVICE_NAME"
     echo "✅ Servidor RTMP + SRT + RTSP activado y escuchando."
     ;;
+  sync-vod)
+    if [ -z "${2:-}" ]; then
+      echo "Uso: tvlister-admin sync-vod /ruta/a/peliculas"
+      exit 1
+    fi
+    cd "$APP_DIR"
+    SYNC_DIR="$2" "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { db, initDb } from "./server/db.js";
+      import { syncLocalVodFolder } from "./server/vodSyncTmdb.js";
+      initDb();
+      const st = await syncLocalVodFolder({
+        folderPath: process.env.SYNC_DIR,
+        contentMode: "auto",
+        useSubfoldersAsCategories: true,
+        autoTmdb: true,
+        saveWatchFolder: true
+      });
+      db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+      console.log("✅ Carpeta sincronizada:", st.rootFolder);
+      console.log("   • Películas nuevas / existentes :", st.moviesAdded, "/", st.moviesExisting);
+      console.log("   • Series nuevas (+Episodios)    :", st.seriesAdded, "(+" + st.episodesAdded + ")");
+      console.log("   • Carátulas TMDB descargadas    :", st.tmdbEnriched);
+    '
+    ;;
   update)
     cmd_update
     ;;

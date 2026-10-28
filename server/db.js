@@ -309,6 +309,20 @@ export function initDb() {
       started_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS vod_watch_folders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      folder_path TEXT UNIQUE NOT NULL,
+      content_mode TEXT NOT NULL DEFAULT 'auto',
+      default_category_id INTEGER,
+      use_subfolders_as_categories INTEGER NOT NULL DEFAULT 1,
+      auto_tmdb INTEGER NOT NULL DEFAULT 1,
+      auto_sync_minutes INTEGER NOT NULL DEFAULT 0,
+      remove_missing INTEGER NOT NULL DEFAULT 0,
+      last_scan_at TEXT,
+      last_scan_summary TEXT DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const ensureColumn = (table, column, def) => {
@@ -327,7 +341,10 @@ export function initDb() {
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'xui_id', 'INTEGER');
   ensureColumn('vod_items', 'xui_id', 'INTEGER');
+  ensureColumn('vod_items', 'backdrop_url', "TEXT DEFAULT ''");
+  ensureColumn('vod_items', 'tmdb_id', "TEXT DEFAULT ''");
   ensureColumn('series', 'xui_id', 'INTEGER');
+  ensureColumn('series', 'tmdb_id', "TEXT DEFAULT ''");
   ensureColumn('series_episodes', 'xui_id', 'INTEGER');
   ensureColumn('categories', 'xui_id', 'INTEGER');
   ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
@@ -526,6 +543,7 @@ export function resetPanelCatalog({ wipeCategories = true, wipeResellers = true 
       DELETE FROM series_episodes;
       DELETE FROM series;
       DELETE FROM vod_items;
+      DELETE FROM vod_watch_folders;
       DELETE FROM channels_247;
       DELETE FROM ingest_endpoints;
       DELETE FROM streams;

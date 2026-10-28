@@ -4,6 +4,7 @@ import zlib from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import mysql from 'mysql2/promise';
 import { db, hashPassword, resetPanelCatalog } from './db.js';
+import { normalizeXuiOrTmdbImageUrl } from './vodSyncTmdb.js';
 
 const MYSQL_SOCKET_CANDIDATES = [
   '/run/mysqld/mysqld.sock',
@@ -921,8 +922,8 @@ export async function extractXuiDataset(source) {
         title: name,
         xui_category_id: xuiCatId,
         source_url: primaryUrl,
-        poster_url: String(props.movie_image || props.cover_big || s.stream_icon || '').trim(),
-        backdrop_url: String(Array.isArray(props.backdrop_path) ? props.backdrop_path[0] || '' : props.backdrop_path || '').trim(),
+        poster_url: normalizeXuiOrTmdbImageUrl(String(props.movie_image || props.cover_big || s.stream_icon || '').trim(), 'poster'),
+        backdrop_url: normalizeXuiOrTmdbImageUrl(String(Array.isArray(props.backdrop_path) ? props.backdrop_path[0] || '' : props.backdrop_path || '').trim(), 'backdrop'),
         plot: String(props.plot || props.description || s.notes || '').trim(),
         genre: String(props.genre || 'General').trim(),
         release_year: yearMatch ? Number(yearMatch[1]) : 2024,
@@ -942,7 +943,7 @@ export async function extractXuiDataset(source) {
         xui_category_id: xuiCatId,
         source_url: primaryUrl,
         backup_url: backupUrl,
-        logo_url: String(s.stream_icon || '').trim(),
+        logo_url: normalizeXuiOrTmdbImageUrl(String(s.stream_icon || '').trim(), 'poster'),
         epg_channel_id: String(s.channel_id || '').trim(),
         stream_mode: isOnDemand ? 'ondemand' : 'direct',
         status: isOnDemand ? 'ondemand_idle' : 'running',
@@ -966,8 +967,8 @@ export async function extractXuiDataset(source) {
         xui_id: xuiId,
         title: String(sr.title || '').trim(),
         xui_category_id: parsePrimaryCategoryId(sr.category_id),
-        poster_url: String(sr.cover || sr.cover_big || '').trim(),
-        backdrop_url: backdrop.trim(),
+        poster_url: normalizeXuiOrTmdbImageUrl(String(sr.cover || sr.cover_big || '').trim(), 'poster'),
+        backdrop_url: normalizeXuiOrTmdbImageUrl(backdrop.trim(), 'backdrop'),
         plot: String(sr.plot || '').trim(),
         genre: String(sr.genre || 'General').trim(),
         release_year: yearMatch ? Number(yearMatch[1]) : 2024,
@@ -1668,3 +1669,30 @@ export async function executeXuiImport(connectionOptions = {}, importFlags = {})
     stats
   };
 }
+
+export async function extractXuiTmdbSettings() {
+  const source = await openXuiDataSource({ mode: 'auto' });
+  try {
+    const tables = await source.listTables();
+    const settingsTbl = tables.find((t) => String(t).toLowerCase() === 'settings');
+    if (!settingsTbl) {
+      throw new Error('No se encontró tabla settings en XUI.one.');
+    }
+    const rows = await source.queryTable(settingsTbl);
+    if (!rows || rows.length === 0) {
+      throw new Error('La tabla settings de XUI.one está vacía.');
+    }
+    const row = rows[0] || {};
+    const apiKey = String(row.tmdb_api_key || row.tmdb_key || '').trim();
+    const rawLang = String(row.tmdb_default || row.default_tmdb || '').trim();
+    return {
+      found: Boolean(apiKey),
+      apiKey,
+      language: rawLang && rawLang.length >= 2 ? rawLang : 'es-MX',
+      sourceLabel: source.sourceLabel
+    };
+  } finally {
+    await source.close();
+  }
+}
+
