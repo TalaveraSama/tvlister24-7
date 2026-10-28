@@ -922,6 +922,51 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: true, channels: found }));
   }
 
+  // Authenticated LAN Bridge for Local Flussonic 23.12 API v3 (allows Cloud Panel to push/probe 192.168.x.x Flussonic)
+  if (urlObj.pathname === '/headend/proxy-flussonic' && req.method === 'POST') {
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const reqPayload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      const targetUrl = String(reqPayload.url || '').trim();
+      if (!/^https?:\/\//i.test(targetUrl)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, status: 400, text: 'Invalid target URL' }));
+      }
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), Number(reqPayload.timeoutMs) || 7000);
+      try {
+        const upstream = await fetch(targetUrl, {
+          method: reqPayload.method || 'GET',
+          headers: reqPayload.headers || {},
+          body: reqPayload.body !== undefined && reqPayload.body !== null ? String(reqPayload.body) : undefined,
+          signal: ac.signal
+        });
+        const respText = await upstream.text();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(
+          JSON.stringify({
+            ok: upstream.ok,
+            status: upstream.status,
+            serverHeader: upstream.headers.get('server') || '',
+            text: respText
+          })
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (proxyErr) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          ok: false,
+          status: 0,
+          text: proxyErr.message || 'LAN proxy connection failed'
+        })
+      );
+    }
+  }
+
   if (pathTokenMatch || legacyHlsMatch) {
     const streamId = Number(pathTokenMatch ? pathTokenMatch[2] : legacyHlsMatch[1]);
     const fileName = path.basename(pathTokenMatch ? pathTokenMatch[3] : legacyHlsMatch[2]);

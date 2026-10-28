@@ -27,6 +27,7 @@ export default function Flussonic2312Page({ onPreview }) {
   const [liveStreams, setLiveStreams] = useState([]);
   const [syncing, setSyncing] = useState(false);
   const [notice, setNotice] = useState('');
+  const [errorNotice, setErrorNotice] = useState('');
 
   // Tabs: 'migrate_ip' (DEFAULT!) | 'live' | 'generator' | 'import_conf'
   const [activeSubTab, setActiveSubTab] = useState('migrate_ip');
@@ -37,6 +38,11 @@ export default function Flussonic2312Page({ onPreview }) {
   const [filterHost, setFilterHost] = useState('');
   const [localAstraHost, setLocalAstraHost] = useState('192.168.88.10');
   const [flussonicOutUrl, setFlussonicOutUrl] = useState('');
+  const [flussonicAuthUser, setFlussonicAuthUser] = useState('admin');
+  const [flussonicAuthPass, setFlussonicAuthPass] = useState('');
+  const [testingConn, setTestingConn] = useState(false);
+  const [localSshCommand, setLocalSshCommand] = useState('');
+  const [copiedSsh, setCopiedSsh] = useState(false);
   const [migrateTranscodeMode, setMigrateTranscodeMode] = useState('copy_deint_aac');
   const [migratePullProto, setMigratePullProto] = useState('mpegts');
   const [migrateCloudMode, setMigrateCloudMode] = useState('constant_copy_247');
@@ -82,8 +88,14 @@ export default function Flussonic2312Page({ onPreview }) {
   const selectedServer = servers.find((s) => s.id === selectedId) || servers[0] || null;
 
   const showToast = (msg) => {
+    setErrorNotice('');
     setNotice(msg);
-    setTimeout(() => setNotice(''), 7500);
+    setTimeout(() => setNotice(''), 9000);
+  };
+
+  const showError = (msg) => {
+    setNotice('');
+    setErrorNotice(msg);
   };
 
   const loadServersAndHosts = async () => {
@@ -98,6 +110,10 @@ export default function Flussonic2312Page({ onPreview }) {
       if (list.length > 0 && !selectedId) {
         setSelectedId(list[0].id);
         if (!flussonicOutUrl) setFlussonicOutUrl(list[0].base_url || '');
+        if (list[0].username) setFlussonicAuthUser(list[0].username);
+        if (list[0].password || list[0].api_token) {
+          setFlussonicAuthPass(list[0].password || list[0].api_token);
+        }
       }
 
       setHostsSummary(hostRes || { totalStreams: 0, alreadyOnFlussonicCount: 0, hosts: [] });
@@ -118,8 +134,14 @@ export default function Flussonic2312Page({ onPreview }) {
   }, []);
 
   useEffect(() => {
-    if (selectedServer?.base_url) {
-      setFlussonicOutUrl(selectedServer.base_url);
+    if (selectedServer) {
+      if (selectedServer.base_url) setFlussonicOutUrl(selectedServer.base_url);
+      if (selectedServer.username !== undefined && selectedServer.username !== '') {
+        setFlussonicAuthUser(selectedServer.username);
+      }
+      if (selectedServer.password || selectedServer.api_token) {
+        setFlussonicAuthPass(selectedServer.password || selectedServer.api_token);
+      }
     }
   }, [selectedServer?.id]);
 
@@ -167,9 +189,14 @@ export default function Flussonic2312Page({ onPreview }) {
       if (res.server?.id) {
         setSelectedId(res.server.id);
         setFlussonicOutUrl(res.server.base_url);
+        if (res.server.username) setFlussonicAuthUser(res.server.username);
+        if (res.server.password || res.server.api_token) {
+          setFlussonicAuthPass(res.server.password || res.server.api_token);
+        }
       }
       showToast(`✅ Servidor "${res.server.name}" (Flussonic 23.12) registrado.`);
     } catch (err) {
+      showError(err.message);
       window.alert(err.message);
     }
   };
@@ -183,6 +210,41 @@ export default function Flussonic2312Page({ onPreview }) {
     setSelectedId(null);
     setLiveStreams([]);
     await loadServersAndHosts();
+  };
+
+  const handleTestFlussonicConnection = async () => {
+    const cleanOut = String(flussonicOutUrl || selectedServer?.base_url || '').trim();
+    if (!cleanOut || cleanOut === 'http://') {
+      window.alert('Escribe primero la IP:Puerto de tu Flussonic 23.12 en el Paso 3.');
+      return;
+    }
+    setTestingConn(true);
+    setErrorNotice('');
+    try {
+      const res = await apiFetch('/api/flussonic-2312/test-connection', {
+        method: 'POST',
+        body: JSON.stringify({
+          server_id: selectedServer?.id || null,
+          base_url: cleanOut,
+          username: flussonicAuthUser,
+          password: flussonicAuthPass,
+          astra_url: `http://${localAstraHost}`
+        })
+      });
+      await loadServersAndHosts();
+      if (res.server?.id) setSelectedId(res.server.id);
+      if (res.effectiveBase) setFlussonicOutUrl(res.effectiveBase);
+      if (Array.isArray(res.streams)) setLiveStreams(res.streams);
+      showToast(
+        `✅ API v3 Conectada: Flussonic v${res.version} en ${res.effectiveBase}${
+          res.usedLanBridge ? ` (vía Puente LAN ${res.bridgeNodeName})` : ''
+        } — ${res.streamCount} streams activos.`
+      );
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      setTestingConn(false);
+    }
   };
 
   // Generate flussonic.conf ONLY for the selected Public Astra IP channels!
@@ -212,14 +274,17 @@ export default function Flussonic2312Page({ onPreview }) {
         `📄 flussonic.conf v23.12 generado SOLO para tus ${res.channelCount} canales de Astra (con IP local ${localAstraHost}).`
       );
     } catch (err) {
-      window.alert(err.message);
+      showError(err.message);
     }
   };
 
-  // Push ONLY the selected Public Astra IP channels to Flussonic 23.12 via API v3
+  // Push ONLY the selected Public Astra IP channels to Flussonic 23.12 via OpenAPI v3 (works directly from Paso 3!)
   const handlePushFilteredToFlussonicApi = async () => {
-    if (!selectedServer) {
-      window.alert('Primero haz clic en "+ Agregar Flussonic 23.12" arriba con la IP y usuario/clave de tu Flussonic.');
+    const cleanOut = String(flussonicOutUrl || selectedServer?.base_url || '').trim();
+    if (!cleanOut || cleanOut === 'http://') {
+      window.alert(
+        'Escribe la IP:Puerto de tu Flussonic 23.12 en el Paso 3 (o usa el botón "1C. Push SSH Local" si tu Flussonic no tiene puerto abierto).'
+      );
       return;
     }
     if (selectedPreviewIds.length === 0) {
@@ -227,10 +292,15 @@ export default function Flussonic2312Page({ onPreview }) {
       return;
     }
     setPushingApi(true);
+    setErrorNotice('');
     try {
-      const res = await apiFetch(`/api/flussonic-2312/servers/${selectedServer.id}/push-streams`, {
+      const res = await apiFetch('/api/flussonic-2312/push-streams-direct', {
         method: 'POST',
         body: JSON.stringify({
+          server_id: selectedServer?.id || null,
+          base_url: cleanOut,
+          username: flussonicAuthUser,
+          password: flussonicAuthPass,
           source_type: 'panel_streams',
           filter_host: filterHost,
           selected_stream_ids: selectedPreviewIds,
@@ -241,11 +311,90 @@ export default function Flussonic2312Page({ onPreview }) {
           constant_247: true
         })
       });
+      await loadServersAndHosts();
+      if (res.server?.id) setSelectedId(res.server.id);
+      if (res.effectiveBase) setFlussonicOutUrl(res.effectiveBase);
+      const fbNote =
+        res.passthroughFallbackCount > 0
+          ? ` (${res.passthroughFallbackCount} en Copy/Copy por licencia de transcoder)`
+          : '';
+      const errNote =
+        Array.isArray(res.errors) && res.errors.length > 0 ? ` | Avisos: ${res.errors.slice(0, 2).join('; ')}` : '';
       showToast(
-        `🚀 ${res.pushedCount}/${res.totalAttempted} canales de Astra creados en Flussonic 23.12 apuntando localmente a ${localAstraHost}.`
+        `🚀 ${res.pushedCount}/${res.totalAttempted} canales creados en Flussonic 23.12 (${res.effectiveBase}) leyendo localmente de ${localAstraHost}${fbNote}${errNote}`
       );
     } catch (err) {
-      window.alert(err.message);
+      showError(err.message);
+    } finally {
+      setPushingApi(false);
+    }
+  };
+
+  // Generate 1-line SSH command to push via API v3 directly on 127.0.0.1 inside a NATed local Flussonic server
+  const handlePrepareLocalSshPush = async (sourceOverride = 'panel_streams') => {
+    if (sourceOverride === 'panel_streams' && selectedPreviewIds.length === 0) {
+      window.alert('Selecciona al menos un canal de Astra para generar el comando SSH local.');
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/flussonic-2312/prepare-local-push-script', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_type: sourceOverride,
+          filter_host: filterHost,
+          selected_stream_ids: selectedPreviewIds,
+          astra_content: genAstraText,
+          astra_override_host: sourceOverride === 'astra_m3u' ? genAstraOverrideHost : localAstraHost,
+          transcode_mode: sourceOverride === 'astra_m3u' ? genTranscodeMode : migrateTranscodeMode,
+          video_bitrate_kbps: genVideoKbps,
+          audio_bitrate_kbps: genAudioKbps,
+          constant_247: sourceOverride === 'astra_m3u' ? genConstant247 : true,
+          username: flussonicAuthUser,
+          password: flussonicAuthPass
+        })
+      });
+      setLocalSshCommand(res.sshCommand || '');
+      showToast(
+        `💻 Comando SSH de 1 línea listo para inyectar ${res.channelCount} canales por API v3 (127.0.0.1) directo dentro de tu Flussonic local.`
+      );
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  const handlePushM3uToFlussonicApi = async () => {
+    const cleanOut = String(flussonicOutUrl || selectedServer?.base_url || '').trim();
+    if (!cleanOut || cleanOut === 'http://') {
+      window.alert('Primero registra o escribe la IP:Puerto de tu Flussonic 23.12.');
+      return;
+    }
+    if (!genAstraText.trim()) {
+      window.alert('Sube o pega primero el archivo playlist.txt / .m3u de Astra.');
+      return;
+    }
+    setPushingApi(true);
+    setErrorNotice('');
+    try {
+      const res = await apiFetch('/api/flussonic-2312/push-streams-direct', {
+        method: 'POST',
+        body: JSON.stringify({
+          server_id: selectedServer?.id || null,
+          base_url: cleanOut,
+          username: flussonicAuthUser,
+          password: flussonicAuthPass,
+          source_type: 'astra_m3u',
+          astra_content: genAstraText,
+          astra_override_host: genAstraOverrideHost,
+          transcode_mode: genTranscodeMode,
+          video_bitrate_kbps: genVideoKbps,
+          audio_bitrate_kbps: genAudioKbps,
+          constant_247: genConstant247
+        })
+      });
+      await loadServersAndHosts();
+      showToast(`🚀 ${res.pushedCount}/${res.totalAttempted} canales del M3U creados en Flussonic 23.12 por API v3.`);
+    } catch (err) {
+      showError(err.message);
     } finally {
       setPushingApi(false);
     }
@@ -266,12 +415,15 @@ export default function Flussonic2312Page({ onPreview }) {
     }
 
     setMigratingLinks(true);
+    setErrorNotice('');
     try {
       const res = await apiFetch('/api/flussonic-2312/migrate-links-by-ip', {
         method: 'POST',
         body: JSON.stringify({
           server_id: selectedServer?.id || null,
           flussonic_base_url: cleanOut,
+          username: flussonicAuthUser,
+          password: flussonicAuthPass,
           filter_host: filterHost,
           selected_stream_ids: selectedPreviewIds,
           local_astra_host: localAstraHost,
@@ -286,12 +438,15 @@ export default function Flussonic2312Page({ onPreview }) {
         })
       });
       await loadServersAndHosts();
+      if (res.server?.id) setSelectedId(res.server.id);
       await refreshIpPreview(filterHost);
       showToast(
-        `✅ ${res.updatedLinksCount} links actualizados a Flussonic 23.12 conservando IDs, nombres, orden y categorías (${res.untouchedCount} canales de otras IPs quedaron intactos).`
+        `✅ ${res.updatedLinksCount} links actualizados a Flussonic 23.12${
+          alsoPush ? ` (${res.pushedToFlussonicCount} enviados por API v3)` : ''
+        } conservando IDs, nombres, orden y categorías (${res.untouchedCount} canales de otras IPs quedaron intactos).`
       );
     } catch (err) {
-      window.alert(err.message);
+      showError(err.message);
     } finally {
       setMigratingLinks(false);
     }
@@ -509,6 +664,29 @@ export default function Flussonic2312Page({ onPreview }) {
         </div>
       )}
 
+      {errorNotice && (
+        <div className="p-4 rounded-xl bg-rose-500/15 border border-rose-500/45 text-xs text-rose-100 space-y-2">
+          <div className="font-bold text-rose-300">⚠️ Diagnóstico Push API v3 Flussonic 23.12:</div>
+          <div className="leading-relaxed">{errorNotice}</div>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => handlePrepareLocalSshPush('panel_streams')}
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold"
+            >
+              💻 Generar Comando SSH Local (1 Línea) sin abrir puertos
+            </button>
+            <button
+              type="button"
+              onClick={() => setErrorNotice('')}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px]"
+            >
+              Cerrar aviso
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Sub-navigation Tabs */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
@@ -681,21 +859,47 @@ export default function Flussonic2312Page({ onPreview }) {
               </div>
             </div>
 
-            {/* Step 3: Flussonic Output URL for Panel Links */}
+            {/* Step 3: Flussonic Output URL + Inline API v3 Auth */}
             <div className="rounded-2xl bg-[#0e1526] border border-slate-800 p-4 space-y-2.5">
-              <div className="text-xs font-bold text-emerald-300">
-                Paso 3 · URL de tu Flussonic 23.12 para Actualizar los Links
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-bold text-emerald-300">
+                  Paso 3 · URL y Credenciales API v3 de tu Flussonic 23.12
+                </div>
+                <button
+                  type="button"
+                  disabled={testingConn}
+                  onClick={handleTestFlussonicConnection}
+                  className="px-2.5 py-1 rounded-lg bg-violet-600/30 hover:bg-violet-600/50 border border-violet-400/40 text-[11px] font-bold text-violet-100"
+                >
+                  {testingConn ? 'Probando...' : '🔍 Probar API v3'}
+                </button>
               </div>
               <div>
                 <span className="text-[11px] text-slate-400 block mb-1">
-                  IP:Puerto de Flussonic accesible desde este Panel Nube:
+                  IP:Puerto de Flussonic accesible por el Panel (o LAN si tienes Nodo ProLiant):
                 </span>
                 <input
                   type="text"
                   value={flussonicOutUrl}
                   onChange={(e) => setFlussonicOutUrl(e.target.value)}
                   placeholder="http://IP_PUBLICA_FLUSSONIC:8080"
-                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white font-mono"
+                  className="w-full px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white font-mono"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={flussonicAuthUser}
+                  onChange={(e) => setFlussonicAuthUser(e.target.value)}
+                  placeholder="Usuario edit_auth (admin)"
+                  className="px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-white"
+                />
+                <input
+                  type="password"
+                  value={flussonicAuthPass}
+                  onChange={(e) => setFlussonicAuthPass(e.target.value)}
+                  placeholder="Contraseña o cluster_key"
+                  className="px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-white"
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -730,16 +934,25 @@ export default function Flussonic2312Page({ onPreview }) {
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-bold transition"
               >
                 <FileCode className="w-4 h-4" />
-                1A. Generar flussonic.conf (Solo estos {selectedPreviewIds.length} canales)
+                1A. Generar flussonic.conf ({selectedPreviewIds.length})
               </button>
               <button
                 type="button"
                 onClick={handlePushFilteredToFlussonicApi}
                 disabled={pushingApi || selectedPreviewIds.length === 0}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-600/30 hover:bg-violet-600/50 border border-violet-500/40 disabled:opacity-40 text-violet-100 text-xs font-bold transition"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-bold transition shadow-md shadow-violet-950/40"
               >
                 <Send className="w-3.5 h-3.5" />
                 {pushingApi ? 'Enviando API v3...' : `1B. Push API v3 a Flussonic (${selectedPreviewIds.length})`}
+              </button>
+              <button
+                type="button"
+                onClick={() => handlePrepareLocalSshPush('panel_streams')}
+                disabled={selectedPreviewIds.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-emerald-500/35 disabled:opacity-40 text-emerald-300 text-xs font-bold transition"
+                title="Si tu Flussonic 23.12 está detrás de NAT MikroTik sin puerto público de administración, ejecuta 1 línea por SSH dentro de Flussonic"
+              >
+                💻 1C. Push SSH Local (NAT)
               </button>
             </div>
 
@@ -762,21 +975,45 @@ export default function Flussonic2312Page({ onPreview }) {
                 <Link2 className="w-4 h-4" />
                 {migratingLinks
                   ? 'Actualizando Links...'
-                  : `2. Solo Actualizar Links de estos ${selectedPreviewIds.length} Canales`}
+                  : `2. Solo Actualizar Links (${selectedPreviewIds.length})`}
               </button>
-              {selectedServer && (
-                <button
-                  type="button"
-                  disabled={migratingLinks || selectedPreviewIds.length === 0}
-                  onClick={() => handleMigrateLinksInPlace({ limitCount: 0, alsoPush: true })}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-white text-xs font-bold"
-                >
-                  <Zap className="w-4 h-4" />
-                  Todo en 1 Clic (Push API v3 + Actualizar Links)
-                </button>
-              )}
+              <button
+                type="button"
+                disabled={migratingLinks || selectedPreviewIds.length === 0}
+                onClick={() => handleMigrateLinksInPlace({ limitCount: 0, alsoPush: true })}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-white text-xs font-bold"
+              >
+                <Zap className="w-4 h-4" />
+                Todo en 1 Clic (Push API v3 + Actualizar Links)
+              </button>
             </div>
           </div>
+
+          {/* 1-Line Local SSH Push Command Box (works behind any MikroTik NAT without opening Flussonic admin port) */}
+          {localSshCommand && (
+            <div className="rounded-2xl bg-[#071318] border border-emerald-500/45 p-4 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-emerald-300">
+                  💻 Push API v3 Local (127.0.0.1) — Pega esta línea en el SSH de tu servidor Flussonic 23.12 (detecta puerto y edit_auth automáticamente):
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(localSshCommand);
+                    setCopiedSsh(true);
+                    setTimeout(() => setCopiedSsh(false), 2500);
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs text-white font-bold"
+                >
+                  {copiedSsh ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedSsh ? 'Comando Copiado' : 'Copiar Comando SSH'}
+                </button>
+              </div>
+              <pre className="p-3 rounded-xl bg-[#050b10] border border-slate-800 text-xs font-mono text-emerald-200 overflow-x-auto">
+                {localSshCommand}
+              </pre>
+            </div>
+          )}
 
           {/* Generated Filtered flussonic.conf Box (if user clicked 1A) */}
           {generatedConf && (
@@ -1121,13 +1358,23 @@ export default function Flussonic2312Page({ onPreview }) {
                 />
                 24/7 Constante (`stream` estático)
               </label>
-              <button
-                type="button"
-                onClick={() => handleGenerateConf('astra_m3u')}
-                className="py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold"
-              >
-                Generar flussonic.conf desde M3U
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleGenerateConf('astra_m3u')}
+                  className="flex-1 py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold"
+                >
+                  Generar .conf
+                </button>
+                <button
+                  type="button"
+                  disabled={pushingApi}
+                  onClick={handlePushM3uToFlussonicApi}
+                  className="flex-1 py-2 px-3 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-bold"
+                >
+                  {pushingApi ? 'Enviando...' : 'Push API v3'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1238,6 +1485,18 @@ export default function Flussonic2312Page({ onPreview }) {
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                   />
                 </div>
+              </div>
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">
+                  Opcional: API Bearer Token o cluster_key (si no usas edit_auth)
+                </label>
+                <input
+                  type="password"
+                  placeholder="Dejar vacío si usas usuario y contraseña edit_auth"
+                  value={createForm.api_token}
+                  onChange={(e) => setCreateForm({ ...createForm, api_token: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                />
               </div>
               <div>
                 <label className="text-slate-300 font-semibold block mb-1">
