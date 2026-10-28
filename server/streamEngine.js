@@ -40,6 +40,21 @@ export const DISK_HLS_ROOT = path.join(RUNTIME_DIR, 'hls');
 export const HLS_WINDOW_SECONDS = 24;
 
 /**
+ * Ventana HLS real según la Segmentación configurada: segDur × (List Size + Delete Threshold).
+ * Sirve para estimar RAM y para decidir si un canal cabe en RAMDisk o va a disco.
+ * Se acota a 12–90 s para no subestimar el buffer del reproductor.
+ */
+export function getHlsWindowSeconds() {
+  try {
+    const seg = getSegmentSettings();
+    const secs = seg.segmentDuration * (seg.listSize + Math.max(0, seg.deleteThreshold));
+    return Math.min(90, Math.max(12, secs));
+  } catch {
+    return HLS_WINDOW_SECONDS;
+  }
+}
+
+/**
  * Estima cuánto espacio necesita el RAMDisk para TODOS los canales en transcodificación.
  * Se asume mínimo 6.5 Mbps por canal Copy (puede recibir HD de 8-12 Mbps del Flussonic origen),
  * porque quedarse sin espacio en tmpfs (ENOSPC) tumba los 145 canales de golpe.
@@ -60,7 +75,7 @@ export function estimateHlsFootprintBytes() {
       const effective = r.vcodec === 'copy' ? Math.max(declared, 6500) : declared;
       bitsPerSecond += effective * 1000;
     }
-    const windowBytes = Math.ceil((bitsPerSecond / 8) * HLS_WINDOW_SECONDS * 1.35);
+    const windowBytes = Math.ceil((bitsPerSecond / 8) * getHlsWindowSeconds() * 1.35);
     return windowBytes + 192 * 1024 * 1024;
   } catch {
     return 512 * 1024 * 1024;

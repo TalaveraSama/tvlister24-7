@@ -611,3 +611,23 @@ panel entrega esos segmentos a los clientes HLS/m3u8 y MPEG-TS.
 **Verificado en laboratorio:** `-map 0:a:2` cuando el español es la 2.ª pista, HLS con
 `-hls_time 3 -hls_list_size 5 -hls_delete_threshold 2 split_by_time`, modo `-f segment` con `index.m3u8`
 generado y entrega MPEG-TS continua, y purga/reconstrucción de segmentos en caliente sin cortar al resto de canales.
+
+#### 8.7.1. Presets recomendados y consumo de RAM
+
+La memoria del RAMDisk de un canal depende **sólo** de tres valores:
+`RAM por canal ≈ bitrate × Segment Duration × (List Size + Delete Threshold)`.
+El panel de Optimización FFmpeg ya usa esa cuenta real (`getHlsWindowSeconds`) para decidir si un canal cabe en
+`/dev/shm` o se deriva a disco.
+
+| Preset | Segmento | Lista | Delete | Ventana | RAM por canal (8 Mbps) | 145 HD |
+|---|---|---|---|---|---|---|
+| **Ahorro RAM/CPU** | 2 s | 4 | 1 | 10 s | ~10 MB | **~1.5 GB** |
+| Equilibrado (XUI) | 2 s | 6 | 2 | 16 s | ~16 MB | ~2.3 GB |
+| Máxima estabilidad | 4 s | 6 | 2 | 32 s | ~32 MB | ~4.6 GB |
+
+(Con canales de 12 Mbps multiplica por 1.5; el sistema suma 192 MB de reserva.)
+
+Sobre **Probe Size / Analysis Duration**: 200 000 (valor por defecto de XUI.one, ≈200 KB) es demasiado justo para
+HD: equivale a ~0,2 s de un canal de 8 Mbps y FFmpeg puede perder el SPS/PPS o la pista de audio al entrar en
+caliente. TVLister usa **5 000 000** (5 MB / 5 s) para fuentes HTTP-HLS. Bajar a **2 000 000 + 3 000 000 µs**
+ahorra RAM por proceso con 145 canales, pero hay que vigilar los primeros canales.
