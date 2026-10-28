@@ -368,19 +368,69 @@ tvlister-admin logs
 
 ---
 
-## 8. Módulo Avanzado: Multi-Puertos, Flussonic M4F, Servidor RTMP/SRT/RTSP y Protocolo MNF v1
+## 8. Módulo Avanzado: Ingesta RTMP/SRT/RTSP, Flussonic M4F, Multi-Puertos y Protocolo MNF v1
 
-Desde el menú lateral **Ingesta, Flussonic & MNF**, TVLister 24/7 incorpora cuatro tecnologías de nivel carrier:
+Desde el menú lateral **Ingesta, Flussonic & MNF**, el **Panel TVLister 24/7** incluye cuatro pestañas operativas de nivel carrier:
 
-1. **Multi-Puertos HTTP / Streaming Dinámicos**: Permite escuchar simultáneamente en múltiples puertos TCP (`8095`, `8880`, `25461`, `2082`, etc.) sobre la misma instancia sin reiniciar el puerto principal, evadiendo bloqueos de ISPs.
-2. **Importador Nativo Flussonic Media Server y Lector `m4f://`**:
-   * Conecta directamente con **Flussonic API v3** (`/streamer/api/v3/streams`), `/playlist.m3u8` o archivos `/etc/flussonic/flussonic.conf`.
-   * Traduce nativamente esquemas `m4f://`, `m4fs://`, `tshttp://` y `hls://` negociando **CMAF Fragmented MP4** (`/index.fmp4.m3u8`) con failover automático a HLS y MPEG-TS.
-3. **Servidor Propio de Ingesta en Vivo (RTMP + SRT + RTSP)**:
-   * Basado en binario aislado **MediaMTX v1.21.3** en `.runtime/bin/mediamtx` (instalación 1-click *Zero-Apt*, 100% compatible con servidores donde convive XUI.one).
-   * Genera claves `stream_key` autenticadas por HTTP contra SQLite para recibir señales en vivo desde **OBS Studio**, **vMix**, **Larix Broadcaster**, encoders **SRT** o cámaras **RTSP**, empaquetándolas automáticamente en CMAF `fmp4` de baja latencia.
-4. **Protocolo Propio Ultraligero MNF v1 (*TVLister Media NanoFrame*)**:
-   * Sustituye las celdas fijas de 188 bytes de MPEG-TS (`.ts`), eliminando paquetes nulos CBR (`0x1FFF`), repetición continua de tablas PSI (`PAT`/`PMT`) y cabeceras PES redundantes.
-   * Cabecera de conexión de **12 bytes** (`MNF\x01`) + **9 bytes por cuadro completo** (`< 0.25%` de overhead frente al `10%–18%` de `.ts`), logrando **12% a 18% de ahorro neto de ancho de banda** y **zapping instantáneo `< 35 ms`** gracias a su caché GOP Keyframe en RAM.
-   * Soporta trunking inter-servidor sin pérdidas (`mnf://origen:puerto/mnf/u/p/id.mnf` -> remuxeado automático en vivo a `.ts` para Smart TVs clásicas).
+### 8.1. Pestaña 1 — Protocolo Propio Ultraligero MNF v1 (*TVLister Media NanoFrame*)
+**¿Para qué sirve?**
+* Sustituye las celdas fijas de 188 bytes de MPEG-TS (`.ts`), eliminando paquetes nulos CBR (`0x1FFF`), repetición continua de tablas PSI (`PAT`/`PMT`) y cabeceras PES redundantes.
+* Usa una cabecera única de sesión de **12 bytes** (`MNF\x01`) + **9 bytes por cuadro completo** (`< 0.25%` de overhead frente al `10%–18%` de `.ts`), logrando **12% a 18% de ahorro neto de ancho de banda** y **zapping instantáneo `< 35 ms`** gracias a su caché GOP Keyframe en RAM.
+
+**¿Cómo utilizarlo paso a paso?**
+1. **Para enlazar dos servidores TVLister ahorrando ancho de banda (*Trunking Inter-VPS*)**:
+   * En el **Servidor A (Origen)** crea una línea de enlace (ej. `trunk01` / `clave01`).
+   * En el **Servidor B (Borde/Reventa)** ve a **Canales en Vivo → Nuevo Canal** y coloca como URL principal:
+     `mnf://IP_SERVIDOR_A:8095/mnf/trunk01/clave01/ID_CANAL.mnf`
+   * Entre ambos VPS viajará en binario ultraligero **MNF v1**, y cuando un cliente Smart TV o TiviMate pida `.ts` o `.m3u8` al Servidor B, TVLister lo convierte al vuelo sin gastar CPU en recodificación.
+2. **Para exportar una lista M3U completa en protocolo MNF**:
+   * Usa `http://TU_IP:8095/get.php?username=USUARIO&password=CLAVE&type=m3u_plus&output=mnf`.
+3. **Para medir el ahorro real**:
+   * Entra a **Laboratorio de Benchmark en Vivo**, pega opcionalmente cualquier URL `.ts` y pulsa **«Ejecutar Benchmark Ahora»**.
+
+---
+
+### 8.2. Pestaña 2 — Servidor de Ingesta en Vivo (RTMP / SRT / RTSP)
+**¿Para qué sirve?**
+Convierte tu VPS en un servidor receptor de transmisiones en vivo desde **OBS Studio**, **vMix**, **Larix Broadcaster (móvil)**, encoders **Haivision/Kiloview** o cámaras IP, sin instalar paquetes `apt` del sistema.
+
+**¿Cómo recibir una señal en vivo paso a paso?**
+1. Entra a **Ingesta, Flussonic & MNF → Servidor RTMP / SRT / RTSP**.
+2. Verifica que el indicador superior diga **EN EJECUCIÓN** (si deseas instalar el binario estático MediaMTX v1.21.3 para empaquetado CMAF `fmp4`, pulsa **«Activar e Instalar Motor RTMP/SRT/RTSP»** o ejecuta `tvlister-admin install-ingest`).
+3. En **Crear Nueva Clave de Transmisión**, escribe:
+   * **Nombre del Canal / Evento**: Ej. `Evento Deportivo PPV 1`
+   * **Stream Key**: Ej. `evento_ppv_01` (y opcionalmente una *Passphrase*)
+   * Pulsa **«Crear Punto de Ingesta»**. *(Esto crea automáticamente el canal en **Canales en Vivo**).*
+4. Copia la URL según tu transmisor:
+   * **En OBS Studio**: Ve a *Ajustes → Emisión → Servicio: Personalizado*:
+     * **Servidor**: `rtmp://TU_IP:1935/live` *(o el puerto libre asignado si XUI.one ocupa 1935)*
+     * **Clave de transmisión**: `evento_ppv_01`
+   * **En vMix / Larix Broadcaster (SRT)**:
+     * `srt://TU_IP:8890?streamid=publish:live/evento_ppv_01&pkt_size=1316`
+   * **En FFmpeg / Encoder RTSP**:
+     * `rtsp://TU_IP:8554/live/evento_ppv_01`
+5. Inicia transmisión en OBS/vMix: el punto pasará a verde brillante y todos tus clientes abonados podrán verlo al instante.
+
+---
+
+### 8.3. Pestaña 3 — Importador Flussonic Media Server y Lector `m4f://`
+**¿Cómo importar canales desde Flussonic paso a paso?**
+1. Entra a **Ingesta, Flussonic & MNF → Importar Flussonic & M4F**.
+2. Elige uno de los dos modos:
+   * **Conectar por API / URL**: Ingresa `http://IP_FLUSSONIC:8080`, usuario y contraseña de Flussonic.
+   * **Pegar `flussonic.conf`**: Pega el contenido de `/etc/flussonic/flussonic.conf`.
+3. Selecciona el **Protocolo de Lectura Preferido** (`m4f:// Nativo` recomendado: negocia CMAF `/index.fmp4.m3u8` con failover automático a HLS `/index.m3u8` y `/mpegts`).
+4. Pulsa **«Analizar Streams»** y luego **«Importar»**.
+5. *Uso directo individual*: También puedes pegar cualquier enlace `m4f://ip:puerto/nombre_canal` directamente en **Canales en Vivo → Nuevo Canal**.
+
+---
+
+### 8.4. Pestaña 4 — Multi-Puertos HTTP / Streaming Dinámicos
+**¿Cómo abrir más puertos simultáneos sin apagar el principal (`8095`)?**
+* **Desde el Panel Web**: Entra a **Ingesta, Flussonic & MNF → Multi-Puertos HTTP**, escribe el puerto deseado (ej. `8880` o `25461`, o pulsa uno de los botones rápidos ISP) y haz clic en **«Abrir Puerto Ahora»**.
+* **Desde SSH (abre además UFW + `iptables` automáticamente)**:
+  ```bash
+  tvlister-admin add-port 8880
+  ```
+Tus clientes podrán conectarse indistintamente por `http://TU_IP:8095` o `http://TU_IP:8880` con las mismas credenciales.
 
