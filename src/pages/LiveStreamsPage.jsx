@@ -29,7 +29,8 @@ import {
   ChevronsUp,
   ChevronsDown,
   GripVertical,
-  Volume2
+  Volume2,
+  Globe
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -123,6 +124,22 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   // Multi-selection for Bulk Edit / Bulk Delete / Bulk Actions
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkNotice, setBulkNotice] = useState('');
+
+  // Cambio masivo de IP/Puerto de origen
+  const [repHostOpen, setRepHostOpen] = useState(false);
+  const [repHostBusy, setRepHostBusy] = useState(false);
+  const [repHostPreview, setRepHostPreview] = useState(null);
+  const [repHostExtra, setRepHostExtra] = useState([]);
+  const [repHostForm, setRepHostForm] = useState({
+    oldHost: '',
+    oldPort: '',
+    newHost: '',
+    newPort: '',
+    includeBackup: true,
+    includeExtra: true,
+    onlyHttp: true,
+    scope: 'all'
+  });
 
   // Bulk Edit & Bulk Delete Modals
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
@@ -709,6 +726,51 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     }
   };
 
+  const runReplaceHost = async (apply = false) => {
+    setRepHostBusy(true);
+    try {
+      const res = await apiFetch('/api/streams/bulk-replace-host', {
+        method: 'POST',
+        body: JSON.stringify({
+          scope: repHostForm.scope,
+          ids: selectedIds,
+          category_filter_id: catFilter !== 'all' ? Number(catFilter) : null,
+          oldHost: repHostForm.oldHost.trim(),
+          oldPort: repHostForm.oldPort.trim(),
+          newHost: repHostForm.newHost.trim(),
+          newPort: repHostForm.newPort.trim(),
+          includeBackup: repHostForm.includeBackup,
+          includeExtra: repHostForm.includeExtra,
+          schemes: repHostForm.onlyHttp ? ['http', 'https'] : [],
+          apply
+        })
+      });
+      if (!apply) {
+        setRepHostPreview(res.preview || []);
+        setRepHostExtra(res.previewExtra || []);
+        if ((res.matchedCount || 0) === 0) {
+          setBulkNotice('⚠️ Ningún canal coincide con esa IP/puerto. Revisa los datos.');
+          setTimeout(() => setBulkNotice(''), 6000);
+        }
+      } else {
+        setRepHostOpen(false);
+        setRepHostPreview(null);
+        setRepHostExtra([]);
+        setBulkNotice(
+          `✅ ${res.updatedCount} canales cambiados a ${repHostForm.newHost}${
+            repHostForm.newPort ? ':' + repHostForm.newPort : ''
+          }${res.restartedWorkers ? ` · ${res.restartedWorkers} reiniciados escalonado` : ''}.`
+        );
+        setTimeout(() => setBulkNotice(''), 8000);
+        await loadAll();
+      }
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setRepHostBusy(false);
+    }
+  };
+
   const handleBulkDeleteConfirm = async () => {
     setBulkBusy(true);
     try {
@@ -1200,6 +1262,24 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
             <button
               onClick={() => {
+                setRepHostPreview(null);
+                setRepHostExtra([]);
+                setBulkNotice('');
+                setRepHostForm((prev) => ({
+                  ...prev,
+                  scope: selectedIds.length > 0 ? 'selected' : catFilter !== 'all' ? 'category' : 'all'
+                }));
+                setRepHostOpen(true);
+              }}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/35 text-xs font-semibold transition"
+              title="Cambiar la IP y/o el puerto de origen de muchos canales sin tocar el resto de la URL"
+            >
+              <Globe className="w-4 h-4" />
+              Cambiar IP / Puerto
+            </button>
+
+            <button
+              onClick={() => {
                 setProfNotice('');
                 const copyProf = findCopyCopy2500Profile();
                 if (copyProf) setBulkProfId(copyProf.id);
@@ -1649,6 +1729,194 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           </table>
         </div>
       </div>
+
+      {/* ==================== MODAL: CAMBIO MASIVO DE IP / PUERTO DE ORIGEN ==================== */}
+      {repHostOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-3xl rounded-2xl bg-[#0e1526] border border-slate-800 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Globe className="w-5 h-5 text-sky-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Cambiar IP / Puerto de Origen</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Reemplaza el host (y opcionalmente el puerto) de la URL de cada canal. La ruta, el usuario/clave
+                    y los parámetros se conservan intactos.
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setRepHostOpen(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto text-xs">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">IP actual (a buscar)</label>
+                  <input
+                    value={repHostForm.oldHost}
+                    onChange={(e) => setRepHostForm({ ...repHostForm, oldHost: e.target.value })}
+                    placeholder="38.226.161.148"
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Puerto actual (opcional)</label>
+                  <input
+                    value={repHostForm.oldPort}
+                    onChange={(e) => setRepHostForm({ ...repHostForm, oldPort: e.target.value })}
+                    placeholder="todos"
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">IP / dominio nuevo</label>
+                  <input
+                    value={repHostForm.newHost}
+                    onChange={(e) => setRepHostForm({ ...repHostForm, newHost: e.target.value })}
+                    placeholder="nueva.ip.o.dominio"
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Puerto nuevo</label>
+                  <input
+                    value={repHostForm.newPort}
+                    onChange={(e) => setRepHostForm({ ...repHostForm, newPort: e.target.value })}
+                    placeholder="conservar"
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">Alcance</label>
+                  <select
+                    value={repHostForm.scope}
+                    onChange={(e) => setRepHostForm({ ...repHostForm, scope: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="all">Todos los canales ({streams.length})</option>
+                    <option value="selected">Sólo seleccionados ({selectedIds.length})</option>
+                    <option value="category">Categoría del filtro actual</option>
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRepHostForm({ ...repHostForm, includeBackup: !repHostForm.includeBackup })}
+                  className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border transition ${
+                    repHostForm.includeBackup
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                      : 'bg-[#090e1a] border-slate-800 text-slate-400'
+                  }`}
+                >
+                  <span className="text-left">Incluir URL de respaldo</span>
+                  <span className={`w-9 h-5 rounded-full relative shrink-0 ${repHostForm.includeBackup ? 'bg-emerald-500' : 'bg-slate-700'}`}>
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${repHostForm.includeBackup ? 'left-4.5' : 'left-0.5'}`} />
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRepHostForm({ ...repHostForm, includeExtra: !repHostForm.includeExtra })}
+                  className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border transition ${
+                    repHostForm.includeExtra
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                      : 'bg-[#090e1a] border-slate-800 text-slate-400'
+                  }`}
+                  title="También actualiza URL original, espejo Astra, canales WK2500 y troncales MNF que usen esa IP"
+                >
+                  <span className="text-left">Incluir URL original / Astra / WK2500</span>
+                  <span className={`w-9 h-5 rounded-full relative shrink-0 ${repHostForm.includeExtra ? 'bg-emerald-500' : 'bg-slate-700'}`}>
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${repHostForm.includeExtra ? 'left-4.5' : 'left-0.5'}`} />
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRepHostForm({ ...repHostForm, onlyHttp: !repHostForm.onlyHttp })}
+                  className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border transition ${
+                    repHostForm.onlyHttp
+                      ? 'bg-sky-500/15 border-sky-500/40 text-sky-200'
+                      : 'bg-[#090e1a] border-slate-800 text-slate-400'
+                  }`}
+                  title="Si lo desactivas también se reescriben fuentes UDP / RTMP / RTSP"
+                >
+                  <span className="text-left">Sólo fuentes HTTP / HLS</span>
+                  <span className={`w-9 h-5 rounded-full relative shrink-0 ${repHostForm.onlyHttp ? 'bg-sky-500' : 'bg-slate-700'}`}>
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${repHostForm.onlyHttp ? 'left-4.5' : 'left-0.5'}`} />
+                  </span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => runReplaceHost(false)}
+                  disabled={repHostBusy || !repHostForm.newHost.trim()}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 font-semibold disabled:opacity-50"
+                >
+                  {repHostBusy ? 'Revisando…' : '1. Previsualizar cambios'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => runReplaceHost(true)}
+                  disabled={repHostBusy || (repHostPreview ? repHostPreview.length : 0) + repHostExtra.length === 0}
+                  className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold disabled:opacity-50"
+                >
+                  2. Aplicar a {(repHostPreview ? repHostPreview.length : 0) + repHostExtra.length} registro(s)
+                </button>
+                <span className="text-[11px] text-slate-500 self-center">
+                  Primero previsualiza: verás exactamente la URL antes y después de cada canal.
+                </span>
+              </div>
+
+              {repHostExtra.length > 0 && (
+                <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3 space-y-1">
+                  <div className="text-[11px] font-semibold text-sky-200">
+                    {repHostExtra.length} registro(s) en otras tablas también se actualizarán
+                  </div>
+                  {repHostExtra.map((x) => (
+                    <div key={`${x.table}-${x.id}`} className="font-mono text-[10px] text-slate-300 break-all">
+                      [{x.table}] {x.name}: {x.before} → {x.after}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {repHostPreview && repHostPreview.length > 0 && (
+                <div className="rounded-xl border border-slate-800 overflow-hidden">
+                  <div className="px-3 py-2 bg-[#131c31] text-[11px] text-slate-300 font-semibold">
+                    {repHostPreview.length} canal(es) coinciden
+                  </div>
+                  <div className="max-h-64 overflow-y-auto divide-y divide-slate-800/70">
+                    {repHostPreview.map((p) => (
+                      <div key={p.id} className="px-3 py-2 space-y-0.5">
+                        <div className="text-slate-200 font-semibold">
+                          #{p.id} · {p.name}
+                          {p.running && <span className="ml-2 text-[10px] text-amber-300">se reiniciará</span>}
+                        </div>
+                        <div className="font-mono text-[10px] text-rose-300 break-all">- {p.before}</div>
+                        <div className="font-mono text-[10px] text-emerald-300 break-all">+ {p.after}</div>
+                        {p.backupBefore && (
+                          <div className="font-mono text-[10px] text-slate-500 break-all">
+                            respaldo: {p.backupBefore} → {p.backupAfter}
+                          </div>
+                        )}
+                        {(p.extras || []).map((x) => (
+                          <div key={x.col} className="font-mono text-[10px] text-sky-300/80 break-all">
+                            {x.label}: {x.before} → {x.after}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ==================== MODAL: EDICIÓN MASIVA DE CANALES ==================== */}
       {bulkEditOpen && (

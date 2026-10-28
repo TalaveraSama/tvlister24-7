@@ -631,3 +631,47 @@ Sobre **Probe Size / Analysis Duration**: 200 000 (valor por defecto de XUI.one,
 HD: equivale a ~0,2 s de un canal de 8 Mbps y FFmpeg puede perder el SPS/PPS o la pista de audio al entrar en
 caliente. TVLister usa **5 000 000** (5 MB / 5 s) para fuentes HTTP-HLS. Bajar a **2 000 000 + 3 000 000 µs**
 ahorra RAM por proceso con 145 canales, pero hay que vigilar los primeros canales.
+
+### 8.8. Cambio Masivo de IP / Puerto de Origen (migración de proveedor)
+
+Cuando el proveedor cambia de IP o de puerto (por ejemplo un panel/Flussonic que pasa de
+`38.226.161.148:8080` a otra IP:puerto), **no hay que editar canal por canal**:
+
+`Streams` → botón **Cambiar IP / Puerto** (barra superior).
+
+1. **IP actual (a buscar)** — la IP vieja, ej. `38.226.161.148`.
+2. **Puerto actual (opcional)** — si lo dejas vacío se reescribe la URL en *cualquier* puerto.
+3. **IP / dominio nuevo** y **Puerto nuevo** (si lo dejas vacío se conserva el puerto de cada URL).
+4. **Alcance**: todos los canales, sólo los seleccionados o la categoría del filtro actual.
+5. **Incluir URL de respaldo** / **Incluir URL original-Astra-WK2500** (opcional).
+6. **1. Previsualizar** → muestra la URL antes y después de cada canal; **2. Aplicar** → guarda y reinicia
+   escalonado sólo los canales que estaban corriendo.
+
+Qué se reescribe exactamente (el resto de la URL **no** se toca):
+
+| Tabla | Columna |
+|---|---|
+| `streams` | `source_url`, `backup_url` |
+| `streams` | `original_source_url`, `astra_local_url` (si se incluye) |
+| `wk2500_channels` | `custom_source_url` (si se incluye) |
+| `mnf_trunks` | `origin_url` (si se incluye) |
+
+Se conservan esquema, `usuario:clave@`, ruta y query string:
+
+```
+http://user:pass@38.226.161.148:8080/live/espn/index.m3u8?token=abc
+   -> http://user:pass@45.10.20.30:2095/live/espn/index.m3u8?token=abc
+```
+
+Validaciones: la IP/dominio nuevo no admite `http://` ni caracteres raros y el puerto debe estar entre
+1 y 65535 (si no, responde `400`). Las fuentes `udp://`, `rtmp://` sólo se tocan si se desactiva
+“Sólo fuentes HTTP / HLS”.
+
+Equivalente por API (útil para automatizar):
+
+```bash
+curl -s -X POST http://127.0.0.1:8095/api/streams/bulk-replace-host \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"scope":"all","oldHost":"38.226.161.148","newHost":"NUEVA_IP","newPort":"2095","apply":false}'
+# Cuando el preview sea correcto, repetir con "apply": true
+```

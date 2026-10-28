@@ -1096,6 +1096,228 @@ app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true, updatedCount: targetIds.length, restartedWorkers: toLaunch.length });
 });
 
+/**
+ * Reescribe el host (y opcionalmente el puerto) de una URL conservando esquema,
+ * credenciales, ruta y query. Ej: http://38.226.161.148:8080/live/a/1.m3u8
+ *   -> http://nueva.ip:2095/live/a/1.m3u8
+ */
+function rewriteStreamUrlHost(rawUrl, { oldHost = '', oldPort = '', newHost = '', newPort = '', schemes = null }) {
+  const url = String(rawUrl || '').trim();
+  if (!url) return null;
+  const m = /^([a-z0-9+.\-]+):\/\/([^/@]*@)?(\[[0-9a-fA-F:]+\]|[^/:?#]+)(?::(\d+))?/i.exec(url);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  if (Array.isArray(schemes) && schemes.length > 0 && !schemes.includes(scheme)) return null;
+  const userinfo = m[2] || '';
+  const host = m[3];
+  const port = m[4] || '';
+  const bareHost = host.replace(/^\[|\]$/g, '').toLowerCase();
+
+  const wantedHost = String(oldHost || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
+  if (wantedHost && bareHost !== wantedHost) return null;
+  const wantedPort = String(oldPort || '').trim();
+  if (wantedPort && port !== wantedPort) return null;
+
+  const targetHost = String(newHost || '').trim() || host;
+  const targetPort = String(newPort || '').trim() || port;
+  const hostOut = targetHost.includes(':') && !targetHost.startsWith('[') ? `[${targetHost}]` : targetHost;
+  const rest = url.slice(m[0].length);
+  const rebuilt = `${m[1]}://${userinfo}${hostOut}${targetPort ? ':' + targetPort : ''}${rest}`;
+  return rebuilt === url ? null : rebuilt;
+}
+
+app.post('/api/streams/bulk-replace-host', requireAuth, requireAdmin, (req, res) => {
+  const {
+    scope = 'selected',
+    ids = [],
+    category_filter_id = null,
+    oldHost = '',
+    oldPort = '',
+    newHost = '',
+    newPort = '',
+    includeBackup = true,
+    includeExtra = true,
+    schemes = ['http', 'https'],
+    apply = false
+  } = req.body || {};
+
+  const cleanHost = String(newHost || '').trim().toLowerCase();
+  if (!cleanHost || !/^[a-z0-9.\-]+$/.test(cleanHost)) {
+    return res.status(400).json({
+      error: 'Escribe la nueva IP o dominio de destino (sólo letras, números, puntos y guiones, sin http://).'
+    });
+  }
+  const cleanPort = String(newPort || '').trim();
+  if (cleanPort && (!/^\d+$/.test(cleanPort) || Number(cleanPort) < 1 || Number(cleanPort) > 65535)) {
+    return res.status(400).json({ error: 'El puerto nuevo debe ser un número entre 1 y 65535 (o déjalo vacío para conservar el actual).' });
+  }
+  const oldPortClean = String(oldPort || '').trim();
+  if (oldPortClean && (!/^\d+$/.test(oldPortClean) || Number(oldPortClean) < 1 || Number(oldPortClean) > 65535)) {
+    return res.status(400).json({ error: 'El puerto actual debe ser numérico (o déjalo vacío para no filtrar por puerto).' });
+  }
+
+  let targetRows = [];
+  if (scope === 'all') {
+    targetRows = db.prepare('SELECT * FROM streams').all();
+  } else if (scope === 'category' && category_filter_id && category_filter_id !== 'all') {
+    targetRows = db.prepare('SELECT * FROM streams WHERE category_id = ?').all(Number(category_filter_id));
+  } else {
+    const cleanIds = Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : [];
+    if (cleanIds.length === 0) {
+      return res.status(400).json({ error: 'Selecciona al menos un canal (o usa el alcance Todo / Categoría).' });
+    }
+    const placeholders = cleanIds.map(() => '?').join(',');
+    targetRows = db.prepare(`SELECT * FROM streams WHERE id IN (${placeholders})`).all(...cleanIds);
+  }
+
+  const opts = {
+    oldHost: String(oldHost || '').trim(),
+    oldPort: oldPortClean,
+    newHost: cleanHost,
+    newPort: cleanPort,
+    schemes: Array.isArray(schemes) && schemes.length > 0 ? schemes.map((x) => String(x).toLowerCase()) : null
+  };
+
+  // Columnas que también pueden llevar la IP vieja (URL original de importación y espejo Astra)
+  const extraStreamCols = [
+    ['original_source_url', 'URL original'],
+    ['astra_local_url', 'URL Astra local']
+  ];
+
+  const matched = [];
+  const columnUpdates = []; // { table, id, column, value }
+
+  for (const row of targetRows) {
+    const nextSource = rewriteStreamUrlHost(row.source_url, opts);
+    const nextBackup = includeBackup ? rewriteStreamUrlHost(row.backup_url, opts) : null;
+    const extras = [];
+    if (includeExtra) {
+      for (const [col, label] of extraStreamCols) {
+        const next = rewriteStreamUrlHost(row[col], opts);
+        if (next) extras.push({ col, label, before: row[col], after: next });
+      }
+    }
+    if (!nextSource && !nextBackup && extras.length === 0) continue;
+
+    const entry = {
+      id: row.id,
+      name: row.name,
+      before: row.source_url,
+      after: nextSource || row.source_url,
+      backupBefore: nextBackup ? row.backup_url : '',
+      backupAfter: nextBackup || '',
+      extras,
+      running: row.stream_mode === 'transcode' && row.status === 'running'
+    };
+    matched.push(entry);
+    if (nextSource) columnUpdates.push({ table: 'streams', id: row.id, column: 'source_url', value: nextSource });
+    if (nextBackup) columnUpdates.push({ table: 'streams', id: row.id, column: 'backup_url', value: nextBackup });
+    for (const e of extras) columnUpdates.push({ table: 'streams', id: row.id, column: e.col, value: e.after });
+  }
+
+  // Otras tablas que guardan una URL de origen con la misma IP (WK2500 y troncales MNF)
+  const extraTables = [];
+  if (includeExtra) {
+    try {
+      for (const row of db.prepare('SELECT catv_ch, custom_name, custom_source_url FROM wk2500_channels').all()) {
+        const next = rewriteStreamUrlHost(row.custom_source_url, opts);
+        if (next) {
+          extraTables.push({
+            table: 'wk2500_channels',
+            id: row.catv_ch,
+            name: row.custom_name,
+            before: row.custom_source_url,
+            after: next
+          });
+          columnUpdates.push({
+            table: 'wk2500_channels',
+            id: row.catv_ch,
+            column: 'custom_source_url',
+            value: next,
+            keyColumn: 'catv_ch'
+          });
+        }
+      }
+    } catch {
+      // tabla no disponible en versiones antiguas
+    }
+    try {
+      for (const row of db.prepare('SELECT id, name, origin_url FROM mnf_trunks').all()) {
+        const next = rewriteStreamUrlHost(row.origin_url, opts);
+        if (next) {
+          extraTables.push({ table: 'mnf_trunks', id: row.id, name: row.name, before: row.origin_url, after: next });
+          columnUpdates.push({ table: 'mnf_trunks', id: row.id, column: 'origin_url', value: next });
+        }
+      }
+    } catch {
+      // tabla no disponible en versiones antiguas
+    }
+  }
+
+  if (!apply) {
+    return res.json({
+      ok: true,
+      dryRun: true,
+      scanned: targetRows.length,
+      matchedCount: matched.length,
+      extraCount: extraTables.length,
+      preview: matched.slice(0, 200),
+      previewExtra: extraTables.slice(0, 100)
+    });
+  }
+  if (columnUpdates.length === 0) {
+    return res.json({ ok: true, dryRun: false, matchedCount: 0, updatedCount: 0, restartedWorkers: 0 });
+  }
+
+  try {
+    withSqliteBusyRetry(() => {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const stmtCache = new Map();
+        for (const u of columnUpdates) {
+          const sql = `UPDATE ${u.table} SET ${u.column} = ? WHERE ${u.keyColumn || 'id'} = ?`;
+          let stmt = stmtCache.get(sql);
+          if (!stmt) {
+            stmt = db.prepare(sql);
+            stmtCache.set(sql, stmt);
+          }
+          stmt.run(u.value, u.id);
+        }
+        const touched = matched.map((m) => m.id);
+        if (touched.length > 0) {
+          db.prepare(`UPDATE streams SET pid = NULL WHERE id IN (${touched.map(() => '?').join(',')})`).run(...touched);
+        }
+        db.exec('COMMIT;');
+      } catch (innerErr) {
+        try {
+          db.exec('ROLLBACK;');
+        } catch {
+          // ignore
+        }
+        throw innerErr;
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Error al cambiar las URLs de los canales.' });
+  }
+
+  const toLaunch = [];
+  for (const m of matched) {
+    stopWorker(`stream_${m.id}`);
+    if (m.running) toLaunch.push(m.id);
+  }
+  if (toLaunch.length > 0) scheduleStaggeredStreamLaunches(toLaunch, 80);
+
+  res.json({
+    ok: true,
+    dryRun: false,
+    matchedCount: matched.length,
+    extraCount: extraTables.length,
+    updatedCount: matched.length,
+    restartedWorkers: toLaunch.length
+  });
+});
+
 app.post('/api/streams/bulk-delete', requireAuth, requireAdmin, (req, res) => {
   const { scope = 'selected', ids = [], category_filter_id = null } = req.body || {};
 
