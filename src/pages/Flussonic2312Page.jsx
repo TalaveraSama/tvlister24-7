@@ -92,6 +92,27 @@ export default function Flussonic2312Page({ onPreview }) {
   const [m4fTranscodeMode, setM4fTranscodeMode] = useState('copy_pure');
   const [convertingM4f, setConvertingM4f] = useState(false);
 
+  // 3-Stage ProLiant Audio Leveler -> Local Flussonic -> Remote Flussonic #2 (Tab 6)
+  const [relayForm, setRelayForm] = useState({
+    proliant_lan_url: '',
+    trunk_username: 'troncal_flussonic',
+    trunk_password: 'proliant247',
+    audio_preset: 'standard',
+    audio_bitrate: '128k',
+    proliant_video_mode: 'copy_video_leveled',
+    push_local_flussonic: true,
+    local_flussonic_url: 'http://192.168.88.20:8080',
+    local_flussonic_user: 'admin',
+    local_flussonic_pass: '',
+    local_flussonic_public_host: '',
+    push_remote_flussonic: false,
+    remote_flussonic_url: '',
+    remote_flussonic_user: 'admin',
+    remote_flussonic_pass: ''
+  });
+  const [runningRelaySetup, setRunningRelaySetup] = useState(false);
+  const [relayResult, setRelayResult] = useState(null);
+
   const selectedServer = servers.find((s) => s.id === selectedId) || servers[0] || null;
 
   const showToast = (msg) => {
@@ -138,6 +159,20 @@ export default function Flussonic2312Page({ onPreview }) {
 
   useEffect(() => {
     loadServersAndHosts();
+    apiFetch('/api/flussonic-2312/proliant-relay-defaults')
+      .then((res) => {
+        if (res?.ok) {
+          setRelayForm((prev) => ({
+            ...prev,
+            proliant_lan_url: res.proliant_lan_url || prev.proliant_lan_url,
+            trunk_username: res.trunk_username || prev.trunk_username,
+            trunk_password: res.trunk_password || prev.trunk_password,
+            audio_preset: res.audio_preset || prev.audio_preset,
+            audio_bitrate: res.audio_bitrate || prev.audio_bitrate
+          }));
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -538,6 +573,29 @@ export default function Flussonic2312Page({ onPreview }) {
     }
   };
 
+  const handleSetupProliantLeveledRelay = async (e) => {
+    e.preventDefault();
+    setRunningRelaySetup(true);
+    setErrorNotice('');
+    try {
+      const res = await apiFetch('/api/flussonic-2312/setup-proliant-leveled-relay', {
+        method: 'POST',
+        body: JSON.stringify(relayForm)
+      });
+      setRelayResult(res);
+      await loadServersAndHosts();
+      showToast(
+        `🎚️ ¡Cadena activa! ${res.leveledStreamsCount} canales nivelando audio 24/7 en el ProLiant${
+          res.localPushedCount ? `, ${res.localPushedCount} enviados a Flussonic Local` : ''
+        }${res.remotePushedCount ? ` y ${res.remotePushedCount} enlazados en Flussonic #2 vía M4F` : ''}.`
+      );
+    } catch (err) {
+      setErrorNotice(err.message);
+    } finally {
+      setRunningRelaySetup(false);
+    }
+  };
+
   const handleSyncLive = async (srvOverride = null) => {
     const target = srvOverride || selectedServer;
     if (!target) return;
@@ -809,6 +867,17 @@ export default function Flussonic2312Page({ onPreview }) {
           >
             <Zap className="w-3.5 h-3.5" />
             5. Pasar Streams TS / HLS → M4F Flussonic
+          </button>
+          <button
+            onClick={() => setActiveSubTab('proliant_relay')}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold border transition ${
+              activeSubTab === 'proliant_relay'
+                ? 'bg-gradient-to-r from-emerald-600 to-cyan-600 text-white border-emerald-400 shadow-lg shadow-emerald-950/50'
+                : 'bg-[#0e1526] text-emerald-300 border-emerald-500/40 hover:border-emerald-400'
+            }`}
+          >
+            <Server className="w-3.5 h-3.5" />
+            6. ProLiant (Nivelar Audio) → Flussonic Local → Flussonic #2
           </button>
         </div>
 
@@ -1681,6 +1750,231 @@ export default function Flussonic2312Page({ onPreview }) {
               </button>
             </div>
           </div>
+        </form>
+      )}
+
+      {activeSubTab === 'proliant_relay' && (
+        <form
+          onSubmit={handleSetupProliantLeveledRelay}
+          className="rounded-2xl bg-[#0e1526] border border-emerald-500/40 p-5 space-y-5"
+        >
+          <div className="space-y-1">
+            <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 text-[11px] font-bold">
+              ARQUITECTURA MAESTRA DE CABECERA 24/7 · SONIDO NIVELADO PAREJO + ENLACE M4F SIN CORTES
+            </div>
+            <h2 className="text-base font-bold text-white">
+              Cadena en 1 Clic: Panel Local HP ProLiant G9 (Nivelar Audio) → Flussonic Local → Segundo Flussonic (`M4F`)
+            </h2>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Ejecuta este asistente <strong>dentro del Panel TVLister instalado en tu HP ProLiant Gen9</strong>. El ProLiant nivela el volumen de todos los canales en tiempo real (`dynaudnorm` 48kHz estéreo) entregando flujo continuo <code>MPEG-TS</code> en memoria RAM hacia tu <strong>Flussonic Local (0% CPU)</strong>, y tu Flussonic Local los envía estables por <code>m4f://</code> a tu <strong>Segundo Flussonic</strong>.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 text-xs">
+            {/* Stage 1: ProLiant Gen9 Audio Leveler */}
+            <div className="rounded-xl bg-[#090e1a] border border-emerald-500/35 p-4 space-y-3">
+              <div className="font-bold text-emerald-300 uppercase text-[11px]">
+                Etapa 1 · Este HP ProLiant G9 (Nivelador 24/7)
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">IP:Puerto LAN de este Panel en el ProLiant</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="http://192.168.88.50:8095"
+                  value={relayForm.proliant_lan_url}
+                  onChange={(e) => setRelayForm({ ...relayForm, proliant_lan_url: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-emerald-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Curva de Nivelación de Audio Broadcast</label>
+                <select
+                  value={relayForm.audio_preset}
+                  onChange={(e) => setRelayForm({ ...relayForm, audio_preset: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                >
+                  <option value="standard">🎚️ TV Estándar (-13 dBFS parejo · Recomendado)</option>
+                  <option value="voice">🎙️ Deportes & Noticias (Realza voces bajas y frena comerciales)</option>
+                  <option value="cinema">🎬 Cine & Películas (Rango dinámico suave)</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Procesamiento de Video en el ProLiant</label>
+                <select
+                  value={relayForm.proliant_video_mode}
+                  onChange={(e) => setRelayForm({ ...relayForm, proliant_video_mode: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                >
+                  <option value="copy_video_leveled">⚡ Copy Video (0% CPU Video) + Audio AAC Nivelado</option>
+                  <option value="deint_x264_leveled">📺 Anti-Rayas YADIF x264 + Audio AAC Nivelado</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-slate-400 block mb-1">Línea Troncal</label>
+                  <input
+                    type="text"
+                    value={relayForm.trunk_username}
+                    onChange={(e) => setRelayForm({ ...relayForm, trunk_username: e.target.value })}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-400 block mb-1">Clave Troncal</label>
+                  <input
+                    type="text"
+                    value={relayForm.trunk_password}
+                    onChange={(e) => setRelayForm({ ...relayForm, trunk_password: e.target.value })}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Stage 2: Local Flussonic #1 */}
+            <div className="rounded-xl bg-[#090e1a] border border-cyan-500/35 p-4 space-y-3">
+              <div className="font-bold text-cyan-300 uppercase text-[11px]">
+                Etapa 2 · Flussonic #1 Local (Recibe del ProLiant)
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">URL LAN de tu Flussonic Local</label>
+                <input
+                  type="text"
+                  placeholder="http://192.168.88.20:8080"
+                  value={relayForm.local_flussonic_url}
+                  onChange={(e) => setRelayForm({ ...relayForm, local_flussonic_url: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-cyan-300 font-mono"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-slate-400 block mb-1">Usuario edit_auth</label>
+                  <input
+                    type="text"
+                    value={relayForm.local_flussonic_user}
+                    onChange={(e) => setRelayForm({ ...relayForm, local_flussonic_user: e.target.value })}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-400 block mb-1">Contraseña</label>
+                  <input
+                    type="password"
+                    value={relayForm.local_flussonic_pass}
+                    onChange={(e) => setRelayForm({ ...relayForm, local_flussonic_pass: e.target.value })}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                  />
+                </div>
+              </div>
+              <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={relayForm.push_local_flussonic}
+                  onChange={(e) => setRelayForm({ ...relayForm, push_local_flussonic: e.target.checked })}
+                  className="rounded accent-cyan-500"
+                />
+                Inyectar canales automáticamente en Flussonic Local vía API v3 (<code>Copy Puro 0% CPU</code>)
+              </label>
+            </div>
+
+            {/* Stage 3: Remote Flussonic #2 via M4F */}
+            <div className="rounded-xl bg-[#090e1a] border border-violet-500/35 p-4 space-y-3">
+              <div className="font-bold text-violet-300 uppercase text-[11px]">
+                Etapa 3 · Segundo Flussonic (Recibe M4F Estable)
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">
+                  IP Pública / VPN de tu Flussonic Local (para que el #2 jale <code>m4f://</code>)
+                </label>
+                <input
+                  type="text"
+                  placeholder="http://IP_PUBLICA_O_VPN_CABECERA:8080"
+                  value={relayForm.local_flussonic_public_host}
+                  onChange={(e) => setRelayForm({ ...relayForm, local_flussonic_public_host: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-amber-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">URL del Segundo Flussonic (Opcional Push API v3)</label>
+                <input
+                  type="text"
+                  placeholder="http://IP_SEGUNDO_FLUSSONIC:8080"
+                  value={relayForm.remote_flussonic_url}
+                  onChange={(e) => setRelayForm({ ...relayForm, remote_flussonic_url: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-violet-300 font-mono"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-slate-400 block mb-1">Usuario #2</label>
+                  <input
+                    type="text"
+                    value={relayForm.remote_flussonic_user}
+                    onChange={(e) => setRelayForm({ ...relayForm, remote_flussonic_user: e.target.value })}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-400 block mb-1">Contraseña #2</label>
+                  <input
+                    type="password"
+                    value={relayForm.remote_flussonic_pass}
+                    onChange={(e) => setRelayForm({ ...relayForm, remote_flussonic_pass: e.target.value })}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                  />
+                </div>
+              </div>
+              <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={relayForm.push_remote_flussonic}
+                  onChange={(e) => setRelayForm({ ...relayForm, push_remote_flussonic: e.target.checked })}
+                  className="rounded accent-violet-500"
+                />
+                Inyectar también en el Segundo Flussonic vía API v3 (<code>m4f://</code> 24/7)
+              </label>
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={runningRelaySetup}
+              className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 disabled:opacity-40 text-white text-xs font-bold shadow-lg shadow-emerald-950/60"
+            >
+              {runningRelaySetup
+                ? 'Activando Nivelación ProLiant y Configurando Flussonic...'
+                : '🚀 Activar Nivelación 24/7 en ProLiant y Enlazar Cadena Flussonic'}
+            </button>
+          </div>
+
+          {relayResult && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-2 text-xs">
+              <div className="space-y-1.5">
+                <div className="font-bold text-cyan-300">
+                  📄 Configuración Generada para Flussonic #1 Local (Respaldo <code>flussonic.conf</code>):
+                </div>
+                <textarea
+                  readOnly
+                  rows={8}
+                  value={relayResult.localFlussonicConf || ''}
+                  className="w-full p-3 rounded-xl bg-[#090e1a] border border-slate-700 font-mono text-[11px] text-slate-200"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <div className="font-bold text-violet-300">
+                  📄 Configuración Generada para Segundo Flussonic vía <code>m4f://</code>:
+                </div>
+                <textarea
+                  readOnly
+                  rows={8}
+                  value={relayResult.remoteFlussonicConf || ''}
+                  className="w-full p-3 rounded-xl bg-[#090e1a] border border-slate-700 font-mono text-[11px] text-slate-200"
+                />
+              </div>
+            </div>
+          )}
         </form>
       )}
 

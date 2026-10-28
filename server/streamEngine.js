@@ -71,6 +71,7 @@ export function getFfmpegBin() {
     '/opt/tvlister24-7/.runtime/bin/ffmpeg',
     '/home/xui/bin/ffmpeg/ffmpeg',
     '/home/xui/bin/ffmpeg',
+    path.resolve(process.cwd(), 'node_modules/@ffmpeg-installer/linux-x64/ffmpeg'),
     'ffmpeg'
   ].filter(Boolean);
 
@@ -388,16 +389,16 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     args.push('-b:a', aBr);
   }
 
+  const hlsTime = isZeroLatency ? '2' : '4';
+  const hlsFlags = isZeroLatency ? 'delete_segments+independent_segments' : 'delete_segments+append_list';
+  const outM3u8 = path.join(outDir, 'index.m3u8');
+  const escapedM3u8 = outM3u8.replace(/\\/g, '\\\\').replace(/([:'\[\]|])/g, '\\$1');
+
+  // Dual muxer via -f tee: encodes/levels audio ONCE and simultaneously writes RAMDisk HLS + seamless continuous MPEG-TS on stdout (pipe:1) for Flussonic tshttp:// & .ts players
   args.push(
     '-f',
-    'hls',
-    '-hls_time',
-    isZeroLatency ? '2' : '4',
-    '-hls_list_size',
-    '6',
-    '-hls_flags',
-    isZeroLatency ? 'delete_segments+independent_segments' : 'delete_segments+append_list',
-    path.join(outDir, 'index.m3u8')
+    'tee',
+    `[f=hls:hls_time=${hlsTime}:hls_list_size=6:hls_flags=${hlsFlags}]${escapedM3u8}|[f=mpegts]pipe:1`
   );
   return args;
 }
@@ -487,14 +488,73 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     timer: null,
     stoppedManually: false,
     pid: null,
-    attemptCount: 0
+    attemptCount: 0,
+    usesStdoutPipe: false,
+    tsSubscribers: new Set(),
+    tsRemainder: Buffer.alloc(0),
+    burstChunks: [],
+    burstBytes: 0
   };
   workers.set(key, state);
+
+  const ingestTsStdout = (rawChunk) => {
+    if (!rawChunk || rawChunk.length === 0) return;
+    let buf = state.tsRemainder.length > 0 ? Buffer.concat([state.tsRemainder, rawChunk]) : rawChunk;
+    let start = 0;
+
+    // Ensure 0x47 sync alignment
+    if (buf.length >= 188 && buf[0] !== 0x47) {
+      let synced = -1;
+      for (let i = 1; i < buf.length; i++) {
+        if (buf[i] === 0x47 && (i + 188 >= buf.length || buf[i + 188] === 0x47)) {
+          synced = i;
+          break;
+        }
+      }
+      if (synced === -1) {
+        state.tsRemainder = Buffer.alloc(0);
+        return;
+      }
+      buf = buf.subarray(synced);
+    }
+
+    const alignedLen = buf.length - (buf.length % 188);
+    if (alignedLen <= 0) {
+      state.tsRemainder = buf;
+      return;
+    }
+
+    const aligned = buf.subarray(start, alignedLen);
+    state.tsRemainder = alignedLen < buf.length ? Buffer.from(buf.subarray(alignedLen)) : Buffer.alloc(0);
+
+    // Keep ~94 KB (~500 TS packets) rolling burst buffer starting at a PAT packet (PID 0x0000) when seen
+    const copyBuf = Buffer.from(aligned);
+    state.burstChunks.push(copyBuf);
+    state.burstBytes += copyBuf.length;
+    while (state.burstBytes > 94000 && state.burstChunks.length > 1) {
+      const removed = state.burstChunks.shift();
+      state.burstBytes -= removed.length;
+    }
+
+    if (state.tsSubscribers.size > 0) {
+      for (const cb of state.tsSubscribers) {
+        try {
+          cb(copyBuf);
+        } catch {
+          // ignore subscriber write error
+        }
+      }
+    }
+  };
 
   const launch = () => {
     if (state.stoppedManually) return;
     const args = typeof argsBuilder === 'function' ? argsBuilder(state.attemptCount) : argsBuilder;
     if (!args || !Array.isArray(args)) return;
+
+    const lastArg = String(args[args.length - 1] || '');
+    state.usesStdoutPipe = lastArg.endsWith('pipe:1');
+    state.tsRemainder = Buffer.alloc(0);
 
     const bin = getFfmpegBin();
     const env = bin.startsWith('/home/xui/')
@@ -502,10 +562,19 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
       : process.env;
 
     const startedAt = Date.now();
-    const child = spawn(bin, args, { stdio: 'ignore', detached: false, env });
+    const child = spawn(bin, args, {
+      stdio: ['ignore', state.usesStdoutPipe ? 'pipe' : 'ignore', 'ignore'],
+      detached: false,
+      env
+    });
     state.child = child;
     state.pid = child.pid || null;
     if (onPidChange) onPidChange(state.pid);
+
+    if (state.usesStdoutPipe && child.stdout) {
+      child.stdout.on('data', ingestTsStdout);
+      child.stdout.on('error', () => {});
+    }
 
     child.on('exit', () => {
       state.pid = null;
@@ -523,10 +592,57 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
   return state.pid;
 }
 
+export function hasWorkerMpegTsFeed(key) {
+  const state = workers.get(key);
+  return Boolean(state && state.usesStdoutPipe && !state.stoppedManually);
+}
+
+/**
+ * Subscribes to the live continuous 188-byte MPEG-TS stream of an active 24/7 FFmpeg worker
+ * (used by Flussonic tshttp:// trunks and .ts IPTV players for zero-jitter audio-leveled output).
+ */
+export function subscribeWorkerMpegTs(key, onChunk) {
+  const state = workers.get(key);
+  if (!state || !state.usesStdoutPipe || state.stoppedManually) return null;
+
+  let cancelled = false;
+
+  // Defer PAT-aligned burst + live subscription atomically to next microtask:
+  // 1) HTTP caller finishes res.setHeader() first
+  // 2) Zero out-of-order or duplicate 188-byte packets between burst and live stream!
+  queueMicrotask(() => {
+    if (cancelled || state.stoppedManually) return;
+    if (state.burstChunks.length > 0) {
+      const full = Buffer.concat(state.burstChunks);
+      let patOffset = 0;
+      for (let off = 0; off + 188 <= full.length; off += 188) {
+        if (full[off] === 0x47 && (((full[off + 1] & 0x1f) << 8) | full[off + 2]) === 0x0000) {
+          patOffset = off;
+          break;
+        }
+      }
+      try {
+        onChunk(full.subarray(patOffset));
+      } catch {
+        // ignore
+      }
+    }
+    state.tsSubscribers.add(onChunk);
+  });
+
+  return () => {
+    cancelled = true;
+    state.tsSubscribers.delete(onChunk);
+  };
+}
+
 export function stopWorker(key) {
   const state = workers.get(key);
   if (!state) return;
   state.stoppedManually = true;
+  state.tsSubscribers.clear();
+  state.burstChunks = [];
+  state.burstBytes = 0;
   if (state.timer) clearTimeout(state.timer);
   if (state.child) {
     try {

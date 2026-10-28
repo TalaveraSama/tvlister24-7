@@ -19,6 +19,8 @@ import {
   getArchiveSegmentsInRange,
   buildFfmpegArgsForStream,
   startSupervisedWorker,
+  hasWorkerMpegTsFeed,
+  subscribeWorkerMpegTs,
   getWorkerPid,
   getFfmpegBin,
   isFfmpegAvailable,
@@ -1334,8 +1336,23 @@ async function serveLiveStreamRequest(req, res) {
   const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, protocol);
   if (!conn.allowed) return res.status(429).send(conn.error);
 
-  // 1) Local FFmpeg-transcoded / Copy-Remux / Audio-Leveled HLS manifest (waits up to 4.2s on On-Demand cold start)
+  // 1) Local FFmpeg-transcoded / Copy-Remux / Audio-Leveled 24/7 Worker (Continuous RAM MPEG-TS for Flussonic tshttp:// & .ts apps + RAMDisk HLS)
   const workerKey = `stream_${stream.id}`;
+  if (protocol === 'MPEG-TS' && hasWorkerMpegTsFeed(workerKey)) {
+    if (req.socket) req.socket.setTimeout(0);
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-TVLister-Engine', 'ProLiant-Continuous-MPEGTS-247');
+    const unsub = subscribeWorkerMpegTs(workerKey, (tsChunk) => {
+      if (!res.writableEnded) res.write(tsChunk);
+    });
+    if (unsub) {
+      attachLiveConnectionSocket(conn.connId, req, res, unsub);
+      req.once('close', unsub);
+      return;
+    }
+  }
+
   const coldWaitMs = stream.headend_node_id ? 10500 : 4200;
   const localManifest = hasActiveWorker
     ? await waitForFreshWorkerManifest(workerKey, coldWaitMs)

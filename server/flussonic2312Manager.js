@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import os from 'node:os';
 import express from 'express';
 import { db, withSqliteBusyRetry } from './db.js';
 import { requireAuth, requireAdmin } from './auth.js';
@@ -2214,5 +2215,306 @@ flussonic2312Router.post('/api/flussonic-2312/rewrite-m4f-player-links', require
     sampleUrl
   });
 });
+
+// ==================== CADENA PROLIANT (AUDIO NIVELADO 24/7) -> FLUSSONIC LOCAL -> FLUSSONIC #2 (M4F) ====================
+function detectLocalServerLanOrigin(req) {
+  const nets = os.networkInterfaces() || {};
+  const candidates = [];
+  for (const entries of Object.values(nets)) {
+    for (const e of entries || []) {
+      if ((e.family === 'IPv4' || e.family === 4) && !e.internal && e.address) {
+        candidates.push(e.address);
+      }
+    }
+  }
+  const preferred =
+    candidates.find((ip) => /^192\.168\./.test(ip)) ||
+    candidates.find((ip) => /^10\./.test(ip)) ||
+    candidates.find((ip) => /^172\.(1[6-9]|2\d|3[01])\./.test(ip)) ||
+    candidates[0] ||
+    '192.168.88.50';
+
+  const hostHdr = String(req?.headers?.host || '');
+  const portMatch = hostHdr.match(/:(\d+)$/);
+  const port = portMatch ? portMatch[1] : process.env.PORT || '8095';
+  return `http://${preferred}:${port}`;
+}
+
+flussonic2312Router.get('/api/flussonic-2312/proliant-relay-defaults', requireAuth, requireAdmin, (req, res) => {
+  const existingTrunk = db
+    .prepare("SELECT username, password, max_connections FROM lines WHERE username = 'troncal_flussonic' LIMIT 1")
+    .get();
+  const presetRow = db.prepare("SELECT value FROM settings WHERE key = 'audio_leveling_preset'").get();
+  const bitrateRow = db.prepare("SELECT value FROM settings WHERE key = 'audio_leveling_bitrate'").get();
+
+  res.json({
+    ok: true,
+    proliant_lan_url: detectLocalServerLanOrigin(req),
+    trunk_username: existingTrunk?.username || 'troncal_flussonic',
+    trunk_password: existingTrunk?.password || 'proliant247',
+    audio_preset: presetRow?.value || 'standard',
+    audio_bitrate: bitrateRow?.value || '128k'
+  });
+});
+
+flussonic2312Router.post(
+  '/api/flussonic-2312/setup-proliant-leveled-relay',
+  requireAuth,
+  requireAdmin,
+  async (req, res) => {
+    const {
+      proliant_lan_url = '',
+      trunk_username = 'troncal_flussonic',
+      trunk_password = 'proliant247',
+      audio_preset = 'standard', // 'standard' | 'voice' | 'cinema'
+      audio_bitrate = '128k',
+      proliant_video_mode = 'copy_video_leveled', // 'copy_video_leveled' | 'deint_x264_leveled'
+      push_local_flussonic = true,
+      local_flussonic_url = '',
+      local_flussonic_user = 'admin',
+      local_flussonic_pass = '',
+      local_flussonic_public_host = '',
+      push_remote_flussonic = false,
+      remote_flussonic_url = '',
+      remote_flussonic_user = 'admin',
+      remote_flussonic_pass = ''
+    } = req.body || {};
+
+    const cleanProliantBase = normalizeBaseUrl(proliant_lan_url || detectLocalServerLanOrigin(req));
+    if (!cleanProliantBase) {
+      return res.status(400).json({ error: 'Indica la IP:Puerto LAN de este Panel en el HP ProLiant Gen9.' });
+    }
+
+    const allStreams = db
+      .prepare(
+        `SELECT s.*, c.name as category_name
+         FROM streams s
+         LEFT JOIN categories c ON c.id = s.category_id
+         ORDER BY s.sort_order ASC, s.id ASC`
+      )
+      .all();
+
+    if (allStreams.length === 0) {
+      return res.status(400).json({
+        error: 'Primero importa tus canales (Astra / M3U / XUI) a este Panel Local del HP ProLiant Gen9.'
+      });
+    }
+
+    const cleanTrunkUser = String(trunk_username || 'troncal_flussonic').trim();
+    const cleanTrunkPass = String(trunk_password || 'proliant247').trim();
+
+    // 1. Configure 24/7 Broadcast Audio Leveling on ProLiant Panel (WITHOUT altering source_url!)
+    let targetProfileId = null;
+    const launchStreamIds = [];
+
+    withSqliteBusyRetry(() => {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const upsertSet = db.prepare(
+          'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+        );
+        upsertSet.run('audio_leveling_enabled', 'true');
+        upsertSet.run('audio_leveling_preset', String(audio_preset || 'standard'));
+        upsertSet.run('audio_leveling_bitrate', String(audio_bitrate || '128k'));
+
+        if (proliant_video_mode === 'deint_x264_leveled') {
+          const existingDeint = db
+            .prepare("SELECT id FROM transcode_profiles WHERE name = 'ProLiant Anti-Rayas + Audio Nivelado 24/7' LIMIT 1")
+            .get();
+          if (existingDeint) {
+            targetProfileId = existingDeint.id;
+          } else {
+            targetProfileId = Number(
+              db
+                .prepare(
+                  `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+                   VALUES ('ProLiant Anti-Rayas + Audio Nivelado 24/7', 'libx264', 'aac', '2500k', ?, 'source', 'veryfast', 'none', '-vf yadif=0:-1:1 -tune zerolatency')`
+                )
+                .run(String(audio_bitrate || '128k')).lastInsertRowid
+            );
+          }
+        } else {
+          const existingCopyLvl = db
+            .prepare("SELECT id FROM transcode_profiles WHERE LOWER(name) LIKE '%copy video + audio nivelado%' LIMIT 1")
+            .get();
+          if (existingCopyLvl) {
+            targetProfileId = existingCopyLvl.id;
+          } else {
+            targetProfileId = Number(
+              db
+                .prepare(
+                  `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+                   VALUES ('Copy Video + Audio Nivelado (Bajo CPU)', 'copy', 'aac', 'source', ?, 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024')`
+                )
+                .run(String(audio_bitrate || '128k')).lastInsertRowid
+            );
+          }
+        }
+
+        // Upsert unlimited trunk line for Local Flussonic
+        const existingLine = db.prepare('SELECT id FROM lines WHERE username = ? LIMIT 1').get(cleanTrunkUser);
+        if (existingLine) {
+          db.prepare(
+            `UPDATE lines
+             SET password = ?, max_connections = 9999, status = 'active', exp_date = NULL, bouquet_ids_json = '[]'
+             WHERE id = ?`
+          ).run(cleanTrunkPass, existingLine.id);
+        } else {
+          db.prepare(
+            `INSERT INTO lines (username, password, max_connections, status, exp_date, bouquet_ids_json, notes)
+             VALUES (?, ?, 9999, 'active', NULL, '[]', 'Troncal interna ProLiant Audio Nivelado -> Flussonic Local')`
+          ).run(cleanTrunkUser, cleanTrunkPass);
+        }
+
+        // Put all non-stopped streams into 24/7 constant Audio-Leveled mode while preserving source_url intact!
+        const updStream = db.prepare(
+          `UPDATE streams
+           SET stream_mode = 'transcode',
+               transcode_profile_id = ?,
+               audio_leveling_mode = 'on',
+               status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'running' END
+           WHERE id = ?`
+        );
+
+        for (const st of allStreams) {
+          updStream.run(targetProfileId, st.id);
+          if (st.status !== 'stopped') launchStreamIds.push(st.id);
+        }
+
+        db.exec('COMMIT;');
+      } catch (err) {
+        db.exec('ROLLBACK;');
+        throw err;
+      }
+    });
+
+    if (launchStreamIds.length > 0) {
+      scheduleDbStreamLaunches(launchStreamIds, 65);
+    }
+
+    // 2. Build Audio-Leveled tshttp:// inputs for Flussonic #1 (Local) AND m4f:// inputs for Flussonic #2 (Remote)
+    const keyed = assignUniqueFlussonicKeys(allStreams);
+    const proliantTshttpBase = cleanProliantBase
+      .replace(/^http:\/\//i, 'tshttp://')
+      .replace(/^https:\/\//i, 'tshttps://');
+
+    const localFlussChannels = keyed.map((ch) => {
+      const leveledInputUrl = `${proliantTshttpBase}/live/${encodeURIComponent(cleanTrunkUser)}/${encodeURIComponent(cleanTrunkPass)}/${ch.id}.ts`;
+      return {
+        ...ch,
+        resolved_origin_url: leveledInputUrl,
+        inputUrl: leveledInputUrl
+      };
+    });
+
+    const localConfLines = [
+      '# ============================================================================',
+      '# FLUSSONIC #1 (LOCAL CABECERA) — Recibe Audio Nivelado 24/7 desde HP ProLiant Gen9',
+      '# Modo: Copy Puro (0% CPU en Flussonic Local — el ProLiant ya niveló el sonido)',
+      '# ============================================================================',
+      ''
+    ];
+    for (const ch of localFlussChannels) {
+      const safeTitle = String(ch.name || ch.flussonic_name).replace(/"/g, "'").trim();
+      localConfLines.push(`stream ${ch.flussonic_name} {`);
+      localConfLines.push(`  title "${safeTitle}";`);
+      localConfLines.push(`  input ${ch.inputUrl};`);
+      localConfLines.push('}');
+      localConfLines.push('');
+    }
+
+    // Bridge address of Flussonic #1 as seen by Flussonic #2
+    const bridgeBaseRaw = normalizeBaseUrl(local_flussonic_public_host || local_flussonic_url || 'http://IP_FLUSSONIC_LOCAL:8080');
+    let m4fBridgeHost = 'IP_FLUSSONIC_LOCAL:8080';
+    let m4fScheme = 'm4f';
+    try {
+      const bu = new URL(bridgeBaseRaw);
+      m4fBridgeHost = bu.host;
+      m4fScheme = bu.protocol === 'https:' ? 'm4fs' : 'm4f';
+    } catch {
+      // keep fallback
+    }
+
+    const remoteFlussChannels = keyed.map((ch) => {
+      const m4fInput = `${m4fScheme}://${m4fBridgeHost}/${ch.flussonic_name}`;
+      return {
+        ...ch,
+        resolved_origin_url: m4fInput,
+        inputUrl: m4fInput
+      };
+    });
+
+    const remoteConfLines = [
+      '# ============================================================================',
+      '# FLUSSONIC #2 (REMOTO / DESTINO) — Recibe vía M4F Estabilizado + Sonido Nivelado',
+      `# Origen M4F: ${m4fScheme}://${m4fBridgeHost}/<canal>`,
+      '# ============================================================================',
+      ''
+    ];
+    for (const ch of remoteFlussChannels) {
+      const safeTitle = String(ch.name || ch.flussonic_name).replace(/"/g, "'").trim();
+      remoteConfLines.push(`stream ${ch.flussonic_name} {`);
+      remoteConfLines.push(`  title "${safeTitle}";`);
+      remoteConfLines.push(`  input ${ch.inputUrl};`);
+      remoteConfLines.push('}');
+      remoteConfLines.push('');
+    }
+
+    // 3. Optional Direct API v3 Push to Flussonic #1 (Local)
+    let localPushedCount = 0;
+    let localPushErrors = [];
+    if (push_local_flussonic && String(local_flussonic_url || '').trim()) {
+      const localSrv = upsertFlussonicServerInline({
+        name: 'Flussonic #1 Local (Cabecera)',
+        base_url: local_flussonic_url,
+        username: local_flussonic_user,
+        password: local_flussonic_pass
+      });
+      if (localSrv) {
+        const resLocal = await pushBatchStreamsToFlussonic2312(localSrv, localFlussChannels, {
+          transcodeMode: 'copy_pure',
+          constant247: true
+        });
+        localPushedCount = resLocal.pushedCount || 0;
+        localPushErrors = resLocal.errors || [];
+      }
+    }
+
+    // 4. Optional Direct API v3 Push to Flussonic #2 (Remote) via M4F!
+    let remotePushedCount = 0;
+    let remotePushErrors = [];
+    if (push_remote_flussonic && String(remote_flussonic_url || '').trim()) {
+      const remoteSrv = upsertFlussonicServerInline({
+        name: 'Flussonic #2 Destino (M4F)',
+        base_url: remote_flussonic_url,
+        username: remote_flussonic_user,
+        password: remote_flussonic_pass
+      });
+      if (remoteSrv) {
+        const resRemote = await pushBatchStreamsToFlussonic2312(remoteSrv, remoteFlussChannels, {
+          transcodeMode: 'copy_pure',
+          constant247: true
+        });
+        remotePushedCount = resRemote.pushedCount || 0;
+        remotePushErrors = resRemote.errors || [];
+      }
+    }
+
+    res.json({
+      ok: true,
+      leveledStreamsCount: launchStreamIds.length,
+      trunkLine: { username: cleanTrunkUser, password: cleanTrunkPass },
+      sampleProliantOut: localFlussChannels[0]?.inputUrl || '',
+      sampleRemoteM4fIn: remoteFlussChannels[0]?.inputUrl || '',
+      localPushedCount,
+      localPushErrors: localPushErrors.slice(0, 5),
+      remotePushedCount,
+      remotePushErrors: remotePushErrors.slice(0, 5),
+      localFlussonicConf: localConfLines.join('\n'),
+      remoteFlussonicConf: remoteConfLines.join('\n')
+    });
+  }
+);
+
 
 
