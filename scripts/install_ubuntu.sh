@@ -166,20 +166,30 @@ fi
 export PATH="${RUNTIME_BIN}:${NODE_DIR}/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
 # 4. Descargar código fuente actualizado preservando .runtime y data
+#    SIEMPRE se clona desde GitHub para no reutilizar código viejo; la copia local
+#    sólo se usa como respaldo si no hay salida a internet.
 echo "[4/6] Descargando código fuente actualizado de TVLister 24/7..."
-if [ -f "./package.json" ] && grep -q '"tvlister24-7"' "./package.json" 2>/dev/null; then
+INSTALL_OK=0
+TMP_CLONE=$(mktemp -d)
+if git clone --quiet --depth 1 --branch "$FALLBACK_BRANCH" "$REPO_URL" "$TMP_CLONE" 2>/dev/null \
+  || git clone --quiet --depth 1 "$REPO_URL" "$TMP_CLONE" 2>/dev/null; then
+  if [ -f "${TMP_CLONE}/package.json" ] && grep -q '"tvlister24-7"' "${TMP_CLONE}/package.json" 2>/dev/null; then
+    tar --exclude='./.git' --exclude='./data' --exclude='./.runtime' --exclude='./node_modules' -cf - -C "$TMP_CLONE" . | tar -xf - -C "$APP_DIR"
+    echo "      Código sincronizado desde GitHub (rama ${FALLBACK_BRANCH})."
+    INSTALL_OK=1
+  fi
+fi
+rm -rf "$TMP_CLONE"
+
+if [ "$INSTALL_OK" -ne 1 ]; then
   SRC_REAL=$(pwd -P)
   DST_REAL=$(cd "$APP_DIR" && pwd -P)
-  if [ "$SRC_REAL" != "$DST_REAL" ]; then
+  if [ -f "./package.json" ] && grep -q '"tvlister24-7"' "./package.json" 2>/dev/null && [ "$SRC_REAL" != "$DST_REAL" ]; then
+    echo "      [AVISO] Sin acceso a GitHub: usando el código del directorio actual."
     tar --exclude='./node_modules' --exclude='./dist' --exclude='./data' --exclude='./.runtime' -cf - . | tar -xf - -C "$APP_DIR"
+  else
+    echo "      [AVISO] No se pudo descargar el código (sin internet). Se reutiliza el código instalado."
   fi
-else
-  TMP_CLONE=$(mktemp -d)
-  if ! git clone --quiet --depth 1 --branch "$FALLBACK_BRANCH" "$REPO_URL" "$TMP_CLONE" 2>/dev/null; then
-    git clone --quiet --depth 1 "$REPO_URL" "$TMP_CLONE"
-  fi
-  tar --exclude='./data' --exclude='./.runtime' -cf - -C "$TMP_CLONE" . | tar -xf - -C "$APP_DIR"
-  rm -rf "$TMP_CLONE"
 fi
 
 # Instalar atómicamente el comando CLI tvlister-admin (nuevo inodo con mv para no afectar procesos en curso)
