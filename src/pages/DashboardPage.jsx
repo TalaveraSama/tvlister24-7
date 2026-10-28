@@ -202,8 +202,18 @@ export default function DashboardPage({ user, onPreview, setActiveTab }) {
                   style={{ width: `${Math.min(100, telemetry.ramPercent || 25)}%` }}
                 />
               </div>
-              <div className="mt-1.5 text-[11px] text-slate-500">
-                {telemetry.ramUsedGb} GB / {telemetry.ramTotalGb} GB
+              <div className="mt-1.5 text-[11px] text-slate-500 flex items-center justify-between gap-1">
+                <span>
+                  {telemetry.ramUsedGb} GB / {telemetry.ramTotalGb} GB
+                </span>
+                {telemetry.hlsRamdisk && (
+                  <span
+                    className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono text-[9px] font-bold"
+                    title={`Segmentos HLS generándose en memoria RAM (${telemetry.hlsRoot}) con 0% desgaste de disco`}
+                  >
+                    RAMDisk HLS ON
+                  </span>
+                )}
               </div>
             </div>
           </div>

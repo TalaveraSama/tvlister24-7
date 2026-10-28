@@ -6,7 +6,29 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_DIR = path.resolve(__dirname, '../streams_runtime');
-export const HLS_ROOT = path.join(RUNTIME_DIR, 'hls');
+
+function resolveOptimalHlsRoot() {
+  if (process.env.HLS_DIR) return path.resolve(process.env.HLS_DIR);
+  // Use Linux kernel tmpfs RAMDisk (/dev/shm) when >= 4 GB system RAM & >= 1.5 GB free on /dev/shm
+  // Eliminates mechanical SATA HDD I/O bottlenecks when generating HLS for 100+ live channels!
+  try {
+    if (os.platform() === 'linux' && os.totalmem() >= 3.8 * 1024 ** 3 && fs.existsSync('/dev/shm')) {
+      const st = fs.statfsSync('/dev/shm');
+      const freeBytes = Number(st.bavail) * Number(st.bsize);
+      if (freeBytes >= 1.5 * 1024 ** 3) {
+        const shmDir = '/dev/shm/tvlister_hls';
+        fs.mkdirSync(shmDir, { recursive: true });
+        return shmDir;
+      }
+    }
+  } catch {
+    // fallback to disk runtime directory
+  }
+  return path.join(RUNTIME_DIR, 'hls');
+}
+
+export const HLS_ROOT = resolveOptimalHlsRoot();
+export const HLS_IS_RAMDISK = HLS_ROOT.startsWith('/dev/shm');
 export const PLAYLIST_ROOT = path.join(RUNTIME_DIR, 'playlists');
 export const ARCHIVE_ROOT = path.join(RUNTIME_DIR, 'archive');
 
@@ -115,6 +137,8 @@ export function getHostTelemetry() {
     ffmpegInstalled: isFfmpegAvailable(),
     ffmpegBin: isFfmpegAvailable() ? getFfmpegBin() : 'No detectado (Modo Direct Stream)',
     ffmpegWorkers: workers.size,
+    hlsRamdisk: HLS_IS_RAMDISK,
+    hlsRoot: HLS_ROOT,
     xuiCoexistence: fs.existsSync('/home/xui')
   };
 }
