@@ -422,6 +422,50 @@ function runInitDbBody() {
       telemetry_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS mnf_trunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      origin_url TEXT NOT NULL,
+      username TEXT NOT NULL,
+      password TEXT NOT NULL,
+      last_sync_at TEXT,
+      synced_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS wk2500_units (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      ip_mode TEXT NOT NULL DEFAULT 'multicast',
+      dest_ip TEXT NOT NULL DEFAULT '239.25.0.0',
+      base_port INTEGER NOT NULL DEFAULT 5000,
+      local_interface_ip TEXT NOT NULL DEFAULT '',
+      ttl INTEGER NOT NULL DEFAULT 16,
+      ch_start INTEGER NOT NULL DEFAULT 2,
+      ch_end INTEGER NOT NULL DEFAULT 125,
+      default_output_mode TEXT NOT NULL DEFAULT 'direct_spts',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS wk2500_channels (
+      catv_ch INTEGER PRIMARY KEY CHECK (catv_ch >= 2 AND catv_ch <= 125),
+      freq_mhz REAL NOT NULL,
+      band_label TEXT NOT NULL DEFAULT '',
+      stream_id INTEGER DEFAULT NULL,
+      custom_name TEXT NOT NULL DEFAULT '',
+      custom_source_url TEXT NOT NULL DEFAULT '',
+      unit_id INTEGER DEFAULT NULL,
+      udp_host TEXT NOT NULL DEFAULT '',
+      udp_port INTEGER NOT NULL DEFAULT 5002,
+      local_interface_ip TEXT NOT NULL DEFAULT '',
+      ttl INTEGER NOT NULL DEFAULT 16,
+      output_mode TEXT NOT NULL DEFAULT 'direct_spts',
+      muxrate_kbps INTEGER NOT NULL DEFAULT 0,
+      service_id INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const ensureColumn = (table, column, def) => {
@@ -878,6 +922,9 @@ export function resetPanelCatalog({ wipeCategories = true, wipeResellers = true 
       DELETE FROM vod_watch_folders;
       DELETE FROM channels_247;
       DELETE FROM ingest_endpoints;
+      DELETE FROM wk2500_channels;
+      DELETE FROM wk2500_units;
+      DELETE FROM mnf_trunks;
       DELETE FROM streams;
       DELETE FROM lines;
       DELETE FROM epg_programs;

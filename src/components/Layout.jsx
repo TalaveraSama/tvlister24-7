@@ -31,6 +31,7 @@ export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpen
     { id: 'streams', label: 'Canales en Vivo', icon: Radio, roles: ['admin'] },
     { id: 'headend', label: 'Nodo Cabecera (Astra)', icon: Cpu, badge: 'PRO', roles: ['admin'] },
     { id: 'flussonic-2312', label: 'Flussonic 23.12', icon: Zap, badge: '23.12', roles: ['admin'] },
+    { id: 'wk2500-catv', label: 'CATV WK2500 (UDP 2–125)', icon: Tv, badge: 'CATV', roles: ['admin'] },
     { id: 'channels247', label: 'Canales 24/7 Studio', icon: Tv2, badge: '24/7', roles: ['admin'] },
     { id: 'vod', label: 'Películas & Series VOD', icon: Film, roles: ['admin'] },
     { id: 'lines', label: 'Líneas, MAG & Enigma2', icon: Users, roles: ['admin', 'reseller'] },

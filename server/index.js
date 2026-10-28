@@ -85,6 +85,7 @@ import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
 import { headendRouter } from './headendManager.js';
 import { flussonic2312Router } from './flussonic2312Manager.js';
+import { wk2500Router, resumeEnabledWk2500Channels, stopAllWk2500Workers } from './wk2500Manager.js';
 import { syncEpgSourceById, startEpgAutoSyncScheduler } from './epgSync.js';
 import { WebSocketServer } from 'ws';
 import {
@@ -218,6 +219,7 @@ app.get('/api/lb/install.sh', (req, res) => {
 
 app.use(headendRouter);
 app.use(flussonic2312Router);
+app.use(wk2500Router);
 
 // ==================== AUTH ROUTES ====================
 app.post('/api/auth/login', (req, res) => {
@@ -2352,6 +2354,7 @@ app.post('/api/system/maintenance', requireAuth, requireAdmin, (req, res) => {
   }
   if (action === 'purge_demo_data' || action === 'clean_panel') {
     stopAllWorkers();
+    stopAllWk2500Workers();
     try {
       resetPanelCatalog({
         wipeCategories: req.body?.wipeCategories !== false,
@@ -3256,6 +3259,7 @@ async function startServer() {
 
   const gracefulShutdown = () => {
     stopAllWorkers();
+    stopAllWk2500Workers();
     stopIngestServer();
     try {
       db.exec('PRAGMA wal_checkpoint(PASSIVE);');
@@ -3280,6 +3284,7 @@ async function startServer() {
     if (getIngestConfig().enabled) {
       await startIngestServer(PORT);
     }
+    resumeEnabledWk2500Channels();
     startVodFolderAutoSyncScheduler();
     startResolutionAutoPilotDaemon((sid, dbMode, nextStatus) => {
       if (dbMode === 'transcode' && nextStatus === 'running') {
