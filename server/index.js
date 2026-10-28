@@ -3032,7 +3032,7 @@ app.post('/api/mnf/benchmark', requireAuth, async (req, res) => {
     const t0 = performance.now();
     const transmuxer = new TsToMnfTransmuxer({ streamId: 999 });
     try {
-      const candidates = resolveFlussonicUrlCandidates(String(streamUrl).trim());
+      const candidates = resolveFlussonicUrlCandidates(String(streamUrl).trim(), { preferProtocol: 'mpegts' });
       const resp = await fetch(candidates[0], { signal: ac.signal, redirect: 'follow' });
       if (!resp.ok || !resp.body) {
         clearTimeout(stopTimer);
@@ -3239,7 +3239,7 @@ async function startServer() {
     }
 
     mnfWss.handleUpgrade(req, socket, head, (ws) => {
-      const upstreamUrls = expandStreamUpstreamUrls(stream);
+      const upstreamUrls = expandStreamUpstreamUrls(stream, { preferProtocol: 'mpegts' });
       const { session, release } = getOrCreateMnfSession({ streamId: stream.id, upstreamUrls });
       const sendFrame = (buf) => {
         if (ws.readyState === 1) {

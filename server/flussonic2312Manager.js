@@ -2140,3 +2140,79 @@ flussonic2312Router.post('/api/flussonic-2312/convert-ts-hls-to-m4f', requireAut
   });
 });
 
+// ==================== CAMBIO RÁPIDO 1-CLIC DE PROTOCOLO FLUSSONIC PARA REPRODUCTORES ====================
+flussonic2312Router.post('/api/flussonic-2312/rewrite-m4f-player-links', requireAuth, requireAdmin, (req, res) => {
+  const { target_protocol = 'mpegts' } = req.body || {}; // 'mpegts' | 'hls' | 'm4f_scheme'
+  const allRows = db.prepare('SELECT * FROM streams ORDER BY id ASC').all();
+
+  const parseFlussonicStreamFromUrl = (raw = '') => {
+    const t = String(raw || '').trim();
+    const mScheme = t.match(/^(m4f|m4fs|m4s|m4ss|tshttp|tshttps|hls|hlss):\/\/(.+)$/i);
+    if (mScheme) {
+      const secure = mScheme[1].toLowerCase().endsWith('s') && !['m4s', 'hls'].includes(mScheme[1].toLowerCase());
+      const httpProto = secure ? 'https' : 'http';
+      try {
+        const u = new URL(`${httpProto}://${mScheme[2]}`);
+        const cleanPath = u.pathname
+          .replace(/\/+$/, '')
+          .replace(/\/(?:(?:index|mono)(?:\.fmp4)?\.m3u8|mpegts)$/i, '');
+        return { httpProto, host: u.host, auth: u.username ? `${u.username}:${u.password}@` : '', streamPath: cleanPath, query: u.search || '' };
+      } catch {
+        return null;
+      }
+    }
+    const mHttp = t.match(/^(https?):\/\/([^/]+)(\/.+?)\/(?:(?:index|mono)(?:\.fmp4)?\.m3u8|mpegts)(\?.*)?$/i);
+    if (mHttp) {
+      return { httpProto: mHttp[1].toLowerCase(), host: mHttp[2], auth: '', streamPath: mHttp[3], query: mHttp[4] || '' };
+    }
+    return null;
+  };
+
+  let rewrittenCount = 0;
+  let sampleUrl = '';
+  const relaunchIds = [];
+
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const upd = db.prepare('UPDATE streams SET source_url = ? WHERE id = ?');
+      for (const row of allRows) {
+        const info = parseFlussonicStreamFromUrl(row.source_url);
+        if (!info || !info.streamPath) continue;
+
+        let nextUrl = '';
+        if (target_protocol === 'm4f_scheme') {
+          const m4fSch = info.httpProto === 'https' ? 'm4fs' : 'm4f';
+          nextUrl = `${m4fSch}://${info.auth}${info.host}${info.streamPath}${info.query}`;
+        } else if (target_protocol === 'hls') {
+          nextUrl = `${info.httpProto}://${info.auth}${info.host}${info.streamPath}/index.m3u8${info.query}`;
+        } else {
+          nextUrl = `${info.httpProto}://${info.auth}${info.host}${info.streamPath}/mpegts${info.query}`;
+        }
+
+        if (nextUrl && nextUrl !== row.source_url) {
+          stopWorker(`stream_${row.id}`);
+          upd.run(nextUrl, row.id);
+          if (row.stream_mode === 'transcode' && row.status === 'running') relaunchIds.push(row.id);
+          rewrittenCount += 1;
+          if (!sampleUrl) sampleUrl = nextUrl;
+        }
+      }
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  if (relaunchIds.length > 0) scheduleDbStreamLaunches(relaunchIds, 60);
+
+  res.json({
+    ok: true,
+    rewrittenCount,
+    target_protocol,
+    sampleUrl
+  });
+});
+
+
