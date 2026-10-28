@@ -65,6 +65,32 @@ export function getLocalHlsManifestPath(key) {
   return fs.existsSync(manifest) ? manifest : null;
 }
 
+export function getFreshLocalHlsManifestPath(key, maxAgeSec = 18) {
+  const manifest = path.join(HLS_ROOT, key, 'index.m3u8');
+  try {
+    if (!fs.existsSync(manifest)) return null;
+    const st = fs.statSync(manifest);
+    if (Date.now() - st.mtimeMs > maxAgeSec * 1000) return null;
+    return manifest;
+  } catch {
+    return null;
+  }
+}
+
+export function cleanupStreamRuntime(streamId) {
+  const dirs = [
+    path.join(HLS_ROOT, `stream_${streamId}`),
+    path.join(ARCHIVE_ROOT, `stream_${streamId}`)
+  ];
+  for (const d of dirs) {
+    try {
+      if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export function getHostTelemetry() {
   const cpus = os.cpus() || [];
   const totalMem = os.totalmem();
@@ -197,34 +223,48 @@ export function buildFfmpegArgsForStream(stream, profile) {
   const outDir = path.join(HLS_ROOT, `stream_${stream.id}`);
   fs.mkdirSync(outDir, { recursive: true });
 
+  const vCodec = profile?.video_codec || 'copy';
+  const aCodec = profile?.audio_codec || 'copy';
   const extraStr = String(profile?.extra_flags || '');
+  const isCopyRemux = vCodec === 'copy';
   const isZeroLatency =
-    /zerolatency|low[-_ ]?latency/i.test(extraStr) ||
-    /zero[-_ ]?latency|low[-_ ]?latency/i.test(String(profile?.name || ''));
+    isCopyRemux ||
+    /zerolatency|low[-_ ]?latency|nobuffer/i.test(extraStr) ||
+    /zero[-_ ]?latency|low[-_ ]?latency|copy\/copy|2\.5\s*mbps/i.test(String(profile?.name || ''));
 
   const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
 
-  if (isZeroLatency) {
+  if (isCopyRemux) {
+    args.push('-fflags', '+genpts+igndts+nobuffer', '-flags', 'low_delay');
+  } else if (isZeroLatency) {
     args.push('-fflags', 'nobuffer', '-flags', 'low_delay');
   }
 
-  if (profile?.hwaccel === 'nvenc') {
-    args.push('-hwaccel', 'cuda');
-  } else if (profile?.hwaccel === 'qsv') {
-    args.push('-hwaccel', 'qsv');
+  if (!isCopyRemux) {
+    if (profile?.hwaccel === 'nvenc') {
+      args.push('-hwaccel', 'cuda');
+    } else if (profile?.hwaccel === 'qsv') {
+      args.push('-hwaccel', 'qsv');
+    }
   }
 
   if (stream.user_agent && stream.source_url.startsWith('http')) {
     args.push('-user_agent', stream.user_agent);
   }
   if (stream.source_url.startsWith('http')) {
-    args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+    args.push(
+      '-rw_timeout',
+      '10000000',
+      '-reconnect',
+      '1',
+      '-reconnect_streamed',
+      '1',
+      '-reconnect_delay_max',
+      '5'
+    );
   }
 
   args.push('-i', stream.source_url);
-
-  const vCodec = profile?.video_codec || 'copy';
-  const aCodec = profile?.audio_codec || 'copy';
   args.push('-c:v', vCodec);
 
   if (vCodec !== 'copy') {
@@ -233,6 +273,8 @@ export function buildFfmpegArgsForStream(stream, profile) {
     if (profile?.resolution && profile.resolution !== 'source') args.push('-s', profile.resolution);
     args.push('-g', isZeroLatency ? '30' : '48', '-sc_threshold', '0');
     args.push(...splitExtraFlags(extraStr));
+  } else {
+    args.push('-max_muxing_queue_size', '1024');
   }
 
   args.push('-c:a', aCodec);

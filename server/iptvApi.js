@@ -9,10 +9,12 @@ import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken } from
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import { resolveIpGeoSync } from './geoIspResolver.js';
+import { ensureSlateManifestForStream, pipeSlateContinuousMpegTs } from './offlineSlateEngine.js';
 import { resolvePublicPosterUrl, normalizeXuiOrTmdbImageUrl, verifyLocalPosterPath } from './vodSyncTmdb.js';
 import {
   computeChannel247LiveState,
   getLocalHlsManifestPath,
+  getFreshLocalHlsManifestPath,
   getArchiveSegmentsInRange,
   buildFfmpegArgsForStream,
   startSupervisedWorker,
@@ -456,6 +458,26 @@ export function recordConnection(req, line, targetType, targetId, targetName, pr
   return { allowed: true, connId: Number(info.lastInsertRowid) };
 }
 
+async function serveSubscriberOfflineSlate(req, res, stream, username, password, protocol, connId = null) {
+  const slate = await ensureSlateManifestForStream(stream);
+  if (!slate || !slate.manifest) return false;
+
+  if (protocol === 'MPEG-TS') {
+    if (connId) attachLiveConnectionSocket(connId, req, res);
+    pipeSlateContinuousMpegTs(req, res, slate.workerKey);
+    return true;
+  }
+
+  const content = fs.readFileSync(slate.manifest, 'utf8');
+  const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${slate.workerKey}/`;
+  const rewritten = content.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-TVLister-Fallback', 'offline-slate-loop');
+  res.send(rewritten);
+  return true;
+}
+
 function wakeOnDemandTranscodeIfNeeded(stream) {
   if (!isFfmpegAvailable()) return;
   const workerKey = `stream_${stream.id}`;
@@ -465,9 +487,14 @@ function wakeOnDemandTranscodeIfNeeded(stream) {
     ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(stream.transcode_profile_id)
     : null;
 
+  const isRemuxOrTranscodeProfile =
+    profile &&
+    ((profile.video_codec && profile.video_codec !== 'copy') ||
+      Number(stream.transcode_profile_id) > 1 ||
+      /copy\/copy|remux|2\.5/i.test(String(profile.name || '')));
+
   const needsFfmpeg =
-    stream.stream_mode === 'transcode' ||
-    (stream.stream_mode === 'ondemand' && profile && profile.video_codec && profile.video_codec !== 'copy');
+    stream.stream_mode === 'transcode' || (stream.stream_mode === 'ondemand' && isRemuxOrTranscodeProfile);
 
   if (!needsFfmpeg) return;
 
@@ -1147,7 +1174,22 @@ async function serveLiveStreamRequest(req, res) {
   // Standard Live Stream Delivery
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(numericId);
   if (!stream) return res.status(404).send('Canal no encontrado');
-  if (stream.status === 'stopped') return res.status(503).send('Canal detenido por el administrador');
+  if (stream.status === 'stopped') {
+    const connStopped = recordConnection(req, auth.line, 'live', stream.id, `${stream.name} [Bucle Offline]`, protocol);
+    if (connStopped.allowed) {
+      const servedSlate = await serveSubscriberOfflineSlate(
+        req,
+        res,
+        stream,
+        username,
+        password,
+        protocol,
+        connStopped.connId
+      );
+      if (servedSlate) return;
+    }
+    return res.status(503).send('Canal detenido por el administrador');
+  }
 
   if (stream.status === 'ondemand_idle') {
     db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(stream.id);
@@ -1159,10 +1201,14 @@ async function serveLiveStreamRequest(req, res) {
   const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, protocol);
   if (!conn.allowed) return res.status(429).send(conn.error);
 
-  // 1) Local FFmpeg-transcoded HLS manifest if active
+  // 1) Local FFmpeg-transcoded / Copy-Remux HLS manifest if fresh (<18s)
   const workerKey = `stream_${stream.id}`;
-  const localManifest = getLocalHlsManifestPath(workerKey);
+  const localManifest = getFreshLocalHlsManifestPath(workerKey, 18);
   if (localManifest) {
+    if (protocol === 'MPEG-TS') {
+      attachLiveConnectionSocket(conn.connId, req, res);
+      return pipeSlateContinuousMpegTs(req, res, workerKey);
+    }
     const content = fs.readFileSync(localManifest, 'utf8');
     const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${workerKey}/`;
     const rewritten = content.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
@@ -1273,11 +1319,37 @@ async function serveLiveStreamRequest(req, res) {
       }
     }
 
+    // All upstream sources failed or have no live signal -> fall back to Offline Video/Image Loop Slate!
+    const servedSlate = await serveSubscriberOfflineSlate(
+      req,
+      res,
+      stream,
+      username,
+      password,
+      protocol,
+      conn.connId
+    );
+    if (servedSlate) return;
+
     if (isLoopbackUpstream) {
       return res
         .status(503)
         .send('Señal RTMP/SRT/RTSP sin transmisión activa en este momento (verifica que OBS/Encoder esté EN VIVO).');
     }
+  }
+
+  if (!candidates[0] && !stream.source_url) {
+    const servedSlate = await serveSubscriberOfflineSlate(
+      req,
+      res,
+      stream,
+      username,
+      password,
+      protocol,
+      conn.connId
+    );
+    if (servedSlate) return;
+    return res.status(503).send('Canal sin fuente configurada.');
   }
 
   return res.redirect(302, candidates[0] || stream.source_url);
@@ -1735,7 +1807,8 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
   // 1. Check active local FFmpeg worker for stream / channel247
   if (sid > 0 && (kind === 'live' || kind === 'channel247')) {
     const workerKey = kind === 'channel247' ? `ch247_${sid}` : `stream_${sid}`;
-    const localManifest = getLocalHlsManifestPath(workerKey);
+    const localManifest =
+      kind === 'live' ? getFreshLocalHlsManifestPath(workerKey, 18) : getLocalHlsManifestPath(workerKey);
     if (localManifest) {
       const content = fs.readFileSync(localManifest, 'utf8');
       const segBase = `/api/admin/preview/hls_local/${encodeURIComponent(workerKey)}/`;
@@ -1811,6 +1884,24 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
       }
     } catch {
       clearTimeout(timer);
+    }
+  }
+
+  // Fallback to Offline Loop Slate (Imagen o Video en Bucle) when live channel has no signal
+  if (kind === 'live') {
+    const slate = await ensureSlateManifestForStream(streamObj);
+    if (slate && slate.manifest) {
+      const content = fs.readFileSync(slate.manifest, 'utf8');
+      const segBase = `/api/admin/preview/hls_local/${encodeURIComponent(slate.workerKey)}/`;
+      const qSuffix = `?jwt=${encodeURIComponent(rawJwt)}`;
+      const rewritten = content.replace(
+        /^(?!#)([^\r\n]+)$/gm,
+        (m) => `${segBase}${path.basename(m.trim())}${qSuffix}`
+      );
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-TVLister-Fallback', 'offline-slate-loop');
+      return res.send(rewritten);
     }
   }
 

@@ -349,6 +349,8 @@ export function initDb() {
   ensureColumn('servers', 'https_port', 'INTEGER');
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'xui_id', 'INTEGER');
+  ensureColumn('streams', 'offline_slate_mode', "TEXT NOT NULL DEFAULT 'global'");
+  ensureColumn('streams', 'offline_slate_url', "TEXT DEFAULT ''");
   ensureColumn('vod_items', 'xui_id', 'INTEGER');
   ensureColumn('vod_items', 'backdrop_url', "TEXT DEFAULT ''");
   ensureColumn('vod_items', 'tmdb_id', "TEXT DEFAULT ''");
@@ -418,6 +420,27 @@ export function initDb() {
     db.prepare('UPDATE streams SET bitrate_kbps = 2500 WHERE bitrate_kbps = 4200 OR bitrate_kbps = 4000').run();
     db.prepare(
       "INSERT INTO settings (key, value) VALUES ('zero_latency_2500k_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+    ).run();
+  }
+
+  // Ensure "Copy/Copy Remux 2.5 Mbps (Zero CPU)" profile & Offline Loop Slate defaults exist on all installations
+  const copy2500Migrated = db.prepare("SELECT value FROM settings WHERE key = 'copy_copy_2500k_v1'").get();
+  if (copy2500Migrated?.value !== 'true') {
+    const hasCopy2500 = db
+      .prepare("SELECT id FROM transcode_profiles WHERE LOWER(name) LIKE '%copy/copy%' OR LOWER(name) LIKE '%copy copy%' LIMIT 1")
+      .get();
+    if (!hasCopy2500) {
+      db.prepare(`
+        INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+        VALUES ('Copy/Copy Remux 2.5 Mbps (Zero CPU)', 'copy', 'copy', '2500k', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024')
+      `).run();
+    }
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_enabled', 'true')").run();
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_type', 'builtin')").run();
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_url', '')").run();
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_text', 'SEÑAL EN RECONEXIÓN - VOLVEMOS EN BREVE')").run();
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('copy_copy_2500k_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
     ).run();
   }
 }
@@ -632,6 +655,7 @@ function seedInitialData() {
     'INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   insertProf.run('Direct Stream (Zero Transcode)', 'copy', 'copy', 'source', 'source', 'source', 'none', 'none', '-fflags +genpts+igndts');
+  insertProf.run('Copy/Copy Remux 2.5 Mbps (Zero CPU)', 'copy', 'copy', '2500k', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024');
   insertProf.run('Zero Latency 2.5 Mbps (H.264 CPU)', 'libx264', 'aac', '2500k', '128k', '1280x720', 'ultrafast', 'none', '-tune zerolatency -maxrate 2500k -bufsize 5000k');
   insertProf.run('NVIDIA NVENC Zero-Latency 2.5 Mbps', 'h264_nvenc', 'aac', '2500k', '128k', '1920x1080', 'p2', 'nvenc', '-rc cbr -zerolatency 1 -maxrate 2500k -bufsize 5000k');
   insertProf.run('Full HD 1080p H.264 (CPU Fast)', 'libx264', 'aac', '4000k', '128k', '1920x1080', 'veryfast', 'none', '-g 50 -sc_threshold 0');

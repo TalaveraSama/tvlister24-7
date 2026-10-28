@@ -53,8 +53,15 @@ import {
   stopArchiveWorker,
   getArchiveStats,
   pruneArchiveSegmentsForStreams,
+  cleanupStreamRuntime,
   isFfmpegAvailable
 } from './streamEngine.js';
+import {
+  SLATES_DIR,
+  getGlobalSlateConfig,
+  restartAllSlateWorkers,
+  ensureSlateManifestForStream
+} from './offlineSlateEngine.js';
 import {
   iptvRouter,
   authenticateLine,
@@ -125,6 +132,9 @@ app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Application-level firewall check
 app.use(firewallMiddleware);
+
+// Serve uploaded offline loop images/videos for panel preview
+app.use('/slates', express.static(SLATES_DIR));
 
 // Production Healthcheck Probe (Nginx / Systemd / Uptime Monitors)
 app.get('/api/health', (_req, res) => {
@@ -399,11 +409,109 @@ app.delete('/api/categories/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ==================== OFFLINE LOOP SLATES (VIDEO / IMAGE LOOP WHEN NO STREAM) ====================
+function listSlateFiles() {
+  try {
+    if (!fs.existsSync(SLATES_DIR)) return [];
+    return fs
+      .readdirSync(SLATES_DIR)
+      .filter((f) => /\.(png|jpe?g|webp|bmp|gif|mp4|ts|mkv|mov|webm)$/i.test(f))
+      .map((f) => {
+        const full = path.join(SLATES_DIR, f);
+        const st = fs.statSync(full);
+        const isImg = /\.(png|jpe?g|webp|bmp|gif)$/i.test(f);
+        return {
+          fileName: f,
+          url: `/slates/${encodeURIComponent(f)}`,
+          kind: isImg ? 'image' : 'video',
+          sizeKb: Math.round(st.size / 1024),
+          updatedAt: st.mtime.toISOString()
+        };
+      })
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  } catch {
+    return [];
+  }
+}
+
+app.get('/api/slates/config', requireAuth, (req, res) => {
+  res.json({
+    config: getGlobalSlateConfig(),
+    files: listSlateFiles()
+  });
+});
+
+app.put('/api/slates/config', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const upsert = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  );
+  if (b.enabled !== undefined) upsert.run('offline_slate_enabled', b.enabled ? 'true' : 'false');
+  if (b.type !== undefined) upsert.run('offline_slate_type', String(b.type || 'builtin'));
+  if (b.url !== undefined) upsert.run('offline_slate_url', String(b.url || '').trim());
+  if (b.text !== undefined) upsert.run('offline_slate_text', String(b.text || '').trim());
+
+  restartAllSlateWorkers();
+  const nextCfg = getGlobalSlateConfig();
+  if (nextCfg.enabled) {
+    ensureSlateManifestForStream({ offline_slate_mode: 'global' }).catch(() => {});
+  }
+  res.json({ ok: true, config: nextCfg, files: listSlateFiles() });
+});
+
+app.post(
+  '/api/slates/upload',
+  requireAuth,
+  requireAdmin,
+  express.raw({ type: 'application/octet-stream', limit: '100mb' }),
+  (req, res) => {
+    const buf = req.body;
+    if (!Buffer.isBuffer(buf) || buf.length === 0) {
+      return res.status(400).json({ error: 'Archivo vacío o inválido.' });
+    }
+    const rawName = String(req.headers['x-file-name'] || 'slate_loop.mp4').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ext = path.extname(rawName).toLowerCase();
+    if (!/\.(png|jpe?g|webp|bmp|gif|mp4|ts|mkv|mov|webm)$/i.test(ext)) {
+      return res.status(400).json({ error: 'Formato no soportado. Usa PNG, JPG, WEBP, MP4, TS o MKV.' });
+    }
+    fs.mkdirSync(SLATES_DIR, { recursive: true });
+    const finalName = `${Date.now()}_${rawName}`;
+    const fullPath = path.join(SLATES_DIR, finalName);
+    fs.writeFileSync(fullPath, buf);
+
+    const kind = /\.(png|jpe?g|webp|bmp|gif)$/i.test(ext) ? 'image' : 'video';
+    const url = `/slates/${encodeURIComponent(finalName)}`;
+    res.json({ ok: true, fileName: finalName, url, kind, files: listSlateFiles() });
+  }
+);
+
+app.delete('/api/slates/files/:fileName', requireAuth, requireAdmin, (req, res) => {
+  const safeName = path.basename(String(req.params.fileName || ''));
+  const fullPath = path.join(SLATES_DIR, safeName);
+  if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+  restartAllSlateWorkers();
+  res.json({ ok: true, files: listSlateFiles() });
+});
+
+function scheduleStaggeredStreamLaunches(streamIds, delayPerStreamMs = 60) {
+  streamIds.forEach((sid, idx) => {
+    setTimeout(() => {
+      try {
+        launchStreamWorkerIfNeeded(sid);
+      } catch {
+        // ignore
+      }
+    }, idx * delayPerStreamMs).unref?.();
+  });
+}
+
 // ==================== LIVE STREAMS ====================
 app.get('/api/streams', requireAuth, (req, res) => {
   const rows = db
     .prepare(
-      `SELECT s.*, c.name as category_name, tp.name as profile_name, tp.video_bitrate as profile_video_bitrate, srv.name as server_name
+      `SELECT s.*, c.name as category_name, tp.name as profile_name,
+              tp.video_codec as profile_video_codec, tp.audio_codec as profile_audio_codec,
+              tp.video_bitrate as profile_video_bitrate, srv.name as server_name
        FROM streams s
        LEFT JOIN categories c ON c.id = s.category_id
        LEFT JOIN transcode_profiles tp ON tp.id = s.transcode_profile_id
@@ -425,8 +533,8 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
   }
   const info = db
     .prepare(
-      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       String(b.name),
@@ -441,7 +549,9 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
       b.stream_mode === 'ondemand' ? 'ondemand_idle' : 'running',
       String(b.user_agent || 'TVLister/2.3'),
       Number(b.tv_archive_days) || 0,
-      Number(b.bitrate_kbps) || 2500
+      Number(b.bitrate_kbps) || 2500,
+      String(b.offline_slate_mode || 'global'),
+      String(b.offline_slate_url || '')
     );
 
   const newId = Number(info.lastInsertRowid);
@@ -466,7 +576,8 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
     `UPDATE streams SET
        name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
        epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
-       user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?
+       user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
+       offline_slate_mode = ?, offline_slate_url = ?
      WHERE id = ?`
   ).run(
     String(b.name || ''),
@@ -481,6 +592,8 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
     String(b.user_agent || 'TVLister/2.3'),
     Number(b.tv_archive_days) || 0,
     Number(b.bitrate_kbps) || 2500,
+    String(b.offline_slate_mode || 'global'),
+    String(b.offline_slate_url || ''),
     id
   );
 
@@ -517,18 +630,218 @@ app.post('/api/streams/bulk-profile', requireAuth, requireAdmin, (req, res) => {
     db.prepare('UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?').run(mode, profId, kbps);
   }
 
+  const toLaunch = [];
   for (const row of affected) {
     stopWorker(`stream_${row.id}`);
     if (mode === 'transcode') {
-      launchStreamWorkerIfNeeded(row.id);
+      toLaunch.push(row.id);
+    } else {
+      db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(row.id);
     }
   }
+  if (toLaunch.length > 0) scheduleStaggeredStreamLaunches(toLaunch, 60);
   res.json({ ok: true, updatedCount: affected.length });
+});
+
+app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
+  const { scope = 'selected', ids = [], category_filter_id = null, changes = {} } = req.body || {};
+
+  let targetRows = [];
+  if (scope === 'all') {
+    targetRows = db.prepare('SELECT id, status, stream_mode FROM streams').all();
+  } else if (scope === 'category' && category_filter_id && category_filter_id !== 'all') {
+    targetRows = db
+      .prepare('SELECT id, status, stream_mode FROM streams WHERE category_id = ?')
+      .all(Number(category_filter_id));
+  } else {
+    const cleanIds = Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : [];
+    if (cleanIds.length === 0) {
+      return res.status(400).json({ error: 'Selecciona al menos un canal para editar en masa.' });
+    }
+    const placeholders = cleanIds.map(() => '?').join(',');
+    targetRows = db
+      .prepare(`SELECT id, status, stream_mode FROM streams WHERE id IN (${placeholders})`)
+      .all(...cleanIds);
+  }
+
+  if (targetRows.length === 0) {
+    return res.json({ ok: true, updatedCount: 0 });
+  }
+
+  const setClauses = [];
+  const setParams = [];
+
+  if (changes.category_id !== undefined && changes.category_id !== '') {
+    setClauses.push('category_id = ?');
+    setParams.push(Number(changes.category_id));
+  }
+  if (changes.stream_mode !== undefined && changes.stream_mode !== '') {
+    setClauses.push('stream_mode = ?');
+    setParams.push(String(changes.stream_mode));
+  }
+  if (changes.transcode_profile_id !== undefined && changes.transcode_profile_id !== '') {
+    setClauses.push('transcode_profile_id = ?');
+    setParams.push(Number(changes.transcode_profile_id));
+  }
+  if (changes.bitrate_kbps !== undefined && changes.bitrate_kbps !== '') {
+    setClauses.push('bitrate_kbps = ?');
+    setParams.push(Math.max(100, Number(changes.bitrate_kbps) || 2500));
+  }
+  if (changes.offline_slate_mode !== undefined && changes.offline_slate_mode !== '') {
+    setClauses.push('offline_slate_mode = ?');
+    setParams.push(String(changes.offline_slate_mode));
+  }
+  if (changes.offline_slate_url !== undefined) {
+    setClauses.push('offline_slate_url = ?');
+    setParams.push(String(changes.offline_slate_url || '').trim());
+  }
+  if (changes.server_id !== undefined && changes.server_id !== '') {
+    setClauses.push('server_id = ?');
+    setParams.push(Number(changes.server_id));
+  }
+  if (changes.user_agent !== undefined && changes.user_agent !== '') {
+    setClauses.push('user_agent = ?');
+    setParams.push(String(changes.user_agent));
+  }
+  if (changes.tv_archive_days !== undefined && changes.tv_archive_days !== '') {
+    setClauses.push('tv_archive_days = ?');
+    setParams.push(Math.max(0, Number(changes.tv_archive_days) || 0));
+  }
+  if (changes.status !== undefined && changes.status !== '') {
+    setClauses.push('status = ?');
+    setParams.push(String(changes.status));
+  }
+
+  if (setClauses.length === 0) {
+    return res.status(400).json({ error: 'No seleccionaste ningún campo para modificar.' });
+  }
+
+  const targetIds = targetRows.map((r) => r.id);
+  const placeholders = targetIds.map(() => '?').join(',');
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.prepare(`UPDATE streams SET ${setClauses.join(', ')} WHERE id IN (${placeholders})`).run(
+      ...setParams,
+      ...targetIds
+    );
+    db.exec('COMMIT;');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    return res.status(500).json({ error: err.message || 'Error en actualización masiva.' });
+  }
+
+  const freshRows = db
+    .prepare(`SELECT id, status, stream_mode FROM streams WHERE id IN (${placeholders})`)
+    .all(...targetIds);
+
+  const toLaunch = [];
+  for (const r of freshRows) {
+    stopWorker(`stream_${r.id}`);
+    if (r.stream_mode === 'transcode' && r.status === 'running') {
+      toLaunch.push(r.id);
+    } else {
+      db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(r.id);
+    }
+  }
+  if (toLaunch.length > 0) {
+    scheduleStaggeredStreamLaunches(toLaunch, 60);
+  }
+
+  res.json({ ok: true, updatedCount: targetIds.length, restartedWorkers: toLaunch.length });
+});
+
+app.post('/api/streams/bulk-delete', requireAuth, requireAdmin, (req, res) => {
+  const { scope = 'selected', ids = [], category_filter_id = null } = req.body || {};
+
+  let targetIds = [];
+  if (scope === 'all') {
+    targetIds = db.prepare('SELECT id FROM streams').all().map((r) => r.id);
+  } else if (scope === 'category' && category_filter_id && category_filter_id !== 'all') {
+    targetIds = db
+      .prepare('SELECT id FROM streams WHERE category_id = ?')
+      .all(Number(category_filter_id))
+      .map((r) => r.id);
+  } else {
+    targetIds = Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : [];
+  }
+
+  if (targetIds.length === 0) {
+    return res.status(400).json({ error: 'No hay canales seleccionados para eliminar.' });
+  }
+
+  for (const sid of targetIds) {
+    stopWorker(`stream_${sid}`);
+    stopArchiveWorker(sid);
+    cleanupStreamRuntime(sid);
+  }
+
+  const delSet = new Set(targetIds);
+  const placeholders = targetIds.map(() => '?').join(',');
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.prepare(`DELETE FROM streams WHERE id IN (${placeholders})`).run(...targetIds);
+
+    const bouquets = db.prepare('SELECT id, stream_ids_json FROM bouquets').all();
+    const updBq = db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?');
+    for (const b of bouquets) {
+      try {
+        const arr = JSON.parse(b.stream_ids_json || '[]').map(Number);
+        const filtered = arr.filter((id) => !delSet.has(id));
+        if (filtered.length !== arr.length) {
+          updBq.run(JSON.stringify(filtered), b.id);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    db.exec('COMMIT;');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    return res.status(500).json({ error: err.message || 'Error al eliminar canales en masa.' });
+  }
+
+  res.json({ ok: true, deletedCount: targetIds.length });
+});
+
+app.post('/api/streams/bulk-action', requireAuth, requireAdmin, (req, res) => {
+  const { ids = [], action = 'restart', scope = 'selected' } = req.body || {};
+  const targetIds =
+    scope === 'all'
+      ? db.prepare('SELECT id FROM streams').all().map((r) => r.id)
+      : (Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : []);
+
+  if (targetIds.length === 0) {
+    return res.status(400).json({ error: 'Selecciona al menos un canal.' });
+  }
+
+  const placeholders = targetIds.map(() => '?').join(',');
+  if (action === 'stop') {
+    for (const sid of targetIds) stopWorker(`stream_${sid}`);
+    db.prepare(`UPDATE streams SET status = 'stopped', pid = NULL WHERE id IN (${placeholders})`).run(...targetIds);
+  } else if (action === 'start' || action === 'restart') {
+    for (const sid of targetIds) stopWorker(`stream_${sid}`);
+    db.prepare(
+      `UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id IN (${placeholders})`
+    ).run(...targetIds);
+    scheduleStaggeredStreamLaunches(targetIds, 60);
+  }
+
+  res.json({ ok: true, affectedCount: targetIds.length });
 });
 
 function launchStreamWorkerIfNeeded(streamId) {
   const s = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId);
-  if (!s || s.stream_mode !== 'transcode' || !isFfmpegAvailable()) return;
+  if (!s || s.stream_mode !== 'transcode' || s.status !== 'running' || !isFfmpegAvailable()) return;
   const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(s.transcode_profile_id || 2);
   startSupervisedWorker(
     `stream_${streamId}`,
@@ -587,6 +900,7 @@ app.delete('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   stopWorker(`stream_${id}`);
   stopArchiveWorker(id);
+  cleanupStreamRuntime(id);
   db.prepare('DELETE FROM streams WHERE id = ?').run(id);
   res.json({ ok: true });
 });
