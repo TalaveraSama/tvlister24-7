@@ -23,7 +23,6 @@ import {
   getWorkerPid,
   isFfmpegAvailable,
   isStreamAudioLeveled,
-  getSegmentSettings,
   HLS_ROOT,
   DISK_HLS_ROOT,
   resolveHlsDirForKey,
@@ -1273,12 +1272,7 @@ async function serveLiveStreamRequest(req, res) {
     }
   }
 
-  // "Max Segment Wait Time" del panel: cuánto espera un cliente a que exista el primer segmento
-  const segCfg = getSegmentSettings();
-  const coldWaitMs = Math.min(
-    60000,
-    Math.max(4000, segCfg.maxSegmentWait * 1000) + (stream.headend_node_id ? 3000 : 0)
-  );
+  const coldWaitMs = stream.headend_node_id ? 10500 : 4200;
   const localManifest = hasActiveWorker
     ? await waitForFreshWorkerManifest(workerKey, coldWaitMs)
     : getFreshLocalHlsManifestPath(workerKey, 18);
@@ -1324,7 +1318,6 @@ async function serveLiveStreamRequest(req, res) {
   if (
     isLoopbackUpstream ||
     proxySetting?.value === 'true' ||
-    segCfg.loopbackProxy ||
     stream.source_url.startsWith('m4f') ||
     stream.source_url.startsWith('mnf')
   ) {

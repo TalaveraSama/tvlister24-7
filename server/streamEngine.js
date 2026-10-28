@@ -127,20 +127,6 @@ let resolvedFfmpegBin = null;
 const workers = new Map();
 
 export function getFfmpegBin() {
-  // Binario elegido explícitamente en el panel (Segmentos HLS -> Versión FFMPEG)
-  try {
-    if (!resolvedFfmpegBin) {
-      const row = db.prepare("SELECT value FROM settings WHERE key = 'ffmpeg_bin_path'").get();
-      const chosen = String(row?.value || '').trim();
-      if (chosen && (!chosen.startsWith('/') || fs.existsSync(chosen))) {
-        resolvedFfmpegBin = chosen;
-        ffmpegAvailableCache = true;
-        return chosen;
-      }
-    }
-  } catch {
-    // sin ajuste guardado
-  }
   if (resolvedFfmpegBin) return resolvedFfmpegBin;
   const candidates = [
     process.env.FFMPEG_PATH,
@@ -169,44 +155,6 @@ export function getFfmpegBin() {
   }
   ffmpegAvailableCache = false;
   return 'ffmpeg';
-}
-
-export function resetFfmpegBinCache() {
-  resolvedFfmpegBin = null;
-  ffmpegAvailableCache = null;
-}
-
-/** Lista los binarios FFmpeg disponibles en el servidor con su versión (para el selector del panel). */
-export function listFfmpegBinaries() {
-  const candidates = [
-    process.env.FFMPEG_PATH,
-    '/opt/tvlister24-7/.runtime/bin/ffmpeg',
-    '/home/xui/bin/ffmpeg/ffmpeg',
-    '/home/xui/bin/ffmpeg',
-    path.resolve(process.cwd(), 'node_modules/@ffmpeg-installer/linux-x64/ffmpeg'),
-    '/usr/bin/ffmpeg',
-    'ffmpeg'
-  ].filter(Boolean);
-
-  const out = [];
-  const seen = new Set();
-  for (const bin of candidates) {
-    if (seen.has(bin)) continue;
-    seen.add(bin);
-    try {
-      if (bin.startsWith('/') && (!fs.existsSync(bin) || fs.statSync(bin).isDirectory())) continue;
-      const env = bin.startsWith('/home/xui/')
-        ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
-        : process.env;
-      const raw = execSync(`"${bin}" -version`, { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'] });
-      const first = String(raw).split('\n')[0] || '';
-      const ver = (first.match(/version\s+([^\s]+)/i) || [])[1] || 'desconocida';
-      out.push({ path: bin, version: ver, label: `${bin} (${ver})`, active: bin === getFfmpegBin() });
-    } catch {
-      // binario inválido o no ejecutable
-    }
-  }
-  return out;
 }
 
 export function isFfmpegAvailable() {
@@ -441,125 +389,29 @@ export function invalidateFfmpegEfficiencyCache() {
  *  - tsPipeMode 'never'  : 100% HLS nativo en RAMDisk y stdout cerrado (máximo ahorro de CPU y RAM por canal)
  *  - h264Threads         : tope de hilos por encoder libx264 (evita 24-72 hilos por canal en servidores multi-core)
  */
-function readAllFfmpegSettings() {
+export function getFfmpegEfficiencyConfig() {
   const now = Date.now();
   if (efficiencyCache.value && now < efficiencyCache.expiresAt) {
     return efficiencyCache.value;
   }
-  let map = {};
   try {
-    const rows = db.prepare("SELECT key, value FROM settings WHERE key LIKE 'ffmpeg_%'").all();
-    map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    const rows = db
+      .prepare(
+        "SELECT key, value FROM settings WHERE key IN ('ffmpeg_ts_pipe_mode', 'ffmpeg_h264_threads')"
+      )
+      .all();
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    const mode = ['auto', 'always', 'never'].includes(map.ffmpeg_ts_pipe_mode)
+      ? map.ffmpeg_ts_pipe_mode
+      : 'auto';
+    const rawThreads = String(map.ffmpeg_h264_threads ?? '').trim();
+    const threads = /^\d+$/.test(rawThreads) ? Math.min(16, Math.max(1, Number(rawThreads))) : 2;
+    const cfg = { tsPipeMode: mode, h264Threads: threads };
+    efficiencyCache = { value: cfg, expiresAt: now + 3000 };
+    return cfg;
   } catch {
-    map = {};
+    return { tsPipeMode: 'auto', h264Threads: 2 };
   }
-  const bool = (k, dflt) => (map[k] === undefined || map[k] === '' ? dflt : String(map[k]) === 'true');
-  const int = (k, dflt, min, max) => {
-    const raw = String(map[k] ?? '').trim();
-    const n = Number(raw);
-    return raw !== '' && Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : dflt;
-  };
-  const pick = (k, allowed, dflt) => (allowed.includes(map[k]) ? map[k] : dflt);
-
-  const cfg = {
-    tsPipeMode: pick('ffmpeg_ts_pipe_mode', ['auto', 'always', 'never'], 'auto'),
-    h264Threads: int('ffmpeg_h264_threads', 2, 1, 16),
-    // ---- Segmentación estilo XUI.one ----
-    segmentDuration: int('ffmpeg_segment_duration', 2, 1, 30),
-    listSize: int('ffmpeg_list_size', 6, 2, 30),
-    deleteThreshold: int('ffmpeg_delete_threshold', 2, 0, 20),
-    maxSegmentWait: int('ffmpeg_max_segment_wait', 15, 3, 60),
-    probeSize: int('ffmpeg_probe_size', 5000000, 100000, 20000000),
-    analysisDuration: int('ffmpeg_analysis_duration', 5000000, 100000, 20000000),
-    segmentType: pick('ffmpeg_segment_type', ['hls', 'segment'], 'hls'),
-    showWarnings: bool('ffmpeg_show_warnings', true),
-    ignoreKeyframes: bool('ffmpeg_ignore_keyframes', false),
-    dtsV4: bool('ffmpeg_dts_v4', true),
-    loopbackProxy: bool('ffmpeg_loopback_proxy', false),
-    restartOnAudioLoss: bool('ffmpeg_restart_on_audio_loss', false),
-    priorityBackup: bool('ffmpeg_priority_backup', false),
-    audioAutoLang: bool('ffmpeg_audio_auto_lang', true),
-    audioLang: String(map.ffmpeg_audio_lang || 'spa').trim().slice(0, 3) || 'spa',
-    binPath: String(map.ffmpeg_bin_path || '').trim()
-  };
-  efficiencyCache = { value: cfg, expiresAt: now + 3000 };
-  return cfg;
-}
-
-export function getFfmpegEfficiencyConfig() {
-  const cfg = readAllFfmpegSettings();
-  return {
-    tsPipeMode: cfg.tsPipeMode,
-    h264Threads: cfg.h264Threads,
-    segmentDuration: cfg.segmentDuration,
-    listSize: cfg.listSize,
-    deleteThreshold: cfg.deleteThreshold
-  };
-}
-
-/** Configuración de segmentación HLS (equivalente al panel "Segment Settings" de XUI.one). */
-export function getSegmentSettings() {
-  const cfg = readAllFfmpegSettings();
-  return {
-    segmentDuration: cfg.segmentDuration,
-    listSize: cfg.listSize,
-    deleteThreshold: cfg.deleteThreshold,
-    maxSegmentWait: cfg.maxSegmentWait,
-    probeSize: cfg.probeSize,
-    analysisDuration: cfg.analysisDuration,
-    segmentType: cfg.segmentType,
-    showWarnings: cfg.showWarnings,
-    ignoreKeyframes: cfg.ignoreKeyframes,
-    dtsV4: cfg.dtsV4,
-    loopbackProxy: cfg.loopbackProxy,
-    restartOnAudioLoss: cfg.restartOnAudioLoss,
-    priorityBackup: cfg.priorityBackup,
-    audioAutoLang: cfg.audioAutoLang,
-    audioLang: cfg.audioLang,
-    binPath: cfg.binPath
-  };
-}
-
-/**
- * Elige la pista de audio a publicar. Con varios idiomas (p. ej. español + inglés) usa el
- * idioma preferido del panel (por defecto `spa`) en lugar de la primera pista, igual que XUI.one.
- */
-export function resolveAudioTrackIndex(stream, cfg) {
-  if (!cfg?.audioAutoLang) return null;
-  let list = [];
-  try {
-    list = JSON.parse(stream?.detected_audio_langs || '[]');
-  } catch {
-    list = [];
-  }
-  if (!Array.isArray(list) || list.length < 2) return null;
-  const want = String(cfg.audioLang || 'spa').toLowerCase();
-  const aliases = want === 'spa' ? ['spa', 'es', 'esp'] : want === 'eng' ? ['eng', 'en'] : [want];
-  const match = list.find((t) => aliases.includes(String(t?.lang || '').toLowerCase()));
-  if (!match) return null;
-  const idx = Number(match.i);
-  return Number.isInteger(idx) && idx >= 0 ? idx : null;
-}
-
-/** Parsea "aac (spa)" / "ac3 (eng)" del listado de FFmpeg para la detección de idiomas. */
-export function parseFfmpegAudioStreams(stderrText = '') {
-  // Formato real de FFmpeg:  Stream #0:1[0x101](spa): Audio: aac (LC), 48000 Hz, stereo, fltp
-  // El idioma aparece entre paréntesis ANTES de ": Audio", y el perfil del códec (LC/HE) va después.
-  const out = [];
-  const re = /Stream\s+#\d+:(\d+)(?:\[[0-9a-fA-Fx]+\])?(?:\(([a-zA-Z]{2,3})\))?[^\n]*?:\s*Audio:\s*([a-zA-Z0-9_]+)([^\n]*)/g;
-  let m;
-  while ((m = re.exec(String(stderrText))) !== null) {
-    const index = Number(m[1]);
-    const lang = String(m[2] || '').toLowerCase();
-    const codec = String(m[3] || '').toLowerCase();
-    const rest = String(m[4] || '');
-    const chMatch = rest.match(/(\d+)\s*channels/);
-    let channels = chMatch ? Number(chMatch[1]) : 2;
-    if (/\bmono\b/i.test(rest)) channels = 1;
-    else if (/\bstereo\b/i.test(rest)) channels = 2;
-    out.push({ i: index, codec, lang, channels });
-  }
-  return out;
 }
 
 export function buildAudioLevelingFilter(preset = 'standard', ultraLightNoResample = false) {
@@ -589,19 +441,7 @@ export function isStreamAudioLeveled(stream, profile) {
 }
 
 export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
-  const seg = getSegmentSettings();
-  const efficiency = getFfmpegEfficiencyConfig();
-
-  // Prioridad Backup (estilo XUI): si el primario falla repetidamente, el respaldo pasa primero
-  const primaryCandidates = resolveFfmpegCompatibleCandidates(stream.source_url, '');
-  const backupCandidates = String(stream.backup_url || '').trim()
-    ? resolveFfmpegCompatibleCandidates(stream.backup_url, '')
-    : [];
-  let candidates = [...primaryCandidates, ...backupCandidates];
-  if (seg.priorityBackup && backupCandidates.length > 0 && (Number(attemptIndex) || 0) >= 2) {
-    candidates = [...backupCandidates, ...primaryCandidates];
-  }
-  if (candidates.length === 0) candidates = [String(stream.source_url || '').trim()];
+  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, stream.backup_url);
   const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
 
   const globalAudio = getGlobalAudioLevelingConfig();
@@ -621,6 +461,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   const noResample =
     extraStr.includes('-no_resample') || globalAudio.preset === 'ultra_200ch';
   const ramMpegTsOnly = extraStr.includes('-ram_mpegts_only');
+  const efficiency = getFfmpegEfficiencyConfig();
   const dualTeeTsPipe =
     !ramMpegTsOnly &&
     (efficiency.tsPipeMode === 'always' ||
@@ -632,26 +473,19 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     fs.mkdirSync(outDir, { recursive: true });
   }
 
-  // -nostdin evita sondeo de TTY; el loglevel se controla desde el panel ("FFMPEG Show Warnings")
-  const args = ['-nostdin', '-hide_banner', '-loglevel', seg.showWarnings ? 'warning' : 'error', '-y'];
+  // -nostdin avoids TTY polling; -loglevel error suppresses high-rate stderr text formatting across 200+ workers
+  const args = ['-nostdin', '-hide_banner', '-loglevel', 'warning', '-y'];
 
   const hasCustomThreads = /(?:^|\s)-threads\s+\d+/.test(extraStr);
   const hasCpuVideoScale =
     !isCopyRemux &&
     ((profile?.resolution && profile.resolution !== 'source') || /-vf\b/.test(extraStr) || /-s\b/.test(extraStr));
 
-  // Sonda/analisis configurables (XUI.one: Probe Size / Analysis Duration). Para fuentes HTTP/HLS
-  // se garantiza un mínimo de 5 MB porque con menos FFmpeg pierde SPS/PPS en canales HD de 8-12 Mbps.
+  // Fuentes HTTP/HLS (Flussonic) necesitan sonda amplia para HD: con 1 MB FFmpeg pierde el SPS/PPS
+  // del primer segmento en canales de 8-12 Mbps y arranca tarde o entrecortado.
   const isHttpInput = /^https?:\/\//i.test(inputUrl);
-  const probeSize = String(isHttpInput ? Math.max(5000000, seg.probeSize) : Math.min(seg.probeSize, 1500000));
-  const analyzeDuration = String(
-    isHttpInput ? Math.max(4000000, seg.analysisDuration) : Math.min(seg.analysisDuration, 1500000)
-  );
-  // "DTS - Use FFMPEG v4.0" (XUI): true => regenera DTS limpio ignorando el DTS roto del origen.
-  // false => conserva el DTS nativo del origen (más fiel, pero un proveedor con timestamps rotos se corta).
-  const fflags = seg.dtsV4
-    ? '+genpts+igndts+nobuffer+discardcorrupt'
-    : '+genpts+nobuffer+discardcorrupt';
+  const probeSize = isHttpInput ? '5000000' : '1500000';
+  const analyzeDuration = isHttpInput ? '4000000' : '1500000';
   // -avoid_negative_ts sólo cuando emitimos MPEG-TS continuo (pipe), no en HLS puro (evita micro-saltos de PTS)
   const needTsContinuity = ramMpegTsOnly || dualTeeTsPipe;
 
@@ -659,7 +493,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     // Copy/Copy Zero-CPU: 1 hilo OS, sin re-encode (14-16 MB RSS por canal)
     if (!hasCustomThreads) args.push('-threads', '1');
     args.push('-probesize', probeSize, '-analyzeduration', analyzeDuration);
-    args.push('-fflags', fflags, '-flags', 'low_delay');
+    args.push('-fflags', '+genpts+igndts+nobuffer+discardcorrupt', '-flags', 'low_delay');
     if (needTsContinuity) args.push('-avoid_negative_ts', 'make_zero');
   } else if (isCopyRemux) {
     // Copy Video + Audio encode/level: 1 worker thread + 1 audio filter thread
@@ -674,7 +508,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
       '-analyzeduration',
       analyzeDuration,
       '-fflags',
-      fflags,
+      '+genpts+igndts+nobuffer+discardcorrupt',
       '-flags',
       'low_delay'
     );
@@ -697,9 +531,9 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
 
     args.push('-probesize', probeSize, '-analyzeduration', analyzeDuration);
     if (isZeroLatency) {
-      args.push('-fflags', fflags, '-flags', 'low_delay');
+      args.push('-fflags', '+genpts+igndts+nobuffer+discardcorrupt', '-flags', 'low_delay');
     } else {
-      args.push('-fflags', seg.dtsV4 ? '+genpts+igndts+discardcorrupt' : '+genpts+discardcorrupt');
+      args.push('-fflags', '+genpts+discardcorrupt');
     }
   }
 
@@ -723,9 +557,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
 
   args.push('-i', inputUrl);
   // Drop DVB EIT/SCTE-35 data (-dn) and DVB/Teletext subtitles (-sn) immediately at demux
-  const preferredAudioIdx = resolveAudioTrackIndex(stream, seg);
-  args.push('-dn', '-sn', '-map', '0:v:0');
-  args.push('-map', preferredAudioIdx === null ? '0:a:0?' : `0:a:${preferredAudioIdx}`);
+  args.push('-dn', '-sn', '-map', '0:v:0', '-map', '0:a:0?');
   args.push('-c:v', vCodec);
 
   if (vCodec !== 'copy') {
@@ -805,149 +637,37 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     return args;
   }
 
-  // ---- Parámetros de segmentación tomados del panel (estilo XUI.one) ----
-  const hlsTime = String(seg.segmentDuration);
-  const listSize = String(seg.listSize);
+  const hlsTime = isZeroLatency ? '2' : '4';
+  const hlsFlags = isZeroLatency
+    ? 'delete_segments+independent_segments+omit_endlist'
+    : 'delete_segments+append_list+omit_endlist';
   const outM3u8 = path.join(outDir, 'index.m3u8');
 
-  const hlsFlagList = ['delete_segments', 'independent_segments', 'omit_endlist'];
-  if (!isZeroLatency) hlsFlagList.push('append_list');
-  // "Ignore Keyframes": corta por tiempo aunque el GOP del origen sea más largo
-  if (seg.ignoreKeyframes) hlsFlagList.push('split_by_time');
-  const hlsFlags = hlsFlagList.join('+');
-  // Delete Threshold es una opción propia del muxer HLS (NO un flag dentro de hls_flags)
-  const deleteThresholdOpt =
-    seg.deleteThreshold > 0 ? `:hls_delete_threshold=${seg.deleteThreshold}` : '';
-
   if (dualTeeTsPipe) {
-    // Dual muxer via -f tee SOLO para canales troncales Flussonic (HLS + MPEG-TS continuo)
+    // Dual muxer via -f tee ONLY for Flussonic tshttp:// trunk streams needing simultaneous HLS + pipe:1
     const escapedM3u8 = outM3u8.replace(/\\/g, '\\\\').replace(/([:'\[\]|])/g, '\\$1');
     args.push(
       '-f',
       'tee',
-      `[f=hls:hls_time=${hlsTime}:hls_list_size=${listSize}:hls_flags=${hlsFlags}${deleteThresholdOpt}]${escapedM3u8}|[f=mpegts:mpegts_flags=+resend_headers]pipe:1`
+      `[f=hls:hls_time=${hlsTime}:hls_list_size=6:hls_flags=${hlsFlags}]${escapedM3u8}|[f=mpegts:mpegts_flags=+resend_headers]pipe:1`
     );
     return args;
   }
 
-  if (seg.segmentType === 'segment') {
-    // Modo XUI.one "-f segment": FFmpeg escribe sólo trozos .ts + un CSV y TVLister genera el
-    // index.m3u8 en memoria (equivalente al "Loopback via PHP" de XUI, pero sin PHP).
-    const csvPath = path.join(outDir, 'segment_list.csv');
-    args.push(
-      '-f',
-      'segment',
-      '-segment_time',
-      hlsTime,
-      '-segment_format',
-      'mpegts',
-      '-segment_list',
-      csvPath,
-      '-segment_list_type',
-      'csv',
-      // Ventana viva + umbral de borrado: FFmpeg elimina los .ts más antiguos por sí mismo
-      '-segment_list_size',
-      String(seg.listSize + seg.deleteThreshold),
-      '-reset_timestamps',
-      '1',
-      '-segment_start_number',
-      '0',
-      path.join(outDir, 'seg_%05d.ts')
-    );
-    return args;
-  }
-
-  // Salida HLS nativa ultra-eficiente en RAMDisk (stdout cerrado: 0 % de copias hacia Node.js)
-  args.push('-f', 'hls', '-hls_time', hlsTime, '-hls_list_size', listSize, '-hls_flags', hlsFlags);
-  if (seg.deleteThreshold > 0) args.push('-hls_delete_threshold', String(seg.deleteThreshold));
-  args.push(outM3u8);
+  // Default Ultra-Efficient Native HLS Output directly on /dev/shm RAMDisk:
+  // Eliminates -f tee dual-muxer overhead and closes stdout completely (0.00% Node.js pipe syscalls / GC!)
+  args.push(
+    '-f',
+    'hls',
+    '-hls_time',
+    hlsTime,
+    '-hls_list_size',
+    '6',
+    '-hls_flags',
+    hlsFlags,
+    outM3u8
+  );
   return args;
-}
-
-/**
- * Generador de playlist para el modo "-f segment" (compatibilidad XUI.one).
- * Lee el CSV que produce FFmpeg y escribe index.m3u8 de forma atómica.
- */
-export function startSegmentPlaylistWriter(outDir, intervalMs = 500) {
-  const csvPath = path.join(outDir, 'segment_list.csv');
-  const m3u8Path = path.join(outDir, 'index.m3u8');
-  let stopped = false;
-  let lastSignature = '';
-
-  const tick = () => {
-    if (stopped) return;
-    let text = '';
-    try {
-      text = fs.readFileSync(csvPath, 'utf8');
-    } catch {
-      return;
-    }
-    if (!text.trim() || text === lastSignature) return;
-    lastSignature = text;
-
-    const entries = [];
-    for (const line of text.split(/\r?\n/)) {
-      const parts = line.trim().split(',');
-      if (parts.length < 3) continue;
-      const name = path.basename(parts[0].trim());
-      const start = Number(parts[1]);
-      const end = Number(parts[2]);
-      if (!name || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
-      const numMatch = name.match(/(\d+)\.ts$/);
-      entries.push({ name, dur: Math.max(0.1, end - start), index: numMatch ? Number(numMatch[1]) : entries.length });
-    }
-    if (entries.length === 0) return;
-
-    const targetDuration = Math.max(1, Math.ceil(Math.max(...entries.map((e) => e.dur))));
-    const lines = [
-      '#EXTM3U',
-      '#EXT-X-VERSION:3',
-      `#EXT-X-TARGETDURATION:${targetDuration}`,
-      `#EXT-X-MEDIA-SEQUENCE:${entries[0].index}`,
-      '#EXT-X-INDEPENDENT-SEGMENTS'
-    ];
-    for (const e of entries) {
-      lines.push(`#EXTINF:${e.dur.toFixed(6)},`, e.name);
-    }
-
-    const tmp = `${m3u8Path}.tmp`;
-    try {
-      fs.writeFileSync(tmp, lines.join('\n') + '\n', 'utf8');
-      fs.renameSync(tmp, m3u8Path);
-    } catch {
-      // reintenta en el siguiente ciclo
-    }
-
-    // Retención: el muxer "segment" nunca borra archivos (a diferencia del muxer HLS),
-    // así que el escritor elimina los .ts que salieron de la ventana del manifiesto.
-    const keep = new Set(entries.map((e) => e.name));
-    const now = Date.now();
-    try {
-      for (const f of fs.readdirSync(outDir)) {
-        if (!f.endsWith('.ts') || keep.has(f)) continue;
-        const fp = path.join(outDir, f);
-        try {
-          // margen de 3 s: nunca borrar un segmento recién creado que aún se está escribiendo
-          if (now - fs.statSync(fp).mtimeMs < 3000) continue;
-          fs.unlinkSync(fp);
-        } catch {
-          // ignorar carreras de borrado
-        }
-      }
-    } catch {
-      // directorio no disponible
-    }
-  };
-
-  tick();
-  const timer = setInterval(tick, intervalMs);
-  timer.unref?.();
-  return {
-    stop() {
-      stopped = true;
-      clearInterval(timer);
-    }
-  };
 }
 
 export function buildFfmpegCommandForStream(stream, profile) {
@@ -1212,24 +932,6 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     return state.hlsTailer;
   };
 
-  const ensurePlaylistWriter = () => {
-    if (state.playlistWriter || state.stoppedManually) return state.playlistWriter;
-    state.playlistWriter = startSegmentPlaylistWriter(resolveHlsDirForKey(key));
-    return state.playlistWriter;
-  };
-
-  const stopPlaylistWriter = () => {
-    if (state.playlistWriter) {
-      try {
-        state.playlistWriter.stop();
-      } catch {
-        // ignore
-      }
-      state.playlistWriter = null;
-    }
-  };
-  state.stopPlaylistWriter = stopPlaylistWriter;
-
   const stopHlsTailer = () => {
     if (state.hlsTailer) {
       try {
@@ -1315,12 +1017,6 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
 
     const lastArg = String(args[args.length - 1] || '');
     state.usesStdoutPipe = lastArg.endsWith('pipe:1');
-    // Modo "-f segment": TVLister genera el index.m3u8 a partir del CSV de FFmpeg
-    if (args.includes('-segment_list')) {
-      ensurePlaylistWriter();
-    } else {
-      stopPlaylistWriter();
-    }
     state.tsCarryLen = 0;
     if (!state.usesStdoutPipe) {
       state.ringBuf = null;
@@ -1479,13 +1175,6 @@ export function stopWorker(key) {
   if (!state) return;
   state.stoppedManually = true;
   if (state.tailerIdleTimer) clearTimeout(state.tailerIdleTimer);
-  if (state.stopPlaylistWriter) {
-    try {
-      state.stopPlaylistWriter();
-    } catch {
-      // ignore
-    }
-  }
   if (state.stopHlsTailer) {
     try {
       state.stopHlsTailer();
