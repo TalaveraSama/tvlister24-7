@@ -20,6 +20,7 @@ import {
   startSupervisedWorker,
   getWorkerPid,
   isFfmpegAvailable,
+  isStreamAudioLeveled,
   HLS_ROOT,
   ARCHIVE_ROOT
 } from './streamEngine.js';
@@ -479,24 +480,27 @@ async function serveSubscriberOfflineSlate(req, res, stream, username, password,
 }
 
 function wakeOnDemandTranscodeIfNeeded(stream) {
-  if (!isFfmpegAvailable()) return;
+  if (!isFfmpegAvailable()) return false;
   const workerKey = `stream_${stream.id}`;
-  if (getWorkerPid(workerKey)) return;
+  if (getWorkerPid(workerKey)) return true;
 
   const profile = stream.transcode_profile_id
     ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(stream.transcode_profile_id)
     : null;
 
+  const audioLeveled = isStreamAudioLeveled(stream, profile);
   const isRemuxOrTranscodeProfile =
-    profile &&
-    ((profile.video_codec && profile.video_codec !== 'copy') ||
-      Number(stream.transcode_profile_id) > 1 ||
-      /copy\/copy|remux|2\.5/i.test(String(profile.name || '')));
+    audioLeveled ||
+    (profile &&
+      ((profile.video_codec && profile.video_codec !== 'copy') ||
+        (profile.audio_codec && profile.audio_codec !== 'copy') ||
+        Number(stream.transcode_profile_id) > 1 ||
+        /copy\/copy|remux|2\.5|nivelado/i.test(String(profile.name || ''))));
 
   const needsFfmpeg =
     stream.stream_mode === 'transcode' || (stream.stream_mode === 'ondemand' && isRemuxOrTranscodeProfile);
 
-  if (!needsFfmpeg) return;
+  if (!needsFfmpeg) return false;
 
   startSupervisedWorker(
     workerKey,
@@ -512,6 +516,22 @@ function wakeOnDemandTranscodeIfNeeded(stream) {
       db.prepare('UPDATE streams SET pid = ? WHERE id = ?').run(pid, stream.id);
     }
   );
+  return Boolean(getWorkerPid(workerKey));
+}
+
+async function waitForFreshWorkerManifest(workerKey, maxWaitMs = 4200) {
+  let manifest = getFreshLocalHlsManifestPath(workerKey, 18);
+  if (manifest) return manifest;
+  if (!getWorkerPid(workerKey)) return null;
+
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 180));
+    manifest = getFreshLocalHlsManifestPath(workerKey, 18);
+    if (manifest) return manifest;
+    if (!getWorkerPid(workerKey)) break;
+  }
+  return getFreshLocalHlsManifestPath(workerKey, 18);
 }
 
 // 1. Standard M3U / M3U_Plus Playlist Generator (/get.php)
@@ -1197,14 +1217,16 @@ async function serveLiveStreamRequest(req, res) {
     stream.status = 'running';
   }
 
-  wakeOnDemandTranscodeIfNeeded(stream);
+  const hasActiveWorker = wakeOnDemandTranscodeIfNeeded(stream);
 
   const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, protocol);
   if (!conn.allowed) return res.status(429).send(conn.error);
 
-  // 1) Local FFmpeg-transcoded / Copy-Remux HLS manifest if fresh (<18s)
+  // 1) Local FFmpeg-transcoded / Copy-Remux / Audio-Leveled HLS manifest (waits up to 4.2s on On-Demand cold start)
   const workerKey = `stream_${stream.id}`;
-  const localManifest = getFreshLocalHlsManifestPath(workerKey, 18);
+  const localManifest = hasActiveWorker
+    ? await waitForFreshWorkerManifest(workerKey, 4200)
+    : getFreshLocalHlsManifestPath(workerKey, 18);
   if (localManifest) {
     if (protocol === 'MPEG-TS') {
       attachLiveConnectionSocket(conn.connId, req, res);
@@ -1805,11 +1827,26 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
   const kind = String(req.query.kind || 'live');
   const sid = Number(req.query.id) || 0;
 
-  // 1. Check active local FFmpeg worker for stream / channel247
+  // 1. Check active local FFmpeg worker for stream / channel247 (also wake On-Demand live streams for preview)
   if (sid > 0 && (kind === 'live' || kind === 'channel247')) {
+    let hasWorker = false;
+    if (kind === 'live') {
+      const stRow = db.prepare('SELECT * FROM streams WHERE id = ?').get(sid);
+      if (stRow && stRow.status !== 'stopped') {
+        if (stRow.status === 'ondemand_idle') {
+          db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(sid);
+          stRow.status = 'running';
+        }
+        hasWorker = wakeOnDemandTranscodeIfNeeded(stRow);
+      }
+    }
     const workerKey = kind === 'channel247' ? `ch247_${sid}` : `stream_${sid}`;
     const localManifest =
-      kind === 'live' ? getFreshLocalHlsManifestPath(workerKey, 18) : getLocalHlsManifestPath(workerKey);
+      kind === 'live'
+        ? hasWorker
+          ? await waitForFreshWorkerManifest(workerKey, 4200)
+          : getFreshLocalHlsManifestPath(workerKey, 18)
+        : getLocalHlsManifestPath(workerKey);
     if (localManifest) {
       const content = fs.readFileSync(localManifest, 'utf8');
       const segBase = `/api/admin/preview/hls_local/${encodeURIComponent(workerKey)}/`;

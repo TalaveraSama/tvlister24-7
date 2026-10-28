@@ -54,7 +54,8 @@ import {
   getArchiveStats,
   pruneArchiveSegmentsForStreams,
   cleanupStreamRuntime,
-  isFfmpegAvailable
+  isFfmpegAvailable,
+  getGlobalAudioLevelingConfig
 } from './streamEngine.js';
 import {
   SLATES_DIR,
@@ -644,6 +645,79 @@ app.post('/api/streams/reorder', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
+app.get('/api/audio-leveling/config', requireAuth, (req, res) => {
+  const cfg = getGlobalAudioLevelingConfig();
+  const directCount = db.prepare("SELECT COUNT(*) as c FROM streams WHERE stream_mode = 'direct'").get()?.c || 0;
+  const totalStreams = db.prepare('SELECT COUNT(*) as c FROM streams').get()?.c || 0;
+  res.json({
+    config: cfg,
+    directCount,
+    totalStreams
+  });
+});
+
+app.put('/api/audio-leveling/config', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const upsert = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  );
+  if (b.enabled !== undefined) upsert.run('audio_leveling_enabled', b.enabled ? 'true' : 'false');
+  if (b.preset) upsert.run('audio_leveling_preset', String(b.preset));
+  if (b.bitrate) upsert.run('audio_leveling_bitrate', String(b.bitrate));
+
+  let convertedFromDirect = 0;
+  if (b.enabled && b.convertDirectToOnDemand !== false) {
+    const hybridProf =
+      db
+        .prepare("SELECT id FROM transcode_profiles WHERE LOWER(name) LIKE '%copy video + audio nivelado%' LIMIT 1")
+        .get() ||
+      db.prepare("SELECT id FROM transcode_profiles WHERE video_codec = 'copy' ORDER BY id DESC LIMIT 1").get();
+    const profId = hybridProf?.id || 2;
+    const info = db
+      .prepare(
+        `UPDATE streams
+         SET stream_mode = 'ondemand',
+             transcode_profile_id = CASE WHEN transcode_profile_id = 1 THEN ? ELSE transcode_profile_id END,
+             status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END
+         WHERE stream_mode = 'direct'`
+      )
+      .run(profId);
+    convertedFromDirect = Number(info.changes) || 0;
+  }
+
+  // Restart currently running stream workers so new audio leveling applies immediately
+  const runningStreams = db.prepare("SELECT id FROM streams WHERE status = 'running'").all();
+  const runningIds = [];
+  for (const r of runningStreams) {
+    if (getWorkerPid(`stream_${r.id}`)) {
+      stopWorker(`stream_${r.id}`);
+      runningIds.push(r.id);
+    }
+  }
+  if (runningIds.length > 0) {
+    scheduleStaggeredStreamLaunches(runningIds, 65);
+  }
+
+  // Also restart running 24/7 workers
+  const running247 = db
+    .prepare("SELECT id FROM channels_247 WHERE status = 'running' AND engine_mode = 'ffmpeg'")
+    .all();
+  for (const ch of running247) {
+    stopWorker(`ch247_${ch.id}`);
+    launchChannel247WorkerIfConfigured(ch.id);
+  }
+
+  const nextCfg = getGlobalAudioLevelingConfig();
+  const directCount = db.prepare("SELECT COUNT(*) as c FROM streams WHERE stream_mode = 'direct'").get()?.c || 0;
+  res.json({
+    ok: true,
+    config: nextCfg,
+    convertedFromDirect,
+    reloadedWorkers: runningIds.length,
+    directCount
+  });
+});
+
 app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.source_url) {
@@ -651,8 +725,8 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
   }
   const info = db
     .prepare(
-      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url, audio_leveling_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       String(b.name),
@@ -669,7 +743,8 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
       Number(b.tv_archive_days) || 0,
       Number(b.bitrate_kbps) || 2500,
       String(b.offline_slate_mode || 'global'),
-      String(b.offline_slate_url || '')
+      String(b.offline_slate_url || ''),
+      String(b.audio_leveling_mode || 'global')
     );
 
   const newId = Number(info.lastInsertRowid);
@@ -695,7 +770,7 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
        name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
        epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
        user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
-       offline_slate_mode = ?, offline_slate_url = ?
+       offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?
      WHERE id = ?`
   ).run(
     String(b.name || ''),
@@ -712,6 +787,7 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
     Number(b.bitrate_kbps) || 2500,
     String(b.offline_slate_mode || 'global'),
     String(b.offline_slate_url || ''),
+    String(b.audio_leveling_mode || 'global'),
     id
   );
 
@@ -808,6 +884,10 @@ app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
   if (changes.offline_slate_mode !== undefined && changes.offline_slate_mode !== '') {
     setClauses.push('offline_slate_mode = ?');
     setParams.push(String(changes.offline_slate_mode));
+  }
+  if (changes.audio_leveling_mode !== undefined && changes.audio_leveling_mode !== '') {
+    setClauses.push('audio_leveling_mode = ?');
+    setParams.push(String(changes.audio_leveling_mode));
   }
   if (changes.offline_slate_url !== undefined) {
     setClauses.push('offline_slate_url = ?');

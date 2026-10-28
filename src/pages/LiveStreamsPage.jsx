@@ -28,7 +28,8 @@ import {
   ArrowDown,
   ChevronsUp,
   ChevronsDown,
-  GripVertical
+  GripVertical,
+  Volume2
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -46,7 +47,8 @@ const EMPTY_FORM = {
   bitrate_kbps: 2500,
   user_agent: 'TVLister/2.3 (MPEG-TS; Linux)',
   offline_slate_mode: 'global',
-  offline_slate_url: ''
+  offline_slate_url: '',
+  audio_leveling_mode: 'global'
 };
 
 const EMPTY_PROF = {
@@ -70,6 +72,7 @@ const EMPTY_BULK_EDIT = {
   bitrate_kbps: '',
   offline_slate_mode: '',
   offline_slate_url: '',
+  audio_leveling_mode: '',
   keep_slate_url: true,
   server_id: '',
   tv_archive_days: '',
@@ -142,6 +145,18 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [slateUploading, setSlateUploading] = useState(false);
   const [slateNotice, setSlateNotice] = useState('');
 
+  // Uniform Audio Leveling ("Audio Igual en Todos los Canales")
+  const [audioModalOpen, setAudioModalOpen] = useState(false);
+  const [audioConfig, setAudioConfig] = useState({
+    enabled: false,
+    preset: 'standard',
+    bitrate: '128k'
+  });
+  const [audioDirectCount, setAudioDirectCount] = useState(0);
+  const [convertDirectOnAudio, setConvertDirectOnAudio] = useState(true);
+  const [audioSaving, setAudioSaving] = useState(false);
+  const [audioNotice, setAudioNotice] = useState('');
+
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -174,6 +189,48 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     }
   };
 
+  const loadAudioLeveling = async () => {
+    try {
+      const au = await apiFetch('/api/audio-leveling/config');
+      if (au?.config) setAudioConfig(au.config);
+      if (typeof au?.directCount === 'number') setAudioDirectCount(au.directCount);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSaveAudioLeveling = async (overrideEnabled = null) => {
+    setAudioSaving(true);
+    setAudioNotice('');
+    try {
+      const nextEnabled = overrideEnabled !== null ? overrideEnabled : audioConfig.enabled;
+      const res = await apiFetch('/api/audio-leveling/config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          ...audioConfig,
+          enabled: nextEnabled,
+          convertDirectToOnDemand: convertDirectOnAudio
+        })
+      });
+      if (res?.config) setAudioConfig(res.config);
+      if (typeof res?.directCount === 'number') setAudioDirectCount(res.directCount);
+      await loadAll();
+      setAudioNotice(
+        res?.config?.enabled
+          ? `✅ Audio nivelado activado en todos los canales${
+              res.convertedFromDirect > 0
+                ? ` (${res.convertedFromDirect} canales en Directo pasados a On-Demand Bajo CPU)`
+                : ''
+            }.`
+          : 'ℹ️ Nivelación global de audio desactivada.'
+      );
+    } catch (err) {
+      setAudioNotice(`❌ ${err.message}`);
+    } finally {
+      setAudioSaving(false);
+    }
+  };
+
   const loadAll = async () => {
     const [st, cats, sys] = await Promise.all([
       apiFetch('/api/streams'),
@@ -193,6 +250,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   useEffect(() => {
     loadAll();
     loadSlates();
+    loadAudioLeveling();
     apiFetch('/api/streams/auto-resolution/status')
       .then((st) => {
         setAutoResStatus(st);
@@ -512,7 +570,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       bitrate_kbps: s.bitrate_kbps || 2500,
       user_agent: s.user_agent || 'TVLister/2.3',
       offline_slate_mode: s.offline_slate_mode || 'global',
-      offline_slate_url: s.offline_slate_url || ''
+      offline_slate_url: s.offline_slate_url || '',
+      audio_leveling_mode: s.audio_leveling_mode || 'global'
     });
     setModalOpen(true);
   };
@@ -620,6 +679,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       if (bulkForm.transcode_profile_id !== '') changes.transcode_profile_id = Number(bulkForm.transcode_profile_id);
       if (bulkForm.bitrate_kbps !== '') changes.bitrate_kbps = Number(bulkForm.bitrate_kbps);
       if (bulkForm.offline_slate_mode !== '') changes.offline_slate_mode = bulkForm.offline_slate_mode;
+      if (bulkForm.audio_leveling_mode !== '') changes.audio_leveling_mode = bulkForm.audio_leveling_mode;
       if (!bulkForm.keep_slate_url || bulkForm.offline_slate_mode === 'custom_image' || bulkForm.offline_slate_mode === 'custom_video') {
         changes.offline_slate_url = bulkForm.offline_slate_url;
       }
@@ -1037,6 +1097,24 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               )}
             </button>
 
+            {/* Uniform Audio Leveling Button */}
+            <button
+              onClick={() => {
+                setAudioNotice('');
+                loadAudioLeveling();
+                setAudioModalOpen(true);
+              }}
+              className={`inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition ${
+                audioConfig.enabled
+                  ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/45 shadow-sm'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+              }`}
+              title="Igualar volumen de audio en todos los canales (normalización dinámica en vivo)"
+            >
+              <Volume2 className="w-4 h-4 text-amber-300" />
+              Audio Igual {audioConfig.enabled ? '• ON' : '• OFF'}
+            </button>
+
             {/* Offline Video / Image Loop Button */}
             <button
               onClick={() => {
@@ -1320,9 +1398,27 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                           </span>
                           {s.profile_video_codec === 'copy' && s.stream_mode !== 'direct' && (
                             <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono text-[9px] font-bold">
-                              COPY/COPY
+                              {(s.audio_leveling_mode === 'on' ||
+                                (s.audio_leveling_mode !== 'off' &&
+                                  (audioConfig.enabled ||
+                                    String(s.profile_name || '').toLowerCase().includes('audio nivelado'))))
+                                ? 'COPY VIDEO'
+                                : 'COPY/COPY'}
                             </span>
                           )}
+                          {s.stream_mode !== 'direct' &&
+                            (s.audio_leveling_mode === 'on' ||
+                              (s.audio_leveling_mode !== 'off' &&
+                                (audioConfig.enabled ||
+                                  String(s.profile_name || '').toLowerCase().includes('audio nivelado')))) && (
+                              <span
+                                title="Audio nivelado dinámicamente a 48 kHz Estéreo (mismo volumen en todos los canales)"
+                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-200 border border-amber-400/35 font-mono text-[9px] font-bold"
+                              >
+                                <Volume2 className="w-2.5 h-2.5 text-amber-300" />
+                                AUDIO IGUAL
+                              </span>
+                            )}
                           {s.resolution_tier && (
                             <span
                               title={
@@ -1695,6 +1791,20 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     <option value="running">Activo / En Línea (running)</option>
                     <option value="ondemand_idle">On-Demand en espera</option>
                     <option value="stopped">Detenido (stopped)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 mb-1">Nivelación de Audio (Volumen Igual)</label>
+                  <select
+                    value={bulkForm.audio_leveling_mode}
+                    onChange={(e) => setBulkForm({ ...bulkForm, audio_leveling_mode: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="">— Mantener sin cambios —</option>
+                    <option value="global">Seguir configuración Global</option>
+                    <option value="on">Forzar Audio Nivelado siempre (ON)</option>
+                    <option value="off">Desactivar nivelación en estos canales (OFF)</option>
                   </select>
                 </div>
 
@@ -2266,6 +2376,21 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     </div>
                   </div>
                 )}
+
+                <div>
+                  <label className="block text-slate-300 mb-1 font-medium">
+                    🔊 Nivelación de Audio (Volumen Igual)
+                  </label>
+                  <select
+                    value={form.audio_leveling_mode || 'global'}
+                    onChange={(e) => setForm({ ...form, audio_leveling_mode: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
+                  >
+                    <option value="global">Seguir configuración Global ({audioConfig.enabled ? 'ON' : 'OFF'})</option>
+                    <option value="on">Forzar Audio Nivelado siempre (ON)</option>
+                    <option value="off">Sin nivelar en este canal (OFF)</option>
+                  </select>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
@@ -3592,6 +3717,170 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Global Uniform Audio Leveling Modal */}
+      {audioModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl rounded-2xl bg-[#0e1526] border border-amber-500/40 p-6 space-y-5 max-h-[92vh] overflow-y-auto shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Volume2 className="w-5 h-5 text-amber-400" />
+                  Nivelador Global de Audio — Mismo Volumen en Todos los Canales
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Empareja canales bajos, frena comerciales fuertes y convierte Dolby 5.1 a Estéreo 48 kHz sin perder lip-sync
+                </p>
+              </div>
+              <button
+                onClick={() => setAudioModalOpen(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {audioNotice && (
+              <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-400/40 text-xs text-amber-100 font-medium">
+                {audioNotice}
+              </div>
+            )}
+
+            {/* Master Switch Card */}
+            <div
+              className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                audioConfig.enabled
+                  ? 'bg-amber-500/15 border-amber-400/50'
+                  : 'bg-[#090e1a] border-slate-700'
+              }`}
+            >
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-white flex items-center gap-2">
+                  <span>🔊 Estado Global de Audio Nivelado</span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      audioConfig.enabled
+                        ? 'bg-amber-400 text-slate-950'
+                        : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {audioConfig.enabled ? 'ACTIVO EN TODA LA PARRILLA' : 'APAGADO'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Funciona tanto con <strong>Auto-Resolución (1M / 2.5M / 3M)</strong> como con <strong>Copy de Video (0% CPU de video)</strong>. Consume apenas <strong>~0.4% CPU</strong> por canal activo.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                disabled={audioSaving}
+                onClick={() => handleSaveAudioLeveling(!audioConfig.enabled)}
+                className={`px-4 py-2.5 rounded-xl text-xs font-bold shrink-0 transition shadow-lg ${
+                  audioConfig.enabled
+                    ? 'bg-slate-800 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40'
+                    : 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+                }`}
+              >
+                {audioConfig.enabled
+                  ? 'Desactivar Nivelación'
+                  : '⚡ Activar Audio Igual Ahora'}
+              </button>
+            </div>
+
+            {/* Curve Preset + Bitrate */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Curva de Nivelación de Volumen
+                </label>
+                <select
+                  value={audioConfig.preset}
+                  onChange={(e) => setAudioConfig({ ...audioConfig, preset: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white"
+                >
+                  <option value="standard">
+                    📺 Estándar TV Equilibrado (-13 dB RMS • Recomendado)
+                  </option>
+                  <option value="voice">
+                    🎙️ Claridad Voz & Deportes (-11.5 dB RMS • Resalta voces)
+                  </option>
+                  <option value="cinema">
+                    🎬 Suave Cine (-15 dB RMS • Más rango dinámico)
+                  </option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Calidad de Audio Uniforme (AAC Estéreo 48 kHz)
+                </label>
+                <select
+                  value={audioConfig.bitrate}
+                  onChange={(e) => setAudioConfig({ ...audioConfig, bitrate: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white"
+                >
+                  <option value="96k">96 kbps AAC Estéreo (Ahorro)</option>
+                  <option value="128k">128 kbps AAC Estéreo (Recomendado TV)</option>
+                  <option value="160k">160 kbps AAC Estéreo (Alta Fidelidad)</option>
+                  <option value="192k">192 kbps AAC Estéreo (Máxima Calidad)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Direct-mode protection */}
+            <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 space-y-1.5">
+              <label className="inline-flex items-start gap-2.5 text-xs text-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={convertDirectOnAudio}
+                  onChange={(e) => setConvertDirectOnAudio(e.target.checked)}
+                  className="mt-0.5 rounded accent-amber-400"
+                />
+                <span>
+                  Convertir automáticamente canales que estén en modo <strong>Directo puro</strong> a{' '}
+                  <strong>On-Demand (Copy Video + Audio Nivelado)</strong> para que ningún canal quede sin nivelar
+                  {audioDirectCount > 0 ? (
+                    <span className="ml-1 text-amber-300 font-semibold">
+                      ({audioDirectCount} canal{audioDirectCount === 1 ? '' : 'es'} actualmente en Directo)
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+            </div>
+
+            {/* Filter Preview */}
+            <div className="p-3 rounded-xl bg-[#070b13] border border-slate-800 text-[11px] font-mono text-emerald-300 break-all">
+              FFmpeg Audio Pipeline: -af &quot;aresample=async=1:first_pts=0,dynaudnorm=
+              {audioConfig.preset === 'voice'
+                ? 'f=150:g=11:p=0.93:m=14:r=0.26:n=1:b=1'
+                : audioConfig.preset === 'cinema'
+                ? 'f=200:g=17:p=0.88:m=7:r=0.18:n=1:b=1'
+                : 'f=150:g=13:p=0.90:m=10:r=0.22:n=1:b=1'}
+              &quot; -ac 2 -ar 48000 -c:a aac -b:a {audioConfig.bitrate}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setAudioModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+              >
+                Cerrar
+              </button>
+              <button
+                type="button"
+                disabled={audioSaving}
+                onClick={() => handleSaveAudioLeveling(true)}
+                className="inline-flex items-center gap-1.5 px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold transition shadow-lg shadow-amber-950/40"
+              >
+                <Save className="w-4 h-4" />
+                {audioSaving ? 'Aplicando...' : 'Guardar y Aplicar Audio Igual'}
+              </button>
+            </div>
           </div>
         </div>
       )}

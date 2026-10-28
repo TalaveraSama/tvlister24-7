@@ -355,6 +355,7 @@ export function initDb() {
   ensureColumn('streams', 'resolution_tier', "TEXT DEFAULT ''");
   ensureColumn('streams', 'resolution_source', "TEXT DEFAULT ''");
   ensureColumn('streams', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('streams', 'audio_leveling_mode', "TEXT NOT NULL DEFAULT 'global'");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
 
   db.exec(`
@@ -570,6 +571,27 @@ export function initDb() {
       throw err;
     }
   }
+
+  // Ensure Hybrid Low-CPU Profile ("Copy Video + Audio Nivelado (Bajo CPU)") & Audio Leveling settings exist
+  const audioLevelMigrated = db.prepare("SELECT value FROM settings WHERE key = 'copy_video_leveled_audio_v1'").get();
+  if (audioLevelMigrated?.value !== 'true') {
+    const existingHybrid = db
+      .prepare("SELECT id FROM transcode_profiles WHERE LOWER(name) LIKE '%copy video + audio nivelado%' LIMIT 1")
+      .get();
+    if (!existingHybrid) {
+      db.prepare(
+        `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+         VALUES ('Copy Video + Audio Nivelado (Bajo CPU)', 'copy', 'aac', 'source', '128k', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024')`
+      ).run();
+    }
+    const insSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
+    insSetting.run('audio_leveling_enabled', 'false');
+    insSetting.run('audio_leveling_preset', 'standard');
+    insSetting.run('audio_leveling_bitrate', '128k');
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('copy_video_leveled_audio_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+    ).run();
+  }
 }
 
 function sanitizeJsonIdArray(rawJson, validIdsSet) {
@@ -783,6 +805,7 @@ function seedInitialData() {
   );
   insertProf.run('Direct Stream (Zero Transcode)', 'copy', 'copy', 'source', 'source', 'source', 'none', 'none', '-fflags +genpts+igndts');
   insertProf.run('Copy/Copy Remux 2.5 Mbps (Zero CPU)', 'copy', 'copy', '2500k', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024');
+  insertProf.run('Copy Video + Audio Nivelado (Bajo CPU)', 'copy', 'aac', 'source', '128k', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024');
   insertProf.run('Auto SD/480p/540p — 1.0 Mbps', 'libx264', 'aac', '1000k', '96k', 'source', 'ultrafast', 'none', '-vf scale=min(960\\,iw):-2 -tune zerolatency -maxrate 1000k -bufsize 2000k');
   insertProf.run('Auto HD 720p — 2.5 Mbps', 'libx264', 'aac', '2500k', '128k', '1280x720', 'ultrafast', 'none', '-tune zerolatency -maxrate 2500k -bufsize 5000k');
   insertProf.run('Auto FHD 1080p — 3.0 Mbps', 'libx264', 'aac', '3000k', '128k', '1920x1080', 'ultrafast', 'none', '-tune zerolatency -maxrate 3000k -bufsize 6000k');

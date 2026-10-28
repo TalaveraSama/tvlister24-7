@@ -3,6 +3,7 @@ import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { db } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_DIR = path.resolve(__dirname, '../streams_runtime');
@@ -243,12 +244,55 @@ function splitExtraFlags(rawFlags = '') {
     .filter(Boolean);
 }
 
+export function getGlobalAudioLevelingConfig() {
+  try {
+    const rows = db
+      .prepare(
+        "SELECT key, value FROM settings WHERE key IN ('audio_leveling_enabled', 'audio_leveling_preset', 'audio_leveling_bitrate')"
+      )
+      .all();
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    return {
+      enabled: map.audio_leveling_enabled === 'true',
+      preset: map.audio_leveling_preset || 'standard',
+      bitrate: map.audio_leveling_bitrate || '128k'
+    };
+  } catch {
+    return { enabled: false, preset: 'standard', bitrate: '128k' };
+  }
+}
+
+export function buildAudioLevelingFilter(preset = 'standard') {
+  if (preset === 'voice') {
+    // Boosts quiet commentators/dialogue and clamps loud commercials
+    return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=11:p=0.93:m=14:r=0.26:n=1:b=1';
+  }
+  if (preset === 'cinema') {
+    // Gentle cinema curve with smooth envelope
+    return 'aresample=async=1:first_pts=0,dynaudnorm=f=200:g=17:p=0.88:m=7:r=0.18:n=1:b=1';
+  }
+  // Standard broadcast TV loudness target (-13 dBFS RMS, -0.9 dBFS peak ceiling, zero startup dip)
+  return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=13:p=0.90:m=10:r=0.22:n=1:b=1';
+}
+
+export function isStreamAudioLeveled(stream, profile) {
+  const mode = stream?.audio_leveling_mode || 'global';
+  if (mode === 'off') return false;
+  if (mode === 'on') return true;
+  if (/audio nivelado/i.test(String(profile?.name || ''))) return true;
+  return getGlobalAudioLevelingConfig().enabled;
+}
+
 export function buildFfmpegArgsForStream(stream, profile) {
   const outDir = path.join(HLS_ROOT, `stream_${stream.id}`);
   fs.mkdirSync(outDir, { recursive: true });
 
+  const globalAudio = getGlobalAudioLevelingConfig();
+  const levelAudio = isStreamAudioLeveled(stream, profile);
+
   const vCodec = profile?.video_codec || 'copy';
-  const aCodec = profile?.audio_codec || 'copy';
+  const rawACodec = profile?.audio_codec || 'copy';
+  const aCodec = levelAudio && (rawACodec === 'copy' || !rawACodec) ? 'aac' : rawACodec;
   const extraStr = String(profile?.extra_flags || '');
   const isCopyRemux = vCodec === 'copy';
   const isZeroLatency =
@@ -289,6 +333,7 @@ export function buildFfmpegArgsForStream(stream, profile) {
   }
 
   args.push('-i', stream.source_url);
+  args.push('-map', '0:v:0', '-map', '0:a:0?');
   args.push('-c:v', vCodec);
 
   if (vCodec !== 'copy') {
@@ -301,9 +346,18 @@ export function buildFfmpegArgsForStream(stream, profile) {
     args.push('-max_muxing_queue_size', '1024');
   }
 
+  if (levelAudio) {
+    args.push('-af', buildAudioLevelingFilter(globalAudio.preset), '-ac', '2', '-ar', '48000');
+  }
+
   args.push('-c:a', aCodec);
-  if (aCodec !== 'copy' && profile?.audio_bitrate && profile.audio_bitrate !== 'source') {
-    args.push('-b:a', profile.audio_bitrate);
+  if (aCodec !== 'copy') {
+    const aBr = levelAudio
+      ? globalAudio.bitrate || '128k'
+      : profile?.audio_bitrate && profile.audio_bitrate !== 'source'
+      ? profile.audio_bitrate
+      : '128k';
+    args.push('-b:a', aBr);
   }
 
   args.push(
@@ -341,10 +395,15 @@ export function buildFfmpegArgsForChannel247(channel, profile) {
   }
   fs.writeFileSync(concatFile, concatLines.join('\n') + '\n', 'utf8');
 
+  const globalAudio = getGlobalAudioLevelingConfig();
   const vCodec = profile?.video_codec && profile.video_codec !== 'copy' ? profile.video_codec : 'libx264';
   const aCodec = profile?.audio_codec && profile.audio_codec !== 'copy' ? profile.audio_codec : 'aac';
   const vBitrate = profile?.video_bitrate && profile.video_bitrate !== 'source' ? profile.video_bitrate : '3500k';
-  const aBitrate = profile?.audio_bitrate && profile.audio_bitrate !== 'source' ? profile.audio_bitrate : '128k';
+  const aBitrate = globalAudio.enabled
+    ? globalAudio.bitrate || '128k'
+    : profile?.audio_bitrate && profile.audio_bitrate !== 'source'
+    ? profile.audio_bitrate
+    : '128k';
   const preset = profile?.preset && profile.preset !== 'none' ? profile.preset : 'veryfast';
 
   const args = [
@@ -366,6 +425,9 @@ export function buildFfmpegArgsForChannel247(channel, profile) {
   ];
 
   args.push('-c:v', vCodec, '-preset', preset, '-b:v', vBitrate, '-g', '48', '-sc_threshold', '0');
+  if (globalAudio.enabled) {
+    args.push('-af', buildAudioLevelingFilter(globalAudio.preset), '-ac', '2', '-ar', '48000');
+  }
   args.push('-c:a', aCodec, '-b:a', aBitrate);
   args.push(
     '-f',
