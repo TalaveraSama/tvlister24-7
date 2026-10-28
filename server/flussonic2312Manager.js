@@ -72,9 +72,10 @@ export function convertAstraHttpToTshttp(urlStr = '', overrideHost = '') {
 }
 
 export function buildFlussonicPullUrl(srv, streamName, protocol = 'mpegts') {
-  const base = normalizeBaseUrl(srv.base_url);
+  const base = normalizeBaseUrl(srv?.base_url || srv || '');
+  if (!base) return '';
   const u = new URL(base);
-  if (srv.username && String(srv.username).trim() && !u.username) {
+  if (srv?.username && String(srv.username).trim() && !u.username && protocol === 'mpegts_auth') {
     u.username = String(srv.username).trim();
     u.password = String(srv.password || '');
   }
@@ -83,11 +84,95 @@ export function buildFlussonicPullUrl(srv, streamName, protocol = 'mpegts') {
   if (protocol === 'hls') {
     return `${cleanRoot}/${safeName}/index.m3u8`;
   }
-  if (protocol === 'tshttp') {
-    return `${cleanRoot}/${safeName}/mpegts`.replace(/^http:\/\//i, 'http://');
-  }
   // Default 24/7 constant low-latency HTTP MPEG-TS output on Flussonic 23.12: /<name>/mpegts
   return `${cleanRoot}/${safeName}/mpegts`;
+}
+
+export function getTrueAstraCandidateUrl(row = {}) {
+  const orig = String(row.original_source_url || '').trim();
+  const astraLocal = String(row.astra_local_url || '').trim();
+  const cur = String(row.source_url || '').trim();
+  if (orig && !orig.includes('/headend/live/')) return orig;
+  if (cur && !cur.includes('/headend/live/')) return cur;
+  return astraLocal || orig || cur;
+}
+
+export function rewriteHttpHostPreservingPort(urlStr = '', targetHost = '') {
+  const raw = String(urlStr || '').trim();
+  const cleanTarget = String(targetHost || '').trim();
+  if (!raw || !cleanTarget) return raw;
+  try {
+    const u = new URL(raw.replace(/^ts(https?:\/\/)/i, '$1'));
+    const parsedNew = new URL(/^https?:\/\//i.test(cleanTarget) ? cleanTarget : `http://${cleanTarget}`);
+    if (parsedNew.port) {
+      u.host = parsedNew.host;
+    } else {
+      u.hostname = parsedNew.hostname;
+    }
+    return u.toString();
+  } catch {
+    return raw;
+  }
+}
+
+export function matchesStreamHostFilter(row, filterHost = '') {
+  const wanted = String(filterHost || '').trim().toLowerCase();
+  if (!wanted || wanted === 'all') return true;
+
+  // Normalize in case user pasted full http://IP:8000/...
+  let cleanWantedHost = wanted;
+  let cleanWantedPort = '';
+  try {
+    if (wanted.includes('://') || wanted.includes('/')) {
+      const wu = new URL(/^https?:\/\//i.test(wanted) ? wanted : `http://${wanted}`);
+      cleanWantedHost = wu.hostname.toLowerCase();
+      cleanWantedPort = wu.port || '';
+    } else if (wanted.includes(':')) {
+      const [hPart, pPart] = wanted.split(':');
+      cleanWantedHost = hPart.toLowerCase();
+      cleanWantedPort = pPart || '';
+    }
+  } catch {
+    // fallback string match
+  }
+
+  const candidateUrls = [row.original_source_url, row.source_url, row.astra_local_url]
+    .map((x) => String(x || '').trim())
+    .filter((x) => x && !x.includes('/headend/live/'));
+
+  for (const uStr of candidateUrls) {
+    try {
+      const u = new URL(uStr.replace(/^ts(https?:\/\/)/i, '$1'));
+      const h = u.hostname.toLowerCase();
+      if (h === cleanWantedHost) {
+        if (!cleanWantedPort || (u.port || '80') === cleanWantedPort) return true;
+      }
+    } catch {
+      if (uStr.toLowerCase().includes(cleanWantedHost)) return true;
+    }
+  }
+  return false;
+}
+
+export function assignUniqueFlussonicKeys(rows = []) {
+  const used = new Set();
+  return rows.map((ch, idx) => {
+    const originUrl = ch.astra_local_url || getTrueAstraCandidateUrl(ch) || ch.inputUrl || '';
+    const baseKey = sanitizeFlussonicStreamKey(
+      ch.flussonic_stream_name || ch.flussonic_name || extractAstraPlayKey(originUrl) || ch.name,
+      ch.id || idx + 1
+    );
+    let finalKey = baseKey;
+    if (used.has(finalKey)) {
+      finalKey = `${baseKey}_${ch.id || idx + 1}`;
+    }
+    used.add(finalKey);
+    return {
+      ...ch,
+      flussonic_name: finalKey,
+      resolved_origin_url: originUrl
+    };
+  });
 }
 
 export function generateFlussonic2312Config({
@@ -124,13 +209,11 @@ export function generateFlussonic2312Config({
   }
 
   const directive = constant247 ? 'stream' : 'ondemand';
+  const keyedChannels = assignUniqueFlussonicKeys(channels);
 
-  channels.forEach((ch, idx) => {
-    const rawUrl = ch.astra_local_url || ch.original_source_url || ch.source_url || ch.inputUrl || '';
-    const key = sanitizeFlussonicStreamKey(
-      ch.flussonic_name || extractAstraPlayKey(rawUrl) || ch.name,
-      idx + 1
-    );
+  keyedChannels.forEach((ch) => {
+    const rawUrl = ch.resolved_origin_url || getTrueAstraCandidateUrl(ch) || ch.inputUrl || '';
+    const key = ch.flussonic_name;
     const flussInput = convertAstraHttpToTshttp(rawUrl, astraOverrideHost);
     const safeTitle = String(ch.name || key).replace(/"/g, "'").trim();
     const vb = Number(ch.bitrate_kbps) || Number(videoBitrateKbps) || 2500;
@@ -174,10 +257,10 @@ export function buildFlussonic2312ApiStreamPayload(ch, idx, options = {}) {
     astraOverrideHost = ''
   } = options;
 
-  const rawUrl = ch.astra_local_url || ch.original_source_url || ch.source_url || ch.inputUrl || '';
+  const rawUrl = ch.resolved_origin_url || getTrueAstraCandidateUrl(ch) || ch.inputUrl || '';
   const name = sanitizeFlussonicStreamKey(
     ch.flussonic_name || extractAstraPlayKey(rawUrl) || ch.name,
-    idx + 1
+    ch.id || idx + 1
   );
   const inputUrl = convertAstraHttpToTshttp(rawUrl, astraOverrideHost);
   const vb = (Number(ch.bitrate_kbps) || Number(videoBitrateKbps) || 2500) * 1000;
@@ -516,10 +599,335 @@ flussonic2312Router.post(
   }
 );
 
+function selectFilteredPanelChannels({ filter_host = '', selected_stream_ids = [] } = {}) {
+  const allRows = db
+    .prepare(
+      `SELECT s.*, c.name as category_name
+       FROM streams s
+       LEFT JOIN categories c ON c.id = s.category_id
+       ORDER BY s.sort_order ASC, s.id ASC`
+    )
+    .all();
+
+  const idSet =
+    Array.isArray(selected_stream_ids) && selected_stream_ids.length > 0
+      ? new Set(selected_stream_ids.map(Number).filter((n) => n > 0))
+      : null;
+
+  const filtered = allRows.filter((row) => {
+    if (idSet && !idSet.has(row.id)) return false;
+    return matchesStreamHostFilter(row, filter_host);
+  });
+
+  return {
+    totalStreams: allRows.length,
+    untouchedCount: allRows.length - filtered.length,
+    channels: assignUniqueFlussonicKeys(filtered)
+  };
+}
+
+// ==================== DETECTOR DE IPs DE ORIGEN EN TU LISTA ACTUAL ====================
+flussonic2312Router.get('/api/flussonic-2312/panel-hosts-summary', requireAuth, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT id, name, source_url, original_source_url, astra_local_url, flussonic_server_id, flussonic_stream_name
+       FROM streams
+       ORDER BY sort_order ASC, id ASC`
+    )
+    .all();
+
+  const hostMap = new Map();
+  let alreadyOnFlussonicCount = 0;
+
+  for (const r of rows) {
+    if (r.flussonic_server_id || r.flussonic_stream_name) alreadyOnFlussonicCount++;
+    const originUrl = getTrueAstraCandidateUrl(r);
+    if (!originUrl) continue;
+    try {
+      const u = new URL(originUrl.replace(/^ts(https?:\/\/)/i, '$1'));
+      const h = u.hostname.toLowerCase();
+      if (!hostMap.has(h)) {
+        hostMap.set(h, {
+          hostname: h,
+          ports: new Set(),
+          count: 0,
+          isAstraPattern: false,
+          sampleName: r.name,
+          sampleUrl: originUrl
+        });
+      }
+      const entry = hostMap.get(h);
+      entry.count++;
+      if (u.port) entry.ports.add(u.port);
+      if (/\/play\//i.test(u.pathname) || u.port === '8000') {
+        entry.isAstraPattern = true;
+      }
+    } catch {
+      // non-URL source
+    }
+  }
+
+  const hosts = Array.from(hostMap.values())
+    .map((x) => ({
+      hostname: x.hostname,
+      ports: Array.from(x.ports),
+      count: x.count,
+      isAstraPattern: x.isAstraPattern,
+      sampleName: x.sampleName,
+      sampleUrl: x.sampleUrl
+    }))
+    .sort((a, b) => Number(b.isAstraPattern) - Number(a.isAstraPattern) || b.count - a.count);
+
+  res.json({
+    totalStreams: rows.length,
+    alreadyOnFlussonicCount,
+    hosts
+  });
+});
+
+// Vista previa exacta de canales filtrados por IP de Astra Pública (sin tocar otros canales)
+flussonic2312Router.post('/api/flussonic-2312/preview-by-ip', requireAuth, (req, res) => {
+  const {
+    filter_host = '',
+    local_astra_host = '192.168.88.10',
+    server_id = null,
+    flussonic_base_url = '',
+    pull_protocol = 'mpegts'
+  } = req.body || {};
+
+  const srv = server_id ? db.prepare('SELECT * FROM flussonic_servers WHERE id = ?').get(Number(server_id)) : null;
+  const effectiveBase = srv || normalizeBaseUrl(flussonic_base_url) || 'http://IP_FLUSSONIC:8080';
+
+  const { totalStreams, untouchedCount, channels } = selectFilteredPanelChannels({ filter_host });
+
+  const preview = channels.map((ch) => {
+    const originUrl = ch.resolved_origin_url || getTrueAstraCandidateUrl(ch);
+    return {
+      id: ch.id,
+      name: ch.name,
+      category_name: ch.category_name || 'Sin Categoría',
+      logo_url: ch.logo_url || '',
+      current_url: ch.source_url,
+      origin_astra_url: originUrl,
+      flussonic_key: ch.flussonic_name,
+      flussonic_local_input: convertAstraHttpToTshttp(originUrl, local_astra_host),
+      new_panel_link: buildFlussonicPullUrl(effectiveBase, ch.flussonic_name, pull_protocol),
+      already_migrated: Boolean(ch.flussonic_stream_name)
+    };
+  });
+
+  res.json({
+    ok: true,
+    totalStreams,
+    matchedCount: preview.length,
+    untouchedCount,
+    preview
+  });
+});
+
+// Migración en sitio (SOLO actualiza links de los canales con la IP de Astra Pública; NO borra ni toca el resto de tu lista)
+flussonic2312Router.post('/api/flussonic-2312/migrate-links-by-ip', requireAuth, requireAdmin, async (req, res) => {
+  const {
+    server_id = null,
+    flussonic_base_url = '',
+    filter_host = '',
+    selected_stream_ids = [],
+    local_astra_host = '192.168.88.10',
+    pull_protocol = 'mpegts', // 'mpegts' | 'hls'
+    cloud_mode = 'constant_copy_247', // 'constant_copy_247' | 'constant_copy_audio_247' | 'direct' | 'ondemand'
+    also_push_to_flussonic = false,
+    transcode_mode = 'copy_deint_aac',
+    video_bitrate_kbps = 2500,
+    audio_bitrate_kbps = 128,
+    constant_247 = true,
+    limit_count = 0
+  } = req.body || {};
+
+  if (!filter_host && (!Array.isArray(selected_stream_ids) || selected_stream_ids.length === 0)) {
+    return res.status(400).json({
+      error: 'Selecciona la IP del Astra Público (o marca canales) para no modificar toda tu lista.'
+    });
+  }
+
+  let srv = server_id ? db.prepare('SELECT * FROM flussonic_servers WHERE id = ?').get(Number(server_id)) : null;
+  const cleanOverrideBase = normalizeBaseUrl(flussonic_base_url);
+  if (!srv && !cleanOverrideBase) {
+    return res.status(400).json({
+      error: 'Indica o selecciona la URL/IP de tu servidor Flussonic 23.12 para construir los nuevos links.'
+    });
+  }
+
+  const effectiveTarget = cleanOverrideBase ? { ...(srv || {}), base_url: cleanOverrideBase } : srv;
+  const selectedRes = selectFilteredPanelChannels({ filter_host, selected_stream_ids });
+  let targetChannels = selectedRes.channels;
+
+  if (Number(limit_count) > 0) {
+    targetChannels = targetChannels.slice(0, Number(limit_count));
+  }
+
+  if (targetChannels.length === 0) {
+    return res.status(400).json({ error: 'Ningún canal de tu lista coincide con esa IP de Astra.' });
+  }
+
+  let pushedToFlussonicCount = 0;
+  const pushErrors = [];
+
+  if (also_push_to_flussonic) {
+    const base = normalizeBaseUrl(effectiveTarget.base_url);
+    const headers = {
+      ...buildFlussonicAuthHeaders(effectiveTarget),
+      'Content-Type': 'application/json'
+    };
+
+    for (let i = 0; i < targetChannels.length; i++) {
+      const { name, payload } = buildFlussonic2312ApiStreamPayload(targetChannels[i], i, {
+        transcodeMode: transcode_mode,
+        videoBitrateKbps: video_bitrate_kbps,
+        audioBitrateKbps: audio_bitrate_kbps,
+        constant247: constant_247 !== false,
+        astraOverrideHost: local_astra_host
+      });
+      const encName = name
+        .split('/')
+        .map((p) => encodeURIComponent(p))
+        .join('/');
+      try {
+        const r = await fetchJsonWithTimeout(
+          `${base}/streamer/api/v3/streams/${encName}`,
+          { method: 'PUT', headers, body: JSON.stringify(payload) },
+          7000
+        );
+        if (r.ok) pushedToFlussonicCount++;
+        else pushErrors.push(`${name}: HTTP ${r.status}`);
+      } catch (e) {
+        pushErrors.push(`${name}: ${e.message}`);
+      }
+    }
+  }
+
+  const copyProfId = getCopyCopyProfileId();
+  const isOndemand = cloud_mode === 'ondemand';
+  const isDirect = cloud_mode === 'direct';
+  const nextStreamMode = isOndemand ? 'ondemand' : isDirect ? 'direct' : 'transcode';
+  const nextStatus = isOndemand ? 'ondemand_idle' : 'running';
+  const nextAudioLvl = cloud_mode === 'constant_copy_audio_247' ? 'on' : 'off';
+
+  const toLaunchIds = [];
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const updInPlace = db.prepare(
+      `UPDATE streams
+       SET original_source_url = CASE
+             WHEN original_source_url != '' AND original_source_url NOT LIKE '%/headend/live/%' THEN original_source_url
+             ELSE source_url
+           END,
+           backup_url = CASE WHEN backup_url = '' THEN source_url ELSE backup_url END,
+           astra_local_url = ?,
+           source_url = ?,
+           headend_node_id = NULL,
+           flussonic_server_id = ?,
+           flussonic_stream_name = ?,
+           stream_mode = ?,
+           transcode_profile_id = ?,
+           audio_leveling_mode = ?,
+           status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE ? END,
+           pid = NULL
+       WHERE id = ?`
+    );
+
+    for (const ch of targetChannels) {
+      stopWorker(`stream_${ch.id}`);
+      const originUrl = ch.resolved_origin_url || getTrueAstraCandidateUrl(ch);
+      const localHttpAstra = rewriteHttpHostPreservingPort(originUrl, local_astra_host);
+      const newLink = buildFlussonicPullUrl(effectiveTarget, ch.flussonic_name, pull_protocol);
+
+      updInPlace.run(
+        localHttpAstra,
+        newLink,
+        srv ? srv.id : null,
+        ch.flussonic_name,
+        nextStreamMode,
+        copyProfId,
+        nextAudioLvl,
+        nextStatus,
+        ch.id
+      );
+
+      if (nextStreamMode === 'transcode' && ch.status !== 'stopped') {
+        toLaunchIds.push(ch.id);
+      }
+    }
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    return res.status(500).json({ error: err.message });
+  }
+
+  if (toLaunchIds.length > 0) {
+    scheduleDbStreamLaunches(toLaunchIds, 60);
+  }
+
+  res.json({
+    ok: true,
+    updatedLinksCount: targetChannels.length,
+    untouchedCount: selectedRes.totalStreams - targetChannels.length,
+    pushedToFlussonicCount,
+    pushErrors: pushErrors.slice(0, 8)
+  });
+});
+
+// Revertir canales migrados a Flussonic de regreso a su URL original de Astra Público (1 clic)
+flussonic2312Router.post('/api/flussonic-2312/revert-links', requireAuth, requireAdmin, (req, res) => {
+  const { ids = [], scope = 'all_flussonic' } = req.body || {};
+
+  let rows = [];
+  if (scope === 'selected' && Array.isArray(ids) && ids.length > 0) {
+    const cleanIds = ids.map(Number).filter((n) => n > 0);
+    const ph = cleanIds.map(() => '?').join(',');
+    rows = db.prepare(`SELECT id, status, stream_mode FROM streams WHERE id IN (${ph})`).all(...cleanIds);
+  } else {
+    rows = db
+      .prepare(
+        "SELECT id, status, stream_mode FROM streams WHERE flussonic_stream_name != '' AND original_source_url != ''"
+      )
+      .all();
+  }
+
+  if (rows.length === 0) {
+    return res.status(400).json({ error: 'No hay canales con link de Flussonic respaldado para revertir.' });
+  }
+
+  const targetIds = rows.map((r) => r.id);
+  const ph = targetIds.map(() => '?').join(',');
+
+  for (const sid of targetIds) stopWorker(`stream_${sid}`);
+
+  db.prepare(
+    `UPDATE streams
+     SET source_url = COALESCE(NULLIF(original_source_url, ''), source_url),
+         flussonic_server_id = NULL,
+         flussonic_stream_name = '',
+         pid = NULL
+     WHERE id IN (${ph})`
+  ).run(...targetIds);
+
+  const fresh = db
+    .prepare(`SELECT id FROM streams WHERE id IN (${ph}) AND stream_mode = 'transcode' AND status = 'running'`)
+    .all(...targetIds)
+    .map((r) => r.id);
+  if (fresh.length > 0) scheduleDbStreamLaunches(fresh, 60);
+
+  res.json({ ok: true, revertedCount: targetIds.length });
+});
+
 // ==================== GENERADOR & PUSH FLUSSONIC.CONF v23.12 (CESBO ASTRA) ====================
 flussonic2312Router.post('/api/flussonic-2312/generate-conf', requireAuth, requireAdmin, (req, res) => {
   const {
     source_type = 'panel_streams', // 'panel_streams' | 'astra_m3u'
+    filter_host = '',
+    selected_stream_ids = [],
     astra_content = '',
     astra_url = 'http://192.168.88.10:8000',
     astra_override_host = '',
@@ -537,9 +945,7 @@ flussonic2312Router.post('/api/flussonic-2312/generate-conf', requireAuth, requi
   if (source_type === 'astra_m3u') {
     channels = parseAstraContent(astra_content, astra_url);
   } else {
-    channels = db
-      .prepare('SELECT id, name, source_url, original_source_url, astra_local_url, bitrate_kbps, logo_url FROM streams ORDER BY sort_order ASC, id ASC')
-      .all();
+    channels = selectFilteredPanelChannels({ filter_host, selected_stream_ids }).channels;
   }
 
   if (channels.length === 0) {
@@ -547,7 +953,7 @@ flussonic2312Router.post('/api/flussonic-2312/generate-conf', requireAuth, requi
       error:
         source_type === 'astra_m3u'
           ? 'No se detectaron canales en el archivo/texto de Cesbo Astra.'
-          : 'Aún no hay canales en el panel para generar flussonic.conf (usa la opción de subir playlist.txt de Astra).'
+          : 'No hay canales en tu lista que coincidan con esa IP filtrada.'
     });
   }
 
@@ -579,6 +985,8 @@ flussonic2312Router.post('/api/flussonic-2312/servers/:id/push-streams', require
 
   const {
     source_type = 'panel_streams',
+    filter_host = '',
+    selected_stream_ids = [],
     astra_content = '',
     astra_override_host = '',
     transcode_mode = 'copy_pure',
@@ -589,10 +997,8 @@ flussonic2312Router.post('/api/flussonic-2312/servers/:id/push-streams', require
 
   const channels =
     source_type === 'astra_m3u'
-      ? parseAstraContent(astra_content, srv.astra_url || 'http://192.168.88.10:8000')
-      : db
-          .prepare('SELECT id, name, source_url, original_source_url, astra_local_url, bitrate_kbps FROM streams ORDER BY sort_order ASC, id ASC')
-          .all();
+      ? assignUniqueFlussonicKeys(parseAstraContent(astra_content, srv.astra_url || 'http://192.168.88.10:8000'))
+      : selectFilteredPanelChannels({ filter_host, selected_stream_ids }).channels;
 
   if (channels.length === 0) {
     return res.status(400).json({ error: 'No hay canales para enviar a Flussonic 23.12.' });

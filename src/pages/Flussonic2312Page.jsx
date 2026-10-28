@@ -11,10 +11,12 @@ import {
   Upload,
   Server,
   Radio,
-  Volume2,
   FileCode,
   Send,
-  Link2
+  Link2,
+  ShieldCheck,
+  RotateCcw,
+  Filter
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -26,15 +28,29 @@ export default function Flussonic2312Page({ onPreview }) {
   const [syncing, setSyncing] = useState(false);
   const [notice, setNotice] = useState('');
 
-  // Tabs: 'live' | 'generator' | 'import_conf'
-  const [activeSubTab, setActiveSubTab] = useState('live');
+  // Tabs: 'migrate_ip' (DEFAULT!) | 'live' | 'generator' | 'import_conf'
+  const [activeSubTab, setActiveSubTab] = useState('migrate_ip');
   const [search, setSearch] = useState('');
+
+  // Smart Public-Astra-IP -> Local Flussonic Link Updater State
+  const [hostsSummary, setHostsSummary] = useState({ totalStreams: 0, alreadyOnFlussonicCount: 0, hosts: [] });
+  const [filterHost, setFilterHost] = useState('');
+  const [localAstraHost, setLocalAstraHost] = useState('192.168.88.10');
+  const [flussonicOutUrl, setFlussonicOutUrl] = useState('');
+  const [migrateTranscodeMode, setMigrateTranscodeMode] = useState('copy_deint_aac');
+  const [migratePullProto, setMigratePullProto] = useState('mpegts');
+  const [migrateCloudMode, setMigrateCloudMode] = useState('constant_copy_247');
+  const [previewRows, setPreviewRows] = useState([]);
+  const [untouchedCount, setUntouchedCount] = useState(0);
+  const [selectedPreviewIds, setSelectedPreviewIds] = useState([]);
+  const [previewSearch, setPreviewSearch] = useState('');
+  const [migratingLinks, setMigratingLinks] = useState(false);
 
   // Create Server Modal
   const [createOpen, setCreateOpen] = useState(false);
   const [createForm, setCreateForm] = useState({
-    name: 'Flussonic 23.12 — Cabecera Local',
-    base_url: 'http://192.168.88.20:8080',
+    name: 'Flussonic 23.12 — Cabecera',
+    base_url: 'http://',
     username: 'admin',
     password: '',
     api_token: '',
@@ -44,9 +60,9 @@ export default function Flussonic2312Page({ onPreview }) {
   });
 
   // flussonic.conf v23.12 Generator & API Push State
-  const [genSourceType, setGenSourceType] = useState('panel_streams'); // 'panel_streams' | 'astra_m3u'
+  const [genSourceType, setGenSourceType] = useState('panel_streams');
   const [genAstraText, setGenAstraText] = useState('');
-  const [genAstraOverrideHost, setGenAstraOverrideHost] = useState('192.168.88.10:8000');
+  const [genAstraOverrideHost, setGenAstraOverrideHost] = useState('192.168.88.10');
   const [genTranscodeMode, setGenTranscodeMode] = useState('copy_deint_aac');
   const [genVideoKbps, setGenVideoKbps] = useState(2500);
   const [genAudioKbps, setGenAudioKbps] = useState(128);
@@ -57,7 +73,7 @@ export default function Flussonic2312Page({ onPreview }) {
   const [copiedConf, setCopiedConf] = useState(false);
   const [pushingApi, setPushingApi] = useState(false);
 
-  // Link to Panel State
+  // Link to Panel State (Tab 2 & Tab 4)
   const [pullProtocol, setPullProtocol] = useState('mpegts');
   const [cloudLinkMode, setCloudLinkMode] = useState('constant_copy_247');
   const [pastedFlussConf, setPastedFlussConf] = useState('');
@@ -67,19 +83,29 @@ export default function Flussonic2312Page({ onPreview }) {
 
   const showToast = (msg) => {
     setNotice(msg);
-    setTimeout(() => setNotice(''), 6500);
+    setTimeout(() => setNotice(''), 7500);
   };
 
-  const loadServers = async () => {
+  const loadServersAndHosts = async () => {
     try {
-      const res = await apiFetch('/api/flussonic-2312/servers');
-      const list = res.servers || [];
+      const [srvRes, hostRes] = await Promise.all([
+        apiFetch('/api/flussonic-2312/servers'),
+        apiFetch('/api/flussonic-2312/panel-hosts-summary')
+      ]);
+      const list = srvRes.servers || [];
       setServers(list);
-      setTotalPanelStreams(res.totalPanelStreams || 0);
+      setTotalPanelStreams(srvRes.totalPanelStreams || 0);
       if (list.length > 0 && !selectedId) {
         setSelectedId(list[0].id);
+        if (!flussonicOutUrl) setFlussonicOutUrl(list[0].base_url || '');
       }
-      if ((res.totalPanelStreams || 0) === 0) {
+
+      setHostsSummary(hostRes || { totalStreams: 0, alreadyOnFlussonicCount: 0, hosts: [] });
+      if (!filterHost && Array.isArray(hostRes?.hosts) && hostRes.hosts.length > 0) {
+        // Auto-select the top detected Astra IP!
+        setFilterHost(hostRes.hosts[0].hostname);
+      }
+      if ((srvRes.totalPanelStreams || 0) === 0) {
         setGenSourceType('astra_m3u');
       }
     } catch {
@@ -88,8 +114,46 @@ export default function Flussonic2312Page({ onPreview }) {
   };
 
   useEffect(() => {
-    loadServers();
+    loadServersAndHosts();
   }, []);
+
+  useEffect(() => {
+    if (selectedServer?.base_url) {
+      setFlussonicOutUrl(selectedServer.base_url);
+    }
+  }, [selectedServer?.id]);
+
+  // Refresh live preview whenever filterHost, localAstraHost, flussonicOutUrl, or migratePullProto changes
+  const refreshIpPreview = async (hostToUse = filterHost) => {
+    if (!hostToUse || !String(hostToUse).trim()) {
+      setPreviewRows([]);
+      setSelectedPreviewIds([]);
+      setUntouchedCount(hostsSummary.totalStreams || 0);
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/flussonic-2312/preview-by-ip', {
+        method: 'POST',
+        body: JSON.stringify({
+          filter_host: hostToUse,
+          local_astra_host: localAstraHost,
+          server_id: selectedServer?.id || null,
+          flussonic_base_url: flussonicOutUrl,
+          pull_protocol: migratePullProto
+        })
+      });
+      const rows = res.preview || [];
+      setPreviewRows(rows);
+      setUntouchedCount(res.untouchedCount ?? 0);
+      setSelectedPreviewIds(rows.map((r) => r.id));
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    refreshIpPreview(filterHost);
+  }, [filterHost, localAstraHost, flussonicOutUrl, migratePullProto, selectedServer?.id]);
 
   const handleCreateServer = async (e) => {
     e.preventDefault();
@@ -99,8 +163,11 @@ export default function Flussonic2312Page({ onPreview }) {
         body: JSON.stringify(createForm)
       });
       setCreateOpen(false);
-      await loadServers();
-      if (res.server?.id) setSelectedId(res.server.id);
+      await loadServersAndHosts();
+      if (res.server?.id) {
+        setSelectedId(res.server.id);
+        setFlussonicOutUrl(res.server.base_url);
+      }
       showToast(`✅ Servidor "${res.server.name}" (Flussonic 23.12) registrado.`);
     } catch (err) {
       window.alert(err.message);
@@ -115,7 +182,140 @@ export default function Flussonic2312Page({ onPreview }) {
     await apiFetch(`/api/flussonic-2312/servers/${selectedServer.id}`, { method: 'DELETE' });
     setSelectedId(null);
     setLiveStreams([]);
-    await loadServers();
+    await loadServersAndHosts();
+  };
+
+  // Generate flussonic.conf ONLY for the selected Public Astra IP channels!
+  const handleGenerateFilteredConf = async () => {
+    if (selectedPreviewIds.length === 0) {
+      window.alert('Selecciona al menos un canal de la IP de Astra para generar su flussonic.conf.');
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/flussonic-2312/generate-conf', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_type: 'panel_streams',
+          filter_host: filterHost,
+          selected_stream_ids: selectedPreviewIds,
+          astra_override_host: localAstraHost,
+          transcode_mode: migrateTranscodeMode,
+          video_bitrate_kbps: genVideoKbps,
+          audio_bitrate_kbps: genAudioKbps,
+          constant_247: true,
+          include_global_header: false
+        })
+      });
+      setGeneratedConf(res.confText || '');
+      setGeneratedCount(res.channelCount || 0);
+      showToast(
+        `📄 flussonic.conf v23.12 generado SOLO para tus ${res.channelCount} canales de Astra (con IP local ${localAstraHost}).`
+      );
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
+  // Push ONLY the selected Public Astra IP channels to Flussonic 23.12 via API v3
+  const handlePushFilteredToFlussonicApi = async () => {
+    if (!selectedServer) {
+      window.alert('Primero haz clic en "+ Agregar Flussonic 23.12" arriba con la IP y usuario/clave de tu Flussonic.');
+      return;
+    }
+    if (selectedPreviewIds.length === 0) {
+      window.alert('No hay canales seleccionados para enviar a Flussonic 23.12.');
+      return;
+    }
+    setPushingApi(true);
+    try {
+      const res = await apiFetch(`/api/flussonic-2312/servers/${selectedServer.id}/push-streams`, {
+        method: 'POST',
+        body: JSON.stringify({
+          source_type: 'panel_streams',
+          filter_host: filterHost,
+          selected_stream_ids: selectedPreviewIds,
+          astra_override_host: localAstraHost,
+          transcode_mode: migrateTranscodeMode,
+          video_bitrate_kbps: genVideoKbps,
+          audio_bitrate_kbps: genAudioKbps,
+          constant_247: true
+        })
+      });
+      showToast(
+        `🚀 ${res.pushedCount}/${res.totalAttempted} canales de Astra creados en Flussonic 23.12 apuntando localmente a ${localAstraHost}.`
+      );
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setPushingApi(false);
+    }
+  };
+
+  // Update ONLY the links of the matched Public Astra IP channels in-place (preserving IDs, categories, order, bouquets!)
+  const handleMigrateLinksInPlace = async ({ limitCount = 0, alsoPush = false } = {}) => {
+    const cleanOut = String(flussonicOutUrl || selectedServer?.base_url || '').trim();
+    if (!cleanOut || cleanOut === 'http://') {
+      window.alert(
+        'Escribe la IP:Puerto de tu Flussonic 23.12 (ej. http://IP_PUBLICA_FLUSSONIC:8080) en el Paso 3 para construir los nuevos links.'
+      );
+      return;
+    }
+    if (selectedPreviewIds.length === 0) {
+      window.alert('Selecciona al menos un canal de la lista filtrada.');
+      return;
+    }
+
+    setMigratingLinks(true);
+    try {
+      const res = await apiFetch('/api/flussonic-2312/migrate-links-by-ip', {
+        method: 'POST',
+        body: JSON.stringify({
+          server_id: selectedServer?.id || null,
+          flussonic_base_url: cleanOut,
+          filter_host: filterHost,
+          selected_stream_ids: selectedPreviewIds,
+          local_astra_host: localAstraHost,
+          pull_protocol: migratePullProto,
+          cloud_mode: migrateCloudMode,
+          also_push_to_flussonic: alsoPush,
+          transcode_mode: migrateTranscodeMode,
+          video_bitrate_kbps: genVideoKbps,
+          audio_bitrate_kbps: genAudioKbps,
+          constant_247: true,
+          limit_count: limitCount
+        })
+      });
+      await loadServersAndHosts();
+      await refreshIpPreview(filterHost);
+      showToast(
+        `✅ ${res.updatedLinksCount} links actualizados a Flussonic 23.12 conservando IDs, nombres, orden y categorías (${res.untouchedCount} canales de otras IPs quedaron intactos).`
+      );
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setMigratingLinks(false);
+    }
+  };
+
+  const handleRevertToOriginalAstra = async () => {
+    if (
+      !window.confirm(
+        '¿Restaurar los canales migrados a Flussonic de vuelta a sus links originales del Astra Público?'
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/flussonic-2312/revert-links', {
+        method: 'POST',
+        body: JSON.stringify({ scope: 'all_flussonic' })
+      });
+      await loadServersAndHosts();
+      await refreshIpPreview(filterHost);
+      showToast(`↩️ ${res.revertedCount} canales restaurados intactos a sus links originales de Astra Público.`);
+    } catch (err) {
+      window.alert(err.message);
+    }
   };
 
   const handleSyncLive = async (srvOverride = null) => {
@@ -127,7 +327,7 @@ export default function Flussonic2312Page({ onPreview }) {
         method: 'POST'
       });
       setLiveStreams(res.streams || []);
-      await loadServers();
+      await loadServersAndHosts();
       showToast(
         `📡 Flussonic v${res.server?.version || '23.12'} sincronizado: ${(res.streams || []).length} streams detectados en vivo.`
       );
@@ -146,7 +346,11 @@ export default function Flussonic2312Page({ onPreview }) {
         method: 'POST',
         body: JSON.stringify({ stream_name: streamName, action })
       });
-      showToast(action === 'delete' ? `🗑️ Stream ${streamName} eliminado.` : `🔄 Stream ${streamName} reiniciado en Flussonic 23.12.`);
+      showToast(
+        action === 'delete'
+          ? `🗑️ Stream ${streamName} eliminado.`
+          : `🔄 Stream ${streamName} reiniciado en Flussonic 23.12.`
+      );
       await handleSyncLive();
     } catch (err) {
       window.alert(err.message);
@@ -166,12 +370,13 @@ export default function Flussonic2312Page({ onPreview }) {
     }
   };
 
-  const handleGenerateConf = async () => {
+  const handleGenerateConf = async (sourceOverride = null) => {
     try {
+      const effectiveSource = sourceOverride || genSourceType;
       const res = await apiFetch('/api/flussonic-2312/generate-conf', {
         method: 'POST',
         body: JSON.stringify({
-          source_type: genSourceType,
+          source_type: effectiveSource,
           astra_content: genAstraText,
           astra_url: selectedServer?.astra_url || 'http://192.168.88.10:8000',
           astra_override_host: genAstraOverrideHost,
@@ -186,7 +391,9 @@ export default function Flussonic2312Page({ onPreview }) {
       });
       setGeneratedConf(res.confText || '');
       setGeneratedCount(res.channelCount || 0);
-      showToast(`✅ flussonic.conf v23.12 generado para ${res.channelCount} canales (${genConstant247 ? '24/7 Constante' : 'On-Demand'}).`);
+      showToast(
+        `✅ flussonic.conf v23.12 generado para ${res.channelCount} canales (${genConstant247 ? '24/7 Constante' : 'On-Demand'}).`
+      );
     } catch (err) {
       window.alert(err.message);
     }
@@ -201,34 +408,6 @@ export default function Flussonic2312Page({ onPreview }) {
     a.download = 'flussonic.conf';
     a.click();
     URL.revokeObjectURL(url);
-  };
-
-  const handlePushStreamsApi = async () => {
-    if (!selectedServer) {
-      window.alert('Primero registra y selecciona tu servidor Flussonic 23.12 arriba.');
-      return;
-    }
-    setPushingApi(true);
-    try {
-      const res = await apiFetch(`/api/flussonic-2312/servers/${selectedServer.id}/push-streams`, {
-        method: 'POST',
-        body: JSON.stringify({
-          source_type: genSourceType,
-          astra_content: genAstraText,
-          astra_override_host: genAstraOverrideHost,
-          transcode_mode: genTranscodeMode,
-          video_bitrate_kbps: genVideoKbps,
-          audio_bitrate_kbps: genAudioKbps,
-          constant_247: genConstant247
-        })
-      });
-      showToast(`🚀 ${res.pushedCount}/${res.totalAttempted} canales creados/actualizados en vivo en Flussonic 23.12 vía API v3.`);
-      await handleSyncLive();
-    } catch (err) {
-      window.alert(err.message);
-    } finally {
-      setPushingApi(false);
-    }
   };
 
   const handleLinkToPanel = async (useConfText = false) => {
@@ -248,9 +427,9 @@ export default function Flussonic2312Page({ onPreview }) {
           auto_categorize: true
         })
       });
-      await loadServers();
+      await loadServersAndHosts();
       showToast(
-        `✅ Flussonic 23.12 vinculado al Panel TVLister: ${res.updatedCount} canales existentes enlazados sin duplicar + ${res.insertedCount} nuevos (${cloudLinkMode === 'ondemand' ? 'On-Demand' : '24/7 Constante'}).`
+        `✅ Flussonic 23.12 vinculado al Panel TVLister: ${res.updatedCount} canales existentes enlazados sin duplicar + ${res.insertedCount} nuevos.`
       );
     } catch (err) {
       window.alert(err.message);
@@ -258,6 +437,16 @@ export default function Flussonic2312Page({ onPreview }) {
       setLinking(false);
     }
   };
+
+  const visiblePreviewRows = previewRows.filter((r) => {
+    if (!previewSearch.trim()) return true;
+    const q = previewSearch.toLowerCase();
+    return (
+      String(r.name || '').toLowerCase().includes(q) ||
+      String(r.flussonic_key || '').toLowerCase().includes(q) ||
+      String(r.origin_astra_url || '').toLowerCase().includes(q)
+    );
+  });
 
   const filteredLive = liveStreams.filter((st) => {
     if (!search.trim()) return true;
@@ -278,17 +467,15 @@ export default function Flussonic2312Page({ onPreview }) {
         <div className="space-y-1">
           <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[11px] font-bold">
             <Zap className="w-3.5 h-3.5" />
-            MÓDULO NATIVO FLUSSONIC MEDIA SERVER v23.12 · REST API v3 + GENERADOR CESBO ASTRA
+            FLUSSONIC MEDIA SERVER v23.12 · MIGRACIÓN INTELIGENTE POR IP DE ASTRA (SOLO ACTUALIZAR LINKS)
           </div>
           <h1 className="text-xl font-bold text-white">
-            Flussonic 23.12 — Control API v3, Anti-Rayas, Audio AAC &amp; Enlace 24/7 Constante
+            Flussonic 23.12 — Pasar Solo Canales de Astra Público a Flussonic Local sin Perder tu Lista
           </h1>
           <p className="text-xs text-slate-300 max-w-3xl leading-relaxed">
-            Conecta tu servidor <strong>Flussonic v23.12</strong>, genera o empuja por API v3 todos tus canales de{' '}
-            <code className="text-cyan-300">Cesbo Astra (192.168.88.10:8000)</code> usando{' '}
-            <code className="text-violet-300">tshttp://</code> en modo <strong>24/7 estático</strong> con{' '}
-            <code className="text-emerald-300">deinterlace=true</code> + audio AAC, y vincúlalos a la Nube en{' '}
-            <strong>24/7 Constante Copy/Copy</strong> sin duplicar canales.
+            Filtra de tu lista actual <strong>únicamente los canales con la IP de tu Astra Público</strong>, envíalos a tu{' '}
+            <strong>Flussonic 23.12 local</strong> leyendo desde <code className="text-cyan-300">tshttp://192.168.88.10:...</code> y{' '}
+            <strong>actualiza solo sus links</strong> conservando IDs, nombres, categorías, logos, EPG, orden y dejando intactos tus demás canales.
           </p>
         </div>
 
@@ -326,6 +513,17 @@ export default function Flussonic2312Page({ onPreview }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
           <button
+            onClick={() => setActiveSubTab('migrate_ip')}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold border transition ${
+              activeSubTab === 'migrate_ip'
+                ? 'bg-gradient-to-r from-violet-600 to-cyan-600 text-white border-cyan-400 shadow-lg shadow-violet-950/50'
+                : 'bg-[#0e1526] text-slate-300 border-slate-800 hover:border-slate-600'
+            }`}
+          >
+            <Filter className="w-3.5 h-3.5" />
+            1. Migrar Solo IP Astra → Flussonic Local (Solo Actualizar Links)
+          </button>
+          <button
             onClick={() => setActiveSubTab('live')}
             className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold border transition ${
               activeSubTab === 'live'
@@ -334,7 +532,7 @@ export default function Flussonic2312Page({ onPreview }) {
             }`}
           >
             <Radio className="w-3.5 h-3.5" />
-            1. Monitor API v3 &amp; Vincular a Panel 24/7
+            2. Monitor API v3 en Vivo
           </button>
           <button
             onClick={() => setActiveSubTab('generator')}
@@ -345,7 +543,7 @@ export default function Flussonic2312Page({ onPreview }) {
             }`}
           >
             <FileCode className="w-3.5 h-3.5" />
-            2. Generador flussonic.conf v23.12 (Cesbo Astra → Flussonic)
+            3. Generador desde Archivo M3U Externo
           </button>
           <button
             onClick={() => setActiveSubTab('import_conf')}
@@ -356,32 +554,361 @@ export default function Flussonic2312Page({ onPreview }) {
             }`}
           >
             <Upload className="w-3.5 h-3.5" />
-            3. Importar /etc/flussonic/flussonic.conf Existente
+            4. Pegar flussonic.conf
           </button>
         </div>
 
-        {selectedServer && (
-          <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
+          {hostsSummary.alreadyOnFlussonicCount > 0 && (
+            <button
+              onClick={handleRevertToOriginalAstra}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-500/35 text-xs font-bold"
+              title="Restaura los links originales del Astra Público en 1 clic"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Revertir Links a Astra Público ({hostsSummary.alreadyOnFlussonicCount})
+            </button>
+          )}
+          {selectedServer && (
             <button
               onClick={() => handleSyncLive()}
               disabled={syncing}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Consultando API v3...' : 'Sincronizar API v3 en Vivo'}
+              {syncing ? 'Consultando API v3...' : 'Sincronizar API v3'}
             </button>
-            <button
-              onClick={handleDeleteServer}
-              className="p-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30"
-              title="Desvincular servidor Flussonic"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
-      {/* TAB 1: LIVE MONITOR & 1-CLICK LINK TO PANEL */}
+      {/* ==================== TAB 1 (DEFAULT): SMART PUBLIC ASTRA IP -> LOCAL FLUSSONIC LINK UPDATER ==================== */}
+      {activeSubTab === 'migrate_ip' && (
+        <div className="space-y-4">
+          {/* Safety Guarantee Banner */}
+          <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/30 p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+              <div className="text-xs text-emerald-100 space-y-0.5">
+                <div className="font-bold text-emerald-300">
+                  Protección Total de tu Lista Actual Activada (Cero canales borrados · Cero duplicados)
+                </div>
+                <p className="text-emerald-200/85">
+                  De tus <strong>{hostsSummary.totalStreams}</strong> canales actuales, se seleccionaron{' '}
+                  <strong className="text-white underline">{selectedPreviewIds.length} canales</strong> con la IP de Astra{' '}
+                  <code className="text-cyan-300">{filterHost || '—'}</code>. Tus otros{' '}
+                  <strong className="text-emerald-300">{untouchedCount} canales</strong> de otros proveedores{' '}
+                  <strong>NO SE TOCAN</strong>, y en estos {selectedPreviewIds.length} canales{' '}
+                  <strong>solo se actualiza el link</strong> conservando IDs, orden, categorías, logos, EPG y bouquets.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* 3-Step Configuration Cards */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {/* Step 1: Select Public Astra IP from existing list */}
+            <div className="rounded-2xl bg-[#0e1526] border border-slate-800 p-4 space-y-2.5">
+              <div className="text-xs font-bold text-violet-300">
+                Paso 1 · Elegir IP de tu Astra Público en tu Lista Actual
+              </div>
+              <select
+                value={filterHost}
+                onChange={(e) => setFilterHost(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white font-semibold"
+              >
+                <option value="">— Selecciona una IP detectada en tu lista —</option>
+                {hostsSummary.hosts.map((h) => (
+                  <option key={h.hostname} value={h.hostname}>
+                    {h.isAstraPattern ? '📡 ' : '🌐 '}
+                    {h.hostname} ({h.count} canales — ej: {h.sampleName})
+                  </option>
+                ))}
+              </select>
+              <div>
+                <span className="text-[11px] text-slate-400 block mb-1">
+                  O escribe manualmente la IP / IP:Puerto del Astra Público a filtrar:
+                </span>
+                <input
+                  type="text"
+                  value={filterHost}
+                  onChange={(e) => setFilterHost(e.target.value)}
+                  placeholder="Ej: 190.12.34.56 o 190.12.34.56:8000"
+                  className="w-full px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-cyan-300 font-mono"
+                />
+              </div>
+            </div>
+
+            {/* Step 2: Local LAN Astra IP inside Flussonic network */}
+            <div className="rounded-2xl bg-[#0e1526] border border-slate-800 p-4 space-y-2.5">
+              <div className="text-xs font-bold text-cyan-300">
+                Paso 2 · IP Local del Astra para tu Flussonic 23.12
+              </div>
+              <div>
+                <span className="text-[11px] text-slate-400 block mb-1">
+                  IP LAN del Astra (conserva el puerto :8000/:8001 de cada canal automáticamente):
+                </span>
+                <input
+                  type="text"
+                  value={localAstraHost}
+                  onChange={(e) => setLocalAstraHost(e.target.value)}
+                  placeholder="192.168.88.10"
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-emerald-300 font-mono font-bold"
+                />
+              </div>
+              <div>
+                <span className="text-[11px] text-slate-400 block mb-1">
+                  Perfil en Flussonic 23.12 (24/7 estático constante):
+                </span>
+                <select
+                  value={migrateTranscodeMode}
+                  onChange={(e) => setMigrateTranscodeMode(e.target.value)}
+                  className="w-full px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white"
+                >
+                  <option value="copy_deint_aac">
+                    🛡️ Anti-Rayas (deinterlace=true) + CPU x264 + Audio AAC 48k
+                  </option>
+                  <option value="copy_video_aac">
+                    ⚡ Copy Video (vb=copy) + Audio AAC 48k Estéreo
+                  </option>
+                  <option value="copy_pure">
+                    ⚡ Copy/Copy Puro Passthrough (0% CPU en Flussonic)
+                  </option>
+                  <option value="nvenc_deint_aac">
+                    🟢 NVIDIA NVENC + Anti-Rayas + Audio AAC 48k
+                  </option>
+                </select>
+              </div>
+            </div>
+
+            {/* Step 3: Flussonic Output URL for Panel Links */}
+            <div className="rounded-2xl bg-[#0e1526] border border-slate-800 p-4 space-y-2.5">
+              <div className="text-xs font-bold text-emerald-300">
+                Paso 3 · URL de tu Flussonic 23.12 para Actualizar los Links
+              </div>
+              <div>
+                <span className="text-[11px] text-slate-400 block mb-1">
+                  IP:Puerto de Flussonic accesible desde este Panel Nube:
+                </span>
+                <input
+                  type="text"
+                  value={flussonicOutUrl}
+                  onChange={(e) => setFlussonicOutUrl(e.target.value)}
+                  placeholder="http://IP_PUBLICA_FLUSSONIC:8080"
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white font-mono"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={migratePullProto}
+                  onChange={(e) => setMigratePullProto(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-white"
+                >
+                  <option value="mpegts">Salida /key/mpegts (24/7 TS)</option>
+                  <option value="hls">Salida /key/index.m3u8 (HLS)</option>
+                </select>
+                <select
+                  value={migrateCloudMode}
+                  onChange={(e) => setMigrateCloudMode(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-white"
+                >
+                  <option value="constant_copy_247">⚡ Nube: 24/7 Copy/Copy</option>
+                  <option value="constant_copy_audio_247">🔊 Nube: 24/7 Copy+Audio Igual</option>
+                  <option value="direct">🚀 Nube: Direct Relay</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Bar: Configure Local Flussonic + Update Links Only */}
+          <div className="rounded-2xl bg-[#0e1526] border border-violet-500/35 p-4 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleGenerateFilteredConf}
+                disabled={selectedPreviewIds.length === 0}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-bold transition"
+              >
+                <FileCode className="w-4 h-4" />
+                1A. Generar flussonic.conf (Solo estos {selectedPreviewIds.length} canales)
+              </button>
+              <button
+                type="button"
+                onClick={handlePushFilteredToFlussonicApi}
+                disabled={pushingApi || selectedPreviewIds.length === 0}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-600/30 hover:bg-violet-600/50 border border-violet-500/40 disabled:opacity-40 text-violet-100 text-xs font-bold transition"
+              >
+                <Send className="w-3.5 h-3.5" />
+                {pushingApi ? 'Enviando API v3...' : `1B. Push API v3 a Flussonic (${selectedPreviewIds.length})`}
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={migratingLinks || selectedPreviewIds.length === 0}
+                onClick={() => handleMigrateLinksInPlace({ limitCount: 3, alsoPush: false })}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 disabled:opacity-40 text-amber-200 text-xs font-bold"
+                title="Actualiza solo los primeros 3 canales seleccionados para probar primero sin riesgo"
+              >
+                🧪 Probar con 3 Canales
+              </button>
+              <button
+                type="button"
+                disabled={migratingLinks || selectedPreviewIds.length === 0}
+                onClick={() => handleMigrateLinksInPlace({ limitCount: 0, alsoPush: false })}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-bold shadow-lg shadow-emerald-950/50"
+              >
+                <Link2 className="w-4 h-4" />
+                {migratingLinks
+                  ? 'Actualizando Links...'
+                  : `2. Solo Actualizar Links de estos ${selectedPreviewIds.length} Canales`}
+              </button>
+              {selectedServer && (
+                <button
+                  type="button"
+                  disabled={migratingLinks || selectedPreviewIds.length === 0}
+                  onClick={() => handleMigrateLinksInPlace({ limitCount: 0, alsoPush: true })}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-white text-xs font-bold"
+                >
+                  <Zap className="w-4 h-4" />
+                  Todo en 1 Clic (Push API v3 + Actualizar Links)
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Generated Filtered flussonic.conf Box (if user clicked 1A) */}
+          {generatedConf && (
+            <div className="rounded-2xl bg-[#0b1020] border border-cyan-500/40 p-4 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-cyan-300">
+                  ✅ Bloques para pegar en /etc/flussonic/flussonic.conf ({generatedCount} canales locales hacia{' '}
+                  {localAstraHost}) — luego ejecuta <code className="text-emerald-300">service flussonic reload</code>:
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(generatedConf);
+                      setCopiedConf(true);
+                      setTimeout(() => setCopiedConf(false), 2500);
+                    }}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-white font-semibold"
+                  >
+                    {copiedConf ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedConf ? 'Copiado' : 'Copiar bloques'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadConf}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs text-white font-bold"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Descargar flussonic.conf
+                  </button>
+                </div>
+              </div>
+              <pre className="p-3.5 rounded-xl bg-[#070b14] border border-slate-800 text-[11px] font-mono text-cyan-200 max-h-72 overflow-auto whitespace-pre">
+                {generatedConf}
+              </pre>
+            </div>
+          )}
+
+          {/* Before / Local Flussonic / New Panel Link Preview Table */}
+          <div className="rounded-2xl bg-[#0e1526] border border-slate-800 p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="text-xs font-bold text-white">
+                Vista Previa Exacta de Canales Filtrados ({selectedPreviewIds.length} seleccionados de{' '}
+                {previewRows.length} con IP <code className="text-cyan-300">{filterHost || '—'}</code>)
+              </div>
+              <input
+                type="text"
+                value={previewSearch}
+                onChange={(e) => setPreviewSearch(e.target.value)}
+                placeholder="Buscar canal en esta vista previa..."
+                className="px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white min-w-[230px]"
+              />
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-slate-800 max-h-[460px]">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-[#090e1a] text-slate-400 uppercase sticky top-0">
+                  <tr>
+                    <th className="px-3 py-2.5 w-10">
+                      <input
+                        type="checkbox"
+                        checked={
+                          visiblePreviewRows.length > 0 &&
+                          visiblePreviewRows.every((r) => selectedPreviewIds.includes(r.id))
+                        }
+                        onChange={() => {
+                          const visIds = visiblePreviewRows.map((r) => r.id);
+                          const allIn = visIds.every((id) => selectedPreviewIds.includes(id));
+                          setSelectedPreviewIds((prev) =>
+                            allIn ? prev.filter((id) => !visIds.includes(id)) : Array.from(new Set([...prev, ...visIds]))
+                          );
+                        }}
+                        className="rounded accent-violet-500"
+                      />
+                    </th>
+                    <th className="px-3 py-2.5">ID / Canal (Se conserva)</th>
+                    <th className="px-3 py-2.5">Origen Astra Público</th>
+                    <th className="px-3 py-2.5">Entrada Local en Flussonic 23.12</th>
+                    <th className="px-3 py-2.5">Nuevo Link en Tu Lista TVLister</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {visiblePreviewRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                        Selecciona arriba la IP de tu Astra Público para previsualizar exactamente qué canales actualizarán su link.
+                      </td>
+                    </tr>
+                  ) : (
+                    visiblePreviewRows.map((r) => (
+                      <tr key={r.id} className="hover:bg-slate-800/30">
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedPreviewIds.includes(r.id)}
+                            onChange={() =>
+                              setSelectedPreviewIds((prev) =>
+                                prev.includes(r.id) ? prev.filter((x) => x !== r.id) : [...prev, r.id]
+                              )
+                            }
+                            className="rounded accent-violet-500"
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-semibold text-white">
+                            <span className="font-mono text-sky-400 mr-1.5">#{r.id}</span>
+                            {r.name}
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            {r.category_name} · key: <code className="text-violet-300">{r.flussonic_key}</code>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-amber-200/90 max-w-[230px] truncate">
+                          {r.origin_astra_url}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-cyan-300 max-w-[240px] truncate">
+                          {r.flussonic_local_input}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-emerald-300 max-w-[260px] truncate">
+                          {r.new_panel_link}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== TAB 2: LIVE MONITOR API v3 ==================== */}
       {activeSubTab === 'live' && (
         <>
           {!selectedServer ? (
@@ -392,36 +919,25 @@ export default function Flussonic2312Page({ onPreview }) {
                   Conecta tu Servidor Flussonic Media Server v23.12
                 </h2>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Ingresa la IP/puerto de tu Flussonic 23.12 (ej. <code className="text-violet-300">http://IP_FLUSSONIC:8080</code>) y tus credenciales{' '}
-                  <code className="text-violet-300">edit_auth</code> para leer todos tus canales en tiempo real, ver bitrates, empujar tus 140 canales de Cesbo Astra o enlazarlos 24/7 constantes al panel.
+                  Registra la IP/puerto y credenciales <code className="text-violet-300">edit_auth</code> de tu Flussonic 23.12 para monitorear bitrates, clientes y reiniciar canales vía REST API v3.
                 </p>
               </div>
-              <div className="flex flex-wrap justify-center gap-3">
-                <button
-                  onClick={() => setCreateOpen(true)}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold"
-                >
-                  <Plus className="w-4 h-4" />
-                  Registrar Servidor Flussonic 23.12
-                </button>
-                <button
-                  onClick={() => setActiveSubTab('generator')}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700"
-                >
-                  <FileCode className="w-4 h-4 text-cyan-400" />
-                  Generar flussonic.conf v23.12 sin conectar aún
-                </button>
-              </div>
+              <button
+                onClick={() => setCreateOpen(true)}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold"
+              >
+                <Plus className="w-4 h-4" />
+                Registrar Servidor Flussonic 23.12
+              </button>
             </div>
           ) : (
             <div className="space-y-4">
-              {/* Telemetry Cards */}
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                 <div className="p-4 rounded-2xl bg-[#0e1526] border border-slate-800">
                   <div className="text-[11px] text-slate-400">Servidor Flussonic</div>
                   <div className="text-base font-bold text-white mt-0.5 truncate">{selectedServer.base_url}</div>
                   <div className="text-[11px] text-violet-300 font-mono mt-1">
-                    Versión v{selectedServer.version || '23.12'} · {selectedServer.status === 'online' ? '🟢 EN LÍNEA' : '⚪ SIN SONDEAR'}
+                    v{selectedServer.version || '23.12'} · {selectedServer.status === 'online' ? '🟢 EN LÍNEA' : '⚪ SIN SONDEAR'}
                   </div>
                 </div>
                 <div className="p-4 rounded-2xl bg-[#0e1526] border border-slate-800">
@@ -443,17 +959,21 @@ export default function Flussonic2312Page({ onPreview }) {
                   <div className="text-xl font-bold text-indigo-300 font-mono mt-0.5">
                     {selectedServer.linked_streams_count || 0}
                   </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Cero duplicados (/play/id)</div>
+                  <div className="text-[11px] text-slate-400 mt-1">
+                    <button onClick={handleDeleteServer} className="text-rose-400 hover:underline">
+                      Desvincular servidor
+                    </button>
+                  </div>
                 </div>
                 <div className="p-4 rounded-2xl bg-[#0e1526] border border-violet-500/30 space-y-2">
-                  <div className="text-[11px] text-violet-200 font-bold">Enlazar a TVLister Nube (24/7):</div>
+                  <div className="text-[11px] text-violet-200 font-bold">Enlazar Todos de Flussonic:</div>
                   <select
                     value={cloudLinkMode}
                     onChange={(e) => setCloudLinkMode(e.target.value)}
                     className="w-full px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-[11px] text-white"
                   >
-                    <option value="constant_copy_247">⚡ 24/7 Constante Copy/Copy (0% CPU)</option>
-                    <option value="constant_copy_audio_247">🔊 24/7 Copy Video + Nivelador Audio</option>
+                    <option value="constant_copy_247">⚡ 24/7 Constante Copy/Copy</option>
+                    <option value="constant_copy_audio_247">🔊 24/7 Copy + Nivelador Audio</option>
                     <option value="ondemand">🌱 On-Demand</option>
                   </select>
                   <button
@@ -462,32 +982,28 @@ export default function Flussonic2312Page({ onPreview }) {
                     className="w-full py-1.5 px-3 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold flex items-center justify-center gap-1"
                   >
                     <Link2 className="w-3.5 h-3.5" />
-                    {linking ? 'Vinculando...' : 'Vincular Todo al Panel 24/7'}
+                    {linking ? 'Vinculando...' : 'Vincular al Panel 24/7'}
                   </button>
                 </div>
               </div>
 
-              {/* Streams Table from Flussonic 23.12 API v3 */}
               <div className="rounded-2xl bg-[#0e1526] border border-slate-800 p-4 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <input
                     type="text"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Buscar stream en Flussonic 23.12 (nombre, título o input Astra)..."
+                    placeholder="Buscar stream en Flussonic 23.12..."
                     className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white min-w-[260px]"
                   />
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-slate-400">Protocolo Pull hacia Nube:</span>
-                    <select
-                      value={pullProtocol}
-                      onChange={(e) => setPullProtocol(e.target.value)}
-                      className="px-2.5 py-1.5 rounded-lg bg-[#090e1a] border border-slate-700 text-white text-xs"
-                    >
-                      <option value="mpegts">HTTP MPEG-TS (/nombre/mpegts — 24/7 baja latencia)</option>
-                      <option value="hls">HLS (/nombre/index.m3u8)</option>
-                    </select>
-                  </div>
+                  <select
+                    value={pullProtocol}
+                    onChange={(e) => setPullProtocol(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg bg-[#090e1a] border border-slate-700 text-white text-xs"
+                  >
+                    <option value="mpegts">HTTP MPEG-TS (/nombre/mpegts — 24/7)</option>
+                    <option value="hls">HLS (/nombre/index.m3u8)</option>
+                  </select>
                 </div>
 
                 <div className="overflow-x-auto rounded-xl border border-slate-800">
@@ -496,9 +1012,9 @@ export default function Flussonic2312Page({ onPreview }) {
                       <tr>
                         <th className="px-3 py-2.5">Key Flussonic</th>
                         <th className="px-3 py-2.5">Canal</th>
-                        <th className="px-3 py-2.5">Entrada (Astra / Upstream)</th>
+                        <th className="px-3 py-2.5">Entrada (Astra Local)</th>
                         <th className="px-3 py-2.5">Modo</th>
-                        <th className="px-3 py-2.5">Codec / Bitrate</th>
+                        <th className="px-3 py-2.5">Bitrate</th>
                         <th className="px-3 py-2.5 text-right">Acciones</th>
                       </tr>
                     </thead>
@@ -506,7 +1022,7 @@ export default function Flussonic2312Page({ onPreview }) {
                       {filteredLive.length === 0 ? (
                         <tr>
                           <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                            Pulsa &laquo;Sincronizar API v3 en Vivo&raquo; arriba para listar tus streams de Flussonic 23.12, o usa la Pestaña 2 para generar/empujar tus canales de Cesbo Astra.
+                            Pulsa &laquo;Sincronizar API v3&raquo; arriba para listar tus streams activos de Flussonic 23.12.
                           </td>
                         </tr>
                       ) : (
@@ -518,36 +1034,12 @@ export default function Flussonic2312Page({ onPreview }) {
                               {st.input_url || '—'}
                             </td>
                             <td className="px-3 py-2.5">
-                              <span
-                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                  st.static
-                                    ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
-                                    : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                                }`}
-                              >
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/15 text-cyan-300">
                                 {st.static ? '24/7 ESTÁTICO' : 'ON-DEMAND'}
                               </span>
                             </td>
-                            <td className="px-3 py-2.5">
-                              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px]">
-                                <span
-                                  className={`px-2 py-0.5 rounded font-bold ${
-                                    st.alive ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
-                                  }`}
-                                >
-                                  {st.alive ? `${st.bitrate_kbps} kbps` : 'OFFLINE'}
-                                </span>
-                                {st.resolution && (
-                                  <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200">
-                                    {st.resolution}
-                                  </span>
-                                )}
-                                {st.has_transcoder && (
-                                  <span className="px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-200">
-                                    TRANSCODER
-                                  </span>
-                                )}
-                              </div>
+                            <td className="px-3 py-2.5 font-mono text-[11px] text-emerald-300">
+                              {st.alive ? `${st.bitrate_kbps} kbps` : 'OFFLINE'}
                             </td>
                             <td className="px-3 py-2.5 text-right space-x-1">
                               <button
@@ -560,21 +1052,18 @@ export default function Flussonic2312Page({ onPreview }) {
                                   })
                                 }
                                 className="p-1.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600 text-indigo-300 hover:text-white"
-                                title="Previsualizar HLS desde Flussonic 23.12"
                               >
                                 <Play className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => handleStreamAction(st.name, 'restart')}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300"
-                                title="Reiniciar stream en Flussonic 23.12"
                               >
                                 <RefreshCw className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => handleStreamAction(st.name, 'delete')}
                                 className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300"
-                                title="Eliminar stream en Flussonic 23.12"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -591,202 +1080,92 @@ export default function Flussonic2312Page({ onPreview }) {
         </>
       )}
 
-      {/* TAB 2: FLUSSONIC.CONF v23.12 GENERATOR FOR CESBO ASTRA */}
+      {/* ==================== TAB 3: EXTERNAL M3U FLUSSONIC.CONF GENERATOR ==================== */}
       {activeSubTab === 'generator' && (
         <div className="rounded-2xl bg-[#0e1526] border border-cyan-500/30 p-5 space-y-4">
-          <div className="space-y-1">
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              <FileCode className="w-4 h-4 text-cyan-400" />
-              Generador Oficial /etc/flussonic/flussonic.conf (Flussonic v23.12) para Cesbo Astra
-            </h2>
-            <p className="text-xs text-slate-400">
-              Convierte automáticamente tus entradas <code className="text-cyan-300">http://192.168.88.10:8000/play/a0ek?ts</code> al esquema nativo{' '}
-              <code className="text-violet-300">tshttp://192.168.88.10:8000/play/a0ek?ts</code> de Flussonic 23.12 en bloques{' '}
-              <code className="text-emerald-300">stream &lt;id&gt;</code> (24/7 constantes, nunca On-Demand).
-            </p>
-          </div>
-
+          <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            <FileCode className="w-4 h-4 text-cyan-400" />
+            Generador /etc/flussonic/flussonic.conf v23.12 desde Archivo playlist.txt / .m3u
+          </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 space-y-2">
-              <label className="text-xs font-bold text-slate-200 block">1. Origen de Canales Astra</label>
-              <select
-                value={genSourceType}
-                onChange={(e) => setGenSourceType(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-xs text-white"
-              >
-                <option value="panel_streams">
-                  Usar mis canales actuales del Panel ({totalPanelStreams} canales)
-                </option>
-                <option value="astra_m3u">Subir / Pegar playlist.txt o .m3u de Cesbo Astra</option>
-              </select>
+              <label className="text-xs font-bold text-slate-200 block">IP LAN Astra Destino</label>
               <input
                 type="text"
                 value={genAstraOverrideHost}
                 onChange={(e) => setGenAstraOverrideHost(e.target.value)}
-                placeholder="IP LAN Astra (ej. 192.168.88.10:8000)"
-                className="w-full px-3 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-xs text-cyan-300 font-mono"
+                placeholder="192.168.88.10"
+                className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-xs text-cyan-300 font-mono"
               />
             </div>
-
             <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 space-y-2">
-              <label className="text-xs font-bold text-slate-200 block">2. Modo en Flussonic 23.12</label>
+              <label className="text-xs font-bold text-slate-200 block">Modo en Flussonic 23.12</label>
               <select
                 value={genTranscodeMode}
                 onChange={(e) => setGenTranscodeMode(e.target.value)}
                 className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-xs text-white"
               >
-                <option value="copy_deint_aac">
-                  🛡️ Anti-Rayas (deinterlace=true) + CPU x264 + Audio AAC 48k
-                </option>
-                <option value="copy_video_aac">
-                  ⚡ Copy Video (vb=copy) + Audio AAC 48k Estéreo
-                </option>
-                <option value="copy_pure">
-                  ⚡ Copy/Copy Puro Passthrough (0% CPU en Flussonic)
-                </option>
-                <option value="nvenc_deint_aac">
-                  🟢 NVIDIA NVENC + Anti-Rayas + Audio AAC 48k
-                </option>
-                <option value="qsv_deint_aac">
-                  🔵 Intel QuickSync QSV + Anti-Rayas + Audio AAC 48k
-                </option>
+                <option value="copy_deint_aac">🛡️ Anti-Rayas + CPU x264 + Audio AAC 48k</option>
+                <option value="copy_video_aac">⚡ Copy Video (vb=copy) + Audio AAC 48k</option>
+                <option value="copy_pure">⚡ Copy/Copy Puro Passthrough</option>
+                <option value="nvenc_deint_aac">🟢 NVIDIA NVENC + Anti-Rayas + AAC</option>
               </select>
-              <div className="grid grid-cols-2 gap-2 text-[11px]">
-                <div>
-                  <span className="text-slate-400">Video kbps:</span>
-                  <input
-                    type="number"
-                    value={genVideoKbps}
-                    onChange={(e) => setGenVideoKbps(Number(e.target.value))}
-                    className="w-full px-2 py-1 rounded bg-[#0e1526] border border-slate-700 text-white font-mono"
-                  />
-                </div>
-                <div>
-                  <span className="text-slate-400">Audio kbps:</span>
-                  <input
-                    type="number"
-                    value={genAudioKbps}
-                    onChange={(e) => setGenAudioKbps(Number(e.target.value))}
-                    className="w-full px-2 py-1 rounded bg-[#0e1526] border border-slate-700 text-white font-mono"
-                  />
-                </div>
-              </div>
             </div>
-
-            <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 space-y-2.5 flex flex-col justify-between">
-              <div className="space-y-2">
-                <label className="flex items-center gap-2 text-xs text-emerald-300 font-bold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={genConstant247}
-                    onChange={(e) => setGenConstant247(e.target.checked)}
-                    className="rounded accent-emerald-500"
-                  />
-                  24/7 Constante (`stream` estático, NO ondemand)
-                </label>
-                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={genIncludeHeader}
-                    onChange={(e) => setGenIncludeHeader(e.target.checked)}
-                    className="rounded accent-cyan-500"
-                  />
-                  Incluir cabecera global (`http 8080; edit_auth ...`)
-                </label>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleGenerateConf}
-                  className="flex-1 py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold"
-                >
-                  Generar flussonic.conf
-                </button>
-                {selectedServer && (
-                  <button
-                    type="button"
-                    disabled={pushingApi}
-                    onClick={handlePushStreamsApi}
-                    className="py-2 px-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold inline-flex items-center gap-1"
-                    title="Crea todos los canales directamente en Flussonic 23.12 vía PUT /streamer/api/v3/streams"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    {pushingApi ? 'Enviando...' : 'Push API v3'}
-                  </button>
-                )}
-              </div>
+            <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 flex flex-col justify-between gap-2">
+              <label className="flex items-center gap-2 text-xs text-emerald-300 font-bold cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={genConstant247}
+                  onChange={(e) => setGenConstant247(e.target.checked)}
+                  className="rounded accent-emerald-500"
+                />
+                24/7 Constante (`stream` estático)
+              </label>
+              <button
+                type="button"
+                onClick={() => handleGenerateConf('astra_m3u')}
+                className="py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold"
+              >
+                Generar flussonic.conf desde M3U
+              </button>
             </div>
           </div>
 
-          {genSourceType === 'astra_m3u' && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-300">
-                  Sube tu archivo <code className="text-cyan-300">playlist.txt</code> / <code className="text-cyan-300">.m3u</code> de Cesbo Astra o pégalo abajo:
-                </span>
-                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold cursor-pointer">
-                  <Upload className="w-3.5 h-3.5" />
-                  Subir playlist.txt / .m3u
-                  <input
-                    type="file"
-                    accept=".txt,.m3u,.m3u8,.conf,.json"
-                    onChange={handleUploadAstraFile}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-              <textarea
-                rows={4}
-                value={genAstraText}
-                onChange={(e) => setGenAstraText(e.target.value)}
-                placeholder="#EXTM3U&#10;#EXTINF:-1 tvg-logo=&quot;http://192.168.88.10:8000/playlist/tvg-logo/a0ek.png&quot;,A&amp;E&#10;http://192.168.88.10:8000/play/a0ek?ts"
-                className="w-full p-3 rounded-xl bg-[#090e1a] border border-slate-700 text-xs font-mono text-slate-200"
-              />
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-300">Sube o pega tu archivo playlist.txt / .m3u de Astra:</span>
+              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold cursor-pointer">
+                <Upload className="w-3.5 h-3.5" />
+                Subir playlist.txt / .m3u
+                <input
+                  type="file"
+                  accept=".txt,.m3u,.m3u8,.conf,.json"
+                  onChange={handleUploadAstraFile}
+                  className="hidden"
+                />
+              </label>
             </div>
-          )}
+            <textarea
+              rows={5}
+              value={genAstraText}
+              onChange={(e) => setGenAstraText(e.target.value)}
+              className="w-full p-3 rounded-xl bg-[#090e1a] border border-slate-700 text-xs font-mono text-slate-200"
+            />
+          </div>
 
           {generatedConf && (
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-bold text-emerald-300">
-                  ✅ Configuración Flussonic v23.12 lista ({generatedCount} canales):
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(generatedConf);
-                      setCopiedConf(true);
-                      setTimeout(() => setCopiedConf(false), 2500);
-                    }}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-white font-semibold"
-                  >
-                    {copiedConf ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    {copiedConf ? 'Copiado' : 'Copiar flussonic.conf'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadConf}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs text-white font-bold"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Descargar flussonic.conf
-                  </button>
-                </div>
-              </div>
-              <pre className="p-4 rounded-xl bg-[#070b14] border border-slate-800 text-[11px] font-mono text-cyan-200 max-h-96 overflow-auto whitespace-pre">
-                {generatedConf}
-              </pre>
-            </div>
+            <pre className="p-4 rounded-xl bg-[#070b14] border border-slate-800 text-[11px] font-mono text-cyan-200 max-h-80 overflow-auto whitespace-pre">
+              {generatedConf}
+            </pre>
           )}
         </div>
       )}
 
-      {/* TAB 3: IMPORT EXISTING FLUSSONIC.CONF */}
+      {/* ==================== TAB 4: IMPORT EXISTING FLUSSONIC.CONF ==================== */}
       {activeSubTab === 'import_conf' && (
         <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/30 p-5 space-y-4">
           <h2 className="text-sm font-bold text-white">
-            Importar bloques desde un archivo /etc/flussonic/flussonic.conf existente hacia TVLister 24/7
+            Enlazar desde un archivo /etc/flussonic/flussonic.conf existente sin duplicar canales
           </h2>
           <textarea
             rows={8}
@@ -795,26 +1174,14 @@ export default function Flussonic2312Page({ onPreview }) {
             placeholder={'stream a0ek {\n  title "A&E";\n  input tshttp://192.168.88.10:8000/play/a0ek?ts;\n}'}
             className="w-full p-3 rounded-xl bg-[#090e1a] border border-slate-700 text-xs font-mono text-slate-200"
           />
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-slate-400">Modo en Panel TVLister:</span>
-              <select
-                value={cloudLinkMode}
-                onChange={(e) => setCloudLinkMode(e.target.value)}
-                className="px-3 py-1.5 rounded-lg bg-[#090e1a] border border-slate-700 text-white text-xs"
-              >
-                <option value="constant_copy_247">⚡ 24/7 Constante Copy/Copy (0% CPU)</option>
-                <option value="constant_copy_audio_247">🔊 24/7 Copy Video + Nivelador Audio</option>
-                <option value="ondemand">🌱 On-Demand</option>
-              </select>
-            </div>
+          <div className="flex justify-end">
             <button
               type="button"
               disabled={linking || !pastedFlussConf.trim()}
               onClick={() => handleLinkToPanel(true)}
               className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-bold"
             >
-              {linking ? 'Importando...' : 'Importar y Enlazar 24/7 sin Duplicar'}
+              {linking ? 'Vinculando...' : 'Vincular 24/7 sin Duplicar'}
             </button>
           </div>
         </div>
@@ -841,12 +1208,12 @@ export default function Flussonic2312Page({ onPreview }) {
               </div>
               <div>
                 <label className="text-slate-300 font-semibold block mb-1">
-                  URL / IP:Puerto de Flussonic 23.12 (accesible desde este panel)
+                  URL / IP:Puerto de Flussonic 23.12 (accesible desde este panel en la Nube)
                 </label>
                 <input
                   type="text"
                   required
-                  placeholder="http://IP_PUBLICA_O_LAN:8080"
+                  placeholder="http://IP_PUBLICA_FLUSSONIC:8080"
                   value={createForm.base_url}
                   onChange={(e) => setCreateForm({ ...createForm, base_url: e.target.value })}
                   className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
