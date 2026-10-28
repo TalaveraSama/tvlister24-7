@@ -344,7 +344,7 @@ app.delete('/api/categories/:id', requireAuth, requireAdmin, (req, res) => {
 app.get('/api/streams', requireAuth, (req, res) => {
   const rows = db
     .prepare(
-      `SELECT s.*, c.name as category_name, tp.name as profile_name, srv.name as server_name
+      `SELECT s.*, c.name as category_name, tp.name as profile_name, tp.video_bitrate as profile_video_bitrate, srv.name as server_name
        FROM streams s
        LEFT JOIN categories c ON c.id = s.category_id
        LEFT JOIN transcode_profiles tp ON tp.id = s.transcode_profile_id
@@ -382,26 +382,27 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
       b.stream_mode === 'ondemand' ? 'ondemand_idle' : 'running',
       String(b.user_agent || 'TVLister/2.3'),
       Number(b.tv_archive_days) || 0,
-      Number(b.bitrate_kbps) || 4000
+      Number(b.bitrate_kbps) || 2500
     );
 
   const newId = Number(info.lastInsertRowid);
-  // Auto-add to main bouquet #1 so lines see new channels immediately
-  const b1 = db.prepare('SELECT * FROM bouquets WHERE id = 1').get();
+  const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
   if (b1) {
     const arr = JSON.parse(b1.stream_ids_json || '[]');
     if (!arr.includes(newId)) {
       arr.push(newId);
-      db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
+      db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?').run(JSON.stringify(arr), b1.id);
     }
   }
 
+  launchStreamWorkerIfNeeded(newId);
   res.json({ id: newId, ok: true });
 });
 
 app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
+  const nextMode = String(b.stream_mode || 'direct');
   db.prepare(
     `UPDATE streams SET
        name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
@@ -415,15 +416,55 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
     String(b.backup_url || ''),
     String(b.logo_url || ''),
     String(b.epg_channel_id || ''),
-    String(b.stream_mode || 'direct'),
+    nextMode,
     b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
     b.server_id ? Number(b.server_id) : 1,
     String(b.user_agent || 'TVLister/2.3'),
     Number(b.tv_archive_days) || 0,
-    Number(b.bitrate_kbps) || 4000,
+    Number(b.bitrate_kbps) || 2500,
     id
   );
+
+  // Restart or stop FFmpeg worker to apply mode/profile change immediately
+  stopWorker(`stream_${id}`);
+  if (nextMode === 'transcode') {
+    const cur = db.prepare('SELECT status FROM streams WHERE id = ?').get(id);
+    if (cur?.status === 'running') {
+      launchStreamWorkerIfNeeded(id);
+    }
+  } else {
+    db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(id);
+  }
   res.json({ ok: true });
+});
+
+app.post('/api/streams/bulk-profile', requireAuth, requireAdmin, (req, res) => {
+  const { category_id, stream_mode, transcode_profile_id, bitrate_kbps } = req.body || {};
+  const profId = Number(transcode_profile_id) || 1;
+  const mode = String(stream_mode || 'direct');
+  const kbps = Number(bitrate_kbps) || 2500;
+
+  let affected = [];
+  if (category_id && category_id !== 'all') {
+    affected = db.prepare('SELECT id FROM streams WHERE category_id = ?').all(Number(category_id));
+    db.prepare('UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ? WHERE category_id = ?').run(
+      mode,
+      profId,
+      kbps,
+      Number(category_id)
+    );
+  } else {
+    affected = db.prepare('SELECT id FROM streams').all();
+    db.prepare('UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?').run(mode, profId, kbps);
+  }
+
+  for (const row of affected) {
+    stopWorker(`stream_${row.id}`);
+    if (mode === 'transcode') {
+      launchStreamWorkerIfNeeded(row.id);
+    }
+  }
+  res.json({ ok: true, updatedCount: affected.length });
 });
 
 function launchStreamWorkerIfNeeded(streamId) {
@@ -1701,6 +1742,10 @@ app.delete('/api/servers/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/profiles', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT * FROM transcode_profiles ORDER BY id ASC').all());
+});
+
 app.post('/api/profiles', requireAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
   if (!b.name) return res.status(400).json({ error: 'Nombre del perfil requerido.' });
@@ -1710,21 +1755,94 @@ app.post('/api/profiles', requireAuth, requireAdmin, (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
-      String(b.name),
+      String(b.name).trim(),
       String(b.video_codec || 'libx264'),
       String(b.audio_codec || 'aac'),
-      String(b.video_bitrate || '3500k'),
+      String(b.video_bitrate || '2500k'),
       String(b.audio_bitrate || '128k'),
-      String(b.resolution || '1920x1080'),
-      String(b.preset || 'veryfast'),
+      String(b.resolution || '1280x720'),
+      String(b.preset || 'ultrafast'),
       String(b.hwaccel || 'none'),
-      String(b.extra_flags || '')
+      String(b.extra_flags || '-tune zerolatency -maxrate 2500k -bufsize 5000k')
     );
   res.json({ id: Number(info.lastInsertRowid), ok: true });
 });
 
+app.put('/api/profiles/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  if (!b.name || !String(b.name).trim()) {
+    return res.status(400).json({ error: 'El nombre del perfil FFmpeg es obligatorio.' });
+  }
+  const existing = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(id);
+  if (!existing) {
+    return res.status(404).json({ error: 'Perfil FFmpeg no encontrado.' });
+  }
+
+  const vBitrate = String(b.video_bitrate ?? existing.video_bitrate ?? '2500k').trim();
+  db.prepare(
+    `UPDATE transcode_profiles SET
+       name = ?,
+       video_codec = ?,
+       audio_codec = ?,
+       video_bitrate = ?,
+       audio_bitrate = ?,
+       resolution = ?,
+       preset = ?,
+       hwaccel = ?,
+       extra_flags = ?
+     WHERE id = ?`
+  ).run(
+    String(b.name).trim(),
+    String(b.video_codec || existing.video_codec || 'libx264'),
+    String(b.audio_codec || existing.audio_codec || 'aac'),
+    vBitrate,
+    String(b.audio_bitrate ?? existing.audio_bitrate ?? '128k').trim(),
+    String(b.resolution || existing.resolution || '1280x720'),
+    String(b.preset || existing.preset || 'ultrafast'),
+    String(b.hwaccel || existing.hwaccel || 'none'),
+    String(b.extra_flags ?? existing.extra_flags ?? ''),
+    id
+  );
+
+  // Sync bitrate_kbps label on streams using this profile if numeric (e.g. 2500k -> 2500)
+  const kbpsMatch = vBitrate.match(/^(\d+(?:\.\d+)?)\s*([km])?$/i);
+  if (kbpsMatch) {
+    const num = parseFloat(kbpsMatch[1]);
+    const unit = (kbpsMatch[2] || 'k').toLowerCase();
+    const kbpsVal = unit === 'm' ? Math.round(num * 1000) : Math.round(num);
+    if (kbpsVal > 0) {
+      db.prepare('UPDATE streams SET bitrate_kbps = ? WHERE transcode_profile_id = ?').run(kbpsVal, id);
+    }
+  }
+
+  // Hot-reload any active FFmpeg transcode workers using this profile
+  const activeStreams = db
+    .prepare("SELECT id FROM streams WHERE transcode_profile_id = ? AND stream_mode = 'transcode' AND status = 'running'")
+    .all(id);
+  for (const s of activeStreams) {
+    stopWorker(`stream_${s.id}`);
+    launchStreamWorkerIfNeeded(s.id);
+  }
+
+  const activeCh247 = db
+    .prepare("SELECT id FROM channels_247 WHERE transcode_profile_id = ? AND engine_mode = 'ffmpeg' AND status = 'running'")
+    .all(id);
+  for (const ch of activeCh247) {
+    stopWorker(`ch247_${ch.id}`);
+    launchChannel247WorkerIfConfigured(ch.id);
+  }
+
+  res.json({ ok: true, restartedStreams: activeStreams.length, restartedChannels247: activeCh247.length });
+});
+
 app.delete('/api/profiles/:id', requireAuth, requireAdmin, (req, res) => {
-  db.prepare('DELETE FROM transcode_profiles WHERE id = ?').run(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (id === 1) {
+    return res.status(400).json({ error: 'El perfil base Direct Stream (#1) se puede editar pero no eliminar.' });
+  }
+  db.prepare('UPDATE streams SET transcode_profile_id = 1 WHERE transcode_profile_id = ?').run(id);
+  db.prepare('DELETE FROM transcode_profiles WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 

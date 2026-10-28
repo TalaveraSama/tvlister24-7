@@ -115,7 +115,7 @@ export function initDb() {
       user_agent TEXT DEFAULT 'TVLister/2.3 (MPEG-TS; Linux)',
       tv_archive_days INTEGER NOT NULL DEFAULT 0,
       pid INTEGER,
-      bitrate_kbps INTEGER NOT NULL DEFAULT 4200,
+      bitrate_kbps INTEGER NOT NULL DEFAULT 2500,
       uptime_started_at TEXT DEFAULT (datetime('now')),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -377,9 +377,40 @@ export function initDb() {
   db.prepare("UPDATE settings SET value = 'TVLister 24/7 Panel' WHERE key = 'panel_name' AND value LIKE ?").run(
     `%${legacyBrandToken}%`
   );
-  db.prepare("UPDATE streams SET user_agent = 'TVLister/2.3 (MPEG-TS; Linux)' WHERE user_agent LIKE ?").run(
-    `%${legacyBrandToken}%`
-  );
+  // One-time migration: set Zero Latency / Low-Latency FFmpeg profile to 2.5 Mbps (2500k) & 2500 kbps default
+  const zeroLatMigrated = db.prepare("SELECT value FROM settings WHERE key = 'zero_latency_2500k_v1'").get();
+  if (zeroLatMigrated?.value !== 'true') {
+    db.prepare(`
+      UPDATE transcode_profiles
+         SET name = 'NVIDIA NVENC Zero-Latency 2.5 Mbps',
+             video_bitrate = '2500k',
+             audio_bitrate = '128k',
+             extra_flags = '-rc cbr -zerolatency 1 -maxrate 2500k -bufsize 5000k'
+       WHERE LOWER(name) LIKE '%nvenc%' AND (LOWER(name) LIKE '%latency%' OR LOWER(name) LIKE '%zero%')
+    `).run();
+
+    db.prepare(`
+      UPDATE transcode_profiles
+         SET video_bitrate = '2500k',
+             audio_bitrate = '128k'
+       WHERE LOWER(name) LIKE '%zero%' AND LOWER(name) NOT LIKE '%direct%' AND LOWER(name) NOT LIKE '%nvenc%'
+    `).run();
+
+    const hasCpuZeroLat = db
+      .prepare("SELECT id FROM transcode_profiles WHERE LOWER(name) LIKE '%zero latency 2.5%' LIMIT 1")
+      .get();
+    if (!hasCpuZeroLat) {
+      db.prepare(`
+        INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+        VALUES ('Zero Latency 2.5 Mbps (H.264 CPU)', 'libx264', 'aac', '2500k', '128k', '1280x720', 'ultrafast', 'none', '-tune zerolatency -maxrate 2500k -bufsize 5000k')
+      `).run();
+    }
+
+    db.prepare('UPDATE streams SET bitrate_kbps = 2500 WHERE bitrate_kbps = 4200 OR bitrate_kbps = 4000').run();
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('zero_latency_2500k_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+    ).run();
+  }
 }
 
 function sanitizeJsonIdArray(rawJson, validIdsSet) {
@@ -592,9 +623,10 @@ function seedInitialData() {
     'INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   insertProf.run('Direct Stream (Zero Transcode)', 'copy', 'copy', 'source', 'source', 'source', 'none', 'none', '-fflags +genpts+igndts');
+  insertProf.run('Zero Latency 2.5 Mbps (H.264 CPU)', 'libx264', 'aac', '2500k', '128k', '1280x720', 'ultrafast', 'none', '-tune zerolatency -maxrate 2500k -bufsize 5000k');
+  insertProf.run('NVIDIA NVENC Zero-Latency 2.5 Mbps', 'h264_nvenc', 'aac', '2500k', '128k', '1920x1080', 'p2', 'nvenc', '-rc cbr -zerolatency 1 -maxrate 2500k -bufsize 5000k');
   insertProf.run('Full HD 1080p H.264 (CPU Fast)', 'libx264', 'aac', '4000k', '128k', '1920x1080', 'veryfast', 'none', '-g 50 -sc_threshold 0');
-  insertProf.run('NVIDIA NVENC 1080p Low-Latency', 'h264_nvenc', 'aac', '4500k', '160k', '1920x1080', 'p4', 'nvenc', '-rc cbr -zerolatency 1');
-  insertProf.run('Intel QuickSync QSV 720p Eco', 'h264_qsv', 'aac', '2200k', '128k', '1280x720', 'faster', 'qsv', '-look_ahead 0');
+  insertProf.run('Intel QuickSync QSV 720p Eco', 'h264_qsv', 'aac', '2500k', '128k', '1280x720', 'faster', 'qsv', '-look_ahead 0');
 
   db.prepare(
     'INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, cpu_usage, ram_usage, bandwidth_mbps, stalker_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'

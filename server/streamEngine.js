@@ -186,11 +186,27 @@ export function computeChannel247LiveState(channel, nowMs = Date.now()) {
   };
 }
 
+function splitExtraFlags(rawFlags = '') {
+  return String(rawFlags || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
 export function buildFfmpegArgsForStream(stream, profile) {
   const outDir = path.join(HLS_ROOT, `stream_${stream.id}`);
   fs.mkdirSync(outDir, { recursive: true });
 
+  const extraStr = String(profile?.extra_flags || '');
+  const isZeroLatency =
+    /zerolatency|low[-_ ]?latency/i.test(extraStr) ||
+    /zero[-_ ]?latency|low[-_ ]?latency/i.test(String(profile?.name || ''));
+
   const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
+
+  if (isZeroLatency) {
+    args.push('-fflags', 'nobuffer', '-flags', 'low_delay');
+  }
 
   if (profile?.hwaccel === 'nvenc') {
     args.push('-hwaccel', 'cuda');
@@ -215,7 +231,8 @@ export function buildFfmpegArgsForStream(stream, profile) {
     if (profile?.preset && profile.preset !== 'none') args.push('-preset', profile.preset);
     if (profile?.video_bitrate && profile.video_bitrate !== 'source') args.push('-b:v', profile.video_bitrate);
     if (profile?.resolution && profile.resolution !== 'source') args.push('-s', profile.resolution);
-    args.push('-g', '48', '-sc_threshold', '0');
+    args.push('-g', isZeroLatency ? '30' : '48', '-sc_threshold', '0');
+    args.push(...splitExtraFlags(extraStr));
   }
 
   args.push('-c:a', aCodec);
@@ -227,11 +244,11 @@ export function buildFfmpegArgsForStream(stream, profile) {
     '-f',
     'hls',
     '-hls_time',
-    '4',
+    isZeroLatency ? '2' : '4',
     '-hls_list_size',
     '6',
     '-hls_flags',
-    'delete_segments+append_list',
+    isZeroLatency ? 'delete_segments+independent_segments' : 'delete_segments+append_list',
     path.join(outDir, 'index.m3u8')
   );
   return args;

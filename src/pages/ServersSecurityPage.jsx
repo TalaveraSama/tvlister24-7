@@ -19,7 +19,9 @@ import {
   Copy,
   Check,
   Lock,
-  ExternalLink
+  ExternalLink,
+  Edit3,
+  X
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -60,13 +62,17 @@ export default function ServersSecurityPage() {
     isp_match: ''
   });
   const [fwForm, setFwForm] = useState({ rule_type: 'ip', value: '', description: '' });
+  const [editingProfId, setEditingProfId] = useState(null);
   const [profForm, setProfForm] = useState({
     name: '',
     video_codec: 'libx264',
     audio_codec: 'aac',
-    video_bitrate: '4000k',
-    resolution: '1920x1080',
-    hwaccel: 'none'
+    video_bitrate: '2500k',
+    audio_bitrate: '128k',
+    resolution: '1280x720',
+    preset: 'ultrafast',
+    hwaccel: 'none',
+    extra_flags: '-tune zerolatency -maxrate 2500k -bufsize 5000k'
   });
 
   const [sslDomain, setSslDomain] = useState('tv.midominio.com');
@@ -195,12 +201,53 @@ export default function ServersSecurityPage() {
     loadAll();
   };
 
+  const startEditProfile = (p) => {
+    setEditingProfId(p.id);
+    setProfForm({
+      name: p.name || '',
+      video_codec: p.video_codec || 'libx264',
+      audio_codec: p.audio_codec || 'aac',
+      video_bitrate: p.video_bitrate || '2500k',
+      audio_bitrate: p.audio_bitrate || '128k',
+      resolution: p.resolution || '1280x720',
+      preset: p.preset || 'ultrafast',
+      hwaccel: p.hwaccel || 'none',
+      extra_flags: p.extra_flags || ''
+    });
+  };
+
+  const cancelEditProfile = () => {
+    setEditingProfId(null);
+    setProfForm({
+      name: '',
+      video_codec: 'libx264',
+      audio_codec: 'aac',
+      video_bitrate: '2500k',
+      audio_bitrate: '128k',
+      resolution: '1280x720',
+      preset: 'ultrafast',
+      hwaccel: 'none',
+      extra_flags: '-tune zerolatency -maxrate 2500k -bufsize 5000k'
+    });
+  };
+
   const addProfile = async (e) => {
     e.preventDefault();
     if (!profForm.name) return;
-    await apiFetch('/api/profiles', { method: 'POST', body: JSON.stringify(profForm) });
-    setProfForm({ ...profForm, name: '' });
-    flash('Perfil de transcodificación guardado.');
+    if (editingProfId) {
+      const res = await apiFetch(`/api/profiles/${editingProfId}`, {
+        method: 'PUT',
+        body: JSON.stringify(profForm)
+      });
+      cancelEditProfile();
+      flash(
+        `Perfil FFmpeg actualizado (${res.restartedStreams || 0} canales activos recargados en caliente).`
+      );
+    } else {
+      await apiFetch('/api/profiles', { method: 'POST', body: JSON.stringify(profForm) });
+      cancelEditProfile();
+      flash('Nuevo perfil FFmpeg creado.');
+    }
     loadAll();
   };
 
@@ -760,42 +807,177 @@ export default function ServersSecurityPage() {
           </div>
 
           <div className="lg:col-span-5 rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              <Sliders className="w-4 h-4 text-cyan-400" />
-              Perfiles Hardware FFmpeg (NVENC / Intel QSV / CPU)
-            </h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-cyan-400" />
+                Perfiles Hardware FFmpeg (Zero Latency / NVENC / CPU)
+              </h2>
+              {editingProfId && (
+                <button
+                  type="button"
+                  onClick={cancelEditProfile}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 hover:text-white text-[11px]"
+                >
+                  <X className="w-3.5 h-3.5" /> Cancelar edición
+                </button>
+              )}
+            </div>
 
-            <form onSubmit={addProfile} className="grid grid-cols-2 gap-2 text-xs">
+            <form
+              onSubmit={addProfile}
+              className={`p-3.5 rounded-xl border space-y-2.5 text-xs ${
+                editingProfId
+                  ? 'bg-indigo-950/25 border-indigo-500/40'
+                  : 'bg-[#090e1a]/60 border-slate-800'
+              }`}
+            >
+              <div className="flex items-center justify-between text-[11px] font-semibold">
+                <span className={editingProfId ? 'text-indigo-300' : 'text-slate-300'}>
+                  {editingProfId ? `Editando Perfil #${editingProfId}` : '+ Crear Perfil FFmpeg'}
+                </span>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-500 mr-1">Bitrate rápido:</span>
+                  {[
+                    { label: '1.5M', br: '1500k', flags: '-tune zerolatency -maxrate 1500k -bufsize 3000k' },
+                    { label: '2.5M', br: '2500k', flags: '-tune zerolatency -maxrate 2500k -bufsize 5000k' },
+                    { label: '4.0M', br: '4000k', flags: '-tune zerolatency -maxrate 4000k -bufsize 8000k' }
+                  ].map((q) => (
+                    <button
+                      key={q.label}
+                      type="button"
+                      onClick={() =>
+                        setProfForm({
+                          ...profForm,
+                          video_bitrate: q.br,
+                          extra_flags:
+                            profForm.video_codec === 'h264_nvenc'
+                              ? `-rc cbr -zerolatency 1 -maxrate ${q.br} -bufsize ${parseInt(q.br, 10) * 2}k`
+                              : q.flags
+                        })
+                      }
+                      className={`px-2 py-0.5 rounded font-mono text-[10px] border transition ${
+                        profForm.video_bitrate === q.br
+                          ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                          : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                      }`}
+                    >
+                      {q.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <input
                 type="text"
-                placeholder="Nombre perfil"
+                required
+                placeholder="Nombre perfil (ej. Zero Latency 2.5 Mbps)"
                 value={profForm.name}
                 onChange={(e) => setProfForm({ ...profForm, name: e.target.value })}
-                className="col-span-2 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
               />
-              <select
-                value={profForm.video_codec}
-                onChange={(e) => setProfForm({ ...profForm, video_codec: e.target.value })}
-                className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
-              >
-                <option value="libx264">CPU libx264</option>
-                <option value="h264_nvenc">NVIDIA NVENC</option>
-                <option value="h264_qsv">Intel QSV</option>
-                <option value="copy">Direct Copy</option>
-              </select>
-              <div className="flex gap-2">
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Codec Video</label>
+                  <select
+                    value={profForm.video_codec}
+                    onChange={(e) => {
+                      const vc = e.target.value;
+                      setProfForm({
+                        ...profForm,
+                        video_codec: vc,
+                        hwaccel: vc === 'h264_nvenc' ? 'nvenc' : vc === 'h264_qsv' ? 'qsv' : 'none'
+                      });
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="libx264">CPU libx264</option>
+                    <option value="h264_nvenc">NVIDIA NVENC</option>
+                    <option value="h264_qsv">Intel QSV</option>
+                    <option value="copy">Direct Copy (Sin recodificar)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Bitrate Video (ej. 2500k)</label>
+                  <input
+                    type="text"
+                    value={profForm.video_bitrate}
+                    onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
+                    placeholder="2500k"
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Resolución</label>
+                  <select
+                    value={profForm.resolution}
+                    onChange={(e) => setProfForm({ ...profForm, resolution: e.target.value })}
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="source">Original (source)</option>
+                    <option value="1280x720">HD 720p (1280x720)</option>
+                    <option value="1920x1080">FHD 1080p (1920x1080)</option>
+                    <option value="854x480">SD 480p (854x480)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Preset Velocidad</label>
+                  <select
+                    value={profForm.preset}
+                    onChange={(e) => setProfForm({ ...profForm, preset: e.target.value })}
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="ultrafast">ultrafast (Zero Latency)</option>
+                    <option value="superfast">superfast</option>
+                    <option value="veryfast">veryfast</option>
+                    <option value="faster">faster</option>
+                    <option value="p2">NVENC p2 (Ultra Low-Lat)</option>
+                    <option value="p4">NVENC p4</option>
+                    <option value="none">none (Copy)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Audio ({profForm.audio_codec})</label>
+                  <select
+                    value={profForm.audio_bitrate}
+                    onChange={(e) => setProfForm({ ...profForm, audio_bitrate: e.target.value })}
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  >
+                    <option value="96k">AAC 96k</option>
+                    <option value="128k">AAC 128k</option>
+                    <option value="160k">AAC 160k</option>
+                    <option value="192k">AAC 192k</option>
+                    <option value="source">Original</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] text-slate-400 mb-1">
+                  Flags Extra FFmpeg (ej. -tune zerolatency -maxrate 2500k -bufsize 5000k)
+                </label>
                 <input
                   type="text"
-                  value={profForm.video_bitrate}
-                  onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
-                  placeholder="4000k"
-                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  value={profForm.extra_flags}
+                  onChange={(e) => setProfForm({ ...profForm, extra_flags: e.target.value })}
+                  placeholder="-tune zerolatency -maxrate 2500k -bufsize 5000k"
+                  className="w-full px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono text-[11px]"
                 />
+              </div>
+
+              <div className="flex justify-end pt-1">
                 <button
                   type="submit"
-                  className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
+                  className="w-full py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold inline-flex items-center justify-center gap-1.5"
                 >
-                  Crear
+                  <Save className="w-3.5 h-3.5" />
+                  {editingProfId ? 'Guardar Cambios del Perfil FFmpeg' : 'Crear Perfil FFmpeg'}
                 </button>
               </div>
             </form>
@@ -804,25 +986,47 @@ export default function ServersSecurityPage() {
               {sys.profiles.map((p) => (
                 <div
                   key={p.id}
-                  className="px-3 py-2.5 rounded-xl bg-[#090e1a] border border-slate-800 flex items-center justify-between"
+                  className={`px-3 py-2.5 rounded-xl border flex items-center justify-between gap-2 ${
+                    editingProfId === p.id
+                      ? 'bg-indigo-950/30 border-indigo-500/50'
+                      : 'bg-[#090e1a] border-slate-800'
+                  }`}
                 >
-                  <div>
-                    <div className="font-semibold text-white">{p.name}</div>
-                    <div className="font-mono text-[11px] text-slate-400">
-                      Video: {p.video_codec} ({p.video_bitrate}) • Audio: {p.audio_codec} • Res: {p.resolution}
+                  <div className="min-w-0">
+                    <div className="font-semibold text-white truncate">{p.name}</div>
+                    <div className="font-mono text-[11px] text-slate-400 truncate">
+                      Video: {p.video_codec} ({p.video_bitrate}) • {p.preset} • Res: {p.resolution}
                     </div>
+                    {p.extra_flags && (
+                      <div className="font-mono text-[10px] text-cyan-400/90 truncate mt-0.5">
+                        {p.extra_flags}
+                      </div>
+                    )}
                   </div>
-                  {p.id > 1 && (
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
-                      onClick={async () => {
-                        await apiFetch(`/api/profiles/${p.id}`, { method: 'DELETE' });
-                        loadAll();
-                      }}
-                      className="p-1.5 rounded bg-rose-500/15 text-rose-300"
+                      type="button"
+                      onClick={() => startEditProfile(p)}
+                      title="Editar Perfil FFmpeg"
+                      className="p-1.5 rounded bg-slate-800 hover:bg-indigo-600 text-slate-200 hover:text-white transition"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Edit3 className="w-3.5 h-3.5" />
                     </button>
-                  )}
+                    {p.id > 1 && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await apiFetch(`/api/profiles/${p.id}`, { method: 'DELETE' });
+                          if (editingProfId === p.id) cancelEditProfile();
+                          loadAll();
+                        }}
+                        title="Eliminar Perfil"
+                        className="p-1.5 rounded bg-rose-500/15 hover:bg-rose-500/30 text-rose-300"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
