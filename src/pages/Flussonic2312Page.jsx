@@ -909,6 +909,8 @@ export default function Flussonic2312Page({ onPreview }) {
                   className="px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-white"
                 >
                   <option value="mpegts">Salida /key/mpegts (24/7 TS)</option>
+                  <option value="cmaf">Salida /key/index.fmp4.m3u8 (M4F / CMAF)</option>
+                  <option value="m4f_scheme">Esquema m4f://IP:Puerto/key</option>
                   <option value="hls">Salida /key/index.m3u8 (HLS)</option>
                 </select>
                 <select
@@ -1239,6 +1241,8 @@ export default function Flussonic2312Page({ onPreview }) {
                     className="px-2.5 py-1.5 rounded-lg bg-[#090e1a] border border-slate-700 text-white text-xs"
                   >
                     <option value="mpegts">HTTP MPEG-TS (/nombre/mpegts — 24/7)</option>
+                    <option value="cmaf">M4F / CMAF fMP4 (/nombre/index.fmp4.m3u8)</option>
+                    <option value="m4f_scheme">Esquema m4f:// (/nombre)</option>
                     <option value="hls">HLS (/nombre/index.m3u8)</option>
                   </select>
                 </div>

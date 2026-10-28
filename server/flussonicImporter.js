@@ -6,19 +6,19 @@ import { db } from './db.js';
  */
 export function isFlussonicScheme(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return false;
-  return /^(m4fs?|tshttps?|hlss?):\/\//i.test(rawUrl.trim());
+  return /^(m4fs?|m4ss?|tshttps?|hlss?):\/\//i.test(rawUrl.trim());
 }
 
 export function resolveFlussonicUrlCandidates(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return [];
   const trimmed = rawUrl.trim();
-  const match = trimmed.match(/^(m4f|m4fs|tshttp|tshttps|hls|hlss):\/\/(.+)$/i);
+  const match = trimmed.match(/^(m4f|m4fs|m4s|m4ss|tshttp|tshttps|hls|hlss):\/\/(.+)$/i);
   if (!match) {
     return [trimmed];
   }
 
   const scheme = match[1].toLowerCase();
-  const isSecure = scheme.endsWith('s');
+  const isSecure = scheme.endsWith('s') && scheme !== 'm4s' && scheme !== 'hls';
   const httpProto = isSecure ? 'https' : 'http';
 
   let parsed;
@@ -40,8 +40,8 @@ export function resolveFlussonicUrlCandidates(rawUrl) {
     return [`${originWithAuth}${cleanPath}${query}`];
   }
 
-  if (scheme === 'm4f' || scheme === 'm4fs') {
-    // Flussonic M4F -> negotiate CMAF fMP4 manifest first, then standard HLS, then raw HTTP MPEG-TS
+  if (scheme === 'm4f' || scheme === 'm4fs' || scheme === 'm4s' || scheme === 'm4ss') {
+    // Flussonic M4F / M4S -> negotiate CMAF fMP4 manifest first, then standard HLS, then raw HTTP MPEG-TS
     return [
       `${originWithAuth}${cleanPath}/index.fmp4.m3u8${query}`,
       `${originWithAuth}${cleanPath}/mono.fmp4.m3u8${query}`,

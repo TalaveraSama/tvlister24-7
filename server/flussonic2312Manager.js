@@ -184,6 +184,13 @@ export function buildFlussonicPullUrl(srv, streamName, protocol = 'mpegts') {
   }
   const cleanRoot = u.toString().replace(/\/+$/, '');
   const safeName = String(streamName || '').replace(/^\/+/, '');
+  if (protocol === 'm4f_scheme') {
+    const m4fProto = u.protocol === 'https:' ? 'm4fs' : 'm4f';
+    return `${m4fProto}://${u.host}/${safeName}`;
+  }
+  if (protocol === 'cmaf' || protocol === 'm4f') {
+    return `${cleanRoot}/${safeName}/index.fmp4.m3u8`;
+  }
   if (protocol === 'hls') {
     return `${cleanRoot}/${safeName}/index.m3u8`;
   }

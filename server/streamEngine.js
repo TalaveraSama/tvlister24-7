@@ -4,6 +4,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
+import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
+
+export function resolveFfmpegCompatibleCandidates(rawUrl = '', backupUrl = '') {
+  const out = [];
+  const pushClean = (u) => {
+    if (u && !out.includes(u)) out.push(u);
+  };
+
+  for (const src of [rawUrl, backupUrl]) {
+    const trimmed = String(src || '').trim();
+    if (!trimmed) continue;
+    if (/^mnfs?:\/\//i.test(trimmed)) {
+      // TVLister MNF URLs: convert /mnf/<u>/<p>/<id>.mnf -> standard MPEG-TS /live/<u>/<p>/<id>.ts for FFmpeg
+      const httpEquiv = trimmed
+        .replace(/^mnf(s?):\/\//i, 'http$1://')
+        .replace(/\/mnf\/([^/]+)\/([^/]+)\/(\d+)\.mnf\b/i, '/live/$1/$2/$3.ts');
+      pushClean(httpEquiv);
+      continue;
+    }
+    for (const cand of resolveFlussonicUrlCandidates(trimmed)) {
+      pushClean(cand);
+    }
+  }
+  return out.length > 0 ? out : [String(rawUrl || '').trim()];
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_DIR = path.resolve(__dirname, '../streams_runtime');
@@ -283,9 +308,12 @@ export function isStreamAudioLeveled(stream, profile) {
   return getGlobalAudioLevelingConfig().enabled;
 }
 
-export function buildFfmpegArgsForStream(stream, profile) {
+export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   const outDir = path.join(HLS_ROOT, `stream_${stream.id}`);
   fs.mkdirSync(outDir, { recursive: true });
+
+  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, stream.backup_url);
+  const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
 
   const globalAudio = getGlobalAudioLevelingConfig();
   const levelAudio = isStreamAudioLeveled(stream, profile);
@@ -316,10 +344,10 @@ export function buildFfmpegArgsForStream(stream, profile) {
     }
   }
 
-  if (stream.user_agent && stream.source_url.startsWith('http')) {
+  if (stream.user_agent && inputUrl.startsWith('http')) {
     args.push('-user_agent', stream.user_agent);
   }
-  if (stream.source_url.startsWith('http')) {
+  if (inputUrl.startsWith('http')) {
     args.push(
       '-rw_timeout',
       '10000000',
@@ -332,7 +360,7 @@ export function buildFfmpegArgsForStream(stream, profile) {
     );
   }
 
-  args.push('-i', stream.source_url);
+  args.push('-i', inputUrl);
   args.push('-map', '0:v:0', '-map', '0:a:0?');
   args.push('-c:v', vCodec);
 
@@ -458,13 +486,14 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     child: null,
     timer: null,
     stoppedManually: false,
-    pid: null
+    pid: null,
+    attemptCount: 0
   };
   workers.set(key, state);
 
   const launch = () => {
     if (state.stoppedManually) return;
-    const args = typeof argsBuilder === 'function' ? argsBuilder() : argsBuilder;
+    const args = typeof argsBuilder === 'function' ? argsBuilder(state.attemptCount) : argsBuilder;
     if (!args || !Array.isArray(args)) return;
 
     const bin = getFfmpegBin();
@@ -472,6 +501,7 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
       ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
       : process.env;
 
+    const startedAt = Date.now();
     const child = spawn(bin, args, { stdio: 'ignore', detached: false, env });
     state.child = child;
     state.pid = child.pid || null;
@@ -480,8 +510,11 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     child.on('exit', () => {
       state.pid = null;
       if (onPidChange) onPidChange(null);
+      if (Date.now() - startedAt < 12_000) {
+        state.attemptCount += 1;
+      }
       if (!state.stoppedManually && workers.get(key) === state) {
-        state.timer = setTimeout(launch, 4500);
+        state.timer = setTimeout(launch, 3500);
       }
     });
   };
@@ -514,20 +547,23 @@ export function stopAllWorkers() {
 // ============================================================================
 // TV ARCHIVE / CATCHUP DISK RECORDER (MPEG-TS Epoch Segments)
 // ============================================================================
-export function buildFfmpegArgsForArchive(stream) {
+export function buildFfmpegArgsForArchive(stream, attemptIndex = 0) {
   const outDir = path.join(ARCHIVE_ROOT, `stream_${stream.id}`);
   fs.mkdirSync(outDir, { recursive: true });
 
+  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, stream.backup_url);
+  const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
+
   const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
-  if (stream.user_agent && stream.source_url.startsWith('http')) {
+  if (stream.user_agent && inputUrl.startsWith('http')) {
     args.push('-user_agent', stream.user_agent);
   }
-  if (stream.source_url.startsWith('http')) {
+  if (inputUrl.startsWith('http')) {
     args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
   }
   args.push(
     '-i',
-    stream.source_url,
+    inputUrl,
     '-c',
     'copy',
     '-f',
@@ -547,7 +583,7 @@ export function buildFfmpegArgsForArchive(stream) {
 
 export function startArchiveWorker(stream) {
   if (!stream || !stream.source_url) return null;
-  return startSupervisedWorker(`archive_${stream.id}`, () => buildFfmpegArgsForArchive(stream));
+  return startSupervisedWorker(`archive_${stream.id}`, (attempt) => buildFfmpegArgsForArchive(stream, attempt));
 }
 
 export function stopArchiveWorker(streamId) {
@@ -630,7 +666,7 @@ export function launchDbStreamWorkerIfNeeded(streamId) {
   const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(s.transcode_profile_id || 1);
   startSupervisedWorker(
     `stream_${streamId}`,
-    () => buildFfmpegArgsForStream(s, profile),
+    (attempt) => buildFfmpegArgsForStream(s, profile, attempt),
     (pid) => {
       db.prepare('UPDATE streams SET pid = ? WHERE id = ?').run(pid, Number(streamId));
     }
