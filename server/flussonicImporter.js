@@ -9,31 +9,9 @@ export function isFlussonicScheme(rawUrl) {
   return /^(m4fs?|m4ss?|tshttps?|hlss?):\/\//i.test(rawUrl.trim());
 }
 
-export function isM4fOrCmafUrl(rawUrl) {
-  if (!rawUrl || typeof rawUrl !== 'string') return false;
-  const t = rawUrl.trim();
-  return /^(m4fs?|m4ss?|tshttps?|hlss?):\/\//i.test(t) || /\.fmp4\.m3u8(\?|$)/i.test(t);
-}
-
-export function resolveFlussonicUrlCandidates(rawUrl, options = {}) {
+export function resolveFlussonicUrlCandidates(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return [];
   const trimmed = rawUrl.trim();
-  const preferProtocol = String(options?.preferProtocol || 'hls').toLowerCase();
-
-  // Also adapt HTTP(S) Flussonic CMAF URLs (.../index.fmp4.m3u8 or .../mono.fmp4.m3u8) for universal player compatibility
-  const cmafHttpMatch = trimmed.match(/^(https?:\/\/.+?)\/(?:index|mono)\.fmp4\.m3u8(\?.*)?$/i);
-  if (cmafHttpMatch) {
-    const streamRoot = cmafHttpMatch[1].replace(/\/+$/, '');
-    const q = cmafHttpMatch[2] || '';
-    if (preferProtocol === 'mpegts') {
-      return [`${streamRoot}/mpegts${q}`, `${streamRoot}/index.m3u8${q}`, trimmed];
-    }
-    if (preferProtocol === 'cmaf') {
-      return [trimmed, `${streamRoot}/index.m3u8${q}`, `${streamRoot}/mpegts${q}`];
-    }
-    return [`${streamRoot}/index.m3u8${q}`, `${streamRoot}/mono.m3u8${q}`, trimmed, `${streamRoot}/mpegts${q}`];
-  }
-
   const match = trimmed.match(/^(m4f|m4fs|m4s|m4ss|tshttp|tshttps|hls|hlss):\/\/(.+)$/i);
   if (!match) {
     return [trimmed];
@@ -57,67 +35,33 @@ export function resolveFlussonicUrlCandidates(rawUrl, options = {}) {
   const cleanPath = (parsed.pathname || '/').replace(/\/+$/, '');
   const query = parsed.search || '';
 
-  // Strip explicit Flussonic suffix if present inside an m4f:// or tshttp:// URI so we can negotiate protocol cleanly
-  const baseStreamPath = cleanPath.replace(/\/(?:(?:index|mono)(?:\.fmp4)?\.m3u8|mpegts)$/i, '');
-
-  if (/\.(ts|mp4)$/i.test(cleanPath)) {
+  // If the path already ends with a concrete manifest or endpoint, preserve it first
+  if (/\.(m3u8|ts|mp4|fmp4)$/i.test(cleanPath) || /\/mpegts$/i.test(cleanPath)) {
     return [`${originWithAuth}${cleanPath}${query}`];
   }
 
   if (scheme === 'm4f' || scheme === 'm4fs' || scheme === 'm4s' || scheme === 'm4ss') {
-    if (preferProtocol === 'mpegts') {
-      // Client app asked for .ts / MPEG-TS -> serve Flussonic /mpegts first, then HLS/CMAF for FFmpeg TS-remux fallback
-      return [
-        `${originWithAuth}${baseStreamPath}/mpegts${query}`,
-        `${originWithAuth}${baseStreamPath}/index.m3u8${query}`,
-        `${originWithAuth}${baseStreamPath}/index.fmp4.m3u8${query}`,
-      ];
-    }
-    if (preferProtocol === 'cmaf') {
-      return [
-        `${originWithAuth}${baseStreamPath}/index.fmp4.m3u8${query}`,
-        `${originWithAuth}${baseStreamPath}/mono.fmp4.m3u8${query}`,
-        `${originWithAuth}${baseStreamPath}/index.m3u8${query}`,
-        `${originWithAuth}${baseStreamPath}/mpegts${query}`,
-      ];
-    }
-    // Universal HLS mode (Smart TVs, Smarters/TiviMate HLS, iOS, hls.js VideoModal, MP2/AAC/AC3 audio safe):
-    // Try classic TS-segmented HLS first, then CMAF fMP4, then raw /mpegts
+    // Flussonic M4F / M4S -> negotiate CMAF fMP4 manifest first, then standard HLS, then raw HTTP MPEG-TS
     return [
-      `${originWithAuth}${baseStreamPath}/index.m3u8${query}`,
-      `${originWithAuth}${baseStreamPath}/mono.m3u8${query}`,
-      `${originWithAuth}${baseStreamPath}/index.fmp4.m3u8${query}`,
-      `${originWithAuth}${baseStreamPath}/mono.fmp4.m3u8${query}`,
-      `${originWithAuth}${baseStreamPath}/mpegts${query}`,
+      `${originWithAuth}${cleanPath}/index.fmp4.m3u8${query}`,
+      `${originWithAuth}${cleanPath}/mono.fmp4.m3u8${query}`,
+      `${originWithAuth}${cleanPath}/index.m3u8${query}`,
+      `${originWithAuth}${cleanPath}/mpegts${query}`,
     ];
   }
 
   if (scheme === 'tshttp' || scheme === 'tshttps') {
-    if (preferProtocol === 'hls') {
-      return [
-        `${originWithAuth}${baseStreamPath}/index.m3u8${query}`,
-        `${originWithAuth}${cleanPath}${query}`,
-        `${originWithAuth}${baseStreamPath}/mpegts${query}`,
-      ];
-    }
     return [
+      `${originWithAuth}${cleanPath}/mpegts${query}`,
       `${originWithAuth}${cleanPath}${query}`,
-      `${originWithAuth}${baseStreamPath}/mpegts${query}`,
-      `${originWithAuth}${baseStreamPath}/index.m3u8${query}`,
+      `${originWithAuth}${cleanPath}/index.m3u8${query}`,
     ];
   }
 
   // hls:// or hlss://
-  if (preferProtocol === 'mpegts') {
-    return [
-      `${originWithAuth}${baseStreamPath}/mpegts${query}`,
-      `${originWithAuth}${baseStreamPath}/index.m3u8${query}`,
-      `${originWithAuth}${baseStreamPath}/mono.m3u8${query}`,
-    ];
-  }
   return [
-    `${originWithAuth}${baseStreamPath}/index.m3u8${query}`,
-    `${originWithAuth}${baseStreamPath}/mono.m3u8${query}`,
+    `${originWithAuth}${cleanPath}/index.m3u8${query}`,
+    `${originWithAuth}${cleanPath}/mono.m3u8${query}`,
   ];
 }
 

@@ -3,11 +3,10 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken } from './auth.js';
-import { resolveFlussonicUrlCandidates, isM4fOrCmafUrl } from './flussonicImporter.js';
+import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import { resolveIpGeoSync } from './geoIspResolver.js';
 import { ensureSlateManifestForStream, pipeSlateContinuousMpegTs } from './offlineSlateEngine.js';
@@ -22,7 +21,6 @@ import {
   hasWorkerMpegTsFeed,
   subscribeWorkerMpegTs,
   getWorkerPid,
-  getFfmpegBin,
   isFfmpegAvailable,
   isStreamAudioLeveled,
   HLS_ROOT,
@@ -128,111 +126,7 @@ export function isItemAllowedForLine(line, kind, itemId) {
   return true;
 }
 
-/**
- * Safe Node 22 undici fetch wrapper that extracts embedded URL credentials (http://user:pass@host)
- * into a standard Authorization: Basic header so fetch() never throws TypeError.
- */
-function safeFetchUpstream(rawUrl, init = {}) {
-  let cleanUrl = String(rawUrl || '').trim();
-  const headers = { ...(init.headers || {}) };
-  try {
-    const u = new URL(cleanUrl);
-    if (u.username || u.password) {
-      const user = decodeURIComponent(u.username || '');
-      const pass = decodeURIComponent(u.password || '');
-      if (!headers.Authorization && !headers.authorization) {
-        headers.Authorization = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
-      }
-      u.username = '';
-      u.password = '';
-      cleanUrl = u.toString();
-    }
-  } catch {
-    // leave rawUrl as-is if non-standard
-  }
-  return fetch(cleanUrl, { ...init, headers });
-}
-
-/**
- * Lightweight 0%-transcode FFmpeg remuxer (`-c:v copy -c:a copy -f mpegts pipe:1`) for legacy .ts
- * IPTV apps when the upstream stream only exposes HLS (.m3u8) or Flussonic CMAF (.fmp4.m3u8).
- */
-function pipeFfmpegRemuxToMpegTs(req, res, upstreamManifestUrl, userAgent = 'TVLister/2.4') {
-  if (!isFfmpegAvailable()) return false;
-  let cleanUrl = String(upstreamManifestUrl || '').trim();
-  const extraHeaders = [];
-  try {
-    const u = new URL(cleanUrl);
-    if (u.username || u.password) {
-      const user = decodeURIComponent(u.username || '');
-      const pass = decodeURIComponent(u.password || '');
-      extraHeaders.push(`Authorization: Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`);
-      u.username = '';
-      u.password = '';
-      cleanUrl = u.toString();
-    }
-  } catch {
-    // ignore
-  }
-
-  const bin = getFfmpegBin();
-  const env = bin.startsWith('/home/xui/')
-    ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
-    : process.env;
-
-  const args = ['-hide_banner', '-loglevel', 'error', '-user_agent', userAgent];
-  if (extraHeaders.length > 0) {
-    args.push('-headers', `${extraHeaders.join('\r\n')}\r\n`);
-  }
-  args.push(
-    '-rw_timeout',
-    '10000000',
-    '-reconnect',
-    '1',
-    '-reconnect_streamed',
-    '1',
-    '-fflags',
-    '+genpts+igndts+nobuffer',
-    '-i',
-    cleanUrl,
-    '-map',
-    '0:v:0',
-    '-map',
-    '0:a:0?',
-    '-c:v',
-    'copy',
-    '-c:a',
-    'copy',
-    '-f',
-    'mpegts',
-    'pipe:1'
-  );
-
-  const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'ignore'], env });
-  res.setHeader('Content-Type', 'video/mp2t');
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('X-TVLister-Adapter', 'M4F-HLS-to-MPEGTS');
-
-  const cleanup = () => {
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      // ignore
-    }
-  };
-  req.once('close', cleanup);
-  res.once('close', cleanup);
-
-  child.stdout.on('data', (chunk) => {
-    if (!res.writableEnded) res.write(chunk);
-  });
-  child.once('exit', () => {
-    if (!res.writableEnded) res.end();
-  });
-  return true;
-}
-
-export function expandStreamUpstreamUrls(stream, options = {}) {
+export function expandStreamUpstreamUrls(stream) {
   const rawList = [stream?.source_url, stream?.backup_url].filter(Boolean);
   const expanded = [];
   for (const raw of rawList) {
@@ -240,7 +134,7 @@ export function expandStreamUpstreamUrls(stream, options = {}) {
     if (/^mnfs?:\/\//i.test(trimmed)) {
       expanded.push(trimmed.replace(/^mnf(s?):\/\//i, 'http$1://'));
     } else {
-      for (const cand of resolveFlussonicUrlCandidates(trimmed, options)) {
+      for (const cand of resolveFlussonicUrlCandidates(trimmed)) {
         if (cand && !expanded.includes(cand)) expanded.push(cand);
       }
     }
@@ -1197,7 +1091,7 @@ iptvRouter.get('/hls_proxy/:username/:password/:streamId', async (req, res) => {
   req.on('close', () => ac.abort());
 
   try {
-    const upRes = await safeFetchUpstream(targetUrl, {
+    const upRes = await fetch(targetUrl, {
       headers: { 'User-Agent': ua },
       redirect: 'follow',
       signal: ac.signal
@@ -1208,8 +1102,9 @@ iptvRouter.get('/hls_proxy/:username/:password/:streamId', async (req, res) => {
     }
 
     const cType = (upRes.headers.get('content-type') || '').toLowerCase();
-    const cleanTarget = targetUrl.split('?')[0].toLowerCase();
-    const isSubManifest = cType.includes('mpegurl') || cleanTarget.endsWith('.m3u8');
+    const isSubManifest =
+      cType.includes('mpegurl') ||
+      targetUrl.split('?')[0].toLowerCase().endsWith('.m3u8');
 
     if (isSubManifest) {
       const text = await upRes.text();
@@ -1222,11 +1117,7 @@ iptvRouter.get('/hls_proxy/:username/:password/:streamId', async (req, res) => {
       }
     }
 
-    res.setHeader(
-      'Content-Type',
-      upRes.headers.get('content-type') ||
-        (cleanTarget.endsWith('.mp4') || cleanTarget.endsWith('.m4s') ? 'video/mp4' : 'video/mp2t')
-    );
+    res.setHeader('Content-Type', upRes.headers.get('content-type') || 'video/mp2t');
     res.setHeader('Cache-Control', 'no-store');
     return Readable.fromWeb(upRes.body).pipe(res);
   } catch {
@@ -1241,8 +1132,7 @@ async function serveLiveStreamRequest(req, res) {
   if (auth.error) return res.status(auth.code).send(auth.error);
 
   const rawId = streamSpec.replace(/\.(m3u8|ts)$/i, '');
-  // In Xtream Codes API, both .ts AND bare numeric IDs (/live/u/p/123 or /u/p/123) expect MPEG-TS; only .m3u8 expects HLS!
-  const protocol = streamSpec.toLowerCase().endsWith('.m3u8') ? 'HLS' : 'MPEG-TS';
+  const protocol = streamSpec.toLowerCase().endsWith('.ts') ? 'MPEG-TS' : 'HLS';
   const numericId = Number(rawId);
 
   // Enforce Bouquet Entitlement
@@ -1375,10 +1265,9 @@ async function serveLiveStreamRequest(req, res) {
     return serveLocalMediaFileWithRange(req, res, stream.source_url, conn.connId);
   }
 
-  // 3) Stream Shield Reverse Proxy & Universal Protocol Auto-Adapter (M4F/CMAF -> MPEG-TS or Classic HLS for 100% App Compatibility)
+  // 3) Stream Shield Reverse Proxy (Flussonic M4F/CMAF, Local RTMP/SRT/RTSP Loopback, HLS .m3u8 rewriting, MNF->TS remux, and MPEG-TS Failover)
   const proxySetting = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
-  const preferProto = protocol === 'MPEG-TS' ? 'mpegts' : 'hls';
-  const candidates = expandStreamUpstreamUrls(stream, { preferProtocol: preferProto });
+  const candidates = expandStreamUpstreamUrls(stream);
   const isLoopbackUpstream = /^https?:\/\/(127\.|localhost|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(
     String(stream.source_url || '').trim()
   );
@@ -1386,11 +1275,10 @@ async function serveLiveStreamRequest(req, res) {
   if (
     isLoopbackUpstream ||
     proxySetting?.value === 'true' ||
-    isM4fOrCmafUrl(stream.source_url) ||
+    stream.source_url.startsWith('m4f') ||
     stream.source_url.startsWith('mnf')
   ) {
     if (req.socket) req.socket.setTimeout(0);
-    let fallbackHlsUrlForTsClient = '';
 
     for (const upstreamUrl of candidates) {
       const cleanPath = upstreamUrl.split('?')[0].toLowerCase();
@@ -1401,8 +1289,8 @@ async function serveLiveStreamRequest(req, res) {
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), 8000);
         try {
-          const upRes = await safeFetchUpstream(upstreamUrl, {
-            headers: { 'User-Agent': stream.user_agent || 'TVLister/2.4' },
+          const upRes = await fetch(upstreamUrl, {
+            headers: { 'User-Agent': stream.user_agent || 'TVLister/2.3' },
             redirect: 'follow',
             signal: ac.signal
           });
@@ -1410,11 +1298,6 @@ async function serveLiveStreamRequest(req, res) {
           if (upRes.ok) {
             const manifestText = await upRes.text();
             if (manifestText.includes('#EXTM3U')) {
-              if (protocol === 'MPEG-TS') {
-                // Never return raw #EXTM3U text to a .ts / MPEG-TS player! Save for on-the-fly FFmpeg TS remux if no /mpegts responds
-                if (!fallbackHlsUrlForTsClient) fallbackHlsUrlForTsClient = upstreamUrl;
-                continue;
-              }
               const proxyPrefix = `${getBaseUrl(req)}/hls_proxy/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${stream.id}`;
               const rewritten = rewriteHlsManifestForProxy(
                 manifestText,
@@ -1432,31 +1315,16 @@ async function serveLiveStreamRequest(req, res) {
           // failover to next candidate / backup_url
         }
       } else {
-        // When client explicitly requested .m3u8 (HLS), try HLS candidates first unless only raw TS exists
         const ac = new AbortController();
-        const probeTimer = setTimeout(() => ac.abort(), 8000);
         try {
-          const upRes = await safeFetchUpstream(upstreamUrl, {
-            headers: { 'User-Agent': stream.user_agent || 'TVLister/2.4' },
+          const upRes = await fetch(upstreamUrl, {
+            headers: { 'User-Agent': stream.user_agent || 'TVLister/2.3' },
             redirect: 'follow',
             signal: ac.signal
           });
-          clearTimeout(probeTimer);
           if (upRes.ok && upRes.body) {
-            const upstreamType = (upRes.headers.get('content-type') || '').toLowerCase();
-
-            // Guard against upstream unexpectedly returning an #EXTM3U manifest on a non-.m3u8 URL when client expects MPEG-TS
-            if (protocol === 'MPEG-TS' && upstreamType.includes('mpegurl')) {
-              if (!fallbackHlsUrlForTsClient) fallbackHlsUrlForTsClient = upstreamUrl;
-              try {
-                await upRes.body.cancel();
-              } catch {
-                // ignore
-              }
-              continue;
-            }
-
             attachLiveConnectionSocket(conn.connId, req, res, () => ac.abort());
+            const upstreamType = (upRes.headers.get('content-type') || '').toLowerCase();
 
             // If upstream is TVLister Media NanoFrame (MNF v1), remux on-the-fly to standard 188-byte MPEG-TS for legacy players!
             if (isLikelyMnf || upstreamType.includes('-mnf')) {
@@ -1489,17 +1357,8 @@ async function serveLiveStreamRequest(req, res) {
             return Readable.fromWeb(upRes.body).pipe(res);
           }
         } catch {
-          clearTimeout(probeTimer);
           // failover to next candidate / backup_url
         }
-      }
-    }
-
-    // If client app requested MPEG-TS (.ts) and upstream only exposed HLS/CMAF (.m3u8 / .fmp4.m3u8), remux on-the-fly (0% transcode)!
-    if (protocol === 'MPEG-TS' && fallbackHlsUrlForTsClient) {
-      attachLiveConnectionSocket(conn.connId, req, res);
-      if (pipeFfmpegRemuxToMpegTs(req, res, fallbackHlsUrlForTsClient, stream.user_agent || 'TVLister/2.4')) {
-        return;
       }
     }
 
@@ -1572,7 +1431,7 @@ iptvRouter.get('/mnf/:username/:password/:streamSpec', (req, res) => {
     'X-Protocol': 'MNF/1.0 (TVLister Media NanoFrame)',
   });
 
-  const upstreamUrls = expandStreamUpstreamUrls(stream, { preferProtocol: 'mpegts' });
+  const upstreamUrls = expandStreamUpstreamUrls(stream);
   const { session, release } = getOrCreateMnfSession({
     streamId: stream.id,
     upstreamUrls,
@@ -1942,8 +1801,8 @@ iptvRouter.get('/api/admin/preview/hls_seg', async (req, res) => {
   req.on('close', () => ac.abort());
 
   try {
-    const upRes = await safeFetchUpstream(targetUrl, {
-      headers: { 'User-Agent': 'TVLister-Monitor/2.4' },
+    const upRes = await fetch(targetUrl, {
+      headers: { 'User-Agent': 'TVLister-Monitor/2.3' },
       redirect: 'follow',
       signal: ac.signal,
     });
@@ -2035,7 +1894,7 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
       ? db.prepare('SELECT * FROM streams WHERE id = ?').get(sid) || { source_url: rawUrl }
       : { source_url: rawUrl };
 
-  const candidates = expandStreamUpstreamUrls(streamObj, { preferProtocol: 'hls' });
+  const candidates = expandStreamUpstreamUrls(streamObj);
   const isLocalIngest = /^https?:\/\/127\.0\.0\.1:\d+\/live\//i.test(rawUrl);
 
   for (const upstreamUrl of candidates) {
@@ -2048,8 +1907,8 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
     req.on('close', () => ac.abort());
 
     try {
-      const upRes = await safeFetchUpstream(upstreamUrl, {
-        headers: { 'User-Agent': streamObj.user_agent || 'TVLister-Monitor/2.4' },
+      const upRes = await fetch(upstreamUrl, {
+        headers: { 'User-Agent': streamObj.user_agent || 'TVLister-Monitor/2.3' },
         redirect: 'follow',
         signal: ac.signal,
       });

@@ -551,28 +551,6 @@ export default function Flussonic2312Page({ onPreview }) {
     }
   };
 
-  const handleQuickRewritePlayerLinks = async (targetProtocol) => {
-    setErrorNotice('');
-    try {
-      const res = await apiFetch('/api/flussonic-2312/rewrite-m4f-player-links', {
-        method: 'POST',
-        body: JSON.stringify({ target_protocol: targetProtocol })
-      });
-      await loadServersAndHosts();
-      showToast(
-        `✅ ${res.rewrittenCount} links de Flussonic cambiados a ${
-          targetProtocol === 'mpegts'
-            ? 'MPEG-TS Universal (/mpegts)'
-            : targetProtocol === 'hls'
-            ? 'HLS Clásico Universal (/index.m3u8)'
-            : 'M4F Auto-Adaptado (m4f://)'
-        }.${res.sampleUrl ? ` Ejemplo: ${res.sampleUrl}` : ''}`
-      );
-    } catch (err) {
-      setErrorNotice(err.message);
-    }
-  };
-
   const handleSetupProliantLeveledRelay = async (e) => {
     e.preventDefault();
     setRunningRelaySetup(true);
@@ -1718,38 +1696,6 @@ export default function Flussonic2312Page({ onPreview }) {
             >
               {convertingM4f ? 'Convirtiendo TS/HLS a M4F...' : '⚡ Convertir Streams TS / HLS a M4F Ahora'}
             </button>
-          </div>
-
-          <div className="mt-4 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/35 space-y-2.5 text-xs">
-            <div className="font-bold text-emerald-300">
-              ✅ Auto-Adaptador Activo para Reproductores IPTV (Smarters, XCIPTV, TiviMate, Smart TV, MAG, VLC y Web):
-            </div>
-            <p className="text-slate-300 leading-relaxed">
-              Las aplicaciones de usuario final no leen <code className="text-amber-300">m4f://</code> ni segmentos <code className="text-amber-300">.fmp4</code> directamente. Ahora <strong>TVLister traduce automáticamente en tiempo real</strong> cada link <code>m4f://</code> según lo que pida la app del cliente: entrega <strong>MPEG-TS puro (<code>/mpegts</code>)</strong> a las apps que piden <code>.ts</code> y <strong>HLS clásico universal (<code>/index.m3u8</code>)</strong> a Smart TVs, iOS y navegadores. Si además deseas cambiar en 1 clic el protocolo guardado en tu lista:
-            </p>
-            <div className="flex flex-wrap gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => handleQuickRewritePlayerLinks('mpegts')}
-                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
-              >
-                🔄 Pasar Links M4F → MPEG-TS Directo (/mpegts)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickRewritePlayerLinks('hls')}
-                className="px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold"
-              >
-                🔄 Pasar Links M4F → HLS Universal (/index.m3u8)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickRewritePlayerLinks('m4f_scheme')}
-                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 font-bold"
-              >
-                ⚡ Dejar en m4f:// (Auto-Adaptado por TVLister)
-              </button>
-            </div>
           </div>
         </form>
       )}
