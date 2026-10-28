@@ -46,13 +46,13 @@ export default function HeadendNodesPage({ onPreview }) {
   // Astra Discovery & Import Modal
   const [importOpen, setImportOpen] = useState(false);
   const [importTab, setImportTab] = useState('migrate'); // 'migrate' | 'scan' | 'paste'
-  const [migrateVipCount, setMigrateVipCount] = useState(35);
+  const [migrateVipCount, setMigrateVipCount] = useState(0);
   const [migrateRewriteHost, setMigrateRewriteHost] = useState('192.168.88.10');
   const [migrateFilterHost, setMigrateFilterHost] = useState('all');
   const [existingSummary, setExistingSummary] = useState({ totalUnassigned: 0, hosts: [], firstChannelUrl: '' });
   const [pastedAstra, setPastedAstra] = useState('');
   const [discoveredList, setDiscoveredList] = useState([]);
-  const [importDefaultMode, setImportDefaultMode] = useState('ondemand');
+  const [importDefaultMode, setImportDefaultMode] = useState('copy_audio');
   const [autoCategorize, setAutoCategorize] = useState(true);
   const [scanningAstra, setScanningAstra] = useState(false);
 
@@ -185,7 +185,24 @@ export default function HeadendNodesPage({ onPreview }) {
         body: JSON.stringify({ ids, scope, headend_mode })
       });
       await loadData(true);
-      showToast(`✅ ${res.updatedCount} canal(es) actualizados a modo ${headend_mode.toUpperCase()} en el ProLiant.`);
+      const is247 = headend_mode !== 'ondemand';
+      showToast(
+        is247
+          ? `✅ ${res.updatedCount} canal(es) activos en 24/7 CONSTANTE (${headend_mode === 'copy_audio' ? 'Copy + Anti-Rayas + Nivelador Audio' : headend_mode.toUpperCase()}) en ProLiant y Nube.`
+          : `✅ ${res.updatedCount} canal(es) cambiados a modo On-Demand.`
+      );
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
+  const handleSelfUpdateAgent = async () => {
+    if (!selectedNode) return;
+    try {
+      const res = await apiFetch(`/api/headend/nodes/${selectedNode.id}/self-update`, {
+        method: 'POST'
+      });
+      showToast(`🔄 ${res.message}`);
     } catch (err) {
       window.alert(err.message);
     }
@@ -296,7 +313,7 @@ export default function HeadendNodesPage({ onPreview }) {
       const res = await apiFetch(`/api/headend/nodes/${selectedNode.id}/attach-existing`, {
         method: 'POST',
         body: JSON.stringify({
-          default_headend_mode: 'ondemand',
+          default_headend_mode: 'copy_audio',
           vip_top_count: Number(migrateVipCount) || 0,
           rewrite_host_to_local: migrateRewriteHost,
           filter_hostname: migrateFilterHost,
@@ -306,7 +323,7 @@ export default function HeadendNodesPage({ onPreview }) {
       setImportOpen(false);
       await loadData(true);
       showToast(
-        `✅ ${res.migratedCount} canal(es) vinculados al Nodo ProLiant conservando IDs, logos, EPG, puertos originales y orden de parrilla.`
+        `✅ ${res.migratedCount} canal(es) vinculados en 24/7 CONSTANTE (Copy + Anti-Rayas + Nivelador Audio) al Nodo ProLiant.`
       );
     } catch (err) {
       window.alert(err.message);
@@ -479,13 +496,24 @@ export default function HeadendNodesPage({ onPreview }) {
                   Comando SSH de Instalación (Ubuntu Server 22.04 / 24.04 LTS — Cero apt):
                 </span>
               </div>
-              <button
-                onClick={handleDeleteNode}
-                className="text-[11px] text-rose-400 hover:text-rose-300 inline-flex items-center gap-1 self-end sm:self-auto"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Desvincular Nodo
-              </button>
+              <div className="flex items-center gap-3 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={handleSelfUpdateAgent}
+                  className="text-[11px] text-cyan-300 hover:text-cyan-200 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 font-semibold"
+                  title="Actualiza el demonio headend-agent.js en el ProLiant automáticamente (o re-ejecuta el comando SSH de abajo una sola vez si tu agente es anterior)"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Actualizar Agente ProLiant
+                </button>
+                <button
+                  onClick={handleDeleteNode}
+                  className="text-[11px] text-rose-400 hover:text-rose-300 inline-flex items-center gap-1"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Desvincular Nodo
+                </button>
+              </div>
             </div>
 
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
@@ -742,7 +770,7 @@ export default function HeadendNodesPage({ onPreview }) {
             </form>
           )}
 
-          {/* Headend Streams Table (VIP 24/7 vs Remote On-Demand) */}
+          {/* Headend Streams Table (24/7 Constante Copy+Anti-Rayas+Audio vs VIP Transcode vs On-Demand) */}
           <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
             <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -759,14 +787,35 @@ export default function HeadendNodesPage({ onPreview }) {
                   className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-slate-200"
                 >
                   <option value="all">Todos en ProLiant ({nodeStreams.length})</option>
-                  <option value="vip_247">🔥 Fijos VIP 24/7</option>
-                  <option value="ondemand">🌱 On-Demand Remoto (Ahorro Subida)</option>
-                  <option value="copy_audio">⚡ Copy Video + Audio Igual</option>
-                  <option value="awake">🟢 Transmitiendo en este instante</option>
+                  <option value="copy_audio">⚡🛡️ 24/7 Copy + Anti-Rayas + Nivelador Audio</option>
+                  <option value="copy_pure_247">⚡ 24/7 Copy/Copy Puro</option>
+                  <option value="vip_247">🔥 24/7 Transcode 1M/2.5M/3M</option>
+                  <option value="ondemand">🌱 On-Demand Remoto (Ahorro)</option>
+                  <option value="awake">🟢 Transmitiendo ahora mismo</option>
                 </select>
+                {nodeStreams.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleChangeStreamMode([], 'copy_audio', 'all')}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white text-xs font-bold shadow-md shadow-cyan-950/50 transition"
+                    title="Pone TODOS los canales 24/7 constantes (nunca On-Demand) con Copy Video + Anti-Rayas automático en entrelazados + Nivelador de Audio"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    ⚡🛡️ Todos 24/7 Constante: Copy + Anti-Rayas + Audio ({nodeStreams.length})
+                  </button>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2 text-xs">
+                <button
+                  type="button"
+                  disabled={selectedStreamIds.length === 0}
+                  onClick={() => handleChangeStreamMode(selectedStreamIds, 'copy_audio')}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 disabled:opacity-40 text-cyan-200 border border-cyan-500/35 font-semibold"
+                >
+                  <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                  24/7 Copy + Anti-Rayas + Audio ({selectedStreamIds.length})
+                </button>
                 <button
                   type="button"
                   disabled={selectedStreamIds.length === 0}
@@ -774,7 +823,7 @@ export default function HeadendNodesPage({ onPreview }) {
                   className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 text-amber-200 border border-amber-500/35 font-semibold"
                 >
                   <Flame className="w-3.5 h-3.5 text-amber-400" />
-                  Marcar VIP 24/7 ({selectedStreamIds.length})
+                  24/7 Transcode ({selectedStreamIds.length})
                 </button>
                 <button
                   type="button"
@@ -783,16 +832,7 @@ export default function HeadendNodesPage({ onPreview }) {
                   className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 disabled:opacity-40 text-emerald-200 border border-emerald-500/35 font-semibold"
                 >
                   <Leaf className="w-3.5 h-3.5 text-emerald-400" />
-                  Pasar a On-Demand ({selectedStreamIds.length})
-                </button>
-                <button
-                  type="button"
-                  disabled={selectedStreamIds.length === 0}
-                  onClick={() => handleChangeStreamMode(selectedStreamIds, 'copy_audio')}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 disabled:opacity-40 text-cyan-200 border border-cyan-500/35 font-semibold"
-                >
-                  <Zap className="w-3.5 h-3.5 text-cyan-400" />
-                  Copy Video + Audio Igual ({selectedStreamIds.length})
+                  On-Demand ({selectedStreamIds.length})
                 </button>
                 <button
                   type="button"
@@ -846,7 +886,12 @@ export default function HeadendNodesPage({ onPreview }) {
                   ) : (
                     filteredStreams.map((s, idx) => {
                       const live = s.liveHeadend || {};
-                      const isVip = s.headend_mode === 'vip_247';
+                      const modeVal = s.headend_mode || 'copy_audio';
+                      const isVip = modeVal === 'vip_247';
+                      const is247 = modeVal !== 'ondemand';
+                      const resText = live.resolution || s.detected_resolution || '';
+                      const parsedH = live.height || Number((resText.split('x')[1] || '').trim()) || 1080;
+                      const isVideoCopy = live.videoMode === 'copy';
                       return (
                         <tr key={s.id} className="hover:bg-slate-800/30">
                           <td className="px-3 py-2.5">
@@ -871,33 +916,34 @@ export default function HeadendNodesPage({ onPreview }) {
                           </td>
                           <td className="px-3 py-2.5">
                             <select
-                              value={s.headend_mode || 'ondemand'}
+                              value={modeVal}
                               onChange={(e) => handleChangeStreamMode([s.id], e.target.value)}
                               className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
                                 isVip
                                   ? 'bg-amber-500/15 text-amber-200 border-amber-500/40'
-                                  : s.headend_mode === 'copy_audio'
+                                  : modeVal !== 'ondemand'
                                   ? 'bg-cyan-500/15 text-cyan-200 border-cyan-500/40'
                                   : 'bg-emerald-500/15 text-emerald-200 border-emerald-500/40'
                               }`}
                             >
-                              <option value="vip_247">🔥 VIP 24/7</option>
+                              <option value="copy_audio">⚡🛡️ 24/7 Copy+Anti-Rayas+Audio</option>
+                              <option value="copy_pure_247">⚡ 24/7 Copy/Copy Puro</option>
+                              <option value="vip_247">🔥 24/7 Transcode</option>
                               <option value="ondemand">🌱 On-Demand</option>
-                              <option value="copy_audio">⚡ Copy+Audio</option>
                             </select>
                           </td>
                           <td className="px-3 py-2.5">
                             <div className="flex flex-wrap items-center gap-1">
-                              {(live.resolution || s.detected_resolution) ? (
+                              {resText ? (
                                 <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono text-[10px] font-bold">
-                                  {live.resolution || s.detected_resolution} → {live.effectiveKbps || s.bitrate_kbps}k
+                                  {resText} → {isVideoCopy ? 'Copy' : `${live.effectiveKbps || s.bitrate_kbps}k`}
                                 </span>
                               ) : (
-                                <span className="text-[10px] text-slate-500">Se mide al abrir</span>
+                                <span className="text-[10px] text-slate-500">Midiendo en vivo...</span>
                               )}
                               {Boolean(live.interlaced || s.headend_interlaced) && (
                                 <span className="px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-200 font-mono text-[9px] font-bold">
-                                  1080i→YADIF
+                                  {parsedH}i→YADIF
                                 </span>
                               )}
                               {(live.audioIn || s.headend_audio_in) && (
@@ -911,7 +957,11 @@ export default function HeadendNodesPage({ onPreview }) {
                             {live.running ? (
                               <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 text-[10px] font-bold">
                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                                SUBIENDO (PID {live.pid})
+                                {is247 ? `24/7 ACTIVO (PID ${live.pid})` : `SUBIENDO (PID ${live.pid})`}
+                              </span>
+                            ) : is247 ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 text-[10px] font-semibold">
+                                ⏳ INICIANDO 24/7...
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 text-[10px] font-semibold">

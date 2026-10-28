@@ -624,3 +624,29 @@ export function pruneArchiveSegmentsForStreams(streams = []) {
   }
 }
 
+export function launchDbStreamWorkerIfNeeded(streamId) {
+  const s = db.prepare('SELECT * FROM streams WHERE id = ?').get(Number(streamId));
+  if (!s || s.stream_mode !== 'transcode' || s.status !== 'running' || !isFfmpegAvailable()) return;
+  const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(s.transcode_profile_id || 1);
+  startSupervisedWorker(
+    `stream_${streamId}`,
+    () => buildFfmpegArgsForStream(s, profile),
+    (pid) => {
+      db.prepare('UPDATE streams SET pid = ? WHERE id = ?').run(pid, Number(streamId));
+    }
+  );
+}
+
+export function scheduleDbStreamLaunches(streamIds = [], delayPerStreamMs = 60) {
+  streamIds.forEach((sid, idx) => {
+    setTimeout(() => {
+      try {
+        launchDbStreamWorkerIfNeeded(Number(sid));
+      } catch {
+        // ignore
+      }
+    }, idx * delayPerStreamMs).unref?.();
+  });
+}
+
+

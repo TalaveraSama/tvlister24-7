@@ -374,6 +374,24 @@ export function initDb() {
       last_astra_scan_json TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS flussonic_servers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      username TEXT NOT NULL DEFAULT '',
+      password TEXT NOT NULL DEFAULT '',
+      api_token TEXT NOT NULL DEFAULT '',
+      version TEXT NOT NULL DEFAULT '23.12',
+      astra_url TEXT NOT NULL DEFAULT 'http://192.168.88.10:8000',
+      astra_auth TEXT NOT NULL DEFAULT '',
+      default_pull_protocol TEXT NOT NULL DEFAULT 'mpegts',
+      default_transcode_mode TEXT NOT NULL DEFAULT 'copy_deint_aac',
+      status TEXT NOT NULL DEFAULT 'unknown',
+      last_sync_at TEXT,
+      telemetry_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const ensureColumn = (table, column, def) => {
@@ -400,11 +418,13 @@ export function initDb() {
   ensureColumn('streams', 'audio_leveling_mode', "TEXT NOT NULL DEFAULT 'global'");
   ensureColumn('streams', 'headend_node_id', 'INTEGER DEFAULT NULL');
   ensureColumn('streams', 'astra_local_url', "TEXT DEFAULT ''");
-  ensureColumn('streams', 'headend_mode', "TEXT NOT NULL DEFAULT 'ondemand'");
+  ensureColumn('streams', 'headend_mode', "TEXT NOT NULL DEFAULT 'copy_audio'");
   ensureColumn('streams', 'deinterlace_mode', "TEXT NOT NULL DEFAULT 'auto'");
   ensureColumn('streams', 'headend_interlaced', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'headend_audio_in', "TEXT DEFAULT ''");
   ensureColumn('streams', 'original_source_url', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'flussonic_server_id', 'INTEGER');
+  ensureColumn('streams', 'flussonic_stream_name', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
 
   db.exec(`
@@ -579,6 +599,26 @@ export function initDb() {
 
     db.prepare(
       "INSERT INTO settings (key, value) VALUES ('auto_res_tiers_1m_25m_3m_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+    ).run();
+  }
+
+  // Upgrade existing Headend streams using 24/7 modes ('copy_audio', 'smart_astra_247', 'vip_247') out of forced 'ondemand' into constant 24/7 Copy/Copy!
+  const headendConstantMigrated = db.prepare("SELECT value FROM settings WHERE key = 'headend_constant_247_v1'").get();
+  if (headendConstantMigrated?.value !== 'true') {
+    const copyProfRow = db
+      .prepare("SELECT id FROM transcode_profiles WHERE video_codec = 'copy' AND audio_codec = 'copy' ORDER BY id ASC LIMIT 1")
+      .get();
+    const copyPid = copyProfRow?.id || 1;
+    db.prepare(
+      `UPDATE streams
+       SET stream_mode = 'transcode',
+           transcode_profile_id = ?,
+           audio_leveling_mode = 'off',
+           status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'running' END
+       WHERE headend_node_id IS NOT NULL AND headend_mode != 'ondemand'`
+    ).run(copyPid);
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('headend_constant_247_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
     ).run();
   }
 

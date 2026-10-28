@@ -84,6 +84,7 @@ import {
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
 import { headendRouter } from './headendManager.js';
+import { flussonic2312Router } from './flussonic2312Manager.js';
 import { syncEpgSourceById, startEpgAutoSyncScheduler } from './epgSync.js';
 import { WebSocketServer } from 'ws';
 import {
@@ -216,6 +217,7 @@ app.get('/api/lb/install.sh', (req, res) => {
 });
 
 app.use(headendRouter);
+app.use(flussonic2312Router);
 
 // ==================== AUTH ROUTES ====================
 app.post('/api/auth/login', (req, res) => {
@@ -769,12 +771,24 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
 app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
+  const existing = db.prepare('SELECT status, headend_node_id, headend_mode FROM streams WHERE id = ?').get(id);
   const nextMode = String(b.stream_mode || 'direct');
+  let nextStatus = b.status ? String(b.status) : existing?.status || 'running';
+  if (nextMode === 'ondemand') {
+    if (nextStatus !== 'stopped') nextStatus = 'ondemand_idle';
+  } else if (nextStatus === 'ondemand_idle') {
+    nextStatus = 'running';
+  }
+  const nextHeadendMode =
+    existing?.headend_node_id && nextMode !== 'ondemand' && existing.headend_mode === 'ondemand'
+      ? 'copy_audio'
+      : existing?.headend_mode || 'copy_audio';
+
   db.prepare(
     `UPDATE streams SET
        name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
        epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
-       user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
+       status = ?, headend_mode = ?, user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
        offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?
      WHERE id = ?`
   ).run(
@@ -787,6 +801,8 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
     nextMode,
     b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
     b.server_id ? Number(b.server_id) : 1,
+    nextStatus,
+    nextHeadendMode,
     String(b.user_agent || 'TVLister/2.3'),
     Number(b.tv_archive_days) || 0,
     Number(b.bitrate_kbps) || 2500,
@@ -798,11 +814,8 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
 
   // Restart or stop FFmpeg worker to apply mode/profile change immediately
   stopWorker(`stream_${id}`);
-  if (nextMode === 'transcode') {
-    const cur = db.prepare('SELECT status FROM streams WHERE id = ?').get(id);
-    if (cur?.status === 'running') {
-      launchStreamWorkerIfNeeded(id);
-    }
+  if (nextMode === 'transcode' && nextStatus === 'running') {
+    launchStreamWorkerIfNeeded(id);
   } else {
     db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(id);
   }
@@ -814,19 +827,26 @@ app.post('/api/streams/bulk-profile', requireAuth, requireAdmin, (req, res) => {
   const profId = Number(transcode_profile_id) || 1;
   const mode = String(stream_mode || 'direct');
   const kbps = Number(bitrate_kbps) || 2500;
+  const statusExpr =
+    mode === 'ondemand'
+      ? "CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END"
+      : "CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'running' END";
+  const headendExpr =
+    mode === 'ondemand'
+      ? 'headend_mode'
+      : "CASE WHEN headend_node_id IS NOT NULL AND headend_mode = 'ondemand' THEN 'copy_audio' ELSE headend_mode END";
 
   let affected = [];
   if (category_id && category_id !== 'all') {
     affected = db.prepare('SELECT id FROM streams WHERE category_id = ?').all(Number(category_id));
-    db.prepare('UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ? WHERE category_id = ?').run(
-      mode,
-      profId,
-      kbps,
-      Number(category_id)
-    );
+    db.prepare(
+      `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr} WHERE category_id = ?`
+    ).run(mode, profId, kbps, Number(category_id));
   } else {
     affected = db.prepare('SELECT id FROM streams').all();
-    db.prepare('UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?').run(mode, profId, kbps);
+    db.prepare(
+      `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}`
+    ).run(mode, profId, kbps);
   }
 
   const toLaunch = [];
@@ -913,6 +933,15 @@ app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
   if (changes.status !== undefined && changes.status !== '') {
     setClauses.push('status = ?');
     setParams.push(String(changes.status));
+  } else if (changes.stream_mode !== undefined && changes.stream_mode !== '') {
+    if (String(changes.stream_mode) === 'ondemand') {
+      setClauses.push("status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END");
+    } else {
+      setClauses.push("status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'running' END");
+      setClauses.push(
+        "headend_mode = CASE WHEN headend_node_id IS NOT NULL AND headend_mode = 'ondemand' THEN 'copy_audio' ELSE headend_mode END"
+      );
+    }
   }
 
   if (setClauses.length === 0) {

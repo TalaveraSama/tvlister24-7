@@ -13,6 +13,7 @@ import https from 'node:https';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn, execSync } from 'node:child_process';
 
 const MASTER_URL = (process.env.MASTER_URL || 'http://127.0.0.1:8095').replace(/\/+$/, '');
@@ -26,6 +27,11 @@ if (!HEADEND_TOKEN) {
 
 // Resolve RAMDisk (/dev/shm) to avoid any SSD/HDD wear on ProLiant VM
 function resolveHlsRoot() {
+  if (process.env.HLS_DIR) {
+    const customDir = path.resolve(process.env.HLS_DIR);
+    fs.mkdirSync(customDir, { recursive: true });
+    return { dir: customDir, isRamdisk: customDir.startsWith('/dev/shm') };
+  }
   try {
     if (os.platform() === 'linux' && fs.existsSync('/dev/shm')) {
       const dir = '/dev/shm/tvlister_headend_hls';
@@ -137,14 +143,18 @@ function sampleNodeTelemetry() {
     const w = workers.get(id);
     const meta = detectedMeta.get(id) || {};
     const isRunning = Boolean(w && w.pid);
-    if (st.headend_mode === 'vip_247') vipCount++;
+    const constant247 = isConstant247Mode(st.headend_mode);
+    if (constant247) vipCount++;
     if (isRunning) {
       activeCount++;
-      if (st.headend_mode !== 'vip_247') onDemandAwakeCount++;
+      if (!constant247) onDemandAwakeCount++;
     }
     streamsTelemetry[id] = {
       running: isRunning,
       pid: w?.pid || null,
+      videoMode: shouldCopyVideoTrack(st, meta) ? 'copy' : 'yadif_x264',
+      videoIn: meta.videoIn || '',
+      height: meta.height || 0,
       resolution: meta.resolution || st.detected_resolution || '',
       tier: meta.tier || st.resolution_tier || '',
       interlaced: Boolean(meta.interlaced),
@@ -234,14 +244,41 @@ function buildAudioFilter(preset = 'standard') {
   return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=13:p=0.90:m=10:r=0.22:n=1:b=1';
 }
 
+function isConstant247Mode(mode = 'copy_audio') {
+  return String(mode || 'copy_audio') !== 'ondemand';
+}
+
+function shouldCopyVideoTrack(st, meta = {}) {
+  const mode = String(st?.headend_mode || 'copy_audio');
+  if (mode === 'copy_pure_247') return true;
+  if (mode === 'vip_247' || mode === 'ondemand') return false;
+
+  // For 'copy_audio' & 'smart_astra_247' (24/7 Constant Copy + Anti-Rayas + Nivelador de Audio):
+  // - Progressive H.264 channels (e.g. AMC HD 1920x1080p) stay 100% '-c:v copy' (0% CPU video!).
+  // - Interlaced channels (480i/576i/1080i with comb lines) or MPEG-2 satellite feeds automatically
+  //   apply YADIF Anti-Rayas + H.264 when Anti-Rayas is active!
+  const deintMode = st?.deinterlace_mode || 'auto';
+  if (deintMode === 'on') return false;
+  if (
+    deintMode !== 'off' &&
+    nodeSettings.auto_deinterlace &&
+    (Boolean(meta.interlaced) || meta.videoIn === 'mpeg2video')
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function buildHeadendSignature(st, meta = {}) {
   const tier = meta.tier || st.resolution_tier || 'hd';
   const kbps = computeTargetBitrateKbps(st, meta);
+  const copyVideo = shouldCopyVideoTrack(st, meta);
   return JSON.stringify({
     url: st.astra_local_url,
     mode: st.headend_mode,
-    tier,
-    kbps,
+    copyVideo,
+    tier: copyVideo ? 'copy' : tier,
+    kbps: copyVideo ? 0 : kbps,
     deint: st.deinterlace_mode || 'auto',
     globalDeint: nodeSettings.auto_deinterlace,
     audioLvl: st.audio_leveling_mode || 'global',
@@ -259,7 +296,8 @@ function buildFfmpegArgs(st) {
   const tier = meta.tier || st.resolution_tier || 'hd';
   const kbps = computeTargetBitrateKbps(st, meta);
   const inputUrl = normalizeAstraInputUrl(st.astra_local_url);
-  const isCopyVideo = st.headend_mode === 'copy_audio';
+  const isCopyVideo = shouldCopyVideoTrack(st, meta);
+  const isPureCopy = st.headend_mode === 'copy_pure_247';
 
   const args = ['-hide_banner', '-loglevel', 'info', '-y'];
 
@@ -291,10 +329,10 @@ function buildFfmpegArgs(st) {
   } else {
     const vFilters = [];
     const deintMode = st.deinterlace_mode || 'auto';
-    if (deintMode === 'on') {
+    if (deintMode === 'on' || meta.interlaced) {
       vFilters.push('yadif=0:-1:0');
     } else if (deintMode === 'auto' && nodeSettings.auto_deinterlace) {
-      // yadif deint=1 ONLY deinterlaces 1080i/576i frames marked interlaced; progressive frames pass at 0 cost!
+      // yadif deint=1 ONLY deinterlaces 1080i/576i/480i frames marked interlaced; progressive frames pass cleanly
       vFilters.push('yadif=0:-1:1');
     }
 
@@ -334,9 +372,11 @@ function buildFfmpegArgs(st) {
 
   const audioMode = st.audio_leveling_mode || 'global';
   const useAudioLevel =
-    audioMode === 'on' || (audioMode !== 'off' && nodeSettings.audio_leveling_enabled);
+    !isPureCopy && (audioMode === 'on' || (audioMode !== 'off' && nodeSettings.audio_leveling_enabled));
 
-  if (useAudioLevel) {
+  if (isPureCopy && audioMode === 'off') {
+    args.push('-c:a', 'copy');
+  } else if (useAudioLevel) {
     args.push(
       '-af',
       buildAudioFilter(nodeSettings.audio_preset),
@@ -375,7 +415,6 @@ function parseLiveStderrStreamMetadata(streamId, stderrChunk) {
 
   const st = desiredStreams.get(streamId);
   const existingMeta = detectedMeta.get(streamId);
-  const assumedTier = existingMeta?.tier || st?.resolution_tier || 'hd';
   const next = { ...(existingMeta || {}) };
   let updated = false;
 
@@ -384,6 +423,7 @@ function parseLiveStderrStreamMetadata(streamId, stderrChunk) {
   );
   if (vMatch) {
     const fullLine = vMatch[0];
+    const videoCodec = String(vMatch[1] || '').toLowerCase();
     const w = Number(vMatch[3]);
     const h = Number(vMatch[4]);
     if (w >= 120 && h >= 90) {
@@ -391,7 +431,13 @@ function parseLiveStderrStreamMetadata(streamId, stderrChunk) {
       const isInterlaced = /\b(top first|bottom first|top coded first|bottom coded first|tff|bff)\b/i.test(
         fullLine
       );
-      if (next.resolution !== `${w}x${h}` || next.tier !== tier || next.interlaced !== isInterlaced) {
+      if (
+        next.videoIn !== videoCodec ||
+        next.resolution !== `${w}x${h}` ||
+        next.tier !== tier ||
+        next.interlaced !== isInterlaced
+      ) {
+        next.videoIn = videoCodec;
         next.width = w;
         next.height = h;
         next.resolution = `${w}x${h}`;
@@ -410,10 +456,13 @@ function parseLiveStderrStreamMetadata(streamId, stderrChunk) {
 
   if (updated) {
     detectedMeta.set(streamId, next);
-    // If auto_resolution is enabled and real video tier differs from assumed tier, hot-reload worker with exact bitrate!
+    // Hot-reload worker if signature changed (e.g. interlaced/MPEG2 detected -> activate YADIF Anti-Rayas, or tier bitrate changed)
     const w = workers.get(streamId);
-    if (st && w && nodeSettings.auto_resolution && next.tier && next.tier !== assumedTier) {
-      setImmediate(() => restartStreamWorker(streamId));
+    if (st && w) {
+      const nextSig = buildHeadendSignature(st, next);
+      if (nextSig !== w.signature) {
+        setImmediate(() => restartStreamWorker(streamId));
+      }
     }
   }
 }
@@ -503,6 +552,8 @@ function restartStreamWorker(streamId) {
   startStreamWorker(streamId);
 }
 
+const MAX_CONSTANT_STARTS_PER_TICK = 16;
+
 function reconcileWorkers() {
   const now = Date.now();
   // Stop removed streams
@@ -511,6 +562,8 @@ function reconcileWorkers() {
       stopStreamWorker(id);
     }
   }
+
+  let startedThisTick = 0;
 
   for (const [id, st] of desiredStreams.entries()) {
     const w = workers.get(id);
@@ -521,12 +574,18 @@ function reconcileWorkers() {
       continue;
     }
 
-    if (st.headend_mode === 'vip_247') {
-      if (!w || w.signature !== sig) {
+    if (isConstant247Mode(st.headend_mode)) {
+      // ALL 24/7 Constant modes ('copy_audio', 'smart_astra_247', 'copy_pure_247', 'vip_247') NEVER sleep!
+      if (!w) {
+        if (startedThisTick < MAX_CONSTANT_STARTS_PER_TICK) {
+          startStreamWorker(id);
+          startedThisTick++;
+        }
+      } else if (w.signature !== sig) {
         startStreamWorker(id);
       }
     } else {
-      // On-Demand or Copy-Audio On-Demand: sleep after 120s of zero Cloud pulls!
+      // Explicit 'ondemand' mode ONLY: sleep after 120s of zero Cloud pulls
       const forceAwake = Number(st.force_wake_until || 0) > now;
       if (forceAwake && !w) {
         startStreamWorker(id);
@@ -716,6 +775,24 @@ async function sendHeartbeatToCloud() {
           pendingAstraDiscoveryReport = await discoverLocalAstraChannels(cmd.astra_url, cmd.astra_auth);
         } else if (cmd.type === 'restart_stream' && cmd.streamId) {
           restartStreamWorker(Number(cmd.streamId));
+        } else if (cmd.type === 'self_update') {
+          try {
+            const bundleRes = await fetch(`${MASTER_URL}/api/headend/agent-bundle.js`);
+            if (bundleRes.ok) {
+              const code = await bundleRes.text();
+              if (code.length > 5000 && code.includes('HeadendAgent')) {
+                const selfPath = fileURLToPath(import.meta.url);
+                const tmpPath = `${selfPath}.next`;
+                fs.writeFileSync(tmpPath, code, 'utf8');
+                fs.renameSync(tmpPath, selfPath);
+                console.log('[HeadendAgent] Auto-actualización recibida desde Nube. Reiniciando demonio...');
+                setTimeout(() => shutdown(), 300);
+                return;
+              }
+            }
+          } catch (upErr) {
+            console.warn(`[HeadendAgent] Error en self_update: ${upErr.message}`);
+          }
         }
       }
     }
@@ -898,7 +975,7 @@ server.listen(HEADEND_PORT, '0.0.0.0', () => {
   );
   sendHeartbeatToCloud();
   setInterval(sendHeartbeatToCloud, 5000);
-  setInterval(reconcileWorkers, 15000);
+  setInterval(reconcileWorkers, 2000);
 });
 
 const shutdown = () => {

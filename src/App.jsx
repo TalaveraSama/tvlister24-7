@@ -7,6 +7,7 @@ import LoginPage from './pages/LoginPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import LiveStreamsPage from './pages/LiveStreamsPage.jsx';
 import HeadendNodesPage from './pages/HeadendNodesPage.jsx';
+import Flussonic2312Page from './pages/Flussonic2312Page.jsx';
 import Channels247Page from './pages/Channels247Page.jsx';
 import VodPage from './pages/VodPage.jsx';
 import UsersDevicesPage from './pages/UsersDevicesPage.jsx';
@@ -92,6 +93,9 @@ export default function App() {
         )}
         {activeTab === 'headend' && user.role === 'admin' && (
           <HeadendNodesPage onPreview={setPreviewItem} />
+        )}
+        {activeTab === 'flussonic-2312' && user.role === 'admin' && (
+          <Flussonic2312Page onPreview={setPreviewItem} />
         )}
         {activeTab === 'channels247' && user.role === 'admin' && (
           <Channels247Page onPreview={setPreviewItem} />

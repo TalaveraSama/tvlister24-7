@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { db, DB_PATH } from './db.js';
 import { requireAuth, requireAdmin } from './auth.js';
-import { stopWorker } from './streamEngine.js';
+import { stopWorker, scheduleDbStreamLaunches } from './streamEngine.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENT_SCRIPT_PATH = path.resolve(__dirname, '../scripts/headend-agent.js');
@@ -595,7 +595,7 @@ headendRouter.get('/api/headend/nodes/:id/streams', requireAuth, (req, res) => {
   res.json(rows);
 });
 
-// Change VIP 24/7 vs On-Demand vs Copy+Audio or Deinterlace on Headend streams (single or bulk)
+// Change 24/7 Constant (Copy+Anti-Rayas+Audio, VIP 24/7, Copy Puro) vs On-Demand or Deinterlace on Headend streams
 headendRouter.post('/api/headend/nodes/:id/streams-mode', requireAuth, requireAdmin, (req, res) => {
   const nodeId = Number(req.params.id);
   const { ids = [], scope = 'selected', headend_mode, deinterlace_mode, astra_local_url } = req.body || {};
@@ -614,13 +614,35 @@ headendRouter.post('/api/headend/nodes/:id/streams-mode', requireAuth, requireAd
     return res.status(400).json({ error: 'No hay canales seleccionados.' });
   }
 
+  const copyProfId = getCopyCopyProfileId();
   const placeholders = targetIds.map(() => '?').join(',');
   if (headend_mode) {
-    db.prepare(`UPDATE streams SET headend_mode = ? WHERE headend_node_id = ? AND id IN (${placeholders})`).run(
-      String(headend_mode),
-      nodeId,
-      ...targetIds
-    );
+    const modeStr = String(headend_mode);
+    const isConstant247 = modeStr !== 'ondemand';
+    const nextCloudMode = isConstant247 ? 'transcode' : 'ondemand';
+    const statusExpr = isConstant247
+      ? "CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'running' END"
+      : "CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END";
+
+    db.prepare(
+      `UPDATE streams
+       SET headend_mode = ?,
+           stream_mode = ?,
+           transcode_profile_id = ?,
+           audio_leveling_mode = 'off',
+           status = ${statusExpr}
+       WHERE headend_node_id = ? AND id IN (${placeholders})`
+    ).run(modeStr, nextCloudMode, copyProfId, nodeId, ...targetIds);
+
+    for (const sid of targetIds) {
+      stopWorker(`stream_${sid}`);
+      if (!isConstant247) {
+        db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(sid);
+      }
+    }
+    if (isConstant247) {
+      scheduleDbStreamLaunches(targetIds, 60);
+    }
   }
   if (deinterlace_mode) {
     db.prepare(`UPDATE streams SET deinterlace_mode = ? WHERE headend_node_id = ? AND id IN (${placeholders})`).run(
@@ -638,6 +660,28 @@ headendRouter.post('/api/headend/nodes/:id/streams-mode', requireAuth, requireAd
   }
 
   res.json({ ok: true, updatedCount: targetIds.length });
+});
+
+// Trigger remote ProLiant Agent self-update over heartbeat
+headendRouter.post('/api/headend/nodes/:id/self-update', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const node = db.prepare('SELECT * FROM headend_nodes WHERE id = ?').get(id);
+  if (!node) return res.status(404).json({ error: 'Nodo no encontrado' });
+
+  let cmds = [];
+  try {
+    cmds = JSON.parse(node.pending_commands_json || '[]');
+  } catch {
+    cmds = [];
+  }
+  if (!cmds.some((c) => c.type === 'self_update')) {
+    cmds.push({ type: 'self_update' });
+  }
+  db.prepare('UPDATE headend_nodes SET pending_commands_json = ? WHERE id = ?').run(JSON.stringify(cmds), id);
+  res.json({
+    ok: true,
+    message: 'Orden de actualización enviada al Agente ProLiant (se aplicará en el próximo latido ~5s).'
+  });
 });
 
 // Discover Cesbo Astra channels via ProLiant Agent (direct LAN HTTP or queued command)
@@ -711,7 +755,7 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
 
   const {
     channels = [],
-    default_headend_mode = 'ondemand',
+    default_headend_mode = 'copy_audio',
     vip_top_count = 0,
     auto_categorize = true
   } = req.body || {};
@@ -720,6 +764,7 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
   }
 
   const copyProfId = getCopyCopyProfileId();
+  const constant247Ids = [];
 
   db.exec('BEGIN IMMEDIATE;');
   try {
@@ -745,7 +790,7 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
          name, category_id, source_url, astra_local_url, logo_url,
          stream_mode, transcode_profile_id, status, bitrate_kbps,
          audio_leveling_mode, headend_node_id, headend_mode, deinterlace_mode, sort_order
-       ) VALUES (?, ?, ?, ?, ?, 'ondemand', ?, 'ondemand_idle', 2500, 'off', ?, ?, 'auto', ?)`
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2500, 'off', ?, ?, 'auto', ?)`
     );
     const updPullUrl = db.prepare('UPDATE streams SET source_url = ? WHERE id = ?');
     const updExistingInPlace = db.prepare(
@@ -757,10 +802,10 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
            headend_node_id = ?,
            headend_mode = ?,
            deinterlace_mode = 'auto',
-           stream_mode = 'ondemand',
+           stream_mode = ?,
            transcode_profile_id = ?,
            audio_leveling_mode = 'off',
-           status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END,
+           status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE ? END,
            pid = NULL
        WHERE id = ?`
     );
@@ -771,6 +816,7 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
     let maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) as m FROM streams').get().m || 0;
     let importedCount = 0;
     let updatedExistingCount = 0;
+    const usedMatchedIds = new Set();
 
     channels.forEach((ch, idx) => {
       if (!ch?.name || !ch?.astra_local_url) return;
@@ -778,12 +824,17 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
       const cleanAstraUrl = String(ch.astra_local_url).trim();
       const bridgedLogo = rewriteAstraLogoToCloudBridge(ch.logo_url || '', nodeId);
       const mode =
-        ch.headend_mode || (idx < Number(vip_top_count || 0) ? 'vip_247' : default_headend_mode || 'ondemand');
+        ch.headend_mode || (idx < Number(vip_top_count || 0) ? 'vip_247' : default_headend_mode || 'copy_audio');
+      const isConstant = String(mode) !== 'ondemand';
+      const cloudStreamMode = isConstant ? 'transcode' : 'ondemand';
+      const cloudStatus = isConstant ? 'running' : 'ondemand_idle';
 
       const playKey = extractAstraPlayKey(cleanAstraUrl);
-      const matched = (playKey && byAstraKey.get(playKey)) || byExactName.get(cleanName.toLowerCase());
+      const candidateMatch = (playKey && byAstraKey.get(playKey)) || byExactName.get(cleanName.toLowerCase());
+      const matched = candidateMatch && !usedMatchedIds.has(candidateMatch.id) ? candidateMatch : null;
 
       if (matched) {
+        usedMatchedIds.add(matched.id);
         stopWorker(`stream_${matched.id}`);
         updExistingInPlace.run(
           cleanAstraUrl,
@@ -792,9 +843,12 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
           bridgedLogo,
           nodeId,
           mode,
+          cloudStreamMode,
           copyProfId,
+          cloudStatus,
           matched.id
         );
+        if (isConstant && matched.status !== 'stopped') constant247Ids.push(matched.id);
         updatedExistingCount++;
         return;
       }
@@ -821,7 +875,9 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
         'http://pending-headend-link',
         cleanAstraUrl,
         bridgedLogo,
+        cloudStreamMode,
         copyProfId,
+        cloudStatus,
         nodeId,
         mode,
         maxOrder
@@ -829,6 +885,7 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
       const newSid = Number(sInfo.lastInsertRowid);
       updPullUrl.run(buildCloudPullUrl(node, newSid), newSid);
       if (!b1Ids.includes(newSid)) b1Ids.push(newSid);
+      if (isConstant) constant247Ids.push(newSid);
       importedCount++;
     });
 
@@ -837,6 +894,7 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
     }
 
     db.exec('COMMIT;');
+    if (constant247Ids.length > 0) scheduleDbStreamLaunches(constant247Ids, 60);
     res.json({ ok: true, importedCount, updatedExistingCount, totalProcessed: importedCount + updatedExistingCount });
   } catch (err) {
     db.exec('ROLLBACK;');
@@ -851,8 +909,8 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
   if (!node) return res.status(404).json({ error: 'Nodo no encontrado' });
 
   const {
-    default_headend_mode = 'ondemand',
-    vip_top_count = 30,
+    default_headend_mode = 'copy_audio',
+    vip_top_count = 0,
     rewrite_host_to_local = '',
     filter_hostname = '',
     limit_count = 0
@@ -882,6 +940,7 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
     return res.status(400).json({ error: 'No hay canales pendientes que coincidan para migrar.' });
   }
 
+  const constant247Ids = [];
   db.exec('BEGIN IMMEDIATE;');
   try {
     const upd = db.prepare(
@@ -894,10 +953,10 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
            headend_node_id = ?,
            headend_mode = ?,
            deinterlace_mode = 'auto',
-           stream_mode = 'ondemand',
+           stream_mode = ?,
            transcode_profile_id = ?,
            audio_leveling_mode = 'off',
-           status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END,
+           status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE ? END,
            pid = NULL
        WHERE id = ?`
     );
@@ -927,11 +986,26 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
         }
       }
       const mode = idx < Number(vip_top_count || 0) ? 'vip_247' : default_headend_mode;
+      const isConstant = String(mode) !== 'ondemand';
+      const cloudStreamMode = isConstant ? 'transcode' : 'ondemand';
+      const cloudStatus = isConstant ? 'running' : 'ondemand_idle';
       const bridgedLogo = rewriteAstraLogoToCloudBridge(st.logo_url || '', nodeId);
-      upd.run(bridgedLogo, localUrl, buildCloudPullUrl(node, st.id), nodeId, mode, copyProfId, st.id);
+      upd.run(
+        bridgedLogo,
+        localUrl,
+        buildCloudPullUrl(node, st.id),
+        nodeId,
+        mode,
+        cloudStreamMode,
+        copyProfId,
+        cloudStatus,
+        st.id
+      );
+      if (isConstant && st.status !== 'stopped') constant247Ids.push(st.id);
     });
 
     db.exec('COMMIT;');
+    if (constant247Ids.length > 0) scheduleDbStreamLaunches(constant247Ids, 60);
     res.json({ ok: true, migratedCount: candidates.length });
   } catch (err) {
     db.exec('ROLLBACK;');
