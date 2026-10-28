@@ -557,8 +557,9 @@ iptvRouter.get('/get.php', (req, res) => {
       s.tv_archive_days > 0
         ? ` catchup="default" catchup-days="${s.tv_archive_days}" catchup-source="${baseUrl}/timeshift/${encodeURIComponent(username)}/${encodeURIComponent(password)}/{duration}/{Y}-{m}-{d}:{H}-{M}/${s.id}.m3u8"`
         : '';
+    const pubLogo = resolvePublicPosterUrl(s.logo_url, baseUrl);
     linesOut.push(
-      `#EXTINF:-1 tvg-chno="${chNo++}" tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${s.logo_url || ''}"${catchupAttr} group-title="${s.category_name}",${s.name}`
+      `#EXTINF:-1 tvg-chno="${chNo++}" tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${pubLogo}"${catchupAttr} group-title="${s.category_name}",${s.name}`
     );
     linesOut.push(`${baseUrl}/${livePrefix}/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${s.id}.${ext}`);
   }
@@ -774,7 +775,7 @@ const handlePlayerApi = (req, res) => {
         name: s.name,
         stream_type: 'live',
         stream_id: s.id,
-        stream_icon: s.logo_url || '',
+        stream_icon: resolvePublicPosterUrl(s.logo_url, baseUrl),
         epg_channel_id: s.epg_channel_id || `stream-${s.id}`,
         added: String(Math.floor(Date.now() / 1000)),
         category_id: String(s.category_id || 1),

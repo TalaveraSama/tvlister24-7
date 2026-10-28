@@ -39,9 +39,16 @@ mkdir -p "$RUNTIME_BIN"
 NODE_BIN="${HEADEND_DIR}/.runtime/node/bin/node"
 
 if [[ ! -x "$NODE_BIN" ]]; then
-  echo "[1/4] Descargando Node.js ${NODE_VERSION} aislado..."
+  DETECTED_VER="$(curl -fsSL --max-time 15 https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt 2>/dev/null | grep -oE 'node-v22\.[0-9]+\.[0-9]+-linux' | head -n1 | sed 's/node-//;s/-linux//' || true)"
+  if [[ -n "${DETECTED_VER:-}" ]]; then
+    NODE_VERSION="$DETECTED_VER"
+  fi
+  echo "[1/4] Descargando Node.js ${NODE_VERSION} aislado (compatible Ubuntu 22.04 / 24.04 LTS)..."
   TAR_URL="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz"
-  curl -fsSL "$TAR_URL" -o /tmp/tvlister_headend_node.tar.gz
+  if ! curl -fsSL "$TAR_URL" -o /tmp/tvlister_headend_node.tar.gz; then
+    NODE_VERSION="v22.14.0"
+    curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz" -o /tmp/tvlister_headend_node.tar.gz
+  fi
   rm -rf "${HEADEND_DIR}/.runtime/node"
   mkdir -p "${HEADEND_DIR}/.runtime/node"
   tar -xzf /tmp/tvlister_headend_node.tar.gz -C "${HEADEND_DIR}/.runtime/node" --strip-components=1
@@ -134,6 +141,10 @@ EOF
 systemctl daemon-reload
 systemctl enable tvlister-headend
 systemctl restart tvlister-headend
+
+# Optimizar buffers de red del kernel para ingesta intensiva MPEG-TS desde Astra LAN (Ubuntu 22.04 / 24.04)
+sysctl -w net.core.rmem_max=26214400 >/dev/null 2>&1 || true
+sysctl -w net.core.wmem_max=26214400 >/dev/null 2>&1 || true
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow "${HEADEND_PORT}/tcp" >/dev/null 2>&1 || true

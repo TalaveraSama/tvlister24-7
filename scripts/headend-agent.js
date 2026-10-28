@@ -551,11 +551,12 @@ function parseAstraM3u(text, baseUrl) {
     if (!line) continue;
     if (line.startsWith('#EXTINF')) {
       const nameMatch = line.match(/,(.+)$/);
-      const grpMatch = line.match(/group-title="([^"]+)"/i);
-      const logoMatch = line.match(/tvg-logo="([^"]+)"/i);
+      const grpMatch = line.match(/group-title="([^"]*)"/i);
+      const logoMatch = line.match(/tvg-logo="([^"]*)"/i);
+      const rawGrp = grpMatch ? grpMatch[1].trim() : '';
       meta = {
         name: nameMatch ? nameMatch[1].trim() : 'Canal Astra',
-        category: grpMatch ? grpMatch[1].trim() : 'Cesbo Astra',
+        category: !rawGrp || rawGrp === '-' ? '' : rawGrp,
         logo: logoMatch ? logoMatch[1].trim() : ''
       };
     } else if (!line.startsWith('#') && meta) {
@@ -793,14 +794,45 @@ const server = http.createServer(async (req, res) => {
   // Path-token HLS route (zero query strings for 100% FFmpeg HLS demuxer compatibility):
   // /headend/live/:token/:streamId/:file  OR  /headend/live/:streamId/:file?token=...
   const pathTokenMatch = urlObj.pathname.match(/^\/headend\/live\/(hdn_[a-zA-Z0-9_-]+)\/(\d+)\/([a-zA-Z0-9_.-]+)$/);
+  const logoTokenMatch = urlObj.pathname.match(/^\/headend\/astra-logo\/(hdn_[a-zA-Z0-9_-]+)\/([a-zA-Z0-9_.-]+)$/);
   const legacyHlsMatch = !pathTokenMatch
     ? urlObj.pathname.match(/^\/headend\/live\/(\d+)\/([a-zA-Z0-9_.-]+)$/)
     : null;
 
-  const extractedPathToken = pathTokenMatch ? pathTokenMatch[1] : '';
+  const extractedPathToken = pathTokenMatch ? pathTokenMatch[1] : logoTokenMatch ? logoTokenMatch[1] : '';
   if (!checkRequestAuth(req, urlObj, extractedPathToken)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     return res.end('Forbidden Headend Token/IP');
+  }
+
+  // Local LAN Cesbo Astra Logo Bridge (e.g. http://192.168.88.10:8000/playlist/tvg-logo/a0ek.png)
+  if (logoTokenMatch) {
+    const safeFile = path.basename(logoTokenMatch[2]);
+    const astraBase = String(nodeSettings.astra_url || 'http://127.0.0.1:8000').replace(/\/+$/, '');
+    const logoUrl = `${astraBase}/playlist/tvg-logo/${encodeURIComponent(safeFile)}`;
+    try {
+      const headers = {};
+      if (nodeSettings.astra_auth && nodeSettings.astra_auth.includes(':')) {
+        headers.Authorization = `Basic ${Buffer.from(nodeSettings.astra_auth).toString('base64')}`;
+      }
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 4500);
+      const r = await fetch(logoUrl, { headers, signal: ac.signal });
+      clearTimeout(t);
+      if (!r.ok) {
+        res.writeHead(404);
+        return res.end('Logo not found on Astra');
+      }
+      const imgBuf = Buffer.from(await r.arrayBuffer());
+      res.writeHead(200, {
+        'Content-Type': r.headers.get('content-type') || 'image/png',
+        'Cache-Control': 'public, max-age=86400'
+      });
+      return res.end(imgBuf);
+    } catch {
+      res.writeHead(502);
+      return res.end('Error fetching logo from local Astra');
+    }
   }
 
   // Direct LAN Astra Discovery endpoint (when Cloud reaches ProLiant HTTP directly)

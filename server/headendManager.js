@@ -3,15 +3,75 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { db } from './db.js';
+import { db, DB_PATH } from './db.js';
 import { requireAuth, requireAdmin } from './auth.js';
 import { stopWorker } from './streamEngine.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENT_SCRIPT_PATH = path.resolve(__dirname, '../scripts/headend-agent.js');
 const INSTALL_SCRIPT_PATH = path.resolve(__dirname, '../scripts/install_headend_node.sh');
+const ASTRA_LOGOS_CACHE_DIR = path.join(path.dirname(DB_PATH), 'astra_logos');
 
 export const headendRouter = express.Router();
+
+export function rewriteAstraLogoToCloudBridge(logoUrl, nodeId) {
+  const raw = String(logoUrl || '').trim();
+  if (!raw || !nodeId) return raw;
+  const m = raw.match(/\/playlist\/tvg-logo\/([a-zA-Z0-9_.-]+)/i);
+  if (m && m[1]) {
+    return `/astra-logo/${Number(nodeId)}/${path.basename(m[1])}`;
+  }
+  return raw;
+}
+
+export function extractAstraPlayKey(urlStr = '') {
+  const m = String(urlStr || '').match(/\/play\/([a-zA-Z0-9_-]+)/i);
+  return m ? m[1].toLowerCase() : '';
+}
+
+export function classifyAstraCategoryByName(name = '') {
+  const n = String(name || '').trim();
+  if (/\b(canal\s*(2|4|6|8|10|12|13|14)\b|nic\b|-?\s*ni\b|nicarao)/i.test(n)) {
+    return 'Nacionales Nicaragua';
+  }
+  if (/\b(playboy|venus|hustler|brazzers|penthouse|sextreme)\b/i.test(n)) {
+    return 'Adultos (+18)';
+  }
+  if (/\b(espn|fox\s*sports|fox\s*nic|golf|pxtv|esport|sport|tyc|win\s*sports|tudn|dazn|ufc|nba|mlb|bein)\b/i.test(n)) {
+    return 'Deportes';
+  }
+  if (
+    /\b(cartoon|discovery\s*kids|disney|baby|tooncast|zoomoo|clan\b|semillitas|max\s*anime|nick|boomerang|adult\s*swim)\b/i.test(
+      n
+    )
+  ) {
+    return 'Infantiles';
+  }
+  if (/\b(ewtn|tbn\s*enlace|rhema|voz\s*de\s*maria|sembrador|cristovision|enlace)\b/i.test(n)) {
+    return 'Religiosos';
+  }
+  if (/\b(bandamax|telehit|htv|exa\s*tv|concert\s*channel|mtv|vh1|ritmoson)\b/i.test(n)) {
+    return 'Música';
+  }
+  if (
+    /\b(discovery|disc\s*theat|history|\bh2\b|national\s*geographic|nat\s*geo|animal\s*planet|\bid\b|\btlc\b|home\s*&\s*health|home\s*garden|el\s*gourmet|sun\s*channel)\b/i.test(
+      n
+    )
+  ) {
+    return 'Documentales & Cultura';
+  }
+  if (
+    /\b(hbo|cinecanal|cinemax|cine\s*latino|a3\s*cine|tnt|golden|amc|star\s*channel|space|universal|studio\s*universal|warner|sony|fx\b|axn|paramount|tcm|pelicula|dhe|europa|euro\s*channel|multipremier|multicinema|film\s*&\s*arts|atres\s*series|kdrama)\b/i.test(
+      n
+    )
+  ) {
+    return 'Cine & Series';
+  }
+  if (/\b(france\s*24|russia\s*today|\brt\b|cnn|dw|ntn24|telesur|bbc|euronews)\b/i.test(n)) {
+    return 'Noticias';
+  }
+  return 'Variedades & Internacionales';
+}
 
 function getCopyCopyProfileId() {
   const row = db
@@ -73,11 +133,12 @@ export function parseAstraContent(rawText = '', defaultBaseUrl = 'http://127.0.0
       if (!line) continue;
       if (line.startsWith('#EXTINF')) {
         const nameM = line.match(/,(.+)$/);
-        const grpM = line.match(/group-title="([^"]+)"/i);
-        const logoM = line.match(/tvg-logo="([^"]+)"/i);
+        const grpM = line.match(/group-title="([^"]*)"/i);
+        const logoM = line.match(/tvg-logo="([^"]*)"/i);
+        const rawGrp = grpM ? grpM[1].trim() : '';
         meta = {
           name: nameM ? nameM[1].trim() : 'Canal Astra',
-          category: grpM ? grpM[1].trim() : 'Cesbo Astra',
+          category: !rawGrp || rawGrp === '-' ? '' : rawGrp,
           logo_url: logoM ? logoM[1].trim() : ''
         };
       } else if (!line.startsWith('#') && meta) {
@@ -162,6 +223,57 @@ headendRouter.get('/api/headend/install.sh', (req, res) => {
   res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
   res.send(injected);
+});
+
+// Public Cloud Logo Bridge & Permanent Disk Cache for Private LAN Cesbo Astra Logos (e.g. 192.168.88.10:8000/playlist/tvg-logo/a0ek.png)
+headendRouter.get('/astra-logo/:nodeId/:file', async (req, res) => {
+  const nodeId = Number(req.params.nodeId);
+  const safeFile = path.basename(String(req.params.file || '').trim());
+  if (!nodeId || !safeFile || !/\.(png|jpg|jpeg|webp|gif|svg)$/i.test(safeFile)) {
+    return res.status(400).send('Invalid logo file');
+  }
+
+  const ext = path.extname(safeFile).toLowerCase();
+  const mime =
+    ext === '.jpg' || ext === '.jpeg'
+      ? 'image/jpeg'
+      : ext === '.webp'
+      ? 'image/webp'
+      : ext === '.svg'
+      ? 'image/svg+xml'
+      : 'image/png';
+
+  const nodeCacheDir = path.join(ASTRA_LOGOS_CACHE_DIR, String(nodeId));
+  const cachedPath = path.join(nodeCacheDir, safeFile);
+
+  if (fs.existsSync(cachedPath)) {
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Cache-Control', 'public, max-age=604800');
+    return res.sendFile(cachedPath);
+  }
+
+  const node = db.prepare('SELECT * FROM headend_nodes WHERE id = ?').get(nodeId);
+  if (!node) return res.status(404).send('Node not found');
+
+  const agentLogoUrl = `${String(node.public_url || '').replace(/\/+$/, '')}/headend/astra-logo/${encodeURIComponent(
+    node.api_token
+  )}/${encodeURIComponent(safeFile)}`;
+
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    const r = await fetch(agentLogoUrl, { signal: ac.signal });
+    clearTimeout(timer);
+    if (!r.ok) return res.status(404).send('Logo not found');
+    const buf = Buffer.from(await r.arrayBuffer());
+    fs.mkdirSync(nodeCacheDir, { recursive: true });
+    fs.writeFileSync(cachedPath, buf);
+    res.setHeader('Content-Type', r.headers.get('content-type') || mime);
+    res.setHeader('Cache-Control', 'public, max-age=604800');
+    return res.send(buf);
+  } catch {
+    return res.status(502).send('Logo bridge unavailable');
+  }
 });
 
 // ==================== AGENT HEARTBEAT & DESIRED-STATE SYNC ====================
@@ -591,13 +703,18 @@ headendRouter.post('/api/headend/parse-astra-text', requireAuth, requireAdmin, (
   res.json({ ok: true, channels });
 });
 
-// Import Cesbo Astra channels & wire 1-stream Cloud Relay automatically
+// Import Cesbo Astra channels & wire 1-stream Cloud Relay automatically (deduplicating /play/a0ek matches!)
 headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAdmin, (req, res) => {
   const nodeId = Number(req.params.id);
   const node = db.prepare('SELECT * FROM headend_nodes WHERE id = ?').get(nodeId);
   if (!node) return res.status(404).json({ error: 'Nodo no encontrado' });
 
-  const { channels = [], default_headend_mode = 'ondemand' } = req.body || {};
+  const {
+    channels = [],
+    default_headend_mode = 'ondemand',
+    vip_top_count = 0,
+    auto_categorize = true
+  } = req.body || {};
   if (!Array.isArray(channels) || channels.length === 0) {
     return res.status(400).json({ error: 'No hay canales de Astra para importar.' });
   }
@@ -610,22 +727,86 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
     const catMap = new Map(existingCats.map((c) => [c.name.toLowerCase(), c.id]));
     const insCat = db.prepare("INSERT INTO categories (name, type, sort_order) VALUES (?, 'live', 0)");
 
+    // Build lookup of existing streams by Astra /play/<id> key and by exact lowercase name to prevent duplicates!
+    const existingStreams = db.prepare('SELECT * FROM streams').all();
+    const byAstraKey = new Map();
+    const byExactName = new Map();
+    for (const ex of existingStreams) {
+      const k =
+        extractAstraPlayKey(ex.astra_local_url) ||
+        extractAstraPlayKey(ex.original_source_url) ||
+        extractAstraPlayKey(ex.source_url);
+      if (k) byAstraKey.set(k, ex);
+      byExactName.set(String(ex.name || '').trim().toLowerCase(), ex);
+    }
+
     const insStream = db.prepare(
       `INSERT INTO streams (
          name, category_id, source_url, astra_local_url, logo_url,
          stream_mode, transcode_profile_id, status, bitrate_kbps,
-         audio_leveling_mode, headend_node_id, headend_mode, deinterlace_mode
-       ) VALUES (?, ?, ?, ?, ?, 'ondemand', ?, 'ondemand_idle', 2500, 'off', ?, ?, 'auto')`
+         audio_leveling_mode, headend_node_id, headend_mode, deinterlace_mode, sort_order
+       ) VALUES (?, ?, ?, ?, ?, 'ondemand', ?, 'ondemand_idle', 2500, 'off', ?, ?, 'auto', ?)`
     );
     const updPullUrl = db.prepare('UPDATE streams SET source_url = ? WHERE id = ?');
+    const updExistingInPlace = db.prepare(
+      `UPDATE streams
+       SET original_source_url = CASE WHEN original_source_url != '' THEN original_source_url ELSE source_url END,
+           astra_local_url = ?,
+           source_url = ?,
+           logo_url = CASE WHEN ? != '' THEN ? ELSE logo_url END,
+           headend_node_id = ?,
+           headend_mode = ?,
+           deinterlace_mode = 'auto',
+           stream_mode = 'ondemand',
+           transcode_profile_id = ?,
+           audio_leveling_mode = 'off',
+           status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END,
+           pid = NULL
+       WHERE id = ?`
+    );
 
     const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
     const b1Ids = b1 ? JSON.parse(b1.stream_ids_json || '[]') : [];
 
+    let maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) as m FROM streams').get().m || 0;
     let importedCount = 0;
-    for (const ch of channels) {
-      if (!ch?.name || !ch?.astra_local_url) continue;
-      const catName = String(ch.category || 'Cesbo Astra').trim();
+    let updatedExistingCount = 0;
+
+    channels.forEach((ch, idx) => {
+      if (!ch?.name || !ch?.astra_local_url) return;
+      const cleanName = String(ch.name).trim();
+      const cleanAstraUrl = String(ch.astra_local_url).trim();
+      const bridgedLogo = rewriteAstraLogoToCloudBridge(ch.logo_url || '', nodeId);
+      const mode =
+        ch.headend_mode || (idx < Number(vip_top_count || 0) ? 'vip_247' : default_headend_mode || 'ondemand');
+
+      const playKey = extractAstraPlayKey(cleanAstraUrl);
+      const matched = (playKey && byAstraKey.get(playKey)) || byExactName.get(cleanName.toLowerCase());
+
+      if (matched) {
+        stopWorker(`stream_${matched.id}`);
+        updExistingInPlace.run(
+          cleanAstraUrl,
+          buildCloudPullUrl(node, matched.id),
+          bridgedLogo,
+          bridgedLogo,
+          nodeId,
+          mode,
+          copyProfId,
+          matched.id
+        );
+        updatedExistingCount++;
+        return;
+      }
+
+      const rawCat = String(ch.category || '').trim();
+      const catName =
+        !rawCat || rawCat === '-'
+          ? auto_categorize
+            ? classifyAstraCategoryByName(cleanName)
+            : 'Cesbo Astra'
+          : rawCat;
+
       let catId = catMap.get(catName.toLowerCase());
       if (!catId) {
         const cInfo = insCat.run(catName);
@@ -633,29 +814,30 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
         catMap.set(catName.toLowerCase(), catId);
       }
 
-      const mode = ch.headend_mode || default_headend_mode || 'ondemand';
+      maxOrder += 1;
       const sInfo = insStream.run(
-        String(ch.name).trim(),
+        cleanName,
         catId,
         'http://pending-headend-link',
-        String(ch.astra_local_url).trim(),
-        String(ch.logo_url || '').trim(),
+        cleanAstraUrl,
+        bridgedLogo,
         copyProfId,
         nodeId,
-        mode
+        mode,
+        maxOrder
       );
       const newSid = Number(sInfo.lastInsertRowid);
       updPullUrl.run(buildCloudPullUrl(node, newSid), newSid);
       if (!b1Ids.includes(newSid)) b1Ids.push(newSid);
       importedCount++;
-    }
+    });
 
     if (b1 && importedCount > 0) {
       db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?').run(JSON.stringify(b1Ids), b1.id);
     }
 
     db.exec('COMMIT;');
-    res.json({ ok: true, importedCount });
+    res.json({ ok: true, importedCount, updatedExistingCount, totalProcessed: importedCount + updatedExistingCount });
   } catch (err) {
     db.exec('ROLLBACK;');
     res.status(500).json({ error: err.message || 'Error importando canales de Astra' });
@@ -706,6 +888,7 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
       `UPDATE streams
        SET original_source_url = CASE WHEN original_source_url != '' THEN original_source_url ELSE source_url END,
            backup_url = CASE WHEN backup_url = '' THEN source_url ELSE backup_url END,
+           logo_url = ?,
            astra_local_url = ?,
            source_url = ?,
            headend_node_id = ?,
@@ -744,7 +927,8 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
         }
       }
       const mode = idx < Number(vip_top_count || 0) ? 'vip_247' : default_headend_mode;
-      upd.run(localUrl, buildCloudPullUrl(node, st.id), nodeId, mode, copyProfId, st.id);
+      const bridgedLogo = rewriteAstraLogoToCloudBridge(st.logo_url || '', nodeId);
+      upd.run(bridgedLogo, localUrl, buildCloudPullUrl(node, st.id), nodeId, mode, copyProfId, st.id);
     });
 
     db.exec('COMMIT;');

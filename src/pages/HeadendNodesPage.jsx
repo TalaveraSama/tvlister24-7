@@ -33,7 +33,7 @@ export default function HeadendNodesPage({ onPreview }) {
   const [createForm, setCreateForm] = useState({
     name: 'HP ProLiant G9 — Cabecera Astra',
     public_url: '',
-    astra_url: 'http://127.0.0.1:8000',
+    astra_url: 'http://192.168.88.10:8000',
     astra_auth: '',
     allowed_cloud_ip: ''
   });
@@ -47,12 +47,13 @@ export default function HeadendNodesPage({ onPreview }) {
   const [importOpen, setImportOpen] = useState(false);
   const [importTab, setImportTab] = useState('migrate'); // 'migrate' | 'scan' | 'paste'
   const [migrateVipCount, setMigrateVipCount] = useState(35);
-  const [migrateRewriteHost, setMigrateRewriteHost] = useState('');
+  const [migrateRewriteHost, setMigrateRewriteHost] = useState('192.168.88.10');
   const [migrateFilterHost, setMigrateFilterHost] = useState('all');
   const [existingSummary, setExistingSummary] = useState({ totalUnassigned: 0, hosts: [], firstChannelUrl: '' });
   const [pastedAstra, setPastedAstra] = useState('');
   const [discoveredList, setDiscoveredList] = useState([]);
   const [importDefaultMode, setImportDefaultMode] = useState('ondemand');
+  const [autoCategorize, setAutoCategorize] = useState(true);
   const [scanningAstra, setScanningAstra] = useState(false);
 
   // Stream Table Filters & Multi-Select
@@ -232,6 +233,28 @@ export default function HeadendNodesPage({ onPreview }) {
     }
   };
 
+  const handleUploadAstraFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const content = await file.text();
+      setPastedAstra(content);
+      const res = await apiFetch('/api/headend/parse-astra-text', {
+        method: 'POST',
+        body: JSON.stringify({
+          content,
+          astra_url: settingsForm?.astra_url || selectedNode?.astra_url || 'http://192.168.88.10:8000'
+        })
+      });
+      setDiscoveredList(res.channels || []);
+      showToast(`📂 Archivo "${file.name}" leído: ${(res.channels || []).length} canales de Cesbo Astra listos.`);
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      e.target.value = '';
+    }
+  };
+
   const handleCommitAstraImport = async () => {
     if (!selectedNode || discoveredList.length === 0) return;
     try {
@@ -239,16 +262,23 @@ export default function HeadendNodesPage({ onPreview }) {
         method: 'POST',
         body: JSON.stringify({
           channels: discoveredList,
-          default_headend_mode: importDefaultMode
+          default_headend_mode: importDefaultMode,
+          vip_top_count: importDefaultMode === 'ondemand' ? Number(migrateVipCount) || 0 : 0,
+          auto_categorize: autoCategorize
         })
       });
       setImportOpen(false);
       setDiscoveredList([]);
       setPastedAstra('');
       await loadData(true);
-      showToast(
-        `✅ ${res.importedCount} canales de Cesbo Astra importados y enlazados ProLiant ↔ Nube (1 flujo por canal).`
-      );
+      const msgParts = [];
+      if (res.updatedExistingCount > 0) {
+        msgParts.push(`${res.updatedExistingCount} canales existentes enlazados sin duplicar`);
+      }
+      if (res.importedCount > 0) {
+        msgParts.push(`${res.importedCount} nuevos importados`);
+      }
+      showToast(`✅ Cesbo Astra listo (${msgParts.join(' + ')}) con puente de logos PNG activo en la Nube.`);
     } catch (err) {
       window.alert(err.message);
     }
@@ -417,7 +447,7 @@ export default function HeadendNodesPage({ onPreview }) {
               Conecta tu HP ProLiant G9 (con Cesbo Astra local) a tu Panel en la Nube
             </h2>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Crea una VM Ubuntu 22.04 en tu HP ProLiant G9 (22 vCPUs, 16 GB RAM, 40 GB Disco), regístrala aquí con su IP Pública + puerto (ej. <code className="text-cyan-300">IP_PUBLICA:8097</code>) y ejecuta el comando de 1 línea que te daremos.
+              En tu VM Ubuntu Server 22.04 o 24.04 LTS en el HP ProLiant G9 (red local <code className="text-cyan-300">192.168.88.x</code> junto a tu Astra <code className="text-cyan-300">192.168.88.10:8000</code>), regístrala aquí con su IP Pública + puerto (ej. <code className="text-cyan-300">IP_PUBLICA:8097</code>) y pega el comando de 1 línea.
             </p>
           </div>
           <button
@@ -446,7 +476,7 @@ export default function HeadendNodesPage({ onPreview }) {
                     : '● ESPERANDO CONEXIÓN DEL AGENTE'}
                 </span>
                 <span className="text-slate-300 font-semibold">
-                  Comando SSH de Instalación (Ubuntu 22.04 en tu HP ProLiant G9 — Cero apt):
+                  Comando SSH de Instalación (Ubuntu Server 22.04 / 24.04 LTS — Cero apt):
                 </span>
               </div>
               <button
@@ -1169,12 +1199,27 @@ export default function HeadendNodesPage({ onPreview }) {
             )}
 
             {importTab === 'paste' && (
-              <div className="space-y-2 text-xs">
+              <div className="space-y-2.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-slate-300">
+                    Sube tu <code className="text-cyan-300">playlist.txt / .m3u</code> de Astra o pégalo abajo (si los canales ya existen en el panel por su clave <code className="text-cyan-300">/play/a0ek</code>, se enlazan sin duplicarse):
+                  </span>
+                  <label className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold cursor-pointer shrink-0">
+                    <Upload className="w-3.5 h-3.5" />
+                    📂 Subir archivo .txt / .m3u
+                    <input
+                      type="file"
+                      accept=".txt,.m3u,.m3u8,.json,.conf,.lua"
+                      onChange={handleUploadAstraFile}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
                 <textarea
                   rows={5}
                   value={pastedAstra}
                   onChange={(e) => setPastedAstra(e.target.value)}
-                  placeholder="Pega aquí el contenido de http://IP_ASTRA:8000/playlist.m3u8 o tu archivo astra.conf / JSON..."
+                  placeholder="Pega aquí el contenido de playlist.txt (ej. http://192.168.88.10:8000/play/a0ek?ts)..."
                   className="w-full p-3 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono text-[11px]"
                 />
                 <button
@@ -1189,20 +1234,44 @@ export default function HeadendNodesPage({ onPreview }) {
 
             {discoveredList.length > 0 && importTab !== 'migrate' && (
               <div className="space-y-3 border-t border-slate-800 pt-3 text-xs">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-bold text-emerald-300">
-                    {discoveredList.length} canales de Astra listos para importar
+                    {discoveredList.length} canales de Astra detectados (con puente automático de logos PNG)
                   </span>
-                  <select
-                    value={importDefaultMode}
-                    onChange={(e) => setImportDefaultMode(e.target.value)}
-                    className="px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
-                  >
-                    <option value="ondemand">Importar en 🌱 On-Demand Remoto (Recomendado 200 canales)</option>
-                    <option value="vip_247">Importar todos en 🔥 VIP 24/7</option>
-                    <option value="copy_audio">Importar en ⚡ Copy Video + Audio Igual</option>
-                  </select>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={importDefaultMode}
+                      onChange={(e) => setImportDefaultMode(e.target.value)}
+                      className="px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                    >
+                      <option value="ondemand">🌱 On-Demand Remoto + Top VIP</option>
+                      <option value="vip_247">🔥 Todos en VIP 24/7</option>
+                      <option value="copy_audio">⚡ Copy Video + Audio Igual</option>
+                    </select>
+                    {importDefaultMode === 'ondemand' && (
+                      <div className="flex items-center gap-1.5 bg-[#090e1a] border border-slate-700 rounded-xl px-2.5 py-1">
+                        <span className="text-[11px] text-amber-300 font-semibold">VIP 24/7 primeros:</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={300}
+                          value={migrateVipCount}
+                          onChange={(e) => setMigrateVipCount(e.target.value)}
+                          className="w-14 bg-transparent text-white font-mono font-bold text-center"
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
+                <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoCategorize}
+                    onChange={(e) => setAutoCategorize(e.target.checked)}
+                    className="rounded accent-emerald-500"
+                  />
+                  Organizar automáticamente en categorías en español (Nacionales Nicaragua, Deportes, Cine & Series, Infantiles...) cuando Astra trae <code className="text-cyan-300">group-title=&quot;-&quot;</code>
+                </label>
                 <div className="max-h-48 overflow-y-auto rounded-xl bg-[#070b13] border border-slate-800 divide-y divide-slate-800/70">
                   {discoveredList.map((ch, i) => (
                     <div key={i} className="px-3 py-1.5 flex items-center justify-between text-[11px]">
@@ -1217,7 +1286,7 @@ export default function HeadendNodesPage({ onPreview }) {
                     onClick={handleCommitAstraImport}
                     className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
                   >
-                    Importar {discoveredList.length} Canales y Enlazar ProLiant ↔ Nube
+                    Aplicar {discoveredList.length} Canales y Enlazar ProLiant ↔ Nube
                   </button>
                 </div>
               </div>

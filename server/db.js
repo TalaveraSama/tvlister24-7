@@ -5,7 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.resolve(__dirname, '../data');
+const DATA_DIR = process.env.TVLISTER_DB_PATH
+  ? path.dirname(path.resolve(process.env.TVLISTER_DB_PATH))
+  : path.resolve(__dirname, '../data');
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -14,7 +16,9 @@ if (!fs.existsSync(DATA_DIR)) {
 // Migrate legacy database filename transparently if upgrading an existing installation
 const LEGACY_DB_NAME = ['mid', 'night_tvlister.db'].join('');
 const LEGACY_DB_PATH = path.join(DATA_DIR, LEGACY_DB_NAME);
-export const DB_PATH = path.join(DATA_DIR, 'tvlister.db');
+export const DB_PATH = process.env.TVLISTER_DB_PATH
+  ? path.resolve(process.env.TVLISTER_DB_PATH)
+  : path.join(DATA_DIR, 'tvlister.db');
 
 if (!fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
   for (const suffix of ['', '-wal', '-shm']) {
