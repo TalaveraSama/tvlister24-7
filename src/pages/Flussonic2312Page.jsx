@@ -43,9 +43,9 @@ export default function Flussonic2312Page({ onPreview }) {
   const [testingConn, setTestingConn] = useState(false);
   const [localSshCommand, setLocalSshCommand] = useState('');
   const [copiedSsh, setCopiedSsh] = useState(false);
-  const [migrateTranscodeMode, setMigrateTranscodeMode] = useState('copy_deint_aac');
+  const [migrateTranscodeMode, setMigrateTranscodeMode] = useState('copy_pure');
   const [migratePullProto, setMigratePullProto] = useState('mpegts');
-  const [migrateCloudMode, setMigrateCloudMode] = useState('constant_copy_247');
+  const [migrateCloudMode, setMigrateCloudMode] = useState('direct');
   const [previewRows, setPreviewRows] = useState([]);
   const [untouchedCount, setUntouchedCount] = useState(0);
   const [selectedPreviewIds, setSelectedPreviewIds] = useState([]);
@@ -62,14 +62,14 @@ export default function Flussonic2312Page({ onPreview }) {
     api_token: '',
     astra_url: 'http://192.168.88.10:8000',
     default_pull_protocol: 'mpegts',
-    default_transcode_mode: 'copy_deint_aac'
+    default_transcode_mode: 'copy_pure'
   });
 
   // flussonic.conf v23.12 Generator & API Push State
   const [genSourceType, setGenSourceType] = useState('panel_streams');
   const [genAstraText, setGenAstraText] = useState('');
   const [genAstraOverrideHost, setGenAstraOverrideHost] = useState('192.168.88.10');
-  const [genTranscodeMode, setGenTranscodeMode] = useState('copy_deint_aac');
+  const [genTranscodeMode, setGenTranscodeMode] = useState('copy_pure');
   const [genVideoKbps, setGenVideoKbps] = useState(2500);
   const [genAudioKbps, setGenAudioKbps] = useState(128);
   const [genConstant247, setGenConstant247] = useState(true);
@@ -81,7 +81,7 @@ export default function Flussonic2312Page({ onPreview }) {
 
   // Link to Panel State (Tab 2 & Tab 4)
   const [pullProtocol, setPullProtocol] = useState('mpegts');
-  const [cloudLinkMode, setCloudLinkMode] = useState('constant_copy_247');
+  const [cloudLinkMode, setCloudLinkMode] = useState('direct');
   const [pastedFlussConf, setPastedFlussConf] = useState('');
   const [linking, setLinking] = useState(false);
 
@@ -988,14 +988,14 @@ export default function Flussonic2312Page({ onPreview }) {
                   onChange={(e) => setMigrateTranscodeMode(e.target.value)}
                   className="w-full px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white"
                 >
-                  <option value="copy_deint_aac">
-                    🛡️ Anti-Rayas (deinterlace=true) + CPU x264 + Audio AAC 48k
+                  <option value="copy_pure">
+                    ⚡ Copy/Copy Puro Passthrough (Sin Transcoding · 0% CPU en Flussonic)
                   </option>
                   <option value="copy_video_aac">
-                    ⚡ Copy Video (vb=copy) + Audio AAC 48k Estéreo
+                    🔊 Copy Video (vb=copy) + Audio AAC 48k Estéreo
                   </option>
-                  <option value="copy_pure">
-                    ⚡ Copy/Copy Puro Passthrough (0% CPU en Flussonic)
+                  <option value="copy_deint_aac">
+                    🛡️ Anti-Rayas (deinterlace=true) + CPU x264 + Audio AAC 48k
                   </option>
                   <option value="nvenc_deint_aac">
                     🟢 NVIDIA NVENC + Anti-Rayas + Audio AAC 48k
@@ -1063,9 +1063,9 @@ export default function Flussonic2312Page({ onPreview }) {
                   onChange={(e) => setMigrateCloudMode(e.target.value)}
                   className="px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-white"
                 >
-                  <option value="constant_copy_247">⚡ Nube: 24/7 Copy/Copy</option>
+                  <option value="direct">🚀 Nube: Direct Relay (Sin Transcoding · 0% FFmpeg)</option>
+                  <option value="constant_copy_247">⚡ Nube: 24/7 Copy/Copy Local</option>
                   <option value="constant_copy_audio_247">🔊 Nube: 24/7 Copy+Audio Igual</option>
-                  <option value="direct">🚀 Nube: Direct Relay</option>
                 </select>
               </div>
             </div>
@@ -1356,6 +1356,7 @@ export default function Flussonic2312Page({ onPreview }) {
                     onChange={(e) => setCloudLinkMode(e.target.value)}
                     className="w-full px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-[11px] text-white"
                   >
+                    <option value="direct">🚀 Direct Relay (Sin Transcoding · 0% FFmpeg)</option>
                     <option value="constant_copy_247">⚡ 24/7 Constante Copy/Copy</option>
                     <option value="constant_copy_audio_247">🔊 24/7 Copy + Nivelador Audio</option>
                     <option value="ondemand">🌱 On-Demand</option>
@@ -1491,9 +1492,9 @@ export default function Flussonic2312Page({ onPreview }) {
                 onChange={(e) => setGenTranscodeMode(e.target.value)}
                 className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-xs text-white"
               >
+                <option value="copy_pure">⚡ Copy/Copy Puro Passthrough (Sin Transcoding · 0% CPU)</option>
+                <option value="copy_video_aac">🔊 Copy Video (vb=copy) + Audio AAC 48k</option>
                 <option value="copy_deint_aac">🛡️ Anti-Rayas + CPU x264 + Audio AAC 48k</option>
-                <option value="copy_video_aac">⚡ Copy Video (vb=copy) + Audio AAC 48k</option>
-                <option value="copy_pure">⚡ Copy/Copy Puro Passthrough</option>
                 <option value="nvenc_deint_aac">🟢 NVIDIA NVENC + Anti-Rayas + AAC</option>
               </select>
             </div>

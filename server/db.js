@@ -416,7 +416,7 @@ function runInitDbBody() {
       astra_url TEXT NOT NULL DEFAULT 'http://192.168.88.10:8000',
       astra_auth TEXT NOT NULL DEFAULT '',
       default_pull_protocol TEXT NOT NULL DEFAULT 'mpegts',
-      default_transcode_mode TEXT NOT NULL DEFAULT 'copy_deint_aac',
+      default_transcode_mode TEXT NOT NULL DEFAULT 'copy_pure',
       status TEXT NOT NULL DEFAULT 'unknown',
       last_sync_at TEXT,
       telemetry_json TEXT NOT NULL DEFAULT '{}',

@@ -288,7 +288,7 @@ export function assignUniqueFlussonicKeys(rows = []) {
 
 export function generateFlussonic2312Config({
   channels = [],
-  transcodeMode = 'copy_deint_aac',
+  transcodeMode = 'copy_pure',
   videoBitrateKbps = 2500,
   audioBitrateKbps = 128,
   constant247 = true,
@@ -912,7 +912,7 @@ function upsertFlussonicServerInline({
       `INSERT INTO flussonic_servers (
          name, base_url, username, password, api_token, version,
          astra_url, astra_auth, default_pull_protocol, default_transcode_mode
-       ) VALUES (?, ?, ?, ?, ?, '23.12', ?, '', 'mpegts', 'copy_deint_aac')`
+       ) VALUES (?, ?, ?, ?, ?, '23.12', ?, '', 'mpegts', 'copy_pure')`
     )
     .run(
       String(name || `Flussonic 23.12 (${hostLabel})`).trim(),
@@ -959,7 +959,7 @@ flussonic2312Router.post('/api/flussonic-2312/servers', requireAuth, requireAdmi
       String(b.astra_url || 'http://192.168.88.10:8000').trim(),
       String(b.astra_auth || '').trim(),
       String(b.default_pull_protocol || 'mpegts'),
-      String(b.default_transcode_mode || 'copy_deint_aac')
+      String(b.default_transcode_mode || 'copy_pure')
     );
 
   const created = db.prepare('SELECT * FROM flussonic_servers WHERE id = ?').get(Number(info.lastInsertRowid));
@@ -1292,9 +1292,9 @@ flussonic2312Router.post('/api/flussonic-2312/migrate-links-by-ip', requireAuth,
     selected_stream_ids = [],
     local_astra_host = '192.168.88.10',
     pull_protocol = 'mpegts', // 'mpegts' | 'hls'
-    cloud_mode = 'constant_copy_247', // 'constant_copy_247' | 'constant_copy_audio_247' | 'direct' | 'ondemand'
+    cloud_mode = 'direct', // 'direct' | 'constant_copy_247' | 'constant_copy_audio_247' | 'ondemand'
     also_push_to_flussonic = false,
-    transcode_mode = 'copy_deint_aac',
+    transcode_mode = 'copy_pure',
     video_bitrate_kbps = 2500,
     audio_bitrate_kbps = 128,
     constant_247 = true,
@@ -1496,7 +1496,7 @@ flussonic2312Router.post('/api/flussonic-2312/generate-conf', requireAuth, requi
     astra_content = '',
     astra_url = 'http://192.168.88.10:8000',
     astra_override_host = '',
-    transcode_mode = 'copy_deint_aac',
+    transcode_mode = 'copy_pure',
     video_bitrate_kbps = 2500,
     audio_bitrate_kbps = 128,
     constant_247 = true,
@@ -1649,7 +1649,7 @@ flussonic2312Router.post('/api/flussonic-2312/prepare-local-push-script', requir
     selected_stream_ids = [],
     astra_content = '',
     astra_override_host = '192.168.88.10',
-    transcode_mode = 'copy_deint_aac',
+    transcode_mode = 'copy_pure',
     video_bitrate_kbps = 2500,
     audio_bitrate_kbps = 128,
     constant_247 = true,
@@ -1805,7 +1805,7 @@ flussonic2312Router.post('/api/flussonic-2312/servers/:id/link-to-panel', requir
     streams = null, // optional pre-fetched list or parsed flussonic.conf streams
     conf_text = '',
     pull_protocol = srv.default_pull_protocol || 'mpegts', // 'mpegts' | 'hls'
-    cloud_mode = 'constant_copy_247', // 'constant_copy_247' | 'constant_copy_audio_247' | 'ondemand'
+    cloud_mode = 'direct', // 'direct' | 'constant_copy_247' | 'constant_copy_audio_247' | 'ondemand'
     auto_categorize = true
   } = req.body || {};
 
@@ -1829,9 +1829,11 @@ flussonic2312Router.post('/api/flussonic-2312/servers/:id/link-to-panel', requir
   }
 
   const copyProfId = getCopyCopyProfileId();
-  const isConstant = cloud_mode !== 'ondemand';
-  const targetStreamMode = isConstant ? 'transcode' : 'ondemand';
-  const targetStatus = isConstant ? 'running' : 'ondemand_idle';
+  const isDirect = cloud_mode === 'direct';
+  const isOndemand = cloud_mode === 'ondemand';
+  const isConstantWorker = !isDirect && !isOndemand;
+  const targetStreamMode = isDirect ? 'direct' : isOndemand ? 'ondemand' : 'transcode';
+  const targetStatus = isOndemand ? 'ondemand_idle' : 'running';
   const targetAudioLvl = cloud_mode === 'constant_copy_audio_247' ? 'on' : 'off';
 
   const existingRows = db.prepare('SELECT * FROM streams').all();
@@ -1914,7 +1916,7 @@ flussonic2312Router.post('/api/flussonic-2312/servers/:id/link-to-panel', requir
           targetStatus,
           matched.id
         );
-        if (isConstant && matched.status !== 'stopped') constantLaunchIds.push(matched.id);
+        if (isConstantWorker && matched.status !== 'stopped') constantLaunchIds.push(matched.id);
         updatedCount++;
         continue;
       }
@@ -1956,7 +1958,7 @@ flussonic2312Router.post('/api/flussonic-2312/servers/:id/link-to-panel', requir
       );
       const newSid = Number(info.lastInsertRowid);
       if (!b1Ids.includes(newSid)) b1Ids.push(newSid);
-      if (isConstant) constantLaunchIds.push(newSid);
+      if (isConstantWorker) constantLaunchIds.push(newSid);
       insertedCount++;
     }
 
