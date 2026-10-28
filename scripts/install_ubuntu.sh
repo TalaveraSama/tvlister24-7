@@ -270,15 +270,23 @@ systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1
 systemctl restart "${SERVICE_NAME}"
 
-# Si UFW está activo, abrir el puerto elegido
+# Si UFW está activo, abrir el puerto del panel y los puertos de ingesta RTMP/SRT/RTSP
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow "${FINAL_PORT}/tcp" >/dev/null 2>&1 || true
+  ufw allow 1935/tcp >/dev/null 2>&1 || true
+  ufw allow 19350/tcp >/dev/null 2>&1 || true
+  ufw allow 8554/tcp >/dev/null 2>&1 || true
+  ufw allow 8890/udp >/dev/null 2>&1 || true
 fi
 
-# Asegurar que iptables permita tráfico entrante al puerto del panel
+# Asegurar que iptables permita tráfico entrante al puerto del panel e ingesta en vivo
 if command -v iptables >/dev/null 2>&1; then
-  iptables -C INPUT -p tcp --dport "${FINAL_PORT}" -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 1 -p tcp --dport "${FINAL_PORT}" -j ACCEPT 2>/dev/null || true
+  for TCP_P in "${FINAL_PORT}" 1935 19350 8554; do
+    iptables -C INPUT -p tcp --dport "${TCP_P}" -j ACCEPT 2>/dev/null || \
+      iptables -I INPUT 1 -p tcp --dport "${TCP_P}" -j ACCEPT 2>/dev/null || true
+  done
+  iptables -C INPUT -p udp --dport 8890 -j ACCEPT 2>/dev/null || \
+    iptables -I INPUT 1 -p udp --dport 8890 -j ACCEPT 2>/dev/null || true
 fi
 
 sleep 2

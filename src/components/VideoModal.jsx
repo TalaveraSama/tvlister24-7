@@ -1,20 +1,58 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { X, Radio, Volume2, VolumeX, RefreshCw, AlertTriangle, Tv } from 'lucide-react';
+import { getToken } from '../lib/api.js';
+
+function buildAdminProxiedUrl(rawUrl, item) {
+  if (!rawUrl) return '';
+  const jwt = getToken();
+  if (!jwt) return rawUrl;
+
+  // Already a relative public/proxy endpoint on this server
+  if (
+    rawUrl.startsWith('/api/admin/preview/') ||
+    rawUrl.startsWith('/live/') ||
+    rawUrl.startsWith('/movie/') ||
+    rawUrl.startsWith('/series/') ||
+    rawUrl.startsWith('/hls_out/') ||
+    rawUrl.startsWith('/hls_proxy/')
+  ) {
+    return rawUrl;
+  }
+
+  // Proxy local disk paths (/mnt/...), 127.0.0.1 RTMP loopback, m4f://, mnf://, and external HTTP(S) streams
+  // through the TVLister server so the Admin browser never hits 127.0.0.1 or CORS blocks!
+  const params = new URLSearchParams({
+    jwt,
+    kind: item?.kind || 'live',
+    id: String(item?.id || 0),
+    url: rawUrl,
+  });
+  return `/api/admin/preview/stream?${params.toString()}`;
+}
 
 export default function VideoModal({ item, onClose }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
+  const retryTimerRef = useRef(null);
   const [error, setError] = useState('');
+  const [waitingIngest, setWaitingIngest] = useState(false);
+  const [retryTick, setRetryTick] = useState(0);
   const [muted, setMuted] = useState(false);
   const [resolution, setResolution] = useState('');
   const [live247State, setLive247State] = useState(item?.liveState || null);
 
-  // Determine active stream URL & seek offset
-  const activeUrl =
+  useEffect(() => {
+    setLive247State(item?.liveState || null);
+  }, [item]);
+
+  // Raw source URL & seek offset
+  const rawActiveUrl =
     item?.kind === 'channel247'
       ? live247State?.currentItem?.url || item?.url
       : item?.url;
+
+  const playableUrl = buildAdminProxiedUrl(rawActiveUrl, item);
 
   const initialSeek =
     item?.kind === 'channel247' ? Number(live247State?.seekOffsetSec || 0) : 0;
@@ -33,16 +71,28 @@ export default function VideoModal({ item, onClose }) {
   };
 
   useEffect(() => {
-    if (!activeUrl || !videoRef.current) return;
+    if (!playableUrl || !videoRef.current || !rawActiveUrl) return;
     setError('');
+    setWaitingIngest(false);
     const video = videoRef.current;
+
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
 
-    const isHls = activeUrl.toLowerCase().includes('.m3u8');
+    const lowerRaw = rawActiveUrl.toLowerCase();
+    const isDirectFile = /\.(mp4|mkv|webm|mov|avi)(\?|$)/i.test(lowerRaw) && item?.kind !== 'live';
+    const isHls =
+      !isDirectFile &&
+      (lowerRaw.includes('.m3u8') ||
+        lowerRaw.startsWith('m4f') ||
+        (item?.kind !== 'vod' && item?.kind !== 'series' && item?.kind !== 'channel247'));
 
     const onLoadedMeta = () => {
       if (video.videoWidth && video.videoHeight) {
@@ -58,15 +108,41 @@ export default function VideoModal({ item, onClose }) {
       });
     };
 
+    const inspectProxyFailure = async (fallbackMsg) => {
+      try {
+        const r = await fetch(playableUrl);
+        if (!r.ok) {
+          const data = await r.json().catch(() => null);
+          if (data?.code === 'INGEST_WAITING') {
+            setWaitingIngest(true);
+            setError(data.error);
+            retryTimerRef.current = setTimeout(() => {
+              setRetryTick((t) => t + 1);
+            }, 3000);
+            return;
+          }
+          if (data?.error) {
+            setError(data.error);
+            return;
+          }
+        }
+      } catch {
+        // ignore
+      }
+      setError(fallbackMsg);
+    };
+
     if (isHls && Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
-        lowLatencyMode: true
+        lowLatencyMode: true,
       });
       hlsRef.current = hls;
-      hls.loadSource(activeUrl);
+      hls.loadSource(playableUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setError('');
+        setWaitingIngest(false);
         video.play().catch(() => {
           video.muted = true;
           setMuted(true);
@@ -81,22 +157,39 @@ export default function VideoModal({ item, onClose }) {
       });
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data.fatal) {
-          setError(`No se pudo cargar el stream HLS (${data.details}). Verifica CORS o disponibilidad de la fuente.`);
+          // If stream turns out to be raw MPEG-TS instead of HLS, fall back to direct <video> src
+          if (data.details === 'manifestParsingError') {
+            hls.destroy();
+            hlsRef.current = null;
+            video.src = playableUrl;
+            video.addEventListener('loadedmetadata', onLoadedMeta);
+            return;
+          }
+          inspectProxyFailure(
+            `No se pudo cargar el stream HLS (${data.details}). Verifica que el canal o encoder esté transmitiendo en vivo.`
+          );
         }
       });
     } else {
-      video.src = activeUrl;
+      video.src = playableUrl;
       video.addEventListener('loadedmetadata', onLoadedMeta);
+      video.addEventListener('error', () => {
+        inspectProxyFailure('No se pudo reproducir el flujo de video desde el origen.');
+      });
     }
 
     return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
       video.removeEventListener('loadedmetadata', onLoadedMeta);
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
     };
-  }, [activeUrl]);
+  }, [playableUrl, retryTick]);
 
   if (!item) return null;
 
@@ -128,6 +221,14 @@ export default function VideoModal({ item, onClose }) {
               </button>
             )}
             <button
+              onClick={() => setRetryTick((t) => t + 1)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+              title="Reconectar señal"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Reconectar
+            </button>
+            <button
               onClick={onClose}
               className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
             >
@@ -148,7 +249,6 @@ export default function VideoModal({ item, onClose }) {
             className="w-full h-full object-contain"
           />
 
-          {/* Optional Watermark Overlay (TVLister 24/7 style) */}
           {item.watermark && (
             <div className="pointer-events-none absolute top-4 right-5 px-3 py-1 rounded bg-black/55 border border-white/15 text-xs font-bold tracking-wider text-white/85 uppercase">
               {item.watermark}
@@ -156,10 +256,25 @@ export default function VideoModal({ item, onClose }) {
           )}
 
           {error && (
-            <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center">
-              <AlertTriangle className="w-10 h-10 text-amber-400 mb-3" />
-              <p className="text-sm text-slate-200 max-w-md mb-2">{error}</p>
-              <p className="text-xs text-slate-400 font-mono break-all max-w-lg">{activeUrl}</p>
+            <div className="absolute inset-0 bg-slate-950/92 flex flex-col items-center justify-center p-6 text-center">
+              {waitingIngest ? (
+                <RefreshCw className="w-10 h-10 text-cyan-400 animate-spin mb-3" />
+              ) : (
+                <AlertTriangle className="w-10 h-10 text-amber-400 mb-3" />
+              )}
+              <p className="text-sm text-slate-200 max-w-lg mb-2 leading-relaxed">{error}</p>
+              {waitingIngest && (
+                <p className="text-xs text-cyan-300 mb-3">
+                  Auto-conectando automáticamente cada 3 segundos en cuanto recibamos video...
+                </p>
+              )}
+              <button
+                onClick={() => setRetryTick((t) => t + 1)}
+                className="mt-1 inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Reintentar Ahora
+              </button>
             </div>
           )}
         </div>
@@ -175,7 +290,9 @@ export default function VideoModal({ item, onClose }) {
                 </span>
               </span>
             ) : (
-              <span className="font-mono truncate">{activeUrl}</span>
+              <span className="font-mono truncate">
+                {rawActiveUrl?.includes('127.0.0.1') ? 'Túnel Interno RTMP/HLS -> Proxy Seguro TVLister' : rawActiveUrl}
+              </span>
             )}
           </div>
           <button

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
-import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl } from './auth.js';
+import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken } from './auth.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import { resolvePublicPosterUrl, normalizeXuiOrTmdbImageUrl, verifyLocalPosterPath } from './vodSyncTmdb.js';
@@ -1074,11 +1074,19 @@ async function serveLiveStreamRequest(req, res) {
     return serveLocalMediaFileWithRange(req, res, stream.source_url, conn.connId);
   }
 
-  // 3) Stream Shield Reverse Proxy (Flussonic M4F/CMAF, HLS .m3u8 rewriting, MNF->TS remux, and MPEG-TS Failover)
+  // 3) Stream Shield Reverse Proxy (Flussonic M4F/CMAF, Local RTMP/SRT/RTSP Loopback, HLS .m3u8 rewriting, MNF->TS remux, and MPEG-TS Failover)
   const proxySetting = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
   const candidates = expandStreamUpstreamUrls(stream);
+  const isLoopbackUpstream = /^https?:\/\/(127\.|localhost|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(
+    String(stream.source_url || '').trim()
+  );
 
-  if (proxySetting?.value === 'true' || stream.source_url.startsWith('m4f') || stream.source_url.startsWith('mnf')) {
+  if (
+    isLoopbackUpstream ||
+    proxySetting?.value === 'true' ||
+    stream.source_url.startsWith('m4f') ||
+    stream.source_url.startsWith('mnf')
+  ) {
     if (req.socket) req.socket.setTimeout(0);
 
     for (const upstreamUrl of candidates) {
@@ -1166,6 +1174,12 @@ async function serveLiveStreamRequest(req, res) {
           // failover to next candidate / backup_url
         }
       }
+    }
+
+    if (isLoopbackUpstream) {
+      return res
+        .status(503)
+        .send('Señal RTMP/SRT/RTSP sin transmisión activa en este momento (verifica que OBS/Encoder esté EN VIVO).');
     }
   }
 
@@ -1541,4 +1555,193 @@ iptvRouter.get('/vod_local_poster', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=86400');
   return res.sendFile(filePath);
 });
+
+// ==================== ADMIN LIVE MONITOR PROXY (Solves 127.0.0.1 RTMP Loopback, Local Disk VOD & CORS) ====================
+function checkAdminPreviewJwt(req) {
+  const authHeader = req.headers.authorization || '';
+  const rawJwt = String(req.query.jwt || (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '')).trim();
+  return { user: verifyToken(rawJwt), rawJwt };
+}
+
+iptvRouter.get('/api/admin/preview/hls_local/:workerKey/:fileName', (req, res) => {
+  const { user } = checkAdminPreviewJwt(req);
+  if (!user) return res.status(401).send('Sesión expirada');
+  const safeKey = path.basename(String(req.params.workerKey || ''));
+  const safeFile = path.basename(String(req.params.fileName || ''));
+  const fullPath = path.join(HLS_ROOT, safeKey, safeFile);
+  if (!fs.existsSync(fullPath)) return res.status(404).send('Segment not ready');
+  res.setHeader(
+    'Content-Type',
+    safeFile.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t'
+  );
+  res.setHeader('Cache-Control', 'no-store');
+  fs.createReadStream(fullPath).pipe(res);
+});
+
+iptvRouter.get('/api/admin/preview/hls_seg', async (req, res) => {
+  const { user, rawJwt } = checkAdminPreviewJwt(req);
+  if (!user) return res.status(401).send('Sesión expirada');
+
+  const sid = Number(req.query.id) || 0;
+  const targetUrl = verifyUpstreamUrl(String(req.query.u || ''), String(req.query.sig || ''), sid);
+  if (!targetUrl) return res.status(400).send('Firma HLS inválida');
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 10000);
+  req.on('close', () => ac.abort());
+
+  try {
+    const upRes = await fetch(targetUrl, {
+      headers: { 'User-Agent': 'TVLister-Monitor/2.3' },
+      redirect: 'follow',
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    if (!upRes.ok || !upRes.body) {
+      return res.status(upRes.status || 502).send('Segmento no disponible');
+    }
+
+    const cType = (upRes.headers.get('content-type') || '').toLowerCase();
+    const cleanTarget = targetUrl.split('?')[0].toLowerCase();
+    const isSubManifest = cType.includes('mpegurl') || cleanTarget.endsWith('.m3u8');
+
+    if (isSubManifest) {
+      const text = await upRes.text();
+      if (text.includes('#EXTM3U')) {
+        const proxyPrefix = `/api/admin/preview/hls_seg`;
+        const rewritten = rewriteHlsManifestForProxy(text, upRes.url || targetUrl, proxyPrefix, sid)
+          .replace(/\/api\/admin\/preview\/hls_seg\?/g, `/api/admin/preview/hls_seg?jwt=${encodeURIComponent(rawJwt)}&id=${sid}&`);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.send(rewritten);
+      }
+    }
+
+    res.setHeader(
+      'Content-Type',
+      upRes.headers.get('content-type') || (cleanTarget.endsWith('.mp4') || cleanTarget.endsWith('.m4s') ? 'video/mp4' : 'video/mp2t')
+    );
+    res.setHeader('Cache-Control', 'no-store');
+    return Readable.fromWeb(upRes.body).pipe(res);
+  } catch {
+    clearTimeout(timer);
+    if (!res.headersSent) res.status(502).send('Error cargando segmento de vista previa');
+  }
+});
+
+iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
+  const { user, rawJwt } = checkAdminPreviewJwt(req);
+  if (!user) return res.status(401).json({ error: 'No autorizado' });
+
+  const rawUrl = String(req.query.url || '').trim();
+  const kind = String(req.query.kind || 'live');
+  const sid = Number(req.query.id) || 0;
+
+  // 1. Check active local FFmpeg worker for stream / channel247
+  if (sid > 0 && (kind === 'live' || kind === 'channel247')) {
+    const workerKey = kind === 'channel247' ? `ch247_${sid}` : `stream_${sid}`;
+    const localManifest = getLocalHlsManifestPath(workerKey);
+    if (localManifest) {
+      const content = fs.readFileSync(localManifest, 'utf8');
+      const segBase = `/api/admin/preview/hls_local/${encodeURIComponent(workerKey)}/`;
+      const qSuffix = `?jwt=${encodeURIComponent(rawJwt)}`;
+      const rewritten = content.replace(
+        /^(?!#)([^\r\n]+)$/gm,
+        (m) => `${segBase}${path.basename(m.trim())}${qSuffix}`
+      );
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(rewritten);
+    }
+  }
+
+  // 2. Local disk media file (VOD movie / series episode / 24-7 file)
+  if (rawUrl.startsWith('/') && fs.existsSync(rawUrl)) {
+    return serveLocalMediaFileWithRange(req, res, rawUrl, null);
+  }
+
+  // 3. Expand Flussonic m4f://, MNF mnf://, or HTTP(S) (including 127.0.0.1:18888 RTMP Ingest!)
+  const streamObj =
+    sid > 0 && kind === 'live'
+      ? db.prepare('SELECT * FROM streams WHERE id = ?').get(sid) || { source_url: rawUrl }
+      : { source_url: rawUrl };
+
+  const candidates = expandStreamUpstreamUrls(streamObj);
+  const isLocalIngest = /^https?:\/\/127\.0\.0\.1:\d+\/live\//i.test(rawUrl);
+
+  for (const upstreamUrl of candidates) {
+    const cleanPath = upstreamUrl.split('?')[0].toLowerCase();
+    // Skip .flv backup candidate when HLS player requests .m3u8
+    if (isLocalIngest && cleanPath.endsWith('.flv')) continue;
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 7000);
+    req.on('close', () => ac.abort());
+
+    try {
+      const upRes = await fetch(upstreamUrl, {
+        headers: { 'User-Agent': streamObj.user_agent || 'TVLister-Monitor/2.3' },
+        redirect: 'follow',
+        signal: ac.signal,
+      });
+      clearTimeout(timer);
+
+      if (!upRes.ok || !upRes.body) continue;
+
+      const cType = (upRes.headers.get('content-type') || '').toLowerCase();
+      const isHls = cType.includes('mpegurl') || cleanPath.endsWith('.m3u8');
+
+      if (isHls) {
+        const manifestText = await upRes.text();
+        if (manifestText.includes('#EXTM3U')) {
+          const proxyPrefix = `/api/admin/preview/hls_seg`;
+          const rewritten = rewriteHlsManifestForProxy(
+            manifestText,
+            upRes.url || upstreamUrl,
+            proxyPrefix,
+            sid
+          ).replace(
+            /\/api\/admin\/preview\/hls_seg\?/g,
+            `/api/admin/preview/hls_seg?jwt=${encodeURIComponent(rawJwt)}&id=${sid}&`
+          );
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+          res.setHeader('Cache-Control', 'no-store');
+          return res.send(rewritten);
+        }
+      } else {
+        if (req.socket) req.socket.setTimeout(0);
+        res.setHeader('Content-Type', upRes.headers.get('content-type') || 'video/mp2t');
+        res.setHeader('Cache-Control', 'no-store');
+        return Readable.fromWeb(upRes.body).pipe(res);
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+
+  if (isLocalIngest) {
+    const keyMatch = rawUrl.match(/\/live\/([^/?#]+)/i);
+    const keyName = keyMatch ? keyMatch[1] : '';
+    const ep = keyName
+      ? db.prepare('SELECT status, publisher_ip FROM ingest_endpoints WHERE stream_key = ?').get(keyName)
+      : null;
+    const rtmpPort = db.prepare("SELECT value FROM settings WHERE key = 'ingest_rtmp_port'").get()?.value || '1935';
+    return res.status(404).json({
+      code: 'INGEST_WAITING',
+      streamKey: keyName,
+      ingestStatus: ep?.status || 'idle',
+      rtmpPort,
+      error:
+        ep?.status === 'live'
+          ? `Señal RTMP recibida (${ep.publisher_ip || 'encoder'}) — generando primeros segmentos de video HLS (espera 2 segundos)...`
+          : `Este canal RTMP está en espera de señal. Inicia transmisión desde OBS / vMix hacia rtmp://${req.hostname}:${rtmpPort}/live con clave "${keyName}".`,
+    });
+  }
+
+  return res.status(502).json({
+    code: 'UPSTREAM_ERROR',
+    error: 'La fuente de origen no respondió o está temporalmente fuera de línea.',
+  });
+});
+
 

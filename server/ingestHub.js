@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import { spawn, execFileSync } from 'child_process';
 import NodeMediaServer from 'node-media-server';
 import { db } from './db.js';
-import { isFfmpegAvailable } from './streamEngine.js';
+import { isFfmpegAvailable, getFfmpegBin } from './streamEngine.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -17,6 +17,7 @@ const MEDIAMTX_VERSION = 'v1.21.3';
 
 let mtxProcess = null;
 let nmsInstance = null;
+const nmsFfmpegWorkers = new Map(); // streamKey -> ChildProcess
 let rtspFallbackServer = null;
 let srtFallbackSocket = null;
 let activeEngineType = 'stopped'; // 'mediamtx' | 'native_node' | 'stopped'
@@ -50,7 +51,7 @@ export function getIngestConfig() {
     rtspPort: Number(getSetting('ingest_rtsp_port', '8554')) || 8554,
     hlsInternalPort: Number(getSetting('ingest_hls_port', '18888')) || 18888,
     apiInternalPort: Number(getSetting('ingest_api_port', '19997')) || 19997,
-    hlsVariant: getSetting('ingest_hls_variant', 'fmp4'),
+    hlsVariant: getSetting('ingest_hls_variant', 'mpegts'),
   };
 }
 
@@ -121,19 +122,20 @@ function buildMediaMtxYaml(cfg, mainPort) {
     'webrtc: false',
     'rtsp: true',
     'rtspTransports: [tcp, udp]',
-    `rtspAddress: :${cfg.rtspPort}`,
+    `rtspAddress: 0.0.0.0:${cfg.rtspPort}`,
     'rtspEncryption: "no"',
     'rtmp: true',
-    `rtmpAddress: :${cfg.rtmpPort}`,
+    `rtmpAddress: 0.0.0.0:${cfg.rtmpPort}`,
     'rtmpEncryption: "no"',
     'srt: true',
-    `srtAddress: :${cfg.srtPort}`,
+    `srtAddress: 0.0.0.0:${cfg.srtPort}`,
     'hls: true',
     `hlsAddress: 127.0.0.1:${cfg.hlsInternalPort}`,
+    'hlsAllowOrigins: ["*"]',
     'hlsAlwaysRemux: true',
-    `hlsVariant: ${cfg.hlsVariant || 'fmp4'}`,
+    `hlsVariant: ${cfg.hlsVariant || 'mpegts'}`,
     'hlsSegmentCount: 6',
-    'hlsSegmentDuration: 1s',
+    'hlsSegmentDuration: 2s',
     'paths:',
     '  all_others:',
     `    runOnReady: curl -fsS -X POST "http://127.0.0.1:${mainPort}/api/ingest/webhook?event=ready&secret=${webhookSecret}" -d "path=$MTX_PATH&sourceType=$MTX_SOURCE_TYPE" || true`,
@@ -146,7 +148,8 @@ function buildMediaMtxYaml(cfg, mainPort) {
 function startBuiltInNodeIngest(cfg) {
   fs.mkdirSync(RUNTIME_STREAM_DIR, { recursive: true });
 
-  // 1. Built-in RTMP 1.0 + HTTP-FLV/HLS Server (NodeMediaServer)
+  // 1. Built-in RTMP 1.0 + HTTP-FLV/HLS Static Server (NodeMediaServer)
+  // Note: We supervise FFmpeg RTMP->HLS transmuxing directly on postPublish instead of NodeMediaServer's legacy NodeTransServer.
   const nmsCfg = {
     logType: 1,
     rtmp: {
@@ -162,23 +165,6 @@ function startBuiltInNodeIngest(cfg) {
       allow_origin: '*',
     },
   };
-
-  if (isFfmpegAvailable()) {
-    const ffBin = fs.existsSync(path.join(RUNTIME_BIN_DIR, 'ffmpeg'))
-      ? path.join(RUNTIME_BIN_DIR, 'ffmpeg')
-      : 'ffmpeg';
-    nmsCfg.trans = {
-      ffmpeg: ffBin,
-      tasks: [
-        {
-          app: 'live',
-          hls: true,
-          hlsFlags: '[hls_time=2:hls_list_size=5:hls_flags=delete_segments]',
-          hlsKeep: false,
-        },
-      ],
-    };
-  }
 
   nmsInstance = new NodeMediaServer(nmsCfg);
 
@@ -199,9 +185,75 @@ function startBuiltInNodeIngest(cfg) {
     }
   });
 
+  nmsInstance.on('postPublish', (_id, StreamPath) => {
+    const key = extractStreamKeyFromPath(StreamPath);
+    if (!key || !isFfmpegAvailable()) return;
+
+    const existingProc = nmsFfmpegWorkers.get(key);
+    if (existingProc) {
+      try { existingProc.kill('SIGTERM'); } catch {}
+      nmsFfmpegWorkers.delete(key);
+    }
+
+    const outDir = path.join(RUNTIME_STREAM_DIR, 'live', key);
+    fs.mkdirSync(outDir, { recursive: true });
+    // Remove stale manifest/segments from previous session
+    try {
+      for (const f of fs.readdirSync(outDir)) {
+        if (f.endsWith('.ts') || f.endsWith('.m3u8') || f.endsWith('.m4s')) {
+          fs.unlinkSync(path.join(outDir, f));
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    const ffBin = getFfmpegBin();
+    const inRtmp = `rtmp://127.0.0.1:${cfg.rtmpPort}${StreamPath}`;
+    const outM3u8 = path.join(outDir, 'index.m3u8');
+    const segPattern = path.join(outDir, 'seg_%05d.ts');
+
+    const ffArgs = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel', 'warning',
+      '-fflags', '+genpts',
+      '-i', inRtmp,
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-ar', '44100',
+      '-ac', '2',
+      '-f', 'hls',
+      '-hls_time', '2',
+      '-hls_list_size', '6',
+      '-hls_flags', 'delete_segments+independent_segments',
+      '-hls_segment_filename', segPattern,
+      outM3u8,
+    ];
+
+    const proc = spawn(ffBin, ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
+    proc.stderr.on('data', (chunk) => {
+      const msg = chunk.toString('utf8').trim();
+      if (msg) pushLog(`[FFmpeg ${key}] ${msg.split('\n')[0]}`);
+    });
+    proc.on('exit', () => {
+      if (nmsFfmpegWorkers.get(key) === proc) {
+        nmsFfmpegWorkers.delete(key);
+      }
+    });
+    nmsFfmpegWorkers.set(key, proc);
+    pushLog(`[HLS] Transmuxer FFmpeg activo -> ${outM3u8}`);
+  });
+
   nmsInstance.on('donePublish', (_id, StreamPath) => {
     const key = extractStreamKeyFromPath(StreamPath);
     if (key) {
+      const proc = nmsFfmpegWorkers.get(key);
+      if (proc) {
+        try { proc.kill('SIGTERM'); } catch {}
+        nmsFfmpegWorkers.delete(key);
+      }
       db.prepare("UPDATE ingest_endpoints SET status = 'idle' WHERE stream_key = ?").run(key);
       pushLog(`[RTMP] Publicación finalizada en ${StreamPath}`);
     }
@@ -345,7 +397,35 @@ export async function startIngestServer(mainPort = currentMainPort) {
     cfg = getIngestConfig();
   }
 
-  const binPath = findMediaMtxBinary();
+  // Keep existing linked RTMP/SRT/RTSP streams synced to active hlsInternalPort and included in Bouquet #1
+  try {
+    const eps = db.prepare('SELECT stream_key, linked_stream_id FROM ingest_endpoints WHERE linked_stream_id IS NOT NULL').all();
+    const b1 = db.prepare('SELECT id, stream_ids_json FROM bouquets ORDER BY id ASC LIMIT 1').get();
+    const b1Ids = b1 ? JSON.parse(b1.stream_ids_json || '[]') : [];
+    let b1Dirty = false;
+    for (const ep of eps) {
+      const hlsUrl = `http://127.0.0.1:${cfg.hlsInternalPort}/live/${ep.stream_key}/index.m3u8`;
+      const flvUrl = `http://127.0.0.1:${cfg.hlsInternalPort}/live/${ep.stream_key}.flv`;
+      db.prepare('UPDATE streams SET source_url = ?, backup_url = ? WHERE id = ?').run(hlsUrl, flvUrl, ep.linked_stream_id);
+      if (b1 && !b1Ids.includes(Number(ep.linked_stream_id))) {
+        b1Ids.push(Number(ep.linked_stream_id));
+        b1Dirty = true;
+      }
+    }
+    if (b1 && b1Dirty) {
+      db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?').run(JSON.stringify(b1Ids), b1.id);
+    }
+  } catch {
+    // ignore
+  }
+
+  let binPath = findMediaMtxBinary();
+  if (!binPath) {
+    const attempt = await installMediaMtxBinary();
+    if (attempt.installed) {
+      binPath = attempt.binPath;
+    }
+  }
 
   // Prefer standalone MediaMTX v1.21.3 if installed, otherwise run Built-in Native Node Engine!
   if (!binPath) {
@@ -373,6 +453,7 @@ export async function startIngestServer(mainPort = currentMainPort) {
     if (mtxLogs.length > 60) mtxLogs = mtxLogs.slice(-60);
   };
 
+  const spawnTime = Date.now();
   proc.stdout.on('data', appendLog);
   proc.stderr.on('data', appendLog);
   proc.on('exit', (code) => {
@@ -383,6 +464,11 @@ export async function startIngestServer(mainPort = currentMainPort) {
         mtxLastError = mtxLastError || `Proceso MediaMTX finalizó con código ${code}`;
       }
       db.prepare("UPDATE ingest_endpoints SET status = 'idle'").run();
+      // If MediaMTX exited immediately on startup, fall back automatically to Built-in Node Engine
+      if (code && code !== 0 && Date.now() - spawnTime < 4000) {
+        pushLog(`[Ingest] MediaMTX salió (${code}); activando Motor Nativo Node de respaldo...`);
+        startBuiltInNodeIngest(cfg);
+      }
     }
   });
 
@@ -400,6 +486,14 @@ export function stopIngestServer() {
     }
     mtxProcess = null;
   }
+  for (const proc of nmsFfmpegWorkers.values()) {
+    try {
+      proc.kill('SIGTERM');
+    } catch {
+      // ignore
+    }
+  }
+  nmsFfmpegWorkers.clear();
   if (nmsInstance) {
     try {
       nmsInstance.stop();
@@ -607,6 +701,15 @@ export function createIngestEndpoint({
         `)
         .run(String(name).trim(), targetCatId, internalHls, internalFlv);
       linkedStreamId = Number(streamRes.lastInsertRowid);
+
+      const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
+      if (b1) {
+        const arr = JSON.parse(b1.stream_ids_json || '[]');
+        if (!arr.includes(linkedStreamId)) {
+          arr.push(linkedStreamId);
+          db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?').run(JSON.stringify(arr), b1.id);
+        }
+      }
     }
 
     const res = db
