@@ -65,7 +65,10 @@ import {
 import {
   getResolutionScanStatus,
   startResolutionAutoClassifyJob,
-  detectSingleStreamResolution
+  detectSingleStreamResolution,
+  getAutoPilotConfig,
+  saveAutoPilotConfig,
+  startResolutionAutoPilotDaemon
 } from './resolutionClassifier.js';
 import {
   iptvRouter,
@@ -955,7 +958,50 @@ app.post('/api/streams/bulk-action', requireAuth, requireAdmin, (req, res) => {
 });
 
 app.get('/api/streams/auto-resolution/status', requireAuth, (req, res) => {
-  res.json(getResolutionScanStatus());
+  res.json({
+    ...getResolutionScanStatus(),
+    pilot: getAutoPilotConfig()
+  });
+});
+
+app.put('/api/streams/auto-resolution/pilot', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const b = req.body || {};
+    const pilot = saveAutoPilotConfig(b);
+    let job = getResolutionScanStatus();
+    // When Auto-Pilot is turned ON, immediately scan & convert existing streams automatically!
+    if (pilot.enabled && b.scanNow !== false && !job.running) {
+      let launchIdx = 0;
+      const totalStreams = db.prepare('SELECT COUNT(*) as c FROM streams').get()?.c || 0;
+      if (totalStreams > 0) {
+        job = startResolutionAutoClassifyJob({
+          scope: 'all',
+          probeLive: true,
+          stream_mode: pilot.stream_mode,
+          sdKbps: pilot.sdKbps,
+          hdKbps: pilot.hdKbps,
+          fhdKbps: pilot.fhdKbps,
+          onStreamUpdated: (sid, dbMode, nextStatus) => {
+            if (dbMode === 'transcode' && nextStatus === 'running') {
+              const delay = (launchIdx++ % 40) * 80;
+              setTimeout(() => {
+                try {
+                  launchStreamWorkerIfNeeded(sid);
+                } catch {
+                  // ignore
+                }
+              }, delay).unref?.();
+            } else {
+              db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(sid);
+            }
+          }
+        });
+      }
+    }
+    res.json({ ok: true, pilot, job });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post('/api/streams/auto-resolution/run', requireAuth, requireAdmin, (req, res) => {
@@ -3121,6 +3167,13 @@ async function startServer() {
       await startIngestServer(PORT);
     }
     startVodFolderAutoSyncScheduler();
+    startResolutionAutoPilotDaemon((sid, dbMode, nextStatus) => {
+      if (dbMode === 'transcode' && nextStatus === 'running') {
+        launchStreamWorkerIfNeeded(sid);
+      } else {
+        db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(sid);
+      }
+    });
   });
 }
 

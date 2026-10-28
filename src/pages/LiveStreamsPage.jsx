@@ -193,7 +193,44 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   useEffect(() => {
     loadAll();
     loadSlates();
+    apiFetch('/api/streams/auto-resolution/status')
+      .then((st) => {
+        setAutoResStatus(st);
+        if (st?.pilot) {
+          setAutoResForm((f) => ({
+            ...f,
+            stream_mode: st.pilot.stream_mode || f.stream_mode,
+            sdKbps: st.pilot.sdKbps || f.sdKbps,
+            hdKbps: st.pilot.hdKbps || f.hdKbps,
+            fhdKbps: st.pilot.fhdKbps || f.fhdKbps
+          }));
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  const handleToggleAutoPilot = async (nextEnabled) => {
+    try {
+      const res = await apiFetch('/api/streams/auto-resolution/pilot', {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled: nextEnabled,
+          stream_mode: autoResForm.stream_mode,
+          sdKbps: autoResForm.sdKbps,
+          hdKbps: autoResForm.hdKbps,
+          fhdKbps: autoResForm.fhdKbps,
+          scanNow: true
+        })
+      });
+      setAutoResStatus({ ...(res.job || autoResStatus || {}), pilot: res.pilot });
+      if (nextEnabled) {
+        setBulkNotice('🤖 Auto-Piloto activado: los canales se analizan y cambian solos a 1M / 2.5M / 3M.');
+        setTimeout(() => setBulkNotice(''), 5500);
+      }
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
 
   useEffect(() => {
     if (!autoResOpen && !autoResStatus?.running) return undefined;
@@ -988,6 +1025,11 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
             >
               <Monitor className="w-4 h-4" />
               Auto-Resolución (1M / 2.5M / 3M)
+              {autoResStatus?.pilot?.enabled && !autoResStatus?.running && (
+                <span className="ml-1 px-1.5 py-0.5 rounded bg-emerald-500/30 text-emerald-200 font-mono text-[9px] font-bold">
+                  AUTO ON
+                </span>
+              )}
               {autoResStatus?.running && (
                 <span className="ml-1 px-1.5 py-0.5 rounded bg-emerald-500 text-slate-950 font-mono text-[10px] font-bold animate-pulse">
                   {autoResStatus.completed}/{autoResStatus.total}
@@ -2769,6 +2811,46 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
             </div>
 
             <form onSubmit={handleRunAutoResolution} className="space-y-4">
+              {/* 1-Click Permanent Auto-Pilot Banner */}
+              <div
+                className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                  autoResStatus?.pilot?.enabled
+                    ? 'bg-emerald-500/15 border-emerald-400/50'
+                    : 'bg-[#090e1a] border-slate-700'
+                }`}
+              >
+                <div className="space-y-1">
+                  <div className="text-xs font-bold text-white flex items-center gap-2">
+                    <span>🤖 Auto-Piloto Permanente (Que se cambien solos)</span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        autoResStatus?.pilot?.enabled
+                          ? 'bg-emerald-500 text-slate-950'
+                          : 'bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {autoResStatus?.pilot?.enabled ? 'ACTIVADO' : 'APAGADO'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Al activarlo, el panel saca tus canales del perfil fijo <strong>Copy/Copy 2.5M</strong>, mide sus píxeles reales (<strong>≤580p = SD 1M</strong>, <strong>720p = HD 2.5M</strong>, <strong>1080p = FHD 3M</strong>) y vigila en segundo plano cualquier canal nuevo o que cambie de calidad para ajustarlo solo.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleToggleAutoPilot(!autoResStatus?.pilot?.enabled)}
+                  className={`px-4 py-2.5 rounded-xl text-xs font-bold shrink-0 transition shadow-lg ${
+                    autoResStatus?.pilot?.enabled
+                      ? 'bg-slate-800 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40'
+                      : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                  }`}
+                >
+                  {autoResStatus?.pilot?.enabled
+                    ? 'Desactivar Auto-Piloto'
+                    : '⚡ Activar Auto-Piloto Ahora'}
+                </button>
+              </div>
+
               {/* 3 Bitrate Tiers */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="p-3.5 rounded-xl bg-teal-500/10 border border-teal-500/30 space-y-1.5">

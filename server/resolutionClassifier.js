@@ -491,3 +491,154 @@ export function startResolutionAutoClassifyJob({
 
   return currentScanJob;
 }
+
+// ==================== AUTONOMOUS AUTO-PILOT ("CAMBIAR SOLOS") ====================
+function getSettingVal(key, fallback) {
+  try {
+    const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return r?.value !== undefined && r?.value !== null && r?.value !== '' ? r.value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function setSettingVal(key, val) {
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, String(val));
+}
+
+export function getAutoPilotConfig() {
+  return {
+    enabled: getSettingVal('auto_res_pilot_enabled', 'false') === 'true',
+    stream_mode: getSettingVal('auto_res_pilot_mode', 'ondemand'),
+    sdKbps: Number(getSettingVal('auto_res_sd_kbps', '1000')) || 1000,
+    hdKbps: Number(getSettingVal('auto_res_hd_kbps', '2500')) || 2500,
+    fhdKbps: Number(getSettingVal('auto_res_fhd_kbps', '3000')) || 3000
+  };
+}
+
+export function saveAutoPilotConfig(cfg = {}) {
+  if (cfg.enabled !== undefined) setSettingVal('auto_res_pilot_enabled', cfg.enabled ? 'true' : 'false');
+  if (cfg.stream_mode) setSettingVal('auto_res_pilot_mode', cfg.stream_mode);
+  if (cfg.sdKbps) setSettingVal('auto_res_sd_kbps', Number(cfg.sdKbps) || 1000);
+  if (cfg.hdKbps) setSettingVal('auto_res_hd_kbps', Number(cfg.hdKbps) || 2500);
+  if (cfg.fhdKbps) setSettingVal('auto_res_fhd_kbps', Number(cfg.fhdKbps) || 3000);
+  return getAutoPilotConfig();
+}
+
+const recentLiveChecks = new Map();
+
+export async function autoCheckSingleStreamOnPlay(streamId, onStreamSwitched = null) {
+  const pilot = getAutoPilotConfig();
+  if (!pilot.enabled) return;
+
+  const now = Date.now();
+  const lastCheck = recentLiveChecks.get(streamId) || 0;
+  // Re-verify at most once every 20 minutes per stream while playing
+  if (now - lastCheck < 20 * 60 * 1000) return;
+  recentLiveChecks.set(streamId, now);
+
+  const st = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId);
+  if (!st) return;
+
+  const customBitrates = { sd: pilot.sdKbps, hd: pilot.hdKbps, fhd: pilot.fhdKbps };
+  const res = await detectSingleStreamResolution(st, { probeLive: true, customBitrates });
+  if (res.source === 'name_hint' && st.resolution_source === 'probed') return;
+
+  const useCopyCodec = pilot.stream_mode === 'copy_ondemand' || pilot.stream_mode === 'copy_transcode';
+  const { sdProfileId, hdProfileId, fhdProfileId } = ensureTierProfilesInDb({
+    sdKbps: pilot.sdKbps,
+    hdKbps: pilot.hdKbps,
+    fhdKbps: pilot.fhdKbps,
+    useCopyCodec
+  });
+  const targetProfId = res.tier === 'sd' ? sdProfileId : res.tier === 'fhd' ? fhdProfileId : hdProfileId;
+
+  const changed =
+    st.resolution_tier !== res.tier ||
+    Number(st.transcode_profile_id) !== Number(targetProfId) ||
+    Number(st.bitrate_kbps) !== Number(res.bitrateKbps);
+
+  db.prepare(
+    `UPDATE streams
+     SET detected_resolution = ?, resolution_tier = ?, resolution_source = ?,
+         transcode_profile_id = ?, bitrate_kbps = ?
+     WHERE id = ?`
+  ).run(res.resolution, res.tier, res.source, targetProfId, res.bitrateKbps, streamId);
+
+  if (changed && typeof onStreamSwitched === 'function') {
+    onStreamSwitched(streamId);
+  }
+}
+
+let lastFallbackRetryMs = 0;
+
+export function startResolutionAutoPilotDaemon(onStreamUpdated = null) {
+  const tick = () => {
+    try {
+      const pilot = getAutoPilotConfig();
+      if (!pilot.enabled || currentScanJob.running) return;
+
+      // 1) Any newly added / imported stream with no tier yet -> classify immediately!
+      const unclassified = db
+        .prepare("SELECT id FROM streams WHERE resolution_tier IS NULL OR resolution_tier = '' LIMIT 50")
+        .all()
+        .map((r) => r.id);
+
+      if (unclassified.length > 0) {
+        startResolutionAutoClassifyJob({
+          scope: 'selected',
+          ids: unclassified,
+          probeLive: true,
+          stream_mode: pilot.stream_mode,
+          sdKbps: pilot.sdKbps,
+          hdKbps: pilot.hdKbps,
+          fhdKbps: pilot.fhdKbps,
+          onStreamUpdated
+        });
+        return;
+      }
+
+      // 2) Re-verify any currently active/playing stream (at most once per 20 min per stream)
+      const activePlaying = db
+        .prepare("SELECT id FROM streams WHERE status = 'running' LIMIT 6")
+        .all();
+      for (const ap of activePlaying) {
+        autoCheckSingleStreamOnPlay(ap.id, (sid) => {
+          const fresh = db.prepare('SELECT stream_mode, status FROM streams WHERE id = ?').get(sid);
+          if (fresh && typeof onStreamUpdated === 'function') {
+            onStreamUpdated(sid, fresh.stream_mode, fresh.status);
+          }
+        }).catch(() => {});
+      }
+
+      // 3) Every 15 minutes, retry up to 12 channels that were offline earlier (name_hint)
+      if (Date.now() - lastFallbackRetryMs > 15 * 60 * 1000) {
+        lastFallbackRetryMs = Date.now();
+        const hintStreams = db
+          .prepare("SELECT id FROM streams WHERE resolution_source = 'name_hint' LIMIT 12")
+          .all()
+          .map((r) => r.id);
+        if (hintStreams.length > 0) {
+          startResolutionAutoClassifyJob({
+            scope: 'selected',
+            ids: hintStreams,
+            probeLive: true,
+            stream_mode: pilot.stream_mode,
+            sdKbps: pilot.sdKbps,
+            hdKbps: pilot.hdKbps,
+            fhdKbps: pilot.fhdKbps,
+            onStreamUpdated
+          });
+        }
+      }
+    } catch {
+      // ignore background tick errors
+    }
+  };
+
+  const timer = setInterval(tick, 45 * 1000);
+  timer.unref?.();
+}
+
