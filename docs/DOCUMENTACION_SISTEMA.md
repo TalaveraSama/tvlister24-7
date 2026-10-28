@@ -588,3 +588,27 @@ curl -s -X POST http://127.0.0.1:8095/api/streams/bulk-replace-host \
   -d '{"scope":"all","oldHost":"38.226.161.148","newHost":"NUEVA_IP","newPort":"2095","apply":false}'
 # Cuando el preview sea correcto, repetir con "apply": true
 ```
+
+### 8.9. Nota: el panel estilo XUI.one fue retirado (motor FFmpeg original)
+
+La tarjeta **"Segmentación HLS / FFmpeg (Estilo XUI.one)"** (Segment Duration, LList Size, Delete Threshold,
+Max Segment Wait, Analysis/Probe, `-f segment`, Show Warnings, Ignore Keyframes, DTS v4, Loopback, Restart on
+Audio Loss, Priority Backup) **se eliminó** junto con su API (`/api/system/segments`,
+`/api/streams/:id/segments`, `/api/streams/:id/detect-audio`) y el vigilante `streamHealth`.
+
+**Motivo:** priorizar el motor que ya venía funcionando estable y rápido (descrito en §8.5 y §8.6).
+El motor actual vuelve a usar valores fijos y probados, sin parámetros experimentales:
+
+```
+-probesize 5000000 -analyzeduration 4000000
+-fflags +genpts+igndts+nobuffer+discardcorrupt -flags low_delay
+-map 0:v:0 -map 0:a:0? -c:v copy -c:a copy
+-f hls -hls_time 2 -hls_list_size 6
+-hls_flags delete_segments+independent_segments+omit_endlist
+```
+
+- Un solo hilo (`-threads 1`) en Copy/Copy, RAMDisk nativo y tailer ordenado de segmentos (§8.6).
+- No se aplica `-hls_delete_threshold` ni `split_by_time` ni selección automática de pista de audio:
+  se publica la primera pista disponible (`0:a:0?`), igual que antes.
+- Las secciones §8.5 (motor eficiente), §8.6 (diagnóstico de pegones) y §8.8 (cambio masivo de IP/puerto)
+  siguen vigentes.
