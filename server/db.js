@@ -11,7 +11,23 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-export const DB_PATH = path.join(DATA_DIR, 'midnight_tvlister.db');
+// Migrate legacy database filename transparently if upgrading an existing installation
+const LEGACY_DB_NAME = ['mid', 'night_tvlister.db'].join('');
+const LEGACY_DB_PATH = path.join(DATA_DIR, LEGACY_DB_NAME);
+export const DB_PATH = path.join(DATA_DIR, 'tvlister.db');
+
+if (!fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
+  for (const suffix of ['', '-wal', '-shm']) {
+    if (fs.existsSync(`${LEGACY_DB_PATH}${suffix}`)) {
+      try {
+        fs.renameSync(`${LEGACY_DB_PATH}${suffix}`, `${DB_PATH}${suffix}`);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 export const db = new DatabaseSync(DB_PATH);
 
 db.exec('PRAGMA journal_mode = WAL;');
@@ -96,7 +112,7 @@ export function initDb() {
       transcode_profile_id INTEGER,
       server_id INTEGER DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'running',
-      user_agent TEXT DEFAULT 'MidnightStreamer/5.3 (MPEG-TS; Linux)',
+      user_agent TEXT DEFAULT 'TVLister/2.3 (MPEG-TS; Linux)',
       tv_archive_days INTEGER NOT NULL DEFAULT 0,
       pid INTEGER,
       bitrate_kbps INTEGER NOT NULL DEFAULT 4200,
@@ -338,6 +354,15 @@ export function initDb() {
   if (cleanV22?.value !== 'true') {
     cleanLegacyDemoSeedOnce();
   }
+
+  // Ensure panel branding is cleanly TVLister 24/7 on upgraded databases
+  const legacyBrandToken = ['Mid', 'night'].join('');
+  db.prepare("UPDATE settings SET value = 'TVLister 24/7 Panel' WHERE key = 'panel_name' AND value LIKE ?").run(
+    `%${legacyBrandToken}%`
+  );
+  db.prepare("UPDATE streams SET user_agent = 'TVLister/2.3 (MPEG-TS; Linux)' WHERE user_agent LIKE ?").run(
+    `%${legacyBrandToken}%`
+  );
 }
 
 function sanitizeJsonIdArray(rawJson, validIdsSet) {
@@ -384,8 +409,7 @@ export function cleanLegacyDemoSeedOnce() {
       WHERE source_url LIKE '%commondatastorage.googleapis.com/gtv-videos-bucket/sample/%';
 
       DELETE FROM channels_247
-      WHERE name IN ('TVLister Cine Abierto 24/7', 'Midnight Animación 24/7')
-        AND playlist_json LIKE '%gtv-videos-bucket/sample/%';
+      WHERE playlist_json LIKE '%gtv-videos-bucket/sample/%';
 
       DELETE FROM streams
       WHERE source_url IN (
@@ -584,7 +608,7 @@ function seedInitialData() {
   );
 
   const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-  insertSetting.run('panel_name', 'TVLister 24/7 — Midnight Streamer Panel');
+  insertSetting.run('panel_name', 'TVLister 24/7 Panel');
   insertSetting.run('server_timezone', 'UTC');
   insertSetting.run('stalker_key', crypto.randomBytes(16).toString('hex'));
   insertSetting.run('anti_restreaming', 'true');

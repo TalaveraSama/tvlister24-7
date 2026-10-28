@@ -1,4 +1,4 @@
-# TVLister 24/7 — Midnight Streamer OTT/VOD Panel (v2.2 Producción Total)
+# Panel TVLister 24/7 — Servidor IPTV / OTT / VOD (v2.3 Producción Total)
 
 Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, **Canales Lineales 24/7 (Playout Continuo)**, **Películas y Series VOD**, **Importación Nativa desde Base de Datos XUI.one**, **Blindaje Stream Shield Proxy (TS + HLS)**, **Líneas M3U / Xtream API / MAG Stalker / Enigma2**, **Módulo de Resellers con Créditos** y **Portal Cliente WebTV HTML5**.
 

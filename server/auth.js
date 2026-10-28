@@ -173,7 +173,7 @@ export function firewallMiddleware(req, res, next) {
     } else {
       rate.count += 1;
       if (rate.count > snap.maxPerMin) {
-        return res.status(429).json({ error: 'Too many requests (Midnight Flood Protection)' });
+        return res.status(429).json({ error: 'Too many requests (TVLister Flood Protection)' });
       }
     }
   }
@@ -188,10 +188,10 @@ export function firewallMiddleware(req, res, next) {
 
   for (const rule of snap.rules) {
     if (rule.rule_type === 'ip' && rule.value && clientIp === rule.value.trim()) {
-      return res.status(403).json({ error: 'Access denied by Midnight Firewall (IP Blocked)' });
+      return res.status(403).json({ error: 'Access denied by TVLister Firewall (IP Blocked)' });
     }
     if (rule.rule_type === 'user_agent' && rule.value && ua.includes(rule.value.toLowerCase().trim())) {
-      return res.status(403).json({ error: 'Access denied by Midnight Firewall (User-Agent Blocked)' });
+      return res.status(403).json({ error: 'Access denied by TVLister Firewall (User-Agent Blocked)' });
     }
   }
   next();

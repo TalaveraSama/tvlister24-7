@@ -85,7 +85,7 @@ export default function ServersSecurityPage() {
     setSys(data);
     setReadiness(rdy);
     setSettingsForm({
-      panel_name: data.settings?.panel_name || 'TVLister 24/7 — Midnight Streamer Panel',
+      panel_name: data.settings?.panel_name || 'TVLister 24/7 Panel',
       server_timezone: data.settings?.server_timezone || 'UTC',
       default_output_format: data.settings?.default_output_format || 'hls',
       anti_restreaming: data.settings?.anti_restreaming || 'true',

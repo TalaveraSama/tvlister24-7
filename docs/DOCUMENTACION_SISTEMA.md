@@ -1,5 +1,5 @@
 # Manual Completo del Panel, Guía de Uso y Arquitectura Tecnológica
-**TVLister 24/7 — Midnight Streamer Edition (Versión Producción Total v2.2)**
+**Panel TVLister 24/7 — Servidor IPTV / OTT / VOD (Versión Producción Total v2.3)**
 
 ---
 
@@ -27,7 +27,7 @@
 
 ## 1. ¿Qué es TVLister 24/7 y para qué sirve?
 
-**TVLister 24/7 (Midnight Edition)** es una plataforma auto-hospedada (*self-hosted*) de **gestión profesional IPTV / OTT / VOD y creación de Canales Lineales 24/7**, diseñada para servidores Linux Ubuntu/Debian en producción real.
+**Panel TVLister 24/7** es una plataforma auto-hospedada (*self-hosted*) de **gestión profesional IPTV / OTT / VOD y creación de Canales Lineales 24/7**, diseñada para servidores Linux Ubuntu/Debian en producción real.
 
 Permite centralizar en un único panel limpio y ultrarrápido:
 * **Distribución de Canales en Vivo, Películas VOD y Series completas** hacia cualquier aplicación comercial (*TiviMate, IPTV Smarters Pro, XCIPTV, Televizo, VLC, Kodi, cajas MAG Stalker, receptores Enigma2 y navegadores Web*).
@@ -47,7 +47,7 @@ El sistema está construido con tecnologías modernas, ligeras y sin dependencia
 | :--- | :--- | :--- |
 | **Entorno de Ejecución** | **Node.js v22 LTS** (aislado en `.runtime/node`) | Motor asíncrono de alto rendimiento capaz de sostener miles de conexiones HTTP/streaming concurrentes con bajo consumo de RAM. |
 | **Servidor HTTP / API** | **Express.js 4** + `http.Server` nativo | Enrutamiento REST para el panel administrativo, API Xtream Codes (`/player_api.php`, `/get.php`), Portal MAG Stalker (`/c/`) y entrega de video sin límite de *timeout*. |
-| **Base de Datos Principal** | **SQLite 3 Nativa (`node:sqlite`) en modo WAL** | Base de datos transaccional ACID embebida en Node 22 (`data/midnight_tvlister.db`). El modo *Write-Ahead Logging (WAL)* permite lecturas y escrituras simultáneas ultrarrápidas sin servidor externo. |
+| **Base de Datos Principal** | **SQLite 3 Nativa (`node:sqlite`) en modo WAL** | Base de datos transaccional ACID embebida en Node 22 (`data/tvlister.db`). El modo *Write-Ahead Logging (WAL)* permite lecturas y escrituras simultáneas ultrarrápidas sin servidor externo. |
 | **Conector Migración XUI.one** | **`mysql2/promise`** + Parser SQL/GZIP (`node:zlib`) | Conecta en modo solo-lectura a MariaDB 10.6 / MySQL por socket Unix local (`/run/mysqld/mysqld.sock`), TCP remoto o archivos `mysqldump` `.sql` / `.sql.gz`. |
 | **Transcodificación & DVR** | **FFmpeg** (`libx264`, `h264_nvenc`, `h264_qsv`, `copy`) | Supervisor de procesos con auto-reconexión automática para transcodificar canales, emitir canales 24/7 en HLS real y grabar segmentos **TV Archive / Catchup DVR**. |
 | **Entrega VOD Local** | **Motor HTTP `206 Partial Content` (*Byte-Range*)** | Sirve películas/series locales (`.mp4`, `.mkv`, `.ts`, `.avi`) directamente desde el disco del servidor (incluyendo rutas `/home/xui/...`) permitiendo adelantar/retroceder instantáneamente en 4K. |
@@ -57,7 +57,7 @@ El sistema está construido con tecnologías modernas, ligeras y sin dependencia
 | Capa / Componente | Tecnología Utilizada | Función en el Panel |
 | :--- | :--- | :--- |
 | **Interfaz Administrativa** | **React 18** + **Vite 6** | Aplicación SPA instantánea compilada en *chunks* optimizados (`dist/`) sin recargas de página. |
-| **Diseño Visual** | **Tailwind CSS 3** + **Lucide Icons** | Interfaz oscura *Midnight Dark* responsiva (adaptable a PC, tablet y móvil) diseñada para centros de monitoreo NOC 24/7. |
+| **Diseño Visual** | **Tailwind CSS 3** + **Lucide Icons** | Interfaz oscura *TVLister Dark* responsiva (adaptable a PC, tablet y móvil) diseñada para centros de monitoreo NOC 24/7. |
 | **Motor de Video Web** | **`hls.js`** + **HTML5 `<video>`** | Reproducción nativa de flujos HLS `.m3u8` (con ABR multi-bitrate) y contenedores MP4 tanto en la vista previa del administrador como en el **Portal Cliente WebTV**. |
 
 ### Infraestructura Linux y Despliegue
@@ -90,7 +90,7 @@ El sistema está construido con tecnologías modernas, ligeras y sin dependencia
         ▼                          ▼                          ▼
 ┌───────────────────┐   ┌──────────────────────┐   ┌─────────────────────────┐
 │ SQLite 3 (WAL)    │   │ Motor FFmpeg & DVR   │   │ Importador XUI.one      │
-│ midnight_tvlister │   │ • Canales 24/7 HLS   │   │ (Solo-Lectura Segura)   │
+│ data/tvlister.db  │   │ • Canales 24/7 HLS   │   │ (Solo-Lectura Segura)   │
 │ • Streams / VOD   │   │ • Auto-Wake OnDemand │   │ • Socket MariaDB /xui   │
 │ • Líneas / Créd.  │   │ • Catchup Timeshift  │   │ • MySQL Remoto / .sql   │
 └───────────────────┘   └──────────────────────┘   └─────────────────────────┘
@@ -346,7 +346,7 @@ tvlister-admin logs
 | `GET /get.php` | Generador `#EXTM3U` (`output=hls`, `output=ts` o `output=mnf`) con `tvg-id`, `tvg-logo` y `catchup-source`. |
 | `GET/POST /player_api.php` | API completa Xtream Codes (`get_live_categories`, `get_live_streams`, `get_vod_categories`, `get_vod_streams`, `get_vod_info`, `get_series_categories`, `get_series`, `get_series_info`, `get_short_epg`). |
 | `GET /live/:u/:p/:id.m3u8` o `.ts` | Entrega autenticada de canales en vivo y canales 24/7 (`10000 + id`), incluyendo fuentes Flussonic `m4f://` y trunking `mnf://`. |
-| `GET /mnf/:u/:p/:id.mnf` | Streaming binario en vivo **MNF v1 (*Midnight NanoFrame*)** con overhead `< 0.25%` y ráfaga GOP Keyframe `< 35 ms`. |
+| `GET /mnf/:u/:p/:id.mnf` | Streaming binario en vivo **MNF v1 (*TVLister Media NanoFrame*)** con overhead `< 0.25%` y ráfaga GOP Keyframe `< 35 ms`. |
 | `WS /ws/mnf/:u/:p/:id` | Transporte WebSocket binario en tiempo real del protocolo **MNF v1** para reproductores de ultrabaja latencia. |
 | `GET /hls_proxy/:u/:p/:streamId` | Proxy *Stream Shield* de manifiestos HLS y CMAF fMP4 (`#EXT-X-MAP`) firmados con HMAC-SHA256. |
 | `GET /hls_out/:u/:p/:key/:file` | Servidor de segmentos `.ts` locales generados por workers de transcodificación FFmpeg. |
@@ -355,7 +355,7 @@ tvlister-admin logs
 | `GET /timeshift/:u/:p/:dur/:start/:id.m3u8` | Reproducción diferida *Catchup / TV Archive* a partir de segmentos grabados por epoch. |
 | `GET/POST /server/load.php` y `/c/` | Middleware emulador Stalker / Ministra para cajas STB MAG autenticadas por MAC. |
 
-### 7.2. Esquema Principal en SQLite (`data/midnight_tvlister.db`)
+### 7.2. Esquema Principal en SQLite (`data/tvlister.db`)
 * **`users`**: Cuentas `admin` y `reseller`, hash PBKDF2, saldo de créditos y `xui_id`.
 * **`lines`**: Suscriptores finales, clave, expiración ISO-8601, `max_connections`, tipo (`m3u`, `mag`, `enigma2`), `mac_address`, `bouquet_ids_json`, `allowed_ips` y `xui_id`.
 * **`categories`** y **`bouquets`**: Clasificación y paquetes de acceso para canales, 24/7, VOD y series.
@@ -379,7 +379,7 @@ Desde el menú lateral **Ingesta, Flussonic & MNF**, TVLister 24/7 incorpora cua
 3. **Servidor Propio de Ingesta en Vivo (RTMP + SRT + RTSP)**:
    * Basado en binario aislado **MediaMTX v1.21.3** en `.runtime/bin/mediamtx` (instalación 1-click *Zero-Apt*, 100% compatible con servidores donde convive XUI.one).
    * Genera claves `stream_key` autenticadas por HTTP contra SQLite para recibir señales en vivo desde **OBS Studio**, **vMix**, **Larix Broadcaster**, encoders **SRT** o cámaras **RTSP**, empaquetándolas automáticamente en CMAF `fmp4` de baja latencia.
-4. **Protocolo Propio Ultraligero MNF v1 (*Midnight NanoFrame*)**:
+4. **Protocolo Propio Ultraligero MNF v1 (*TVLister Media NanoFrame*)**:
    * Sustituye las celdas fijas de 188 bytes de MPEG-TS (`.ts`), eliminando paquetes nulos CBR (`0x1FFF`), repetición continua de tablas PSI (`PAT`/`PMT`) y cabeceras PES redundantes.
    * Cabecera de conexión de **12 bytes** (`MNF\x01`) + **9 bytes por cuadro completo** (`< 0.25%` de overhead frente al `10%–18%` de `.ts`), logrando **12% a 18% de ahorro neto de ancho de banda** y **zapping instantáneo `< 35 ms`** gracias a su caché GOP Keyframe en RAM.
    * Soporta trunking inter-servidor sin pérdidas (`mnf://origen:puerto/mnf/u/p/id.mnf` -> remuxeado automático en vivo a `.ts` para Smart TVs clásicas).

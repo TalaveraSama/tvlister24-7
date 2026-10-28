@@ -1,4 +1,4 @@
-const TOKEN_KEY = 'midnight_tvlister_token';
+const TOKEN_KEY = 'tvlister_auth_token';
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY) || '';

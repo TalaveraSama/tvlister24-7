@@ -382,7 +382,7 @@ export default function IngestProtocolsPage() {
               <div className="text-xs font-bold uppercase tracking-wider text-cyan-400 mb-1">
                 ¿Qué inventamos? — MNF v1
               </div>
-              <div className="text-lg font-bold text-white mb-2">Midnight NanoFrame Binary</div>
+              <div className="text-lg font-bold text-white mb-2">TVLister Media NanoFrame (MNF)</div>
               <p className="text-xs text-slate-400 leading-relaxed">
                 MPEG-TS (<code className="text-slate-200">.ts</code>) fue diseñado en 1994 para satélite con celdas fijas de <strong>188 bytes</strong>, cabeceras PES repetidas, tablas PAT/PMT cada 100ms y relleno nulo <code className="text-rose-300">0x1FFF</code>, desperdiciando <strong>10% a 18%</strong> de ancho de banda.
                 <br />

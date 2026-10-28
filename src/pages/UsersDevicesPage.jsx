@@ -469,7 +469,7 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                   Enlaces de Integración OTT — {linksLine.username}
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Compatible con TiviMate, IPTV Smarters, VLC, Kodi, MAG Stalker & Midnight Player
+                  Compatible con TiviMate, IPTV Smarters, VLC, Kodi, MAG Stalker & TVLister Player
                 </p>
               </div>
               <button onClick={() => setLinksLine(null)} className="text-slate-400 hover:text-white">

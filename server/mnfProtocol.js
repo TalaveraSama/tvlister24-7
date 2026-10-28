@@ -103,7 +103,7 @@ function parsePesPtsMs(pesBuffer, offset) {
 }
 
 /**
- * Real-time MPEG-TS (188-byte) -> MNF v1 (Midnight NanoFrame) Transmuxer.
+ * Real-time MPEG-TS (188-byte) -> MNF v1 (TVLister Media NanoFrame) Transmuxer.
  * Strips:
  *   - 0x1FFF CBR null stuffing packets
  *   - Repeated PAT / PMT / SDT PSI tables
@@ -399,7 +399,7 @@ function mpegCrc32(buf) {
 }
 
 /**
- * Reverse Remuxer: MNF v1 (Midnight NanoFrame) -> Standard 188-byte MPEG-TS!
+ * Reverse Remuxer: MNF v1 (TVLister Media NanoFrame) -> Standard 188-byte MPEG-TS!
  * Enables TVLister Edge servers to pull streams via ultra-light `mnf://` trunking
  * and still serve legacy `.ts` Smart TVs / STBs cleanly at the last mile.
  */
@@ -814,7 +814,7 @@ export function getMnfHubStats() {
   const savedPct = totalTsIn > 0 ? Number(((savedBytes / totalTsIn) * 100).toFixed(2)) : 0;
 
   return {
-    protocolVersion: 'MNF/1.0 (Midnight NanoFrame)',
+    protocolVersion: 'MNF/1.0 (TVLister Media NanoFrame)',
     activeChannels: channels.length,
     totalSubscribers,
     totalTsBytesIn: totalTsIn,

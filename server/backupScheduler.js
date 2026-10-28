@@ -27,8 +27,8 @@ const BACKUP_TABLES = [
 export function buildFullBackupObject() {
   const dump = {
     exported_at: new Date().toISOString(),
-    panel: 'TVLister 24/7 Midnight Edition',
-    version: '2.0.0',
+    panel: 'TVLister 24/7 Panel',
+    version: '2.3.0',
     data: {}
   };
   for (const t of BACKUP_TABLES) {

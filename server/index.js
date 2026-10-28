@@ -365,7 +365,7 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
       b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
       b.server_id ? Number(b.server_id) : 1,
       b.stream_mode === 'ondemand' ? 'ondemand_idle' : 'running',
-      String(b.user_agent || 'MidnightStreamer/5.3'),
+      String(b.user_agent || 'TVLister/2.3'),
       Number(b.tv_archive_days) || 0,
       Number(b.bitrate_kbps) || 4000
     );
@@ -403,7 +403,7 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
     String(b.stream_mode || 'direct'),
     b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
     b.server_id ? Number(b.server_id) : 1,
-    String(b.user_agent || 'MidnightStreamer/5.3'),
+    String(b.user_agent || 'TVLister/2.3'),
     Number(b.tv_archive_days) || 0,
     Number(b.bitrate_kbps) || 4000,
     id
@@ -1979,7 +1979,7 @@ app.post('/api/ingest/webhook', express.urlencoded({ extended: false }), (req, r
   res.status(out.ok ? 200 : 403).json(out);
 });
 
-// 4. MNF v1 (Midnight NanoFrame) Protocol Stats & Live TS-vs-MNF Benchmark
+// 4. MNF v1 (TVLister Media NanoFrame) Protocol Stats & Live TS-vs-MNF Benchmark
 app.get('/api/mnf/stats', requireAuth, (req, res) => {
   res.json(getMnfHubStats());
 });
@@ -2151,7 +2151,7 @@ async function startServer() {
     console.error('[TVLister Production Guard] unhandledRejection:', reason);
   });
 
-  // Binary WebSocket MNF v1 (Midnight NanoFrame) Upgrade Handler (`/ws/mnf/:username/:password/:streamId`)
+  // Binary WebSocket MNF v1 (TVLister Media NanoFrame) Upgrade Handler (`/ws/mnf/:username/:password/:streamId`)
   const mnfWss = new WebSocketServer({ noServer: true });
   const handleMnfUpgrade = (req, socket, head) => {
     let pathname = '';
@@ -2235,7 +2235,7 @@ async function startServer() {
   process.on('SIGINT', gracefulShutdown);
 
   httpServer.listen(PORT, HOST, async () => {
-    console.log(`TVLister 24/7 Midnight Panel listening on http://${HOST}:${PORT}`);
+    console.log(`TVLister 24/7 Panel listening on http://${HOST}:${PORT}`);
     await initMultiPortManager({
       app,
       primaryServer: httpServer,

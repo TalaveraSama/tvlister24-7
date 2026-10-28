@@ -11,7 +11,7 @@ import {
   Server,
   MonitorPlay,
   LogOut,
-  Moon,
+  Tv,
   Coins,
   Menu,
   X,
@@ -58,13 +58,13 @@ export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpen
         <div className="px-5 py-4 border-b border-slate-800/80 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 via-violet-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/25">
-              <Moon className="w-5 h-5 text-white" />
+              <Tv className="w-5 h-5 text-white" />
             </div>
             <div>
               <div className="font-bold tracking-tight text-white leading-tight flex items-center gap-1.5">
                 TVLister <span className="text-indigo-400">24/7</span>
               </div>
-              <div className="text-[11px] text-slate-400 font-medium">Midnight Streamer v5.3</div>
+              <div className="text-[11px] text-slate-400 font-medium">Panel TVLister v2.3</div>
             </div>
           </div>
           <button

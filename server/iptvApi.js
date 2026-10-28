@@ -501,7 +501,7 @@ function buildXmltvPayload() {
   const staticPrograms = db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC').all();
 
   const xml = ['<?xml version="1.0" encoding="UTF-8"?>'];
-  xml.push('<tv generator-info-name="TVLister 24/7 Midnight Streamer Engine" generator-info-url="https://tvlister24-7.local">');
+  xml.push('<tv generator-info-name="TVLister 24/7 Engine" generator-info-url="https://tvlister24-7.local">');
 
   for (const s of streams) {
     const cid = xmlEscape(s.epg_channel_id || `stream-${s.id}`);
@@ -566,7 +566,7 @@ iptvRouter.get(['/xmltv.php', '/xmltv.xml.gz'], (req, res) => {
   res.send(xmlBody);
 });
 
-// 3. Xtream / MidnightStreamer Compatible Player & Panel API (/player_api.php & /panel_api.php)
+// 3. Xtream Codes Compatible Player & Panel API (/player_api.php & /panel_api.php)
 const handlePlayerApi = (req, res) => {
   const params = { ...req.query, ...req.body };
   const { username, password, action } = params;
@@ -586,7 +586,7 @@ const handlePlayerApi = (req, res) => {
       user_info: {
         username: line.username,
         password: line.password,
-        message: 'Bienvenido a TVLister 24/7 Midnight Streamer',
+        message: 'Bienvenido a TVLister 24/7',
         auth: 1,
         status: 'Active',
         exp_date: line.exp_date ? String(Math.floor(new Date(line.exp_date).getTime() / 1000)) : null,
@@ -895,7 +895,7 @@ iptvRouter.get('/hls_proxy/:username/:password/:streamId', async (req, res) => {
   }
 
   const stream = db.prepare('SELECT id, name, user_agent FROM streams WHERE id = ?').get(sid);
-  const ua = stream?.user_agent || 'MidnightStreamer/5.3';
+  const ua = stream?.user_agent || 'TVLister/2.3';
 
   // Refresh viewer heartbeat while fetching HLS sub-playlists/segments
   if (stream) {
@@ -1061,7 +1061,7 @@ async function serveLiveStreamRequest(req, res) {
         const timer = setTimeout(() => ac.abort(), 8000);
         try {
           const upRes = await fetch(upstreamUrl, {
-            headers: { 'User-Agent': stream.user_agent || 'MidnightStreamer/5.3' },
+            headers: { 'User-Agent': stream.user_agent || 'TVLister/2.3' },
             redirect: 'follow',
             signal: ac.signal
           });
@@ -1095,15 +1095,15 @@ async function serveLiveStreamRequest(req, res) {
         });
         try {
           const upRes = await fetch(upstreamUrl, {
-            headers: { 'User-Agent': stream.user_agent || 'MidnightStreamer/5.3' },
+            headers: { 'User-Agent': stream.user_agent || 'TVLister/2.3' },
             redirect: 'follow',
             signal: ac.signal
           });
           if (upRes.ok && upRes.body) {
             const upstreamType = (upRes.headers.get('content-type') || '').toLowerCase();
 
-            // If upstream is Midnight NanoFrame (MNF v1), remux on-the-fly to standard 188-byte MPEG-TS for legacy players!
-            if (isLikelyMnf || upstreamType.includes('midnight-mnf')) {
+            // If upstream is TVLister Media NanoFrame (MNF v1), remux on-the-fly to standard 188-byte MPEG-TS for legacy players!
+            if (isLikelyMnf || upstreamType.includes('-mnf')) {
               res.setHeader('Content-Type', 'video/mp2t');
               res.setHeader('Cache-Control', 'no-store');
               res.setHeader('X-Upstream-Protocol', 'MNF/1.0');
@@ -1145,7 +1145,7 @@ async function serveLiveStreamRequest(req, res) {
 // 4. Live Stream Delivery (/live/:username/:password/:streamSpec AND short Xtream /:username/:password/:numericId)
 iptvRouter.get('/live/:username/:password/:streamSpec', serveLiveStreamRequest);
 
-// 4b. Native Ultra-Light MNF v1 (Midnight NanoFrame) Delivery (/mnf/:username/:password/:streamSpec)
+// 4b. Native Ultra-Light MNF v1 (TVLister Media NanoFrame) Delivery (/mnf/:username/:password/:streamSpec)
 iptvRouter.get('/mnf/:username/:password/:streamSpec', (req, res) => {
   const { username, password, streamSpec } = req.params;
   const auth = authenticateLine(username, password, req);
@@ -1169,10 +1169,10 @@ iptvRouter.get('/mnf/:username/:password/:streamSpec', (req, res) => {
   }
 
   res.writeHead(200, {
-    'Content-Type': 'application/x-midnight-mnf',
+    'Content-Type': 'application/x-tvlister-mnf',
     'Cache-Control': 'no-store, no-transform',
     'Connection': 'keep-alive',
-    'X-Protocol': 'MNF/1.0 (Midnight NanoFrame)',
+    'X-Protocol': 'MNF/1.0 (TVLister Media NanoFrame)',
   });
 
   const upstreamUrls = expandStreamUpstreamUrls(stream);

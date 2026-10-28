@@ -148,7 +148,7 @@ export default function VideoModal({ item, onClose }) {
             className="w-full h-full object-contain"
           />
 
-          {/* Optional Watermark Overlay (MidnightStreamer style) */}
+          {/* Optional Watermark Overlay (TVLister 24/7 style) */}
           {item.watermark && (
             <div className="pointer-events-none absolute top-4 right-5 px-3 py-1 rounded bg-black/55 border border-white/15 text-xs font-bold tracking-wider text-white/85 uppercase">
               {item.watermark}

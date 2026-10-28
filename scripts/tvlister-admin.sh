@@ -41,7 +41,7 @@ cmd_status() {
   echo "============================================================"
   echo "  URL Panel Admin : http://${ip}:${port}"
   echo "  Directorio      : ${APP_DIR}"
-  echo "  Base de Datos   : ${APP_DIR}/data/midnight_tvlister.db"
+  echo "  Base de Datos   : ${APP_DIR}/data/tvlister.db"
   if [ -d "/home/xui" ]; then
     echo "  Coexistencia    : XUI.one detectado (/home/xui intacto)"
   fi
@@ -108,10 +108,11 @@ cmd_set_port() {
 }
 
 cmd_backup() {
-  local ts out
+  local ts out dbfile
   ts=$(date +%Y%m%d_%H%M%S)
   out="/root/tvlister247_backup_${ts}.db"
-  cp "${APP_DIR}/data/midnight_tvlister.db" "$out"
+  dbfile="${APP_DIR}/data/tvlister.db"
+  cp "$dbfile" "$out"
   find /root -maxdepth 1 -name "tvlister247_backup_*.db" -mtime +7 -delete 2>/dev/null || true
   echo "✅ Copia de seguridad guardada en: ${out}"
 }

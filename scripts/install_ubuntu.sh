@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TVLister 24/7 — Midnight Edition | Instalador Aislado Ubuntu / Debian VPS
+# TVLister 24/7 Panel | Instalador Aislado Ubuntu / Debian VPS
 # Compatible 100% con servidores que ya tienen XUI.one, Xtream UI, Nginx o Docker
 # Idempotente: puede ejecutarse múltiples veces para instalar o actualizar sin perder datos.
 # ==============================================================================
@@ -246,7 +246,7 @@ fi
 
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=TVLister 24/7 Midnight OTT/VOD Streaming Panel
+Description=TVLister 24/7 IPTV/OTT/VOD Streaming Panel
 After=network.target
 
 [Service]

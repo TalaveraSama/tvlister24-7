@@ -29,7 +29,7 @@ const EMPTY_FORM = {
   server_id: 1,
   tv_archive_days: 3,
   bitrate_kbps: 4500,
-  user_agent: 'MidnightStreamer/5.3 (MPEG-TS; Linux)'
+  user_agent: 'TVLister/2.3 (MPEG-TS; Linux)'
 };
 
 export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
@@ -92,7 +92,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       server_id: s.server_id || 1,
       tv_archive_days: s.tv_archive_days || 0,
       bitrate_kbps: s.bitrate_kbps || 4000,
-      user_agent: s.user_agent || 'MidnightStreamer/5.3'
+      user_agent: s.user_agent || 'TVLister/2.3'
     });
     setModalOpen(true);
   };

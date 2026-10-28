@@ -224,7 +224,7 @@ export default function WebTvPortal({ onBackToAdmin }) {
       <div className="min-h-screen bg-[#070b13] flex items-center justify-center p-4">
         <div className="w-full max-w-md rounded-2xl bg-[#0e1526] border border-slate-800 p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold text-white">Midnight WebTV Client Player</h2>
+            <h2 className="text-lg font-bold text-white">TVLister WebTV Player</h2>
             <button
               onClick={onBackToAdmin}
               className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300"
