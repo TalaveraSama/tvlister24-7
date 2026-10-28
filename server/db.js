@@ -486,6 +486,8 @@ function runInitDbBody() {
   ensureColumn('streams', 'offline_slate_mode', "TEXT NOT NULL DEFAULT 'global'");
   ensureColumn('streams', 'offline_slate_url', "TEXT DEFAULT ''");
   ensureColumn('streams', 'detected_resolution', "TEXT DEFAULT ''");
+  // Idiomas de audio detectados (JSON: [{"i":0,"lang":"spa","codec":"aac","channels":2}])
+  ensureColumn('streams', 'detected_audio_langs', "TEXT DEFAULT ''");
   ensureColumn('streams', 'resolution_tier', "TEXT DEFAULT ''");
   ensureColumn('streams', 'resolution_source', "TEXT DEFAULT ''");
   ensureColumn('streams', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');

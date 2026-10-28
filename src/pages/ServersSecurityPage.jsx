@@ -23,7 +23,10 @@ import {
   Edit3,
   X,
   Zap,
-  Gauge
+  Gauge,
+  Layers,
+  Volume2,
+  Scissors
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -87,6 +90,31 @@ export default function ServersSecurityPage() {
   const [ffEff, setFfEff] = useState(null);
   const [ffForm, setFfForm] = useState({ tsPipeMode: 'auto', h264Threads: 2 });
 
+  // Segmentación HLS (estilo XUI.one)
+  const [segForm, setSegForm] = useState({
+    segmentDuration: 2,
+    listSize: 6,
+    deleteThreshold: 2,
+    maxSegmentWait: 15,
+    probeSize: 5000000,
+    analysisDuration: 5000000,
+    segmentType: 'hls',
+    showWarnings: true,
+    ignoreKeyframes: false,
+    dtsV4: true,
+    loopbackProxy: false,
+    restartOnAudioLoss: false,
+    priorityBackup: false,
+    audioAutoLang: true,
+    audioLang: 'spa',
+    binPath: ''
+  });
+  const [segBinaries, setSegBinaries] = useState([]);
+  const [segStreams, setSegStreams] = useState([]);
+  const [segTargetId, setSegTargetId] = useState('');
+  const [segData, setSegData] = useState(null);
+  const [segBusy, setSegBusy] = useState(false);
+
   const loadAll = async () => {
     const [data, rdy, eff] = await Promise.all([
       apiFetch('/api/system'),
@@ -98,6 +126,25 @@ export default function ServersSecurityPage() {
     if (eff) {
       setFfEff(eff);
       setFfForm({ tsPipeMode: eff.tsPipeMode || 'auto', h264Threads: Number(eff.h264Threads) || 2 });
+    }
+
+    try {
+      const seg = await apiFetch('/api/system/segments');
+      setSegForm((prev) => ({
+        ...prev,
+        ...seg,
+        binPath: seg.effectiveFfmpegBin || seg.binPath || ''
+      }));
+      setSegBinaries(seg.binaries || []);
+    } catch {
+      // endpoint opcional
+    }
+
+    try {
+      const list = await apiFetch('/api/streams');
+      setSegStreams(Array.isArray(list) ? list : list.streams || []);
+    } catch {
+      // sin canales
     }
     setSettingsForm({
       panel_name: data.settings?.panel_name || 'TVLister 24/7 Panel',
@@ -137,6 +184,70 @@ export default function ServersSecurityPage() {
     });
     flash('Configuración general del sistema guardada.');
     loadAll();
+  };
+
+  const handleSaveSegments = async () => {
+    setSegBusy(true);
+    try {
+      const res = await apiFetch('/api/system/segments', {
+        method: 'PUT',
+        body: JSON.stringify(segForm)
+      });
+      flash(
+        `Segmentación guardada: ${res.segmentDuration}s × ${res.listSize} segmentos (borrado ${res.deleteThreshold}). Reiniciados ${res.restartedStreams || 0} canales.`
+      );
+      loadAll();
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudo guardar la segmentación');
+    } finally {
+      setSegBusy(false);
+    }
+  };
+
+  const handleDetectAudioAll = async () => {
+    try {
+      const r = await apiFetch('/api/streams/detect-audio-bulk', {
+        method: 'POST',
+        body: JSON.stringify({ scope: 'all' })
+      });
+      flash(r.message || 'Detección de idiomas de audio en curso.');
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudo iniciar la detección de audio');
+    }
+  };
+
+  const loadSegmentsFor = async (streamId) => {
+    if (!streamId) {
+      setSegData(null);
+      return;
+    }
+    try {
+      setSegData(await apiFetch(`/api/streams/${streamId}/segments`));
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudieron leer los segmentos del canal');
+    }
+  };
+
+  const handlePurgeSegments = async () => {
+    if (!segData) return;
+    try {
+      const r = await apiFetch(`/api/streams/${segData.streamId}/segments`, { method: 'DELETE' });
+      flash(r.message || 'Segmentos eliminados.');
+      loadSegmentsFor(segData.streamId);
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudieron eliminar los segmentos');
+    }
+  };
+
+  const handleRebuildSegments = async () => {
+    if (!segData) return;
+    try {
+      const r = await apiFetch(`/api/streams/${segData.streamId}/segments/rebuild`, { method: 'POST' });
+      flash(r.message || 'Canal reconstruido.');
+      setTimeout(() => loadSegmentsFor(segData.streamId), 2500);
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudo reconstruir el canal');
+    }
   };
 
   const handleSaveFfmpegEfficiency = async () => {
@@ -745,6 +856,224 @@ export default function ServersSecurityPage() {
             >
               <Zap className="w-3.5 h-3.5" /> Aplicar Optimización y Reiniciar Motor FFmpeg (Escalonado)
             </button>
+          </div>
+
+          {/* ============ Segmentación HLS estilo XUI.one ============ */}
+          <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Scissors className="w-4 h-4 text-fuchsia-400" />
+              Segmentación HLS / FFmpeg (Estilo XUI.one)
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 text-xs">
+              {[
+                { key: 'segmentDuration', label: 'Segment Duration (s)', min: 1, max: 30 },
+                { key: 'listSize', label: 'List Size', min: 2, max: 30 },
+                { key: 'deleteThreshold', label: 'Delete Threshold', min: 0, max: 20 },
+                { key: 'maxSegmentWait', label: 'Max Segment Wait Time (s)', min: 3, max: 60 },
+                { key: 'analysisDuration', label: 'Analysis Duration (µs)', min: 100000, max: 20000000 },
+                { key: 'probeSize', label: 'Probe Size (bytes)', min: 100000, max: 20000000 }
+              ].map((f) => (
+                <div key={f.key}>
+                  <label className="block text-slate-400 mb-1">{f.label}</label>
+                  <input
+                    type="number"
+                    min={f.min}
+                    max={f.max}
+                    value={segForm[f.key]}
+                    onChange={(e) => setSegForm({ ...segForm, [f.key]: Number(e.target.value) })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block text-slate-400 mb-1">Versión / Binario FFmpeg</label>
+                <select
+                  value={segForm.binPath}
+                  onChange={(e) => setSegForm({ ...segForm, binPath: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono text-[11px]"
+                >
+                  <option value="">Automático (el mejor detectado)</option>
+                  {segBinaries.map((b) => (
+                    <option key={b.path} value={b.path}>
+                      {b.path} — {b.version}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-slate-400 mb-1">FFmpeg Segment Type</label>
+                <select
+                  value={segForm.segmentType}
+                  onChange={(e) => setSegForm({ ...segForm, segmentType: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                >
+                  <option value="hls">-f hls (nativo, recomendado)</option>
+                  <option value="segment">-f segment (compatibilidad XUI.one)</option>
+                </select>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  En modo <b>-f segment</b> FFmpeg escribe sólo trozos .ts + CSV y TVLister genera el{' '}
+                  <code>index.m3u8</code> (equivale al loopback PHP de XUI, sin PHP).
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+              {[
+                { key: 'showWarnings', label: 'FFMPEG Show Warnings' },
+                { key: 'ignoreKeyframes', label: 'Ignore Keyframes (split_by_time)' },
+                { key: 'dtsV4', label: 'DTS — regenerar timestamps (FFmpeg v4.0)' },
+                { key: 'loopbackProxy', label: 'Loopback Streams vía Proxy TVLister' },
+                { key: 'restartOnAudioLoss', label: 'Restart on Audio Loss / HLS congelado' },
+                { key: 'priorityBackup', label: 'Priority Backup (respaldo primero al fallar)' },
+                { key: 'audioAutoLang', label: 'Elegir audio por idioma (español por defecto)' }
+              ].map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setSegForm({ ...segForm, [t.key]: !segForm[t.key] })}
+                  className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border transition ${
+                    segForm[t.key]
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                      : 'bg-[#090e1a] border-slate-800 text-slate-400'
+                  }`}
+                >
+                  <span className="text-left">{t.label}</span>
+                  <span
+                    className={`w-9 h-5 rounded-full relative shrink-0 ${
+                      segForm[t.key] ? 'bg-emerald-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${
+                        segForm[t.key] ? 'left-4.5' : 'left-0.5'
+                      }`}
+                    />
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-end gap-2 text-xs">
+              <div>
+                <label className="block text-slate-400 mb-1 flex items-center gap-1">
+                  <Volume2 className="w-3.5 h-3.5 text-cyan-400" /> Idioma de audio preferido
+                </label>
+                <select
+                  value={segForm.audioLang}
+                  onChange={(e) => setSegForm({ ...segForm, audioLang: e.target.value })}
+                  className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                >
+                  <option value="spa">Español (spa)</option>
+                  <option value="eng">Inglés (eng)</option>
+                  <option value="por">Portugués (por)</option>
+                  <option value="">Primera pista disponible</option>
+                </select>
+              </div>
+              <button
+                onClick={handleDetectAudioAll}
+                className="px-3 py-2 rounded-xl bg-cyan-600/25 hover:bg-cyan-600 text-cyan-200 hover:text-white border border-cyan-500/40 font-semibold"
+              >
+                Detectar Idiomas de Audio (todos)
+              </button>
+              <button
+                onClick={handleSaveSegments}
+                disabled={segBusy}
+                className="px-4 py-2 rounded-xl bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-semibold disabled:opacity-60"
+              >
+                {segBusy ? 'Guardando…' : 'Guardar Segmentación y Reiniciar (Escalonado)'}
+              </button>
+            </div>
+
+            {/* Manipulación de segmentos por canal */}
+            <div className="pt-3 border-t border-slate-800 space-y-2.5">
+              <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-fuchsia-400" /> Manipular Segmentos de un Canal
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs">
+                <select
+                  value={segTargetId}
+                  onChange={(e) => {
+                    setSegTargetId(e.target.value);
+                    loadSegmentsFor(e.target.value);
+                  }}
+                  className="flex-1 min-w-[240px] px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                >
+                  <option value="">Selecciona un canal…</option>
+                  {segStreams.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      #{st.id} — {st.name} ({st.stream_mode})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => loadSegmentsFor(segTargetId)}
+                  className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-semibold"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 inline" /> Actualizar
+                </button>
+                <button
+                  onClick={handlePurgeSegments}
+                  disabled={!segData}
+                  className="px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/40 text-amber-200 border border-amber-500/40 font-semibold disabled:opacity-50"
+                >
+                  Purgar Segmentos
+                </button>
+                <button
+                  onClick={handleRebuildSegments}
+                  disabled={!segData}
+                  className="px-3 py-2 rounded-xl bg-rose-600/25 hover:bg-rose-600 text-rose-200 hover:text-white border border-rose-500/40 font-semibold disabled:opacity-50"
+                >
+                  Reconstruir Canal (Segmentos desde Cero)
+                </button>
+              </div>
+
+              {segData && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                    {[
+                      { l: 'Canal', v: `#${segData.streamId} ${segData.name}` },
+                      { l: 'Tipo / Ventana', v: `${segData.segmentType} · ${segData.segmentDuration}s × ${segData.listSize}` },
+                      { l: 'Segmentos', v: `${segData.segmentCount} · ${segData.totalMb} MB` },
+                      { l: 'Ubicación', v: segData.onRamDisk ? 'RAMDisk' : 'Disco' }
+                    ].map((b) => (
+                      <div key={b.l} className="p-2.5 rounded-xl bg-[#090e1a] border border-slate-800">
+                        <div className="text-slate-400 text-[11px]">{b.l}</div>
+                        <div className="font-mono text-white truncate" title={String(b.v)}>
+                          {String(b.v)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {segData.segments?.length > 0 ? (
+                    <div className="max-h-44 overflow-y-auto rounded-xl border border-slate-800 divide-y divide-slate-800/70 font-mono text-[11px]">
+                      {segData.segments.map((sg) => (
+                        <div key={sg.name} className="px-3 py-1 flex items-center justify-between text-slate-300">
+                          <span>{sg.name}</span>
+                          <span className="text-slate-500">
+                            {sg.sizeKb} KB · {sg.ageSec}s
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-slate-500">
+                      Este canal no tiene segmentos en disco (puede estar en modo Directo o aún arrancando).
+                    </div>
+                  )}
+
+                  {segData.manifest && (
+                    <pre className="p-3 rounded-xl bg-[#070b13] border border-slate-800 text-[10px] font-mono text-slate-400 max-h-32 overflow-auto">
+                      {segData.manifest.slice(0, 1200)}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Nginx + SSL Let's Encrypt Configurator */}
