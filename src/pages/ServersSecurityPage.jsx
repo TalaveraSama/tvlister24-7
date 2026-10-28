@@ -202,16 +202,17 @@ export default function ServersSecurityPage() {
   };
 
   const startEditProfile = (p) => {
+    const isCopy = p.video_codec === 'copy';
     setEditingProfId(p.id);
     setProfForm({
       name: p.name || '',
       video_codec: p.video_codec || 'libx264',
       audio_codec: p.audio_codec || 'aac',
-      video_bitrate: p.video_bitrate || '2500k',
-      audio_bitrate: p.audio_bitrate || '128k',
-      resolution: p.resolution || '1280x720',
-      preset: p.preset || 'ultrafast',
-      hwaccel: p.hwaccel || 'none',
+      video_bitrate: isCopy ? 'source' : p.video_bitrate || '2500k',
+      audio_bitrate: p.audio_codec === 'copy' ? 'copy' : p.audio_bitrate || '128k',
+      resolution: isCopy ? 'source' : p.resolution || '1280x720',
+      preset: isCopy ? 'none' : p.preset || 'ultrafast',
+      hwaccel: isCopy ? 'none' : p.hwaccel || 'none',
       extra_flags: p.extra_flags || ''
     });
   };
@@ -233,22 +234,33 @@ export default function ServersSecurityPage() {
 
   const addProfile = async (e) => {
     e.preventDefault();
-    if (!profForm.name) return;
-    if (editingProfId) {
-      const res = await apiFetch(`/api/profiles/${editingProfId}`, {
-        method: 'PUT',
-        body: JSON.stringify(profForm)
-      });
-      cancelEditProfile();
-      flash(
-        `Perfil FFmpeg actualizado (${res.restartedStreams || 0} canales activos recargados en caliente).`
-      );
-    } else {
-      await apiFetch('/api/profiles', { method: 'POST', body: JSON.stringify(profForm) });
-      cancelEditProfile();
-      flash('Nuevo perfil FFmpeg creado.');
+    if (!profForm.name || !profForm.name.trim()) return;
+    try {
+      const payload = {
+        ...profForm,
+        video_bitrate: profForm.video_codec === 'copy' ? 'source' : profForm.video_bitrate,
+        resolution: profForm.video_codec === 'copy' ? 'source' : profForm.resolution,
+        preset: profForm.video_codec === 'copy' ? 'none' : profForm.preset,
+        audio_bitrate: profForm.audio_codec === 'copy' ? 'copy' : profForm.audio_bitrate
+      };
+      if (editingProfId) {
+        const res = await apiFetch(`/api/profiles/${editingProfId}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+        cancelEditProfile();
+        flash(
+          `Perfil FFmpeg actualizado (${res.restartedStreams || 0} canales activos recargados en caliente).`
+        );
+      } else {
+        await apiFetch('/api/profiles', { method: 'POST', body: JSON.stringify(payload) });
+        cancelEditProfile();
+        flash('Nuevo perfil FFmpeg creado.');
+      }
+      loadAll();
+    } catch (err) {
+      flash(`Error: ${err.message}`);
     }
-    loadAll();
   };
 
   const handleRestoreFile = async (e) => {
@@ -835,78 +847,133 @@ export default function ServersSecurityPage() {
                 <span className={editingProfId ? 'text-indigo-300' : 'text-slate-300'}>
                   {editingProfId ? `Editando Perfil #${editingProfId}` : '+ Crear Perfil FFmpeg'}
                 </span>
-                <div className="flex items-center gap-1">
-                  <span className="text-slate-500 mr-1">Bitrate rápido:</span>
-                  {[
-                    { label: '1.5M', br: '1500k', flags: '-tune zerolatency -maxrate 1500k -bufsize 3000k' },
-                    { label: '2.5M', br: '2500k', flags: '-tune zerolatency -maxrate 2500k -bufsize 5000k' },
-                    { label: '4.0M', br: '4000k', flags: '-tune zerolatency -maxrate 4000k -bufsize 8000k' }
-                  ].map((q) => (
-                    <button
-                      key={q.label}
-                      type="button"
-                      onClick={() =>
-                        setProfForm({
-                          ...profForm,
-                          video_bitrate: q.br,
-                          extra_flags:
-                            profForm.video_codec === 'h264_nvenc'
-                              ? `-rc cbr -zerolatency 1 -maxrate ${q.br} -bufsize ${parseInt(q.br, 10) * 2}k`
-                              : q.flags
-                        })
-                      }
-                      className={`px-2 py-0.5 rounded font-mono text-[10px] border transition ${
-                        profForm.video_bitrate === q.br
-                          ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                          : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
-                      }`}
-                    >
-                      {q.label}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-1 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setProfForm({
+                        name: 'Copy / Copy (Bitrate Original · Zero CPU)',
+                        video_codec: 'copy',
+                        audio_codec: 'copy',
+                        video_bitrate: 'source',
+                        audio_bitrate: 'copy',
+                        resolution: 'source',
+                        preset: 'none',
+                        hwaccel: 'none',
+                        extra_flags: '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024'
+                      })
+                    }
+                    className="px-2 py-0.5 rounded font-mono text-[10px] border bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                  >
+                    ⚡ Copy/Copy (Bitrate Original)
+                  </button>
+                  {profForm.video_codec !== 'copy' &&
+                    [
+                      { label: '1.5M', br: '1500k', flags: '-tune zerolatency -maxrate 1500k -bufsize 3000k' },
+                      { label: '2.5M', br: '2500k', flags: '-tune zerolatency -maxrate 2500k -bufsize 5000k' },
+                      { label: '4.0M', br: '4000k', flags: '-tune zerolatency -maxrate 4000k -bufsize 8000k' }
+                    ].map((q) => (
+                      <button
+                        key={q.label}
+                        type="button"
+                        onClick={() =>
+                          setProfForm({
+                            ...profForm,
+                            video_bitrate: q.br,
+                            extra_flags:
+                              profForm.video_codec === 'h264_nvenc'
+                                ? `-rc cbr -zerolatency 1 -maxrate ${q.br} -bufsize ${parseInt(q.br, 10) * 2}k`
+                                : q.flags
+                          })
+                        }
+                        className={`px-2 py-0.5 rounded font-mono text-[10px] border transition ${
+                          profForm.video_bitrate === q.br
+                            ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                            : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                        }`}
+                      >
+                        {q.label}
+                      </button>
+                    ))}
                 </div>
               </div>
 
               <input
                 type="text"
                 required
-                placeholder="Nombre perfil (ej. Zero Latency 2.5 Mbps)"
+                placeholder="Nombre perfil (ej. Copy / Copy Bitrate Original)"
                 value={profForm.name}
                 onChange={(e) => setProfForm({ ...profForm, name: e.target.value })}
                 className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
               />
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <div>
                   <label className="block text-[10px] text-slate-400 mb-1">Codec Video</label>
                   <select
                     value={profForm.video_codec}
                     onChange={(e) => {
                       const vc = e.target.value;
+                      const isCopy = vc === 'copy';
                       setProfForm({
                         ...profForm,
                         video_codec: vc,
-                        hwaccel: vc === 'h264_nvenc' ? 'nvenc' : vc === 'h264_qsv' ? 'qsv' : 'none'
+                        audio_codec: isCopy ? 'copy' : profForm.audio_codec === 'copy' ? 'aac' : profForm.audio_codec,
+                        video_bitrate: isCopy ? 'source' : profForm.video_bitrate === 'source' ? '2500k' : profForm.video_bitrate,
+                        audio_bitrate: isCopy ? 'copy' : profForm.audio_bitrate === 'copy' ? '128k' : profForm.audio_bitrate,
+                        resolution: isCopy ? 'source' : profForm.resolution === 'source' ? '1280x720' : profForm.resolution,
+                        preset: isCopy ? 'none' : profForm.preset === 'none' ? 'ultrafast' : profForm.preset,
+                        hwaccel: vc === 'h264_nvenc' ? 'nvenc' : vc === 'h264_qsv' ? 'qsv' : 'none',
+                        extra_flags: isCopy
+                          ? '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024'
+                          : profForm.extra_flags
                       });
                     }}
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                   >
+                    <option value="copy">Copy (Bitrate Original)</option>
                     <option value="libx264">CPU libx264</option>
                     <option value="h264_nvenc">NVIDIA NVENC</option>
                     <option value="h264_qsv">Intel QSV</option>
-                    <option value="copy">Direct Copy (Sin recodificar)</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">Bitrate Video (ej. 2500k)</label>
-                  <input
-                    type="text"
-                    value={profForm.video_bitrate}
-                    onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
-                    placeholder="2500k"
-                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-                  />
+                  <label className="block text-[10px] text-slate-400 mb-1">Codec Audio</label>
+                  <select
+                    value={profForm.audio_codec}
+                    onChange={(e) => {
+                      const ac = e.target.value;
+                      setProfForm({
+                        ...profForm,
+                        audio_codec: ac,
+                        audio_bitrate: ac === 'copy' ? 'copy' : profForm.audio_bitrate === 'copy' ? '128k' : profForm.audio_bitrate
+                      });
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="copy">Copy (Original)</option>
+                    <option value="aac">AAC Estéreo</option>
+                    <option value="mp2">MP2 Broadcast</option>
+                    <option value="mp3">MP3</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Bitrate Video</label>
+                  {profForm.video_codec === 'copy' ? (
+                    <div className="w-full px-2.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/35 text-emerald-300 font-mono text-[11px] font-semibold">
+                      source (Original)
+                    </div>
+                  ) : (
+                    <input
+                      type="text"
+                      value={profForm.video_bitrate}
+                      onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
+                      placeholder="2500k"
+                      className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                    />
+                  )}
                 </div>
               </div>
 
@@ -915,8 +982,9 @@ export default function ServersSecurityPage() {
                   <label className="block text-[10px] text-slate-400 mb-1">Resolución</label>
                   <select
                     value={profForm.resolution}
+                    disabled={profForm.video_codec === 'copy'}
                     onChange={(e) => setProfForm({ ...profForm, resolution: e.target.value })}
-                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white disabled:opacity-50"
                   >
                     <option value="source">Original (source)</option>
                     <option value="1280x720">HD 720p (1280x720)</option>
@@ -929,31 +997,35 @@ export default function ServersSecurityPage() {
                   <label className="block text-[10px] text-slate-400 mb-1">Preset Velocidad</label>
                   <select
                     value={profForm.preset}
+                    disabled={profForm.video_codec === 'copy'}
                     onChange={(e) => setProfForm({ ...profForm, preset: e.target.value })}
-                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white disabled:opacity-50"
                   >
+                    <option value="none">none (Copy)</option>
                     <option value="ultrafast">ultrafast (Zero Latency)</option>
                     <option value="superfast">superfast</option>
                     <option value="veryfast">veryfast</option>
                     <option value="faster">faster</option>
                     <option value="p2">NVENC p2 (Ultra Low-Lat)</option>
                     <option value="p4">NVENC p4</option>
-                    <option value="none">none (Copy)</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">Audio ({profForm.audio_codec})</label>
+                  <label className="block text-[10px] text-slate-400 mb-1">Audio Bitrate</label>
                   <select
                     value={profForm.audio_bitrate}
+                    disabled={profForm.audio_codec === 'copy'}
                     onChange={(e) => setProfForm({ ...profForm, audio_bitrate: e.target.value })}
-                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono disabled:opacity-50"
                   >
-                    <option value="96k">AAC 96k</option>
-                    <option value="128k">AAC 128k</option>
-                    <option value="160k">AAC 160k</option>
-                    <option value="192k">AAC 192k</option>
-                    <option value="source">Original</option>
+                    <option value="copy">copy (Original)</option>
+                    <option value="96k">96k</option>
+                    <option value="128k">128k</option>
+                    <option value="160k">160k</option>
+                    <option value="192k">192k</option>
+                    <option value="256k">256k</option>
+                    <option value="source">source</option>
                   </select>
                 </div>
               </div>

@@ -7,7 +7,7 @@ import cors from 'cors';
 
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import { db, DB_PATH, initDb, hashPassword, verifyPassword, resetPanelCatalog } from './db.js';
+import { db, DB_PATH, initDb, hashPassword, verifyPassword, resetPanelCatalog, withSqliteBusyRetry } from './db.js';
 import {
   inspectLocalXuiEnvironment,
   previewXuiImport,
@@ -773,7 +773,9 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
 app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
-  const existing = db.prepare('SELECT status, headend_node_id, headend_mode FROM streams WHERE id = ?').get(id);
+  const existing = db
+    .prepare('SELECT status, bitrate_kbps, headend_node_id, headend_mode FROM streams WHERE id = ?')
+    .get(id);
   const nextMode = String(b.stream_mode || 'direct');
   let nextStatus = b.status ? String(b.status) : existing?.status || 'running';
   if (nextMode === 'ondemand') {
@@ -786,49 +788,80 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
       ? 'copy_audio'
       : existing?.headend_mode || 'copy_audio';
 
-  db.prepare(
-    `UPDATE streams SET
-       name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
-       epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
-       status = ?, headend_mode = ?, user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
-       offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?
-     WHERE id = ?`
-  ).run(
-    String(b.name || ''),
-    b.category_id ? Number(b.category_id) : 1,
-    String(b.source_url || ''),
-    String(b.backup_url || ''),
-    String(b.logo_url || ''),
-    String(b.epg_channel_id || ''),
-    nextMode,
-    b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
-    b.server_id ? Number(b.server_id) : 1,
-    nextStatus,
-    nextHeadendMode,
-    String(b.user_agent || 'TVLister/2.3'),
-    Number(b.tv_archive_days) || 0,
-    Number(b.bitrate_kbps) || 2500,
-    String(b.offline_slate_mode || 'global'),
-    String(b.offline_slate_url || ''),
-    String(b.audio_leveling_mode || 'global'),
-    id
-  );
+  const parsedKbps = Number(b.bitrate_kbps);
+  const nextBitrateKbps =
+    Number.isFinite(parsedKbps) && parsedKbps > 0 ? parsedKbps : existing?.bitrate_kbps ?? 0;
+
+  withSqliteBusyRetry(() => {
+    db.prepare(
+      `UPDATE streams SET
+         name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
+         epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
+         status = ?, headend_mode = ?, user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
+         offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?
+       WHERE id = ?`
+    ).run(
+      String(b.name || ''),
+      b.category_id ? Number(b.category_id) : 1,
+      String(b.source_url || ''),
+      String(b.backup_url || ''),
+      String(b.logo_url || ''),
+      String(b.epg_channel_id || ''),
+      nextMode,
+      b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
+      b.server_id ? Number(b.server_id) : 1,
+      nextStatus,
+      nextHeadendMode,
+      String(b.user_agent || 'TVLister/2.3'),
+      Number(b.tv_archive_days) || 0,
+      nextBitrateKbps,
+      String(b.offline_slate_mode || 'global'),
+      String(b.offline_slate_url || ''),
+      String(b.audio_leveling_mode || 'global'),
+      id
+    );
+  });
 
   // Restart or stop FFmpeg worker to apply mode/profile change immediately
   stopWorker(`stream_${id}`);
   if (nextMode === 'transcode' && nextStatus === 'running') {
     launchStreamWorkerIfNeeded(id);
   } else {
-    db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(id);
+    withSqliteBusyRetry(() => db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(id));
   }
   res.json({ ok: true });
 });
 
 app.post('/api/streams/bulk-profile', requireAuth, requireAdmin, (req, res) => {
-  const { category_id, stream_mode, transcode_profile_id, bitrate_kbps } = req.body || {};
+  const {
+    scope = '',
+    ids = [],
+    category_id,
+    stream_mode,
+    transcode_profile_id,
+    bitrate_kbps,
+    keep_bitrate = true
+  } = req.body || {};
   const profId = Number(transcode_profile_id) || 1;
   const mode = String(stream_mode || 'direct');
-  const kbps = Number(bitrate_kbps) || 2500;
+  const chosenProf = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(profId);
+  const isCopyVideo =
+    mode === 'direct' ||
+    !chosenProf ||
+    chosenProf.video_codec === 'copy' ||
+    String(chosenProf.video_bitrate || '').toLowerCase() === 'source';
+
+  // Preserve original stream bitrate by default (and ALWAYS on Copy/Direct profiles unless explicitly transcoding)
+  const numericKbps = Number(bitrate_kbps);
+  const shouldUpdateBitrate =
+    !isCopyVideo &&
+    keep_bitrate === false &&
+    bitrate_kbps !== undefined &&
+    bitrate_kbps !== '' &&
+    bitrate_kbps !== 'source' &&
+    Number.isFinite(numericKbps) &&
+    numericKbps > 0;
+
   const statusExpr =
     mode === 'ondemand'
       ? "CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END"
@@ -839,29 +872,65 @@ app.post('/api/streams/bulk-profile', requireAuth, requireAdmin, (req, res) => {
       : "CASE WHEN headend_node_id IS NOT NULL AND headend_mode = 'ondemand' THEN 'copy_audio' ELSE headend_mode END";
 
   let affected = [];
-  if (category_id && category_id !== 'all') {
-    affected = db.prepare('SELECT id FROM streams WHERE category_id = ?').all(Number(category_id));
-    db.prepare(
-      `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr} WHERE category_id = ?`
-    ).run(mode, profId, kbps, Number(category_id));
-  } else {
-    affected = db.prepare('SELECT id FROM streams').all();
-    db.prepare(
-      `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}`
-    ).run(mode, profId, kbps);
-  }
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      if (scope === 'selected' && Array.isArray(ids) && ids.length > 0) {
+        const cleanIds = ids.map(Number).filter((n) => n > 0);
+        const ph = cleanIds.map(() => '?').join(',');
+        affected = db.prepare(`SELECT id, status FROM streams WHERE id IN (${ph})`).all(...cleanIds);
+        if (shouldUpdateBitrate) {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE id IN (${ph})`
+          ).run(mode, profId, numericKbps, ...cleanIds);
+        } else {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE id IN (${ph})`
+          ).run(mode, profId, ...cleanIds);
+        }
+      } else if (category_id && category_id !== 'all') {
+        affected = db.prepare('SELECT id, status FROM streams WHERE category_id = ?').all(Number(category_id));
+        if (shouldUpdateBitrate) {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE category_id = ?`
+          ).run(mode, profId, numericKbps, Number(category_id));
+        } else {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE category_id = ?`
+          ).run(mode, profId, Number(category_id));
+        }
+      } else {
+        affected = db.prepare('SELECT id, status FROM streams').all();
+        if (shouldUpdateBitrate) {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL`
+          ).run(mode, profId, numericKbps);
+        } else {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL`
+          ).run(mode, profId);
+        }
+      }
+      db.exec('COMMIT;');
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK;');
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
+  });
 
   const toLaunch = [];
   for (const row of affected) {
     stopWorker(`stream_${row.id}`);
-    if (mode === 'transcode') {
+    if (mode === 'transcode' && row.status !== 'stopped') {
       toLaunch.push(row.id);
-    } else {
-      db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(row.id);
     }
   }
   if (toLaunch.length > 0) scheduleStaggeredStreamLaunches(toLaunch, 60);
-  res.json({ ok: true, updatedCount: affected.length });
+  res.json({ ok: true, updatedCount: affected.length, preservedBitrate: !shouldUpdateBitrate });
 });
 
 app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
@@ -889,6 +958,14 @@ app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
     return res.json({ ok: true, updatedCount: 0 });
   }
 
+  const chosenProf =
+    changes.transcode_profile_id !== undefined && changes.transcode_profile_id !== ''
+      ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(Number(changes.transcode_profile_id))
+      : null;
+  const isCopySelected =
+    changes.stream_mode === 'direct' ||
+    (chosenProf && (chosenProf.video_codec === 'copy' || String(chosenProf.video_bitrate || '').toLowerCase() === 'source'));
+
   const setClauses = [];
   const setParams = [];
 
@@ -904,9 +981,16 @@ app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
     setClauses.push('transcode_profile_id = ?');
     setParams.push(Number(changes.transcode_profile_id));
   }
-  if (changes.bitrate_kbps !== undefined && changes.bitrate_kbps !== '') {
+  // Never overwrite original stream bitrate on Copy/Direct profiles or when bitrate_kbps is blank/'source'
+  if (
+    !isCopySelected &&
+    changes.bitrate_kbps !== undefined &&
+    changes.bitrate_kbps !== '' &&
+    String(changes.bitrate_kbps).toLowerCase() !== 'source' &&
+    Number(changes.bitrate_kbps) > 0
+  ) {
     setClauses.push('bitrate_kbps = ?');
-    setParams.push(Math.max(100, Number(changes.bitrate_kbps) || 2500));
+    setParams.push(Math.max(100, Number(changes.bitrate_kbps)));
   }
   if (changes.offline_slate_mode !== undefined && changes.offline_slate_mode !== '') {
     setClauses.push('offline_slate_mode = ?');
@@ -953,19 +1037,25 @@ app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
   const targetIds = targetRows.map((r) => r.id);
   const placeholders = targetIds.map(() => '?').join(',');
 
-  db.exec('BEGIN IMMEDIATE;');
   try {
-    db.prepare(`UPDATE streams SET ${setClauses.join(', ')} WHERE id IN (${placeholders})`).run(
-      ...setParams,
-      ...targetIds
-    );
-    db.exec('COMMIT;');
+    withSqliteBusyRetry(() => {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        db.prepare(`UPDATE streams SET ${setClauses.join(', ')}, pid = NULL WHERE id IN (${placeholders})`).run(
+          ...setParams,
+          ...targetIds
+        );
+        db.exec('COMMIT;');
+      } catch (innerErr) {
+        try {
+          db.exec('ROLLBACK;');
+        } catch {
+          // ignore
+        }
+        throw innerErr;
+      }
+    });
   } catch (err) {
-    try {
-      db.exec('ROLLBACK;');
-    } catch {
-      // ignore
-    }
     return res.status(500).json({ error: err.message || 'Error en actualización masiva.' });
   }
 
@@ -978,8 +1068,6 @@ app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
     stopWorker(`stream_${r.id}`);
     if (r.stream_mode === 'transcode' && r.status === 'running') {
       toLaunch.push(r.id);
-    } else {
-      db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(r.id);
     }
   }
   if (toLaunch.length > 0) {
@@ -2500,30 +2588,79 @@ app.delete('/api/servers/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+function normalizeTranscodeProfilePayload(b = {}, existing = null) {
+  const vCodec = String(b.video_codec || existing?.video_codec || 'libx264').trim();
+  const aCodec = String(b.audio_codec || existing?.audio_codec || 'aac').trim();
+  const isCopyVideo = vCodec === 'copy';
+  const isCopyAudio = aCodec === 'copy';
+
+  const rawVBitrate = String(b.video_bitrate ?? existing?.video_bitrate ?? (isCopyVideo ? 'source' : '2500k')).trim();
+  const video_bitrate =
+    isCopyVideo || !rawVBitrate || rawVBitrate.toLowerCase() === 'copy' || rawVBitrate.toLowerCase() === 'original'
+      ? 'source'
+      : rawVBitrate;
+
+  const rawABitrate = String(b.audio_bitrate ?? existing?.audio_bitrate ?? (isCopyAudio ? 'copy' : '128k')).trim();
+  const audio_bitrate = isCopyAudio ? 'copy' : rawABitrate || '128k';
+
+  const resolution = isCopyVideo ? 'source' : String(b.resolution || existing?.resolution || '1280x720').trim();
+  const preset = isCopyVideo ? 'none' : String(b.preset || existing?.preset || 'ultrafast').trim();
+  const hwaccel = isCopyVideo ? 'none' : String(b.hwaccel || existing?.hwaccel || 'none').trim();
+
+  let extra_flags = String(
+    b.extra_flags ??
+      existing?.extra_flags ??
+      (isCopyVideo
+        ? '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024'
+        : '-tune zerolatency -maxrate 2500k -bufsize 5000k')
+  ).trim();
+
+  // Strip x264/NVENC rate-control flags if user switched profile video_codec to 'copy'
+  if (isCopyVideo && /(-maxrate|-bufsize|-tune\s+zerolatency|-rc\s+cbr)/i.test(extra_flags)) {
+    extra_flags = '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024';
+  }
+
+  return {
+    name: String(b.name || existing?.name || '').trim(),
+    video_codec: vCodec,
+    audio_codec: aCodec,
+    video_bitrate,
+    audio_bitrate,
+    resolution,
+    preset,
+    hwaccel,
+    extra_flags
+  };
+}
+
 app.get('/api/profiles', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM transcode_profiles ORDER BY id ASC').all());
 });
 
 app.post('/api/profiles', requireAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
-  if (!b.name) return res.status(400).json({ error: 'Nombre del perfil requerido.' });
-  const info = db
-    .prepare(
-      `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      String(b.name).trim(),
-      String(b.video_codec || 'libx264'),
-      String(b.audio_codec || 'aac'),
-      String(b.video_bitrate || '2500k'),
-      String(b.audio_bitrate || '128k'),
-      String(b.resolution || '1280x720'),
-      String(b.preset || 'ultrafast'),
-      String(b.hwaccel || 'none'),
-      String(b.extra_flags || '-tune zerolatency -maxrate 2500k -bufsize 5000k')
-    );
-  res.json({ id: Number(info.lastInsertRowid), ok: true });
+  if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'Nombre del perfil requerido.' });
+  const norm = normalizeTranscodeProfilePayload(b, null);
+  const id = withSqliteBusyRetry(() => {
+    const info = db
+      .prepare(
+        `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        norm.name,
+        norm.video_codec,
+        norm.audio_codec,
+        norm.video_bitrate,
+        norm.audio_bitrate,
+        norm.resolution,
+        norm.preset,
+        norm.hwaccel,
+        norm.extra_flags
+      );
+    return Number(info.lastInsertRowid);
+  });
+  res.json({ id, ok: true });
 });
 
 app.put('/api/profiles/:id', requireAuth, requireAdmin, (req, res) => {
@@ -2537,50 +2674,58 @@ app.put('/api/profiles/:id', requireAuth, requireAdmin, (req, res) => {
     return res.status(404).json({ error: 'Perfil FFmpeg no encontrado.' });
   }
 
-  const vBitrate = String(b.video_bitrate ?? existing.video_bitrate ?? '2500k').trim();
-  db.prepare(
-    `UPDATE transcode_profiles SET
-       name = ?,
-       video_codec = ?,
-       audio_codec = ?,
-       video_bitrate = ?,
-       audio_bitrate = ?,
-       resolution = ?,
-       preset = ?,
-       hwaccel = ?,
-       extra_flags = ?
-     WHERE id = ?`
-  ).run(
-    String(b.name).trim(),
-    String(b.video_codec || existing.video_codec || 'libx264'),
-    String(b.audio_codec || existing.audio_codec || 'aac'),
-    vBitrate,
-    String(b.audio_bitrate ?? existing.audio_bitrate ?? '128k').trim(),
-    String(b.resolution || existing.resolution || '1280x720'),
-    String(b.preset || existing.preset || 'ultrafast'),
-    String(b.hwaccel || existing.hwaccel || 'none'),
-    String(b.extra_flags ?? existing.extra_flags ?? ''),
-    id
-  );
+  const norm = normalizeTranscodeProfilePayload(b, existing);
+  withSqliteBusyRetry(() => {
+    db.prepare(
+      `UPDATE transcode_profiles SET
+         name = ?,
+         video_codec = ?,
+         audio_codec = ?,
+         video_bitrate = ?,
+         audio_bitrate = ?,
+         resolution = ?,
+         preset = ?,
+         hwaccel = ?,
+         extra_flags = ?
+       WHERE id = ?`
+    ).run(
+      norm.name,
+      norm.video_codec,
+      norm.audio_codec,
+      norm.video_bitrate,
+      norm.audio_bitrate,
+      norm.resolution,
+      norm.preset,
+      norm.hwaccel,
+      norm.extra_flags,
+      id
+    );
 
-  // Sync bitrate_kbps label on streams using this profile if numeric (e.g. 2500k -> 2500)
-  const kbpsMatch = vBitrate.match(/^(\d+(?:\.\d+)?)\s*([km])?$/i);
-  if (kbpsMatch) {
-    const num = parseFloat(kbpsMatch[1]);
-    const unit = (kbpsMatch[2] || 'k').toLowerCase();
-    const kbpsVal = unit === 'm' ? Math.round(num * 1000) : Math.round(num);
-    if (kbpsVal > 0) {
-      db.prepare('UPDATE streams SET bitrate_kbps = ? WHERE transcode_profile_id = ?').run(kbpsVal, id);
+    // Only sync stream bitrate label when profile actually transcodes video to a fixed numeric target (never on Copy/source)
+    if (norm.video_codec !== 'copy' && norm.video_bitrate !== 'source') {
+      const kbpsMatch = norm.video_bitrate.match(/^(\d+(?:\.\d+)?)\s*([km])?$/i);
+      if (kbpsMatch) {
+        const num = parseFloat(kbpsMatch[1]);
+        const unit = (kbpsMatch[2] || 'k').toLowerCase();
+        const kbpsVal = unit === 'm' ? Math.round(num * 1000) : Math.round(num);
+        if (kbpsVal > 0) {
+          db.prepare('UPDATE streams SET bitrate_kbps = ? WHERE transcode_profile_id = ?').run(kbpsVal, id);
+        }
+      }
     }
-  }
+  });
 
-  // Hot-reload any active FFmpeg transcode workers using this profile
+  // Staggered hot-reload for active FFmpeg workers using this profile (safe for 200+ channels)
   const activeStreams = db
     .prepare("SELECT id FROM streams WHERE transcode_profile_id = ? AND stream_mode = 'transcode' AND status = 'running'")
     .all(id);
+  const reloadIds = [];
   for (const s of activeStreams) {
     stopWorker(`stream_${s.id}`);
-    launchStreamWorkerIfNeeded(s.id);
+    reloadIds.push(s.id);
+  }
+  if (reloadIds.length > 0) {
+    scheduleStaggeredStreamLaunches(reloadIds, 60);
   }
 
   const activeCh247 = db
@@ -2599,8 +2744,10 @@ app.delete('/api/profiles/:id', requireAuth, requireAdmin, (req, res) => {
   if (id === 1) {
     return res.status(400).json({ error: 'El perfil base Direct Stream (#1) se puede editar pero no eliminar.' });
   }
-  db.prepare('UPDATE streams SET transcode_profile_id = 1 WHERE transcode_profile_id = ?').run(id);
-  db.prepare('DELETE FROM transcode_profiles WHERE id = ?').run(id);
+  withSqliteBusyRetry(() => {
+    db.prepare('UPDATE streams SET transcode_profile_id = 1 WHERE transcode_profile_id = ?').run(id);
+    db.prepare('DELETE FROM transcode_profiles WHERE id = ?').run(id);
+  });
   res.json({ ok: true });
 });
 

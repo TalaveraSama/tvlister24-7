@@ -614,7 +614,7 @@ function runInitDbBody() {
     if (!hasCopy2500) {
       db.prepare(`
         INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
-        VALUES ('Copy/Copy Remux 2.5 Mbps (Zero CPU)', 'copy', 'copy', '2500k', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024')
+        VALUES ('Copy / Copy (Bitrate Original · Zero CPU)', 'copy', 'copy', 'source', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024')
       `).run();
     }
     db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_enabled', 'true')").run();
@@ -754,6 +754,37 @@ function runInitDbBody() {
     insSetting.run('audio_leveling_bitrate', '128k');
     db.prepare(
       "INSERT INTO settings (key, value) VALUES ('copy_video_leveled_audio_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+    ).run();
+  }
+
+  // Ensure all Copy/Copy profiles use 'source' video_bitrate (never fake 2500k) so original stream bitrate is always respected
+  const copySourceMigrated = db.prepare("SELECT value FROM settings WHERE key = 'copy_copy_source_bitrate_v1'").get();
+  if (copySourceMigrated?.value !== 'true') {
+    db.prepare(
+      `UPDATE transcode_profiles
+       SET name = CASE
+             WHEN name = 'Copy/Copy Remux 2.5 Mbps (Zero CPU)' THEN 'Copy / Copy (Bitrate Original · Zero CPU)'
+             ELSE name
+           END,
+           video_bitrate = 'source',
+           resolution = 'source',
+           preset = 'none',
+           hwaccel = 'none'
+       WHERE video_codec = 'copy'`
+    ).run();
+
+    const hasCleanCopyCopy = db
+      .prepare("SELECT id FROM transcode_profiles WHERE video_codec = 'copy' AND audio_codec = 'copy' AND id > 1 LIMIT 1")
+      .get();
+    if (!hasCleanCopyCopy) {
+      db.prepare(
+        `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+         VALUES ('Copy / Copy (Bitrate Original · Zero CPU)', 'copy', 'copy', 'source', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024')`
+      ).run();
+    }
+
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('copy_copy_source_bitrate_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
     ).run();
   }
 }
@@ -971,7 +1002,7 @@ function seedInitialData() {
     'INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   insertProf.run('Direct Stream (Zero Transcode)', 'copy', 'copy', 'source', 'source', 'source', 'none', 'none', '-fflags +genpts+igndts');
-  insertProf.run('Copy/Copy Remux 2.5 Mbps (Zero CPU)', 'copy', 'copy', '2500k', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024');
+  insertProf.run('Copy / Copy (Bitrate Original · Zero CPU)', 'copy', 'copy', 'source', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024');
   insertProf.run('Copy Video + Audio Nivelado (Bajo CPU)', 'copy', 'aac', 'source', '128k', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024');
   insertProf.run('Auto SD/480p/540p — 1.0 Mbps', 'libx264', 'aac', '1000k', '96k', 'source', 'ultrafast', 'none', '-vf scale=min(960\\,iw):-2 -tune zerolatency -maxrate 1000k -bufsize 2000k');
   insertProf.run('Auto HD 720p — 2.5 Mbps', 'libx264', 'aac', '2500k', '128k', '1280x720', 'ultrafast', 'none', '-tune zerolatency -maxrate 2500k -bufsize 5000k');

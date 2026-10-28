@@ -178,6 +178,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [bulkCat, setBulkCat] = useState('all');
   const [bulkMode, setBulkMode] = useState('transcode');
   const [bulkProfId, setBulkProfId] = useState(2);
+  const [bulkKeepBitrate, setBulkKeepBitrate] = useState(true);
 
   const loadSlates = async () => {
     try {
@@ -532,11 +533,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   };
 
   const findCopyCopy2500Profile = () =>
-    profiles.find(
-      (p) =>
-        p.video_codec === 'copy' &&
-        (String(p.name || '').toLowerCase().includes('copy/copy') || String(p.video_bitrate || '') === '2500k')
-    ) ||
+    profiles.find((p) => p.video_codec === 'copy' && p.audio_codec === 'copy' && p.id > 1) ||
+    profiles.find((p) => p.video_codec === 'copy' && p.audio_codec === 'copy') ||
     profiles.find((p) => p.video_codec === 'copy') ||
     profiles[0];
 
@@ -591,21 +589,21 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     const zeroProf = findZeroLatencyCpuProfile();
     const directProf = profiles.find((p) => p.id === 1) || copyProf;
 
-    if (presetKey === 'copy_copy_2500') {
+    if (presetKey === 'copy_copy_2500' || presetKey === 'copy_copy_source') {
       setBulkForm((prev) => ({
         ...prev,
         stream_mode: 'transcode',
-        transcode_profile_id: copyProf ? String(copyProf.id) : '1',
-        bitrate_kbps: '2500',
+        transcode_profile_id: copyProf ? String(copyProf.id) : '2',
+        bitrate_kbps: '',
         offline_slate_mode: 'global',
         status: 'running'
       }));
-    } else if (presetKey === 'ondemand_copy_2500') {
+    } else if (presetKey === 'ondemand_copy_2500' || presetKey === 'ondemand_copy_source') {
       setBulkForm((prev) => ({
         ...prev,
         stream_mode: 'ondemand',
-        transcode_profile_id: copyProf ? String(copyProf.id) : '1',
-        bitrate_kbps: '2500',
+        transcode_profile_id: copyProf ? String(copyProf.id) : '2',
+        bitrate_kbps: '',
         offline_slate_mode: 'global'
       }));
     } else if (presetKey === 'zero_h264_2500') {
@@ -622,7 +620,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
         ...prev,
         stream_mode: 'direct',
         transcode_profile_id: directProf ? String(directProf.id) : '1',
-        bitrate_kbps: '2500',
+        bitrate_kbps: '',
         offline_slate_mode: 'global',
         status: 'running'
       }));
@@ -633,10 +631,13 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     const copyProf = findCopyCopy2500Profile();
     if (!copyProf) return;
     const scope = targetScope || (selectedIds.length > 0 ? 'selected' : 'all');
-    const countLabel = scope === 'all' ? `TODOS los ${streams.length} canales` : `${selectedIds.length} canales seleccionados`;
+    const countLabel =
+      scope === 'all'
+        ? `TODOS los ${streams.length} canales`
+        : `${selectedIds.length} canales seleccionados`;
     if (
       !window.confirm(
-        `¿Cambiar ${countLabel} a Copy / Copy (Video Copy + Audio Copy) a 2.5 Mbps (2500 kbps) con respaldo de bucle offline activo?`
+        `¿Pasar ${countLabel} a Copy / Copy (Video Copy + Audio Copy) manteniendo intacto el bitrate original que trae cada stream?`
       )
     ) {
       return;
@@ -651,14 +652,13 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           changes: {
             stream_mode: 'transcode',
             transcode_profile_id: copyProf.id,
-            bitrate_kbps: 2500,
             offline_slate_mode: 'global',
             status: 'running'
           }
         })
       });
       setBulkNotice(
-        `✅ ${res.updatedCount} canales configurados en Copy/Copy a 2.5 Mbps (2500k) correctamente.`
+        `✅ ${res.updatedCount} canales configurados en Copy / Copy manteniendo intacto el bitrate original que trae cada stream.`
       );
       setTimeout(() => setBulkNotice(''), 6000);
       await loadAll();
@@ -830,42 +830,72 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const handleSaveProfile = async (e) => {
     e.preventDefault();
     if (!profForm.name.trim()) return;
-    if (editingProfId) {
-      const res = await apiFetch(`/api/profiles/${editingProfId}`, {
-        method: 'PUT',
-        body: JSON.stringify(profForm)
-      });
-      setProfNotice(
-        `Perfil "${profForm.name}" actualizado (${res.restartedStreams || 0} canales activos recargados).`
-      );
-      setEditingProfId(null);
-      setProfForm(EMPTY_PROF);
-    } else {
-      await apiFetch('/api/profiles', {
-        method: 'POST',
-        body: JSON.stringify(profForm)
-      });
-      setProfNotice(`Nuevo perfil "${profForm.name}" creado.`);
-      setProfForm(EMPTY_PROF);
+    try {
+      const payload = {
+        ...profForm,
+        video_bitrate: profForm.video_codec === 'copy' ? 'source' : profForm.video_bitrate,
+        resolution: profForm.video_codec === 'copy' ? 'source' : profForm.resolution,
+        preset: profForm.video_codec === 'copy' ? 'none' : profForm.preset,
+        audio_bitrate: profForm.audio_codec === 'copy' ? 'copy' : profForm.audio_bitrate
+      };
+      if (editingProfId) {
+        const res = await apiFetch(`/api/profiles/${editingProfId}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+        setProfNotice(
+          `✅ Perfil "${profForm.name}" actualizado (${res.restartedStreams || 0} canales activos recargados).`
+        );
+        setEditingProfId(null);
+        setProfForm(EMPTY_PROF);
+      } else {
+        await apiFetch('/api/profiles', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        setProfNotice(`✅ Nuevo perfil "${profForm.name}" creado.`);
+        setProfForm(EMPTY_PROF);
+      }
+      await loadAll();
+    } catch (err) {
+      setProfNotice(`❌ ${err.message}`);
     }
-    await loadAll();
   };
 
   const handleBulkApplyProfile = async () => {
-    const chosenProf = profiles.find((p) => p.id === Number(bulkProfId));
-    const kbpsMatch = String(chosenProf?.video_bitrate || '').match(/^(\d+)/);
-    const kbps = kbpsMatch ? Number(kbpsMatch[1]) : 2500;
-    const res = await apiFetch('/api/streams/bulk-profile', {
-      method: 'POST',
-      body: JSON.stringify({
-        category_id: bulkCat,
-        stream_mode: bulkMode,
-        transcode_profile_id: Number(bulkProfId),
-        bitrate_kbps: kbps
-      })
-    });
-    setProfNotice(`Perfil aplicado en lote a ${res.updatedCount} canales.`);
-    await loadAll();
+    try {
+      const chosenProf = profiles.find((p) => p.id === Number(bulkProfId));
+      const isCopyProf =
+        bulkMode === 'direct' ||
+        !chosenProf ||
+        chosenProf.video_codec === 'copy' ||
+        String(chosenProf.video_bitrate || '').toLowerCase() === 'source';
+      const keepOriginalBitrate = isCopyProf || bulkKeepBitrate;
+      const kbpsMatch = String(chosenProf?.video_bitrate || '').match(/^(\d+)/);
+      const kbps = !keepOriginalBitrate && kbpsMatch ? Number(kbpsMatch[1]) : undefined;
+
+      const isSelectedScope = bulkCat === 'selected';
+      const res = await apiFetch('/api/streams/bulk-profile', {
+        method: 'POST',
+        body: JSON.stringify({
+          scope: isSelectedScope ? 'selected' : bulkCat === 'all' ? 'all' : 'category',
+          ids: isSelectedScope ? selectedIds : [],
+          category_id: isSelectedScope ? 'all' : bulkCat,
+          stream_mode: bulkMode,
+          transcode_profile_id: Number(bulkProfId),
+          keep_bitrate: keepOriginalBitrate,
+          ...(kbps ? { bitrate_kbps: kbps } : {})
+        })
+      });
+      setProfNotice(
+        `✅ Perfil "${chosenProf?.name || ''}" aplicado en lote a ${res.updatedCount} canales (${
+          res.preservedBitrate !== false ? 'manteniendo el bitrate original de cada stream' : `a ${kbps} kbps`
+        }).`
+      );
+      await loadAll();
+    } catch (err) {
+      setProfNotice(`❌ ${err.message}`);
+    }
   };
 
   const handleSave = async (e) => {
@@ -1133,6 +1163,19 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               Bucle Sin Stream {slateConfig.enabled ? '• ON' : '• OFF'}
             </button>
 
+            {/* 1-Click Bulk Copy/Copy (Source Bitrate Untouched) */}
+            {streams.length > 0 && (
+              <button
+                disabled={bulkBusy}
+                onClick={() => handleQuickCopyCopy2500()}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/45 text-xs font-bold transition shadow-sm"
+                title="Pasar en masa a Copy / Copy manteniendo intacto el bitrate original que trae cada stream"
+              >
+                <Zap className="w-4 h-4 text-amber-300" />
+                Copy/Copy Masivo (Bitrate Original)
+              </button>
+            )}
+
             {/* Bulk Edit Button */}
             <button
               onClick={() => openBulkEditModal()}
@@ -1160,12 +1203,13 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 setProfNotice('');
                 const copyProf = findCopyCopy2500Profile();
                 if (copyProf) setBulkProfId(copyProf.id);
+                setBulkKeepBitrate(true);
                 setProfilesModalOpen(true);
               }}
               className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-semibold transition"
             >
               <Sliders className="w-4 h-4" />
-              Perfiles FFmpeg (2.5M)
+              Perfiles FFmpeg
             </button>
 
             {onOpenXuiImport && (
@@ -1235,10 +1279,10 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               disabled={bulkBusy}
               onClick={() => handleQuickCopyCopy2500('selected')}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-semibold transition"
-              title="Pasar seleccionados a Copy Video + Copy Audio @ 2.5 Mbps"
+              title="Pasar seleccionados a Copy Video + Copy Audio manteniendo el bitrate original del stream"
             >
               <Zap className="w-3.5 h-3.5 text-amber-400" />
-              Pasar a Copy/Copy 2.5M
+              Pasar a Copy/Copy (Bitrate Original)
             </button>
 
             <button
@@ -1455,11 +1499,14 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                         </div>
                         <div className="text-[11px] text-slate-400 mt-0.5">
                           {s.profile_name || 'Direct Stream'} •{' '}
-                          {s.stream_mode === 'transcode' &&
-                          s.profile_video_bitrate &&
-                          s.profile_video_bitrate !== 'source'
-                            ? s.profile_video_bitrate
-                            : `${s.bitrate_kbps || 2500} kbps`}
+                          {s.stream_mode === 'direct' ||
+                          s.profile_video_codec === 'copy' ||
+                          !s.profile_video_bitrate ||
+                          s.profile_video_bitrate === 'source'
+                            ? s.bitrate_kbps && s.bitrate_kbps !== 2500
+                              ? `Bitrate Original (${s.bitrate_kbps} kbps)`
+                              : 'Bitrate Original (Source)'
+                            : s.profile_video_bitrate}
                         </div>
                       </td>
                       <td className="px-4 py-3">
@@ -1632,23 +1679,23 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => applyPresetInBulkModal('copy_copy_2500')}
+                    onClick={() => applyPresetInBulkModal('copy_copy_source')}
                     className="p-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-left transition"
                   >
-                    <div className="font-bold text-amber-200">⚡ Copy / Copy a 2.5 Mbps (Recomendado +100 canales)</div>
+                    <div className="font-bold text-amber-200">⚡ Copy / Copy — Bitrate Original del Stream</div>
                     <div className="text-[10px] text-slate-300 mt-0.5">
-                      Video Copy + Audio Copy • HLS 2s • 2500 kbps • ~0% CPU + Bucle Offline ON
+                      Video Copy + Audio Copy • Mantiene intacto el bitrate que trae cada canal • ~0% CPU
                     </div>
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => applyPresetInBulkModal('ondemand_copy_2500')}
+                    onClick={() => applyPresetInBulkModal('ondemand_copy_source')}
                     className="p-2.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-left transition"
                   >
-                    <div className="font-bold text-emerald-300">🌱 On-Demand Copy / Copy 2.5 Mbps</div>
+                    <div className="font-bold text-emerald-300">🌱 On-Demand Copy / Copy — Bitrate Original</div>
                     <div className="text-[10px] text-slate-300 mt-0.5">
-                      Ahorra ancho de banda upstream cuando nadie mira el canal • 2500 kbps
+                      Ahorra ancho de banda cuando nadie mira el canal • Mantiene el bitrate original
                     </div>
                   </button>
 
@@ -1731,30 +1778,64 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                   <label className="block text-slate-300 mb-1">Perfil FFmpeg</label>
                   <select
                     value={bulkForm.transcode_profile_id}
-                    onChange={(e) => setBulkForm({ ...bulkForm, transcode_profile_id: e.target.value })}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const selProf = profiles.find((p) => String(p.id) === String(val));
+                      const isCopy =
+                        selProf &&
+                        (selProf.video_codec === 'copy' ||
+                          String(selProf.video_bitrate || '').toLowerCase() === 'source');
+                      setBulkForm({
+                        ...bulkForm,
+                        transcode_profile_id: val,
+                        bitrate_kbps: isCopy ? '' : bulkForm.bitrate_kbps
+                      });
+                    }}
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                   >
                     <option value="">— Mantener sin cambios —</option>
                     {profiles.map((p) => (
                       <option key={p.id} value={p.id}>
-                        {p.name} ({p.video_codec}/{p.audio_codec} • {p.video_bitrate})
+                        {p.name} ({p.video_codec}/{p.audio_codec} •{' '}
+                        {p.video_codec === 'copy' || p.video_bitrate === 'source'
+                          ? 'Bitrate Original'
+                          : p.video_bitrate}
+                        )
                       </option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-slate-300 mb-1">Bitrate Objetivo (kbps — 2.5 Megas = 2500)</label>
-                  <input
-                    type="number"
-                    min="200"
-                    max="30000"
-                    step="100"
-                    value={bulkForm.bitrate_kbps}
-                    onChange={(e) => setBulkForm({ ...bulkForm, bitrate_kbps: e.target.value })}
-                    placeholder="Sin cambios (ej. escribe 2500)"
-                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-                  />
+                  <label className="block text-slate-300 mb-1">
+                    Bitrate Objetivo (dejar vacío = mantener el bitrate que trae el stream)
+                  </label>
+                  {(() => {
+                    const selProf = profiles.find(
+                      (p) => String(p.id) === String(bulkForm.transcode_profile_id)
+                    );
+                    const isCopy =
+                      bulkForm.stream_mode === 'direct' ||
+                      (selProf &&
+                        (selProf.video_codec === 'copy' ||
+                          String(selProf.video_bitrate || '').toLowerCase() === 'source'));
+                    return isCopy ? (
+                      <div className="w-full px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/35 text-emerald-300 font-semibold">
+                        ✓ Mantener Bitrate Original del Stream (Sin tocar bitrate)
+                      </div>
+                    ) : (
+                      <input
+                        type="number"
+                        min="200"
+                        max="30000"
+                        step="100"
+                        value={bulkForm.bitrate_kbps}
+                        onChange={(e) => setBulkForm({ ...bulkForm, bitrate_kbps: e.target.value })}
+                        placeholder="Mantener el bitrate original del stream"
+                        className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                      />
+                    );
+                  })()}
                 </div>
 
                 <div>
@@ -2307,7 +2388,11 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     onChange={(e) => {
                       const nextPid = Number(e.target.value);
                       const selP = profiles.find((p) => p.id === nextPid);
-                      const brMatch = String(selP?.video_bitrate || '').match(/^(\d+)/);
+                      const isCopy =
+                        !selP ||
+                        selP.video_codec === 'copy' ||
+                        String(selP.video_bitrate || '').toLowerCase() === 'source';
+                      const brMatch = !isCopy ? String(selP?.video_bitrate || '').match(/^(\d+)/) : null;
                       setForm({
                         ...form,
                         transcode_profile_id: nextPid,
@@ -2318,7 +2403,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                   >
                     {profiles.map((p) => (
                       <option key={p.id} value={p.id}>
-                        {p.name} ({p.video_bitrate})
+                        {p.name} ({p.video_codec === 'copy' || p.video_bitrate === 'source' ? 'Bitrate Original' : p.video_bitrate})
                       </option>
                     ))}
                   </select>
@@ -2574,19 +2659,19 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       : 'bg-[#090e1a] border-slate-800'
                   }`}
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
                     <span className="font-bold text-white">
                       {editingProfId ? `Editando Perfil #${editingProfId}` : '+ Nuevo Perfil FFmpeg'}
                     </span>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 flex-wrap">
                       <button
                         type="button"
                         onClick={() =>
                           setProfForm({
-                            name: 'Copy/Copy Remux 2.5 Mbps (Zero CPU)',
+                            name: 'Copy / Copy (Bitrate Original · Zero CPU)',
                             video_codec: 'copy',
                             audio_codec: 'copy',
-                            video_bitrate: '2500k',
+                            video_bitrate: 'source',
                             audio_bitrate: 'copy',
                             resolution: 'source',
                             preset: 'none',
@@ -2596,37 +2681,36 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                         }
                         className="px-2 py-0.5 rounded font-mono text-[10px] border bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
                       >
-                        Copy/Copy 2.5M
+                        ⚡ Copy/Copy (Bitrate Original)
                       </button>
-                      {[
-                        { label: '1.5M', br: '1500k' },
-                        { label: '2.5M', br: '2500k' },
-                        { label: '4.0M', br: '4000k' }
-                      ].map((q) => (
-                        <button
-                          key={q.label}
-                          type="button"
-                          onClick={() =>
-                            setProfForm({
-                              ...profForm,
-                              video_bitrate: q.br,
-                              extra_flags:
-                                profForm.video_codec === 'copy'
-                                  ? '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024'
-                                  : profForm.video_codec === 'h264_nvenc'
-                                  ? `-rc cbr -zerolatency 1 -maxrate ${q.br} -bufsize ${parseInt(q.br, 10) * 2}k`
-                                  : `-tune zerolatency -maxrate ${q.br} -bufsize ${parseInt(q.br, 10) * 2}k`
-                            })
-                          }
-                          className={`px-2 py-0.5 rounded font-mono text-[10px] border ${
-                            profForm.video_bitrate === q.br
-                              ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                              : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
-                          }`}
-                        >
-                          {q.label}
-                        </button>
-                      ))}
+                      {profForm.video_codec !== 'copy' &&
+                        [
+                          { label: '1.5M', br: '1500k' },
+                          { label: '2.5M', br: '2500k' },
+                          { label: '4.0M', br: '4000k' }
+                        ].map((q) => (
+                          <button
+                            key={q.label}
+                            type="button"
+                            onClick={() =>
+                              setProfForm({
+                                ...profForm,
+                                video_bitrate: q.br,
+                                extra_flags:
+                                  profForm.video_codec === 'h264_nvenc'
+                                    ? `-rc cbr -zerolatency 1 -maxrate ${q.br} -bufsize ${parseInt(q.br, 10) * 2}k`
+                                    : `-tune zerolatency -maxrate ${q.br} -bufsize ${parseInt(q.br, 10) * 2}k`
+                              })
+                            }
+                            className={`px-2 py-0.5 rounded font-mono text-[10px] border ${
+                              profForm.video_bitrate === q.br
+                                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                            }`}
+                          >
+                            {q.label}
+                          </button>
+                        ))}
                     </div>
                   </div>
 
@@ -2637,7 +2721,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       required
                       value={profForm.name}
                       onChange={(e) => setProfForm({ ...profForm, name: e.target.value })}
-                      placeholder="Copy/Copy Remux 2.5 Mbps (Zero CPU)"
+                      placeholder="Copy / Copy (Bitrate Original · Zero CPU)"
                       className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
                     />
                   </div>
@@ -2649,16 +2733,24 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                         value={profForm.video_codec}
                         onChange={(e) => {
                           const vc = e.target.value;
+                          const isCopy = vc === 'copy';
                           setProfForm({
                             ...profForm,
                             video_codec: vc,
-                            audio_codec: vc === 'copy' ? 'copy' : profForm.audio_codec === 'copy' ? 'aac' : profForm.audio_codec,
-                            hwaccel: vc === 'h264_nvenc' ? 'nvenc' : vc === 'h264_qsv' ? 'qsv' : 'none'
+                            audio_codec: isCopy ? 'copy' : profForm.audio_codec === 'copy' ? 'aac' : profForm.audio_codec,
+                            video_bitrate: isCopy ? 'source' : profForm.video_bitrate === 'source' ? '2500k' : profForm.video_bitrate,
+                            audio_bitrate: isCopy ? 'copy' : profForm.audio_bitrate === 'copy' ? '128k' : profForm.audio_bitrate,
+                            resolution: isCopy ? 'source' : profForm.resolution === 'source' ? '1280x720' : profForm.resolution,
+                            preset: isCopy ? 'none' : profForm.preset === 'none' ? 'ultrafast' : profForm.preset,
+                            hwaccel: vc === 'h264_nvenc' ? 'nvenc' : vc === 'h264_qsv' ? 'qsv' : 'none',
+                            extra_flags: isCopy
+                              ? '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024'
+                              : profForm.extra_flags
                           });
                         }}
                         className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
                       >
-                        <option value="copy">Copy (Sin recodificar)</option>
+                        <option value="copy">Copy (Sin recodificar · Bitrate Original)</option>
                         <option value="libx264">CPU libx264</option>
                         <option value="h264_nvenc">NVIDIA NVENC</option>
                         <option value="h264_qsv">Intel QSV</option>
@@ -2668,23 +2760,37 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       <label className="block text-slate-400 mb-1">Codec Audio</label>
                       <select
                         value={profForm.audio_codec}
-                        onChange={(e) => setProfForm({ ...profForm, audio_codec: e.target.value })}
+                        onChange={(e) => {
+                          const ac = e.target.value;
+                          setProfForm({
+                            ...profForm,
+                            audio_codec: ac,
+                            audio_bitrate: ac === 'copy' ? 'copy' : profForm.audio_bitrate === 'copy' ? '128k' : profForm.audio_bitrate
+                          });
+                        }}
                         className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
                       >
                         <option value="copy">Copy (Original)</option>
                         <option value="aac">AAC Estéreo</option>
+                        <option value="mp2">MP2 Broadcast</option>
                         <option value="mp3">MP3</option>
                       </select>
                     </div>
                     <div>
-                      <label className="block text-slate-400 mb-1">Bitrate (2.5M = 2500k)</label>
-                      <input
-                        type="text"
-                        value={profForm.video_bitrate}
-                        onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
-                        placeholder="2500k"
-                        className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
-                      />
+                      <label className="block text-slate-400 mb-1">Bitrate Video</label>
+                      {profForm.video_codec === 'copy' ? (
+                        <div className="w-full px-2.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/35 text-emerald-300 font-mono text-[11px] font-semibold">
+                          source (Original)
+                        </div>
+                      ) : (
+                        <input
+                          type="text"
+                          value={profForm.video_bitrate}
+                          onChange={(e) => setProfForm({ ...profForm, video_bitrate: e.target.value })}
+                          placeholder="2500k"
+                          className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
+                        />
+                      )}
                     </div>
                   </div>
 
@@ -2693,8 +2799,9 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       <label className="block text-slate-400 mb-1">Resolución</label>
                       <select
                         value={profForm.resolution}
+                        disabled={profForm.video_codec === 'copy'}
                         onChange={(e) => setProfForm({ ...profForm, resolution: e.target.value })}
-                        className="w-full px-2.5 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
+                        className="w-full px-2.5 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white disabled:opacity-50"
                       >
                         <option value="source">Original</option>
                         <option value="1280x720">1280x720 (720p)</option>
@@ -2706,8 +2813,9 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       <label className="block text-slate-400 mb-1">Preset</label>
                       <select
                         value={profForm.preset}
+                        disabled={profForm.video_codec === 'copy'}
                         onChange={(e) => setProfForm({ ...profForm, preset: e.target.value })}
-                        className="w-full px-2.5 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
+                        className="w-full px-2.5 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white disabled:opacity-50"
                       >
                         <option value="none">none (Copy)</option>
                         <option value="ultrafast">ultrafast</option>
@@ -2722,13 +2830,16 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       <label className="block text-slate-400 mb-1">Audio Bitrate</label>
                       <select
                         value={profForm.audio_bitrate}
+                        disabled={profForm.audio_codec === 'copy'}
                         onChange={(e) => setProfForm({ ...profForm, audio_bitrate: e.target.value })}
-                        className="w-full px-2.5 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
+                        className="w-full px-2.5 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono disabled:opacity-50"
                       >
                         <option value="copy">copy</option>
                         <option value="96k">96k</option>
                         <option value="128k">128k</option>
                         <option value="160k">160k</option>
+                        <option value="192k">192k</option>
+                        <option value="256k">256k</option>
                         <option value="source">source</option>
                       </select>
                     </div>
@@ -2784,7 +2895,11 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       <div className="min-w-0">
                         <div className="font-semibold text-white truncate">{p.name}</div>
                         <div className="font-mono text-[11px] text-amber-300">
-                          {p.video_codec}/{p.audio_codec} • {p.video_bitrate} • {p.resolution}
+                          {p.video_codec}/{p.audio_codec} •{' '}
+                          {p.video_codec === 'copy' || p.video_bitrate === 'source'
+                            ? 'Bitrate Original (source)'
+                            : p.video_bitrate}{' '}
+                          • {p.resolution}
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
@@ -2796,11 +2911,13 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                               name: p.name || '',
                               video_codec: p.video_codec || 'libx264',
                               audio_codec: p.audio_codec || 'aac',
-                              video_bitrate: p.video_bitrate || '2500k',
-                              audio_bitrate: p.audio_bitrate || '128k',
-                              resolution: p.resolution || '1280x720',
-                              preset: p.preset || 'ultrafast',
-                              hwaccel: p.hwaccel || 'none',
+                              video_bitrate:
+                                p.video_codec === 'copy' ? 'source' : p.video_bitrate || '2500k',
+                              audio_bitrate:
+                                p.audio_codec === 'copy' ? 'copy' : p.audio_bitrate || '128k',
+                              resolution: p.video_codec === 'copy' ? 'source' : p.resolution || '1280x720',
+                              preset: p.video_codec === 'copy' ? 'none' : p.preset || 'ultrafast',
+                              hwaccel: p.video_codec === 'copy' ? 'none' : p.hwaccel || 'none',
                               extra_flags: p.extra_flags || ''
                             });
                           }}
@@ -2813,12 +2930,17 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                           <button
                             type="button"
                             onClick={async () => {
-                              await apiFetch(`/api/profiles/${p.id}`, { method: 'DELETE' });
-                              if (editingProfId === p.id) {
-                                setEditingProfId(null);
-                                setProfForm(EMPTY_PROF);
+                              try {
+                                await apiFetch(`/api/profiles/${p.id}`, { method: 'DELETE' });
+                                if (editingProfId === p.id) {
+                                  setEditingProfId(null);
+                                  setProfForm(EMPTY_PROF);
+                                }
+                                setProfNotice(`🗑️ Perfil "${p.name}" eliminado.`);
+                                loadAll();
+                              } catch (err) {
+                                setProfNotice(`❌ ${err.message}`);
                               }
-                              loadAll();
                             }}
                             className="p-1.5 rounded bg-rose-500/15 text-rose-300"
                             title="Eliminar Perfil"
@@ -2833,55 +2955,87 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               </div>
 
               {/* Bulk Apply Bar */}
-              <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 flex flex-wrap items-end gap-3">
-                <div className="flex-1 min-w-[160px]">
-                  <label className="block text-slate-400 mb-1">Aplicar en lote a Categoría</label>
-                  <select
-                    value={bulkCat}
-                    onChange={(e) => setBulkCat(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+              <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="flex-1 min-w-[170px]">
+                    <label className="block text-slate-400 mb-1">Aplicar en lote a</label>
+                    <select
+                      value={bulkCat}
+                      onChange={(e) => setBulkCat(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                    >
+                      <option value="all">Todos los canales ({streams.length})</option>
+                      {selectedIds.length > 0 && (
+                        <option value="selected">Canales seleccionados con check ({selectedIds.length})</option>
+                      )}
+                      {categories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          Categoría: {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="min-w-[150px]">
+                    <label className="block text-slate-400 mb-1">Modo</label>
+                    <select
+                      value={bulkMode}
+                      onChange={(e) => setBulkMode(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                    >
+                      <option value="direct">Direct Stream</option>
+                      <option value="ondemand">On-Demand</option>
+                      <option value="transcode">Transcodificación / Remux Activo</option>
+                    </select>
+                  </div>
+                  <div className="flex-1 min-w-[190px]">
+                    <label className="block text-slate-400 mb-1">Perfil FFmpeg</label>
+                    <select
+                      value={bulkProfId}
+                      onChange={(e) => setBulkProfId(Number(e.target.value))}
+                      className="w-full px-3 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                    >
+                      {profiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} (
+                          {p.video_codec === 'copy' || p.video_bitrate === 'source'
+                            ? 'Bitrate Original'
+                            : p.video_bitrate}
+                          )
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleBulkApplyProfile}
+                    className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold"
                   >
-                    <option value="all">Todos los canales ({streams.length})</option>
-                    {categories.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
+                    Aplicar en Lote
+                  </button>
                 </div>
-                <div className="min-w-[150px]">
-                  <label className="block text-slate-400 mb-1">Modo</label>
-                  <select
-                    value={bulkMode}
-                    onChange={(e) => setBulkMode(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
-                  >
-                    <option value="direct">Direct Stream</option>
-                    <option value="ondemand">On-Demand</option>
-                    <option value="transcode">Transcodificación / Remux Activo</option>
-                  </select>
-                </div>
-                <div className="flex-1 min-w-[180px]">
-                  <label className="block text-slate-400 mb-1">Perfil FFmpeg</label>
-                  <select
-                    value={bulkProfId}
-                    onChange={(e) => setBulkProfId(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
-                  >
-                    {profiles.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} ({p.video_bitrate})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleBulkApplyProfile}
-                  className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold"
-                >
-                  Aplicar en Lote
-                </button>
+
+                {(() => {
+                  const chosenProf = profiles.find((p) => p.id === Number(bulkProfId));
+                  const isCopy =
+                    bulkMode === 'direct' ||
+                    !chosenProf ||
+                    chosenProf.video_codec === 'copy' ||
+                    String(chosenProf.video_bitrate || '').toLowerCase() === 'source';
+                  return (
+                    <label className="inline-flex items-center gap-2 text-xs text-emerald-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isCopy ? true : bulkKeepBitrate}
+                        disabled={isCopy}
+                        onChange={(e) => setBulkKeepBitrate(e.target.checked)}
+                        className="rounded accent-emerald-500"
+                      />
+                      <span>
+                        <strong>Mantener intacto el bitrate original que trae cada stream</strong> (sin tocar ni modificar bitrate)
+                      </span>
+                    </label>
+                  );
+                })()}
               </div>
             </div>
           </div>
