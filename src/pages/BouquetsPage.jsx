@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Layers, Plus, Trash2, Save, FolderPlus } from 'lucide-react';
+import { Layers, Plus, Trash2, Save, FolderPlus, ArrowUp, ArrowDown } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
 export default function BouquetsPage() {
@@ -88,6 +88,19 @@ export default function BouquetsPage() {
 
   const deleteCategory = async (id) => {
     await apiFetch(`/api/categories/${id}`, { method: 'DELETE' });
+    loadAll();
+  };
+
+  const moveCategory = async (idx, delta) => {
+    const target = idx + delta;
+    if (target < 0 || target >= categories.length) return;
+    const copy = [...categories];
+    const [picked] = copy.splice(idx, 1);
+    copy.splice(target, 0, picked);
+    await apiFetch('/api/categories/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ orderedIds: copy.map((c) => c.id) })
+    });
     loadAll();
   };
 
@@ -238,21 +251,46 @@ export default function BouquetsPage() {
         </form>
 
         <div className="space-y-2 max-h-96 overflow-y-auto text-xs">
-          {categories.map((c) => (
+          {categories.map((c, idx) => (
             <div
               key={c.id}
-              className="px-3 py-2.5 rounded-xl bg-[#090e1a] border border-slate-800 flex items-center justify-between"
+              className="px-3 py-2.5 rounded-xl bg-[#090e1a] border border-slate-800 flex items-center justify-between gap-2"
             >
-              <div>
-                <div className="font-medium text-white">{c.name}</div>
-                <div className="text-[10px] uppercase text-indigo-300">{c.type}</div>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-mono text-[11px] font-bold text-cyan-400">#{idx + 1}</span>
+                <div className="min-w-0">
+                  <div className="font-medium text-white truncate">{c.name}</div>
+                  <div className="text-[10px] uppercase text-indigo-300">{c.type}</div>
+                </div>
               </div>
-              <button
-                onClick={() => deleteCategory(c.id)}
-                className="p-1 rounded bg-rose-500/15 hover:bg-rose-500/30 text-rose-300"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  disabled={idx === 0}
+                  onClick={() => moveCategory(idx, -1)}
+                  className="p-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-slate-300"
+                  title="Subir categoría"
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={idx === categories.length - 1}
+                  onClick={() => moveCategory(idx, 1)}
+                  className="p-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-slate-300"
+                  title="Bajar categoría"
+                >
+                  <ArrowDown className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteCategory(c.id)}
+                  className="p-1 rounded bg-rose-500/15 hover:bg-rose-500/30 text-rose-300"
+                  title="Eliminar categoría"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           ))}
         </div>

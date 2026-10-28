@@ -145,8 +145,8 @@ function getAllowedContentForLine(line) {
   const categories = db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, id ASC').all();
   const catMap = new Map(categories.map((c) => [c.id, c.name]));
 
-  const allStreams = db.prepare('SELECT * FROM streams ORDER BY id ASC').all();
-  const allCh247 = db.prepare('SELECT * FROM channels_247 ORDER BY id ASC').all();
+  const allStreams = db.prepare('SELECT * FROM streams ORDER BY sort_order ASC, id ASC').all();
+  const allCh247 = db.prepare('SELECT * FROM channels_247 ORDER BY sort_order ASC, id ASC').all();
   const allVod = db.prepare('SELECT * FROM vod_items ORDER BY id ASC').all();
   const allSeries = db.prepare('SELECT * FROM series ORDER BY id ASC').all();
   const allEpisodes = db.prepare('SELECT * FROM series_episodes ORDER BY season_num ASC, episode_num ASC, id ASC').all();
@@ -530,13 +530,14 @@ iptvRouter.get('/get.php', (req, res) => {
   const epgUrl = `${baseUrl}/xmltv.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
   const linesOut = [`#EXTM3U x-tvg-url="${epgUrl}"`];
 
+  let chNo = 1;
   for (const s of streams) {
     const catchupAttr =
       s.tv_archive_days > 0
         ? ` catchup="default" catchup-days="${s.tv_archive_days}" catchup-source="${baseUrl}/timeshift/${encodeURIComponent(username)}/${encodeURIComponent(password)}/{duration}/{Y}-{m}-{d}:{H}-{M}/${s.id}.m3u8"`
         : '';
     linesOut.push(
-      `#EXTINF:-1 tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${s.logo_url || ''}"${catchupAttr} group-title="${s.category_name}",${s.name}`
+      `#EXTINF:-1 tvg-chno="${chNo++}" tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${s.logo_url || ''}"${catchupAttr} group-title="${s.category_name}",${s.name}`
     );
     linesOut.push(`${baseUrl}/${livePrefix}/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${s.id}.${ext}`);
   }
@@ -544,7 +545,7 @@ iptvRouter.get('/get.php', (req, res) => {
   for (const ch of channels247) {
     const virtualId = 10000 + ch.id;
     linesOut.push(
-      `#EXTINF:-1 tvg-id="${ch.epg_channel_id || `ch247-${ch.id}`}" tvg-name="${ch.name}" tvg-logo="${ch.logo_url || ''}" group-title="${ch.category_name}",[24/7] ${ch.name}`
+      `#EXTINF:-1 tvg-chno="${chNo++}" tvg-id="${ch.epg_channel_id || `ch247-${ch.id}`}" tvg-name="${ch.name}" tvg-logo="${ch.logo_url || ''}" group-title="${ch.category_name}",[24/7] ${ch.name}`
     );
     linesOut.push(`${baseUrl}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${virtualId}.m3u8`);
   }
@@ -615,8 +616,8 @@ iptvRouter.get('/enigma2.php', (req, res) => {
 
 // 2. Standard XMLTV Electronic Program Guide (/xmltv.php & /xmltv.xml.gz)
 function buildXmltvPayload() {
-  const streams = db.prepare('SELECT * FROM streams').all();
-  const channels247 = db.prepare('SELECT * FROM channels_247').all();
+  const streams = db.prepare('SELECT * FROM streams ORDER BY sort_order ASC, id ASC').all();
+  const channels247 = db.prepare('SELECT * FROM channels_247 ORDER BY sort_order ASC, id ASC').all();
   const staticPrograms = db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC').all();
 
   const xml = ['<?xml version="1.0" encoding="UTF-8"?>'];

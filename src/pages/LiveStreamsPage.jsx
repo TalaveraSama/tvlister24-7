@@ -22,7 +22,13 @@ import {
   Film,
   Zap,
   AlertTriangle,
-  Monitor
+  Monitor,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  ChevronsUp,
+  ChevronsDown,
+  GripVertical
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -93,6 +99,23 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   });
   const [autoResStatus, setAutoResStatus] = useState(null);
   const [probingSingleId, setProbingSingleId] = useState(null);
+
+  // Channel & Category Lineup Ordering
+  const [viewSort, setViewSort] = useState('lineup'); // 'lineup' | 'name_asc' | 'id_desc' | 'bitrate_desc'
+  const [orderModalOpen, setOrderModalOpen] = useState(false);
+  const [orderTab, setOrderTab] = useState('streams'); // 'streams' | 'categories'
+  const [orderCatFilter, setOrderCatFilter] = useState('all');
+  const [orderSearch, setOrderSearch] = useState('');
+  const [orderStreamsList, setOrderStreamsList] = useState([]);
+  const [orderCatsList, setOrderCatsList] = useState([]);
+  const [packStreamsOnCatSave, setPackStreamsOnCatSave] = useState(true);
+  const [alphaInsideCatSave, setAlphaInsideCatSave] = useState(false);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [dragOverIdx, setDragOverIdx] = useState(null);
+  const [orderDirty, setOrderDirty] = useState(false);
+  const [orderSaving, setOrderSaving] = useState(false);
+  const [editingCatId, setEditingCatId] = useState(null);
+  const [editingCatName, setEditingCatName] = useState('');
 
   // Multi-selection for Bulk Edit / Bulk Delete / Bulk Actions
   const [selectedIds, setSelectedIds] = useState([]);
@@ -225,6 +248,191 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       window.alert(err.message);
     } finally {
       setProbingSingleId(null);
+    }
+  };
+
+  // ==================== CHANNEL & CATEGORY LINEUP ORDERING ====================
+  const openOrderModal = (initialTab = 'streams') => {
+    const startCat = catFilter !== 'all' ? String(catFilter) : 'all';
+    setOrderTab(initialTab);
+    setOrderCatFilter(startCat);
+    setOrderSearch('');
+    setOrderStreamsList(
+      startCat === 'all'
+        ? [...streams]
+        : streams.filter((s) => String(s.category_id) === startCat)
+    );
+    setOrderCatsList([...categories]);
+    setOrderDirty(false);
+    setEditingCatId(null);
+    setOrderModalOpen(true);
+  };
+
+  const handleChangeOrderCatFilter = (nextCat) => {
+    if (orderDirty && !window.confirm('Tienes cambios de orden sin guardar. ¿Cambiar de filtro de todos modos?')) {
+      return;
+    }
+    setOrderCatFilter(nextCat);
+    setOrderSearch('');
+    setOrderStreamsList(
+      nextCat === 'all'
+        ? [...streams]
+        : streams.filter((s) => String(s.category_id) === String(nextCat))
+    );
+    setOrderDirty(false);
+  };
+
+  const moveArrayItem = (arr, fromIdx, toIdx) => {
+    if (fromIdx < 0 || fromIdx >= arr.length) return arr;
+    const clamped = Math.max(0, Math.min(arr.length - 1, toIdx));
+    if (fromIdx === clamped) return arr;
+    const copy = [...arr];
+    const [picked] = copy.splice(fromIdx, 1);
+    copy.splice(clamped, 0, picked);
+    return copy;
+  };
+
+  const moveStreamInModal = (fromIdx, toIdx) => {
+    setOrderStreamsList((prev) => moveArrayItem(prev, fromIdx, toIdx));
+    setOrderDirty(true);
+  };
+
+  const moveCategoryInModal = (fromIdx, toIdx) => {
+    setOrderCatsList((prev) => moveArrayItem(prev, fromIdx, toIdx));
+    setOrderDirty(true);
+  };
+
+  const applySmartSortPreset = (preset) => {
+    const catRank = new Map(orderCatsList.map((c, i) => [c.id, i + 1]));
+    const tierWeight = (t) => (t === 'fhd' ? 1 : t === 'hd' ? 2 : t === 'sd' ? 3 : 4);
+    const natCmp = (a, b) =>
+      String(a || '').localeCompare(String(b || ''), 'es', { numeric: true, sensitivity: 'base' });
+
+    // If grouping by category while viewing a subset, switch to full catalog so grouping packs everything cleanly
+    const base =
+      (preset === 'cat_alpha' || preset === 'cat_keep') && orderCatFilter !== 'all'
+        ? [...streams]
+        : [...orderStreamsList];
+
+    if ((preset === 'cat_alpha' || preset === 'cat_keep') && orderCatFilter !== 'all') {
+      setOrderCatFilter('all');
+    }
+
+    const sorted = [...base].sort((a, b) => {
+      if (preset === 'az') return natCmp(a.name, b.name);
+      if (preset === 'za') return natCmp(b.name, a.name);
+      if (preset === 'id_asc') return a.id - b.id;
+      if (preset === 'quality') {
+        const diff = tierWeight(a.resolution_tier) - tierWeight(b.resolution_tier);
+        if (diff !== 0) return diff;
+        return (b.bitrate_kbps || 0) - (a.bitrate_kbps || 0) || natCmp(a.name, b.name);
+      }
+      if (preset === 'cat_alpha' || preset === 'cat_keep') {
+        const ra = catRank.get(a.category_id) ?? 999999;
+        const rb = catRank.get(b.category_id) ?? 999999;
+        if (ra !== rb) return ra - rb;
+        if (preset === 'cat_alpha') return natCmp(a.name, b.name);
+        return (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id;
+      }
+      return 0;
+    });
+
+    setOrderStreamsList(sorted);
+    setOrderDirty(true);
+  };
+
+  const handleSaveStreamsOrder = async () => {
+    if (orderStreamsList.length === 0) return;
+    setOrderSaving(true);
+    try {
+      await apiFetch('/api/streams/reorder', {
+        method: 'POST',
+        body: JSON.stringify({
+          orderedIds: orderStreamsList.map((s) => s.id),
+          mode: orderCatFilter === 'all' ? 'full' : 'subset'
+        })
+      });
+      setOrderDirty(false);
+      await loadAll();
+      setBulkNotice(
+        `✅ Nuevo orden guardado en ${orderStreamsList.length} canales (activo en Xtream, M3U, Stalker y WebTV).`
+      );
+      setTimeout(() => setBulkNotice(''), 5000);
+      setOrderModalOpen(false);
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setOrderSaving(false);
+    }
+  };
+
+  const handleSaveCategoriesOrder = async () => {
+    if (orderCatsList.length === 0) return;
+    setOrderSaving(true);
+    try {
+      await apiFetch('/api/categories/reorder', {
+        method: 'POST',
+        body: JSON.stringify({
+          orderedIds: orderCatsList.map((c) => c.id),
+          packStreamsByCategory: packStreamsOnCatSave,
+          alphaInsideCategory: alphaInsideCatSave
+        })
+      });
+      setOrderDirty(false);
+      await loadAll();
+      setBulkNotice(
+        `✅ Orden de ${orderCatsList.length} categorías guardado${
+          packStreamsOnCatSave ? ' y canales reagrupados automáticamente' : ''
+        }.`
+      );
+      setTimeout(() => setBulkNotice(''), 5000);
+      setOrderModalOpen(false);
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setOrderSaving(false);
+    }
+  };
+
+  const handleRenameCategoryInline = async (catId) => {
+    if (!editingCatName.trim()) return;
+    try {
+      await apiFetch(`/api/categories/${catId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name: editingCatName.trim() })
+      });
+      setOrderCatsList((prev) =>
+        prev.map((c) => (c.id === catId ? { ...c, name: editingCatName.trim() } : c))
+      );
+      setEditingCatId(null);
+      await loadAll();
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
+  const handleInlineNudgeStream = async (streamId, delta) => {
+    // Operates on current visible lineup (either all streams or active category filter)
+    const scopeList =
+      catFilter === 'all'
+        ? [...streams]
+        : streams.filter((s) => String(s.category_id) === String(catFilter));
+    const idx = scopeList.findIndex((s) => s.id === streamId);
+    if (idx === -1) return;
+    const targetIdx = idx + delta;
+    if (targetIdx < 0 || targetIdx >= scopeList.length) return;
+    const reordered = moveArrayItem(scopeList, idx, targetIdx);
+    try {
+      await apiFetch('/api/streams/reorder', {
+        method: 'POST',
+        body: JSON.stringify({
+          orderedIds: reordered.map((s) => s.id),
+          mode: catFilter === 'all' ? 'full' : 'subset'
+        })
+      });
+      await loadAll();
+    } catch (err) {
+      window.alert(err.message);
     }
   };
 
@@ -627,17 +835,31 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     }
   };
 
-  const filtered = streams.filter((s) => {
-    const matchesSearch =
-      s.name.toLowerCase().includes(search.toLowerCase()) ||
-      s.source_url.toLowerCase().includes(search.toLowerCase()) ||
-      String(s.detected_resolution || '').toLowerCase().includes(search.toLowerCase());
-    const matchesCat = catFilter === 'all' || String(s.category_id) === String(catFilter);
-    const matchesRes =
-      resFilter === 'all' ||
-      (resFilter === 'unscanned' ? !s.resolution_tier : s.resolution_tier === resFilter);
-    return matchesSearch && matchesCat && matchesRes;
-  });
+  const lineupIndexMap = new Map(streams.map((s, idx) => [s.id, idx + 1]));
+
+  const filtered = streams
+    .filter((s) => {
+      const matchesSearch =
+        s.name.toLowerCase().includes(search.toLowerCase()) ||
+        s.source_url.toLowerCase().includes(search.toLowerCase()) ||
+        String(s.detected_resolution || '').toLowerCase().includes(search.toLowerCase());
+      const matchesCat = catFilter === 'all' || String(s.category_id) === String(catFilter);
+      const matchesRes =
+        resFilter === 'all' ||
+        (resFilter === 'unscanned' ? !s.resolution_tier : s.resolution_tier === resFilter);
+      return matchesSearch && matchesCat && matchesRes;
+    })
+    .sort((a, b) => {
+      if (viewSort === 'name_asc') {
+        return String(a.name || '').localeCompare(String(b.name || ''), 'es', {
+          numeric: true,
+          sensitivity: 'base'
+        });
+      }
+      if (viewSort === 'id_desc') return b.id - a.id;
+      if (viewSort === 'bitrate_desc') return (b.bitrate_kbps || 0) - (a.bitrate_kbps || 0);
+      return (lineupIndexMap.get(a.id) || 0) - (lineupIndexMap.get(b.id) || 0);
+    });
 
   const filteredIds = filtered.map((s) => s.id);
   const allFilteredSelected =
@@ -712,6 +934,18 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               <option value="unscanned">Sin clasificar aún</option>
             </select>
 
+            <select
+              value={viewSort}
+              onChange={(e) => setViewSort(e.target.value)}
+              className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700/80 text-xs text-slate-200"
+              title="Cambiar vista en esta tabla"
+            >
+              <option value="lineup">Vista: Orden de Parrilla (Clientes)</option>
+              <option value="name_asc">Vista: Nombre A → Z</option>
+              <option value="bitrate_desc">Vista: Mayor Bitrate</option>
+              <option value="id_desc">Vista: ID más reciente</option>
+            </select>
+
             {streams.length > 0 && (
               <button
                 type="button"
@@ -729,6 +963,16 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* Order Channels & Categories Button */}
+            <button
+              onClick={() => openOrderModal('streams')}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-400/40 text-xs font-bold transition shadow-sm"
+              title="Ordenar cómo se muestran los canales y categorías en apps IPTV, M3U, Stalker y WebTV"
+            >
+              <ArrowUpDown className="w-4 h-4 text-sky-300" />
+              Ordenar Canales
+            </button>
+
             {/* Auto-Resolution Classifier (SD/480p/540p -> 1M, HD 720p -> 2.5M, FHD 1080p -> 3M) */}
             <button
               onClick={() => {
@@ -943,7 +1187,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     title="Seleccionar todos los filtrados"
                   />
                 </th>
-                <th className="px-3 py-3">ID</th>
+                <th className="px-3 py-3"># Orden</th>
                 <th className="px-4 py-3">Canal</th>
                 <th className="px-4 py-3">Categoría</th>
                 <th className="px-4 py-3">Modo & Perfil</th>
@@ -979,7 +1223,36 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                           className="rounded accent-indigo-500 cursor-pointer"
                         />
                       </td>
-                      <td className="px-3 py-3 font-mono text-slate-400">#{s.id}</td>
+                      <td className="px-3 py-3">
+                        <div className="flex items-center gap-1.5">
+                          {viewSort === 'lineup' && !search && resFilter === 'all' && (
+                            <div className="flex flex-col gap-0.5">
+                              <button
+                                type="button"
+                                onClick={() => handleInlineNudgeStream(s.id, -1)}
+                                title="Subir 1 puesto en la parrilla"
+                                className="p-0.5 rounded bg-slate-800/80 hover:bg-sky-600/40 text-slate-400 hover:text-sky-200 transition"
+                              >
+                                <ArrowUp className="w-2.5 h-2.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleInlineNudgeStream(s.id, 1)}
+                                title="Bajar 1 puesto en la parrilla"
+                                className="p-0.5 rounded bg-slate-800/80 hover:bg-sky-600/40 text-slate-400 hover:text-sky-200 transition"
+                              >
+                                <ArrowDown className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          )}
+                          <div>
+                            <div className="font-mono font-bold text-sky-300 text-xs">
+                              #{lineupIndexMap.get(s.id) || s.sort_order || s.id}
+                            </div>
+                            <div className="font-mono text-[9px] text-slate-500">ID {s.id}</div>
+                          </div>
+                        </div>
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
                           <div className="w-9 h-9 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
@@ -2732,6 +3005,511 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Channel & Category Lineup Organizer Modal */}
+      {orderModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-4xl rounded-2xl bg-[#0e1526] border border-sky-500/35 p-6 flex flex-col max-h-[92vh] shadow-2xl">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3 shrink-0">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <ArrowUpDown className="w-5 h-5 text-sky-400" />
+                  Organizador de Parrilla — Cómo se muestran los Canales y Categorías
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  El orden guardado aquí se aplica en vivo a IPTV Smarters, TiviMate, XCIPTV, Listas M3U (tvg-chno), Stalker MAG y WebTV
+                </p>
+              </div>
+              <button
+                onClick={() => setOrderModalOpen(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex items-center gap-2 pt-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setOrderTab('streams')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition border ${
+                  orderTab === 'streams'
+                    ? 'bg-sky-500/20 text-sky-200 border-sky-400/50'
+                    : 'bg-[#090e1a] text-slate-400 border-slate-800 hover:text-white'
+                }`}
+              >
+                📺 Orden de Canales ({orderStreamsList.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setOrderTab('categories')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition border ${
+                  orderTab === 'categories'
+                    ? 'bg-indigo-500/20 text-indigo-200 border-indigo-400/50'
+                    : 'bg-[#090e1a] text-slate-400 border-slate-800 hover:text-white'
+                }`}
+              >
+                📂 Orden de Categorías ({orderCatsList.length})
+              </button>
+            </div>
+
+            {orderTab === 'streams' ? (
+              <>
+                {/* Filter + Search + Smart Auto-Sort Presets */}
+                <div className="pt-3 space-y-2.5 shrink-0">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <select
+                      value={orderCatFilter}
+                      onChange={(e) => handleChangeOrderCatFilter(e.target.value)}
+                      className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white"
+                    >
+                      <option value="all">
+                        Parrilla Global Completa ({streams.length} canales)
+                      </option>
+                      {categories.map((c) => (
+                        <option key={c.id} value={String(c.id)}>
+                          Solo categoría: {c.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+                      <input
+                        type="text"
+                        value={orderSearch}
+                        onChange={(e) => setOrderSearch(e.target.value)}
+                        placeholder="Filtrar rápido para encontrar un canal y cambiar su # posición..."
+                        className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Quick Auto-Sort Buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5 bg-[#090e1a] p-2.5 rounded-xl border border-slate-800">
+                    <span className="text-[11px] text-slate-400 font-semibold mr-1">
+                      Orden rápido:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => applySmartSortPreset('cat_alpha')}
+                      className="px-2.5 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/30 text-sky-200 border border-sky-500/30 text-[11px] font-semibold transition"
+                    >
+                      📂 Por Categorías + A→Z
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySmartSortPreset('cat_keep')}
+                      className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/30 text-indigo-200 border border-indigo-500/30 text-[11px] font-semibold transition"
+                    >
+                      📂 Agrupar por Categorías
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySmartSortPreset('az')}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold transition"
+                    >
+                      A → Z
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySmartSortPreset('za')}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold transition"
+                    >
+                      Z → A
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySmartSortPreset('quality')}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 text-[11px] font-semibold transition"
+                    >
+                      💎 Calidad (FHD → HD → SD)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySmartSortPreset('id_asc')}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[11px] font-semibold transition"
+                    >
+                      # ID Original
+                    </button>
+                  </div>
+                </div>
+
+                {/* Scrollable Draggable Channel List */}
+                <div className="my-3 flex-1 overflow-y-auto rounded-xl bg-[#070b13] border border-slate-800 divide-y divide-slate-800/70">
+                  {orderStreamsList.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-500">
+                      No hay canales en esta selección.
+                    </div>
+                  ) : (
+                    orderStreamsList.map((st, realIdx) => {
+                      if (
+                        orderSearch.trim() &&
+                        !st.name.toLowerCase().includes(orderSearch.trim().toLowerCase()) &&
+                        !String(st.category_name || '')
+                          .toLowerCase()
+                          .includes(orderSearch.trim().toLowerCase())
+                      ) {
+                        return null;
+                      }
+                      const isDragTarget = dragOverIdx === realIdx && dragIdx !== null && dragIdx !== realIdx;
+                      return (
+                        <div
+                          key={`${st.id}-${realIdx}`}
+                          draggable={!orderSearch.trim()}
+                          onDragStart={() => setDragIdx(realIdx)}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            if (dragOverIdx !== realIdx) setDragOverIdx(realIdx);
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            if (dragIdx !== null && dragIdx !== realIdx) {
+                              moveStreamInModal(dragIdx, realIdx);
+                            }
+                            setDragIdx(null);
+                            setDragOverIdx(null);
+                          }}
+                          onDragEnd={() => {
+                            setDragIdx(null);
+                            setDragOverIdx(null);
+                          }}
+                          className={`flex items-center justify-between gap-2 px-3 py-2 text-xs transition ${
+                            isDragTarget
+                              ? 'bg-sky-500/20 border-t-2 border-sky-400'
+                              : 'hover:bg-slate-800/40'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {!orderSearch.trim() && (
+                              <GripVertical
+                                className="w-4 h-4 text-slate-500 hover:text-sky-300 cursor-grab shrink-0"
+                                title="Arrastra para mover este canal"
+                              />
+                            )}
+
+                            {/* Direct # Position Input */}
+                            <div className="flex items-center gap-1 shrink-0" title="Escribe el número de puesto y pulsa Enter">
+                              <span className="text-[10px] text-slate-500 font-mono">#</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={orderStreamsList.length}
+                                defaultValue={realIdx + 1}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    const val = parseInt(e.currentTarget.value, 10);
+                                    if (!Number.isNaN(val)) moveStreamInModal(realIdx, val - 1);
+                                  }
+                                }}
+                                onBlur={(e) => {
+                                  const val = parseInt(e.currentTarget.value, 10);
+                                  if (!Number.isNaN(val) && val - 1 !== realIdx) {
+                                    moveStreamInModal(realIdx, val - 1);
+                                  }
+                                }}
+                                className="w-14 px-1.5 py-1 rounded-lg bg-[#0e1526] border border-slate-700 focus:border-sky-400 text-center font-mono font-bold text-sky-300 text-xs"
+                              />
+                            </div>
+
+                            {st.logo_url ? (
+                              <img
+                                src={st.logo_url}
+                                alt={st.name}
+                                className="w-7 h-7 rounded bg-slate-800 object-cover shrink-0"
+                              />
+                            ) : (
+                              <div className="w-7 h-7 rounded bg-slate-800 flex items-center justify-center shrink-0">
+                                <Radio className="w-3.5 h-3.5 text-indigo-400" />
+                              </div>
+                            )}
+
+                            <div className="min-w-0">
+                              <div className="font-semibold text-white truncate">{st.name}</div>
+                              <div className="text-[10px] text-slate-400 flex items-center gap-1.5">
+                                <span>{st.category_name || 'General'}</span>
+                                {st.resolution_tier && (
+                                  <span className="px-1.5 py-0.2 rounded bg-slate-800 text-cyan-300 font-mono">
+                                    {st.resolution_tier.toUpperCase()}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* 4 Quick Move Buttons */}
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              disabled={realIdx === 0}
+                              onClick={() => moveStreamInModal(realIdx, 0)}
+                              title="Enviar al puesto #1 (Inicio)"
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-sky-600/30 disabled:opacity-30 text-slate-300 hover:text-sky-200 transition"
+                            >
+                              <ChevronsUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={realIdx === 0}
+                              onClick={() => moveStreamInModal(realIdx, realIdx - 1)}
+                              title="Subir 1 puesto"
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-sky-600/30 disabled:opacity-30 text-slate-300 hover:text-sky-200 transition"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={realIdx === orderStreamsList.length - 1}
+                              onClick={() => moveStreamInModal(realIdx, realIdx + 1)}
+                              title="Bajar 1 puesto"
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-sky-600/30 disabled:opacity-30 text-slate-300 hover:text-sky-200 transition"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={realIdx === orderStreamsList.length - 1}
+                              onClick={() => moveStreamInModal(realIdx, orderStreamsList.length - 1)}
+                              title="Enviar al final"
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-sky-600/30 disabled:opacity-30 text-slate-300 hover:text-sky-200 transition"
+                            >
+                              <ChevronsDown className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Footer Save Channels */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-slate-800 shrink-0">
+                  <div className="text-[11px] text-slate-400">
+                    💡 Arrastra filas, usa las flechas o escribe directamente el <strong># número</strong> y pulsa Enter.
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOrderModalOpen(false)}
+                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      disabled={orderSaving}
+                      onClick={handleSaveStreamsOrder}
+                      className="inline-flex items-center gap-1.5 px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-bold transition shadow-lg shadow-sky-950/50"
+                    >
+                      <Save className="w-4 h-4" />
+                      {orderSaving ? 'Guardando...' : 'Guardar Orden de Canales'}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Tab 2: Categories Ordering & Inline Rename */}
+                <div className="pt-3 space-y-2 shrink-0">
+                  <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <label className="inline-flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={packStreamsOnCatSave}
+                        onChange={(e) => setPackStreamsOnCatSave(e.target.checked)}
+                        className="rounded accent-indigo-500"
+                      />
+                      <span>
+                        Reagrupar también los <strong>{streams.length} canales</strong> siguiendo este orden de categorías
+                      </span>
+                    </label>
+
+                    {packStreamsOnCatSave && (
+                      <label className="inline-flex items-center gap-2 text-xs text-indigo-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={alphaInsideCatSave}
+                          onChange={(e) => setAlphaInsideCatSave(e.target.checked)}
+                          className="rounded accent-indigo-500"
+                        />
+                        <span>Ordenar A→Z dentro de cada categoría</span>
+                      </label>
+                    )}
+                  </div>
+                </div>
+
+                <div className="my-3 flex-1 overflow-y-auto rounded-xl bg-[#070b13] border border-slate-800 divide-y divide-slate-800/70">
+                  {orderCatsList.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-500">
+                      No hay categorías en vivo creadas.
+                    </div>
+                  ) : (
+                    orderCatsList.map((cat, idx) => {
+                      const countInCat = streams.filter((s) => s.category_id === cat.id).length;
+                      return (
+                        <div
+                          key={`${cat.id}-${idx}`}
+                          draggable
+                          onDragStart={() => setDragIdx(idx)}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            if (dragOverIdx !== idx) setDragOverIdx(idx);
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            if (dragIdx !== null && dragIdx !== idx) {
+                              moveCategoryInModal(dragIdx, idx);
+                            }
+                            setDragIdx(null);
+                            setDragOverIdx(null);
+                          }}
+                          onDragEnd={() => {
+                            setDragIdx(null);
+                            setDragOverIdx(null);
+                          }}
+                          className="flex items-center justify-between gap-2 px-3 py-2.5 text-xs hover:bg-slate-800/40 transition"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                            <GripVertical className="w-4 h-4 text-slate-500 hover:text-indigo-300 cursor-grab shrink-0" />
+                            <input
+                              type="number"
+                              min={1}
+                              max={orderCatsList.length}
+                              defaultValue={idx + 1}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  const val = parseInt(e.currentTarget.value, 10);
+                                  if (!Number.isNaN(val)) moveCategoryInModal(idx, val - 1);
+                                }
+                              }}
+                              onBlur={(e) => {
+                                const val = parseInt(e.currentTarget.value, 10);
+                                if (!Number.isNaN(val) && val - 1 !== idx) {
+                                  moveCategoryInModal(idx, val - 1);
+                                }
+                              }}
+                              className="w-12 px-1.5 py-1 rounded-lg bg-[#0e1526] border border-slate-700 text-center font-mono font-bold text-indigo-300 text-xs shrink-0"
+                            />
+
+                            {editingCatId === cat.id ? (
+                              <div className="flex items-center gap-1.5 flex-1">
+                                <input
+                                  type="text"
+                                  value={editingCatName}
+                                  onChange={(e) => setEditingCatName(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleRenameCategoryInline(cat.id);
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-[#0e1526] border border-indigo-500 text-white text-xs flex-1 max-w-xs"
+                                  autoFocus
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleRenameCategoryInline(cat.id)}
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold text-[11px]"
+                                >
+                                  OK
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingCatId(null)}
+                                  className="px-2 py-1 rounded-lg bg-slate-800 text-slate-400 text-[11px]"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="font-semibold text-white truncate">{cat.name}</span>
+                                <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 text-[10px] font-mono">
+                                  {countInCat} canales
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingCatId(cat.id);
+                                    setEditingCatName(cat.name);
+                                  }}
+                                  title="Renombrar categoría"
+                                  className="text-slate-500 hover:text-indigo-300 p-1"
+                                >
+                                  <Edit3 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              disabled={idx === 0}
+                              onClick={() => moveCategoryInModal(idx, 0)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/30 disabled:opacity-30 text-slate-300"
+                              title="Enviar al #1"
+                            >
+                              <ChevronsUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === 0}
+                              onClick={() => moveCategoryInModal(idx, idx - 1)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/30 disabled:opacity-30 text-slate-300"
+                              title="Subir"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === orderCatsList.length - 1}
+                              onClick={() => moveCategoryInModal(idx, idx + 1)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/30 disabled:opacity-30 text-slate-300"
+                              title="Bajar"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === orderCatsList.length - 1}
+                              onClick={() => moveCategoryInModal(idx, orderCatsList.length - 1)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/30 disabled:opacity-30 text-slate-300"
+                              title="Enviar al final"
+                            >
+                              <ChevronsDown className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setOrderModalOpen(false)}
+                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={orderSaving}
+                    onClick={handleSaveCategoriesOrder}
+                    className="inline-flex items-center gap-1.5 px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition shadow-lg shadow-indigo-950/50"
+                  >
+                    <Save className="w-4 h-4" />
+                    {orderSaving ? 'Guardando...' : 'Guardar Orden de Categorías'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

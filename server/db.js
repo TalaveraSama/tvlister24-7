@@ -354,6 +354,40 @@ export function initDb() {
   ensureColumn('streams', 'detected_resolution', "TEXT DEFAULT ''");
   ensureColumn('streams', 'resolution_tier', "TEXT DEFAULT ''");
   ensureColumn('streams', 'resolution_source', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_streams_sort_order ON streams(sort_order, id);
+    CREATE INDEX IF NOT EXISTS idx_categories_sort_order ON categories(sort_order, id);
+
+    CREATE TRIGGER IF NOT EXISTS trg_streams_auto_sort_order
+    AFTER INSERT ON streams
+    WHEN NEW.sort_order = 0
+    BEGIN
+      UPDATE streams
+      SET sort_order = COALESCE((SELECT MAX(sort_order) FROM streams WHERE id != NEW.id), 0) + 1
+      WHERE id = NEW.id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_channels247_auto_sort_order
+    AFTER INSERT ON channels_247
+    WHEN NEW.sort_order = 0
+    BEGIN
+      UPDATE channels_247
+      SET sort_order = COALESCE((SELECT MAX(sort_order) FROM channels_247 WHERE id != NEW.id), 0) + 1
+      WHERE id = NEW.id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_categories_auto_sort_order
+    AFTER INSERT ON categories
+    WHEN NEW.sort_order = 0
+    BEGIN
+      UPDATE categories
+      SET sort_order = COALESCE((SELECT MAX(sort_order) FROM categories WHERE id != NEW.id), 0) + 1
+      WHERE id = NEW.id;
+    END;
+  `);
   ensureColumn('vod_items', 'xui_id', 'INTEGER');
   ensureColumn('vod_items', 'backdrop_url', "TEXT DEFAULT ''");
   ensureColumn('vod_items', 'tmdb_id', "TEXT DEFAULT ''");
@@ -496,6 +530,45 @@ export function initDb() {
     db.prepare(
       "INSERT INTO settings (key, value) VALUES ('auto_res_tiers_1m_25m_3m_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
     ).run();
+  }
+
+  // Backfill sequential sort_order (1..N) for existing streams, channels_247, and categories
+  const sortOrderMigrated = db.prepare("SELECT value FROM settings WHERE key = 'streams_sort_order_v1'").get();
+  if (sortOrderMigrated?.value !== 'true') {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const zeroStreams = db.prepare('SELECT id FROM streams WHERE sort_order = 0 ORDER BY id ASC').all();
+      let maxStreamOrd = db.prepare('SELECT COALESCE(MAX(sort_order), 0) as m FROM streams').get()?.m || 0;
+      const updStreamOrd = db.prepare('UPDATE streams SET sort_order = ? WHERE id = ?');
+      for (const r of zeroStreams) {
+        maxStreamOrd += 1;
+        updStreamOrd.run(maxStreamOrd, r.id);
+      }
+
+      const zeroCh = db.prepare('SELECT id FROM channels_247 WHERE sort_order = 0 ORDER BY id ASC').all();
+      let maxChOrd = db.prepare('SELECT COALESCE(MAX(sort_order), 0) as m FROM channels_247').get()?.m || 0;
+      const updChOrd = db.prepare('UPDATE channels_247 SET sort_order = ? WHERE id = ?');
+      for (const r of zeroCh) {
+        maxChOrd += 1;
+        updChOrd.run(maxChOrd, r.id);
+      }
+
+      const zeroCats = db.prepare('SELECT id FROM categories WHERE sort_order = 0 ORDER BY id ASC').all();
+      let maxCatOrd = db.prepare('SELECT COALESCE(MAX(sort_order), 0) as m FROM categories').get()?.m || 0;
+      const updCatOrd = db.prepare('UPDATE categories SET sort_order = ? WHERE id = ?');
+      for (const r of zeroCats) {
+        maxCatOrd += 1;
+        updCatOrd.run(maxCatOrd, r.id);
+      }
+
+      db.prepare(
+        "INSERT INTO settings (key, value) VALUES ('streams_sort_order_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+      ).run();
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
   }
 }
 

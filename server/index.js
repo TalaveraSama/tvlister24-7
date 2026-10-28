@@ -406,7 +406,76 @@ app.post('/api/categories', requireAuth, requireAdmin, (req, res) => {
   const info = db
     .prepare('INSERT INTO categories (name, type, sort_order) VALUES (?, ?, ?)')
     .run(String(name), String(type), Number(sort_order) || 0);
-  res.json({ id: Number(info.lastInsertRowid), name, type, sort_order });
+  const created = db.prepare('SELECT * FROM categories WHERE id = ?').get(Number(info.lastInsertRowid));
+  res.json(created || { id: Number(info.lastInsertRowid), name, type, sort_order });
+});
+
+app.put('/api/categories/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: 'Categoría no encontrada' });
+  const nextName = req.body?.name !== undefined ? String(req.body.name).trim() : existing.name;
+  const nextSort = req.body?.sort_order !== undefined ? Number(req.body.sort_order) : existing.sort_order;
+  if (!nextName) return res.status(400).json({ error: 'Nombre requerido' });
+  db.prepare('UPDATE categories SET name = ?, sort_order = ? WHERE id = ?').run(nextName, nextSort, id);
+  res.json({ ok: true, category: db.prepare('SELECT * FROM categories WHERE id = ?').get(id) });
+});
+
+app.post('/api/categories/reorder', requireAuth, requireAdmin, (req, res) => {
+  const { orderedIds = [], packStreamsByCategory = false, alphaInsideCategory = false } = req.body || {};
+  const cleanIds = Array.isArray(orderedIds) ? orderedIds.map(Number).filter((n) => n > 0) : [];
+  if (cleanIds.length === 0) {
+    return res.status(400).json({ error: 'Lista de categorías vacía.' });
+  }
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const allCats = db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, id ASC').all();
+    const idSet = new Set(cleanIds);
+    const curSlots = allCats
+      .filter((c) => idSet.has(c.id))
+      .map((c) => c.sort_order)
+      .sort((a, b) => a - b);
+
+    const updCat = db.prepare('UPDATE categories SET sort_order = ? WHERE id = ?');
+    if (cleanIds.length === allCats.length) {
+      cleanIds.forEach((cid, idx) => updCat.run(idx + 1, cid));
+    } else {
+      cleanIds.forEach((cid, idx) => {
+        const slot = curSlots[idx] !== undefined ? curSlots[idx] : idx + 1;
+        updCat.run(slot, cid);
+      });
+      // Normalize sequential 1..N
+      const refreshed = db.prepare('SELECT id FROM categories ORDER BY sort_order ASC, id ASC').all();
+      refreshed.forEach((r, idx) => updCat.run(idx + 1, r.id));
+    }
+
+    if (packStreamsByCategory) {
+      const catRankRows = db.prepare('SELECT id, sort_order FROM categories ORDER BY sort_order ASC, id ASC').all();
+      const catRank = new Map(catRankRows.map((c, idx) => [c.id, idx + 1]));
+      const allStreams = db.prepare('SELECT id, name, category_id, sort_order FROM streams ORDER BY sort_order ASC, id ASC').all();
+      allStreams.sort((a, b) => {
+        const ra = catRank.get(a.category_id) ?? 999999;
+        const rb = catRank.get(b.category_id) ?? 999999;
+        if (ra !== rb) return ra - rb;
+        if (alphaInsideCategory) {
+          return String(a.name || '').localeCompare(String(b.name || ''), 'es', { numeric: true, sensitivity: 'base' });
+        }
+        return (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id;
+      });
+      const updStream = db.prepare('UPDATE streams SET sort_order = ? WHERE id = ?');
+      allStreams.forEach((s, idx) => updStream.run(idx + 1, s.id));
+    }
+
+    db.exec('COMMIT;');
+    res.json({
+      ok: true,
+      categories: db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, id ASC').all()
+    });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: err.message || 'Error al reordenar categorías' });
+  }
 });
 
 app.delete('/api/categories/:id', requireAuth, requireAdmin, (req, res) => {
@@ -521,7 +590,7 @@ app.get('/api/streams', requireAuth, (req, res) => {
        LEFT JOIN categories c ON c.id = s.category_id
        LEFT JOIN transcode_profiles tp ON tp.id = s.transcode_profile_id
        LEFT JOIN servers srv ON srv.id = s.server_id
-       ORDER BY s.id DESC`
+       ORDER BY s.sort_order ASC, s.id ASC`
     )
     .all()
     .map((s) => ({
@@ -529,6 +598,47 @@ app.get('/api/streams', requireAuth, (req, res) => {
       archiveStats: getArchiveStats(s.id)
     }));
   res.json(rows);
+});
+
+app.post('/api/streams/reorder', requireAuth, requireAdmin, (req, res) => {
+  const { orderedIds = [], mode = 'full' } = req.body || {};
+  const cleanIds = Array.isArray(orderedIds) ? orderedIds.map(Number).filter((n) => n > 0) : [];
+  if (cleanIds.length === 0) {
+    return res.status(400).json({ error: 'Lista de canales a ordenar vacía.' });
+  }
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const allStreams = db.prepare('SELECT id, sort_order FROM streams ORDER BY sort_order ASC, id ASC').all();
+    const idSet = new Set(cleanIds);
+    const upd = db.prepare('UPDATE streams SET sort_order = ? WHERE id = ?');
+
+    if (mode === 'subset' && cleanIds.length < allStreams.length) {
+      // Keep non-included channels at their exact positions and reorder only the subset's occupied slots
+      const occupiedPositions = [];
+      allStreams.forEach((s, globalIdx) => {
+        if (idSet.has(s.id)) occupiedPositions.push(globalIdx);
+      });
+      const finalOrder = allStreams.map((s) => s.id);
+      cleanIds.forEach((sid, subIdx) => {
+        if (occupiedPositions[subIdx] !== undefined) {
+          finalOrder[occupiedPositions[subIdx]] = sid;
+        }
+      });
+      finalOrder.forEach((sid, idx) => upd.run(idx + 1, sid));
+    } else {
+      // Full order: place cleanIds first (1..K), followed by any remaining streams in existing relative order
+      const remaining = allStreams.filter((s) => !idSet.has(s.id)).map((s) => s.id);
+      const finalOrder = [...cleanIds, ...remaining];
+      finalOrder.forEach((sid, idx) => upd.run(idx + 1, sid));
+    }
+
+    db.exec('COMMIT;');
+    res.json({ ok: true, reorderedCount: cleanIds.length });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: err.message || 'Error al guardar el nuevo orden de canales' });
+  }
 });
 
 app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
@@ -1055,7 +1165,7 @@ app.get('/api/channels247', requireAuth, (req, res) => {
        FROM channels_247 ch
        LEFT JOIN categories c ON c.id = ch.category_id
        LEFT JOIN transcode_profiles tp ON tp.id = ch.transcode_profile_id
-       ORDER BY ch.id DESC`
+       ORDER BY ch.sort_order ASC, ch.id ASC`
     )
     .all();
 
@@ -1070,6 +1180,26 @@ app.get('/api/channels247', requireAuth, (req, res) => {
     };
   });
   res.json(enriched);
+});
+
+app.post('/api/channels247/reorder', requireAuth, requireAdmin, (req, res) => {
+  const cleanIds = Array.isArray(req.body?.orderedIds)
+    ? req.body.orderedIds.map(Number).filter((n) => n > 0)
+    : [];
+  if (cleanIds.length === 0) return res.status(400).json({ error: 'Lista vacía' });
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const allCh = db.prepare('SELECT id FROM channels_247 ORDER BY sort_order ASC, id ASC').all();
+    const idSet = new Set(cleanIds);
+    const finalOrder = [...cleanIds, ...allCh.filter((c) => !idSet.has(c.id)).map((c) => c.id)];
+    const upd = db.prepare('UPDATE channels_247 SET sort_order = ? WHERE id = ?');
+    finalOrder.forEach((cid, idx) => upd.run(idx + 1, cid));
+    db.exec('COMMIT;');
+    res.json({ ok: true });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/channels247', requireAuth, requireAdmin, (req, res) => {

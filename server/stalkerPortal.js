@@ -67,8 +67,8 @@ function getStbAllowedCatalog(line) {
     }
   }
 
-  const allStreams = db.prepare('SELECT * FROM streams ORDER BY id ASC').all();
-  const allCh247 = db.prepare('SELECT * FROM channels_247 ORDER BY id ASC').all();
+  const allStreams = db.prepare('SELECT * FROM streams ORDER BY sort_order ASC, id ASC').all();
+  const allCh247 = db.prepare('SELECT * FROM channels_247 ORDER BY sort_order ASC, id ASC').all();
   const allVods = db.prepare('SELECT * FROM vod_items ORDER BY id ASC').all();
 
   return {
