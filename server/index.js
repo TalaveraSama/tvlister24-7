@@ -55,7 +55,17 @@ import {
   pruneArchiveSegmentsForStreams,
   isFfmpegAvailable
 } from './streamEngine.js';
-import { iptvRouter, authenticateLine, isItemAllowedForLine, recordConnection, expandStreamUpstreamUrls } from './iptvApi.js';
+import {
+  iptvRouter,
+  authenticateLine,
+  isItemAllowedForLine,
+  recordConnection,
+  expandStreamUpstreamUrls,
+  pruneStaleConnections,
+  kickConnectionSocket,
+  kickAllLineConnections
+} from './iptvApi.js';
+import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
 import { syncEpgSourceById, startEpgAutoSyncScheduler } from './epgSync.js';
 import { WebSocketServer } from 'ws';
@@ -257,7 +267,9 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
     ? db.prepare("SELECT COUNT(*) as c FROM lines WHERE owner_id = ? AND status = 'active'").get(req.user.id).c
     : db.prepare("SELECT COUNT(*) as c FROM lines WHERE status = 'active'").get().c;
 
-  const connections = isReseller
+  pruneStaleConnections();
+
+  const rawConnections = isReseller
     ? db
         .prepare(
           `SELECT ac.* FROM active_connections ac
@@ -267,6 +279,8 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
         )
         .all(req.user.id)
     : db.prepare('SELECT * FROM active_connections ORDER BY last_ping_at DESC').all();
+
+  const connections = rawConnections.map(enrichActiveConnectionRow);
 
   const servers = db.prepare('SELECT * FROM servers ORDER BY is_main DESC, id ASC').all().map((s) =>
     s.is_main
@@ -315,8 +329,53 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
   });
 });
 
+function enrichActiveConnectionRow(ac) {
+  let country = ac.country || '--';
+  let isp = ac.isp || '';
+  if (!isp || isp === 'Client Network' || isp === 'Detectando ISP...') {
+    const geo = resolveIpGeoSync(ac.ip_address);
+    if (geo.country && geo.country !== '--') country = geo.country;
+    if (geo.isp) isp = geo.isp;
+  }
+  const agentInfo = classifyPlayerAgent(ac.user_agent);
+  return {
+    ...ac,
+    country,
+    isp: isp || 'ISP Desconocido',
+    player_name: agentInfo.player,
+    player_category: agentInfo.category
+  };
+}
+
+app.get('/api/connections', requireAuth, (req, res) => {
+  pruneStaleConnections();
+  const isReseller = req.user.role === 'reseller';
+  const rows = isReseller
+    ? db
+        .prepare(
+          `SELECT ac.* FROM active_connections ac
+           JOIN lines l ON l.id = ac.line_id
+           WHERE l.owner_id = ?
+           ORDER BY ac.last_ping_at DESC`
+        )
+        .all(req.user.id)
+    : db.prepare('SELECT * FROM active_connections ORDER BY last_ping_at DESC').all();
+  res.json(rows.map(enrichActiveConnectionRow));
+});
+
 app.delete('/api/connections/:id', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM active_connections WHERE id = ?').run(Number(req.params.id));
+  const connId = Number(req.params.id);
+  if (req.user.role === 'reseller') {
+    const owned = db
+      .prepare(
+        `SELECT ac.id FROM active_connections ac
+         JOIN lines l ON l.id = ac.line_id
+         WHERE ac.id = ? AND l.owner_id = ?`
+      )
+      .get(connId, req.user.id);
+    if (!owned) return res.status(403).json({ error: 'No tienes permiso sobre esta sesión.' });
+  }
+  kickConnectionSocket(connId);
   res.json({ ok: true });
 });
 
@@ -1169,31 +1228,64 @@ app.delete('/api/packages/:id', requireAuth, requireAdmin, (req, res) => {
 
 // ==================== SUBSCRIBER LINES & MAG/ENIGMA2 DEVICES ====================
 app.get('/api/lines', requireAuth, (req, res) => {
+  pruneStaleConnections();
   const isReseller = req.user.role === 'reseller';
   const rows = isReseller
     ? db
         .prepare(
-          `SELECT l.*, u.username as owner_username,
-           (SELECT COUNT(*) FROM active_connections ac WHERE ac.line_id = l.id) as active_conns
+          `SELECT l.*, u.username as owner_username
            FROM lines l LEFT JOIN users u ON u.id = l.owner_id
            WHERE l.owner_id = ? ORDER BY l.id DESC`
         )
         .all(req.user.id)
     : db
         .prepare(
-          `SELECT l.*, u.username as owner_username,
-           (SELECT COUNT(*) FROM active_connections ac WHERE ac.line_id = l.id) as active_conns
+          `SELECT l.*, u.username as owner_username
            FROM lines l LEFT JOIN users u ON u.id = l.owner_id
            ORDER BY l.id DESC`
         )
         .all();
 
+  const connRows = isReseller
+    ? db
+        .prepare(
+          `SELECT ac.* FROM active_connections ac
+           JOIN lines l ON l.id = ac.line_id
+           WHERE l.owner_id = ?
+           ORDER BY ac.last_ping_at DESC`
+        )
+        .all(req.user.id)
+    : db.prepare('SELECT * FROM active_connections ORDER BY last_ping_at DESC').all();
+
+  const sessionsByLine = new Map();
+  for (const ac of connRows) {
+    const list = sessionsByLine.get(ac.line_id) || [];
+    list.push(enrichActiveConnectionRow(ac));
+    sessionsByLine.set(ac.line_id, list);
+  }
+
   res.json(
-    rows.map((r) => ({
-      ...r,
-      bouquet_ids: JSON.parse(r.bouquet_ids_json || '[1]')
-    }))
+    rows.map((r) => {
+      const active_sessions = sessionsByLine.get(r.id) || [];
+      return {
+        ...r,
+        active_conns: active_sessions.length,
+        active_sessions,
+        bouquet_ids: JSON.parse(r.bouquet_ids_json || '[1]')
+      };
+    })
   );
+});
+
+app.post('/api/lines/:id/kick', requireAuth, (req, res) => {
+  const lineId = Number(req.params.id);
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(lineId);
+  if (!line) return res.status(404).json({ error: 'Línea no encontrada.' });
+  if (req.user.role === 'reseller' && line.owner_id !== req.user.id) {
+    return res.status(403).json({ error: 'No tienes permiso sobre esta línea.' });
+  }
+  kickAllLineConnections(lineId);
+  res.json({ ok: true });
 });
 
 app.post('/api/lines', requireAuth, (req, res) => {
@@ -1285,6 +1377,9 @@ app.put('/api/lines/:id', requireAuth, (req, res) => {
     String(b.notes ?? line.notes),
     id
   );
+  if (b.status && b.status !== 'active') {
+    kickAllLineConnections(id);
+  }
   res.json({ ok: true });
 });
 
@@ -1295,7 +1390,7 @@ app.delete('/api/lines/:id', requireAuth, (req, res) => {
   if (req.user.role === 'reseller' && line.owner_id !== req.user.id) {
     return res.status(403).json({ error: 'Sin permiso' });
   }
-  db.prepare('DELETE FROM active_connections WHERE line_id = ?').run(id);
+  kickAllLineConnections(id);
   db.prepare('DELETE FROM lines WHERE id = ?').run(id);
   res.json({ ok: true });
 });

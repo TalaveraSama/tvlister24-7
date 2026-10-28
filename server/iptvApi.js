@@ -8,6 +8,7 @@ import { db } from './db.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken } from './auth.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
+import { resolveIpGeoSync } from './geoIspResolver.js';
 import { resolvePublicPosterUrl, normalizeXuiOrTmdbImageUrl, verifyLocalPosterPath } from './vodSyncTmdb.js';
 import {
   computeChannel247LiveState,
@@ -200,9 +201,7 @@ function serveLocalMediaFileWithRange(req, res, filePath, connId = null) {
 
   if (req.socket) req.socket.setTimeout(0);
   if (connId) {
-    req.on('close', () => {
-      db.prepare('DELETE FROM active_connections WHERE id = ?').run(connId);
-    });
+    attachLiveConnectionSocket(connId, req, res);
   }
 
   if (req.method === 'HEAD') {
@@ -321,22 +320,112 @@ function selectEdgeRedirect(req) {
   };
 }
 
+const activeLiveSockets = new Map(); // connId -> Set<{ close: () => void, hb: NodeJS.Timeout }>
+
+export function pruneStaleConnections() {
+  try {
+    db.prepare(
+      `DELETE FROM active_connections
+       WHERE (protocol IN ('HLS', 'WebTV') AND datetime(last_ping_at) < datetime('now', '-90 seconds'))
+          OR datetime(last_ping_at) < datetime('now', '-15 minutes')`
+    ).run();
+  } catch {
+    // ignore SQLite busy race
+  }
+}
+
+export function attachLiveConnectionSocket(connId, req, res, onForceClose = null) {
+  if (!connId) return;
+  const hb = setInterval(() => {
+    try {
+      db.prepare("UPDATE active_connections SET last_ping_at = datetime('now') WHERE id = ?").run(connId);
+    } catch {
+      // ignore
+    }
+  }, 30_000);
+  hb.unref?.();
+
+  const handle = {
+    hb,
+    close: () => {
+      clearInterval(hb);
+      try {
+        if (typeof onForceClose === 'function') onForceClose();
+      } catch {
+        // ignore
+      }
+      try {
+        if (res && !res.writableEnded) res.destroy();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  let set = activeLiveSockets.get(connId);
+  if (!set) {
+    set = new Set();
+    activeLiveSockets.set(connId, set);
+  }
+  set.add(handle);
+
+  const cleanup = () => {
+    clearInterval(hb);
+    const s = activeLiveSockets.get(connId);
+    if (s) {
+      s.delete(handle);
+      if (s.size === 0) activeLiveSockets.delete(connId);
+    }
+    try {
+      db.prepare('DELETE FROM active_connections WHERE id = ?').run(connId);
+    } catch {
+      // ignore
+    }
+  };
+
+  if (req && typeof req.once === 'function') req.once('close', cleanup);
+}
+
+export function kickConnectionSocket(connId) {
+  const numericId = Number(connId);
+  const set = activeLiveSockets.get(numericId);
+  if (set) {
+    for (const h of set) {
+      h.close();
+    }
+    activeLiveSockets.delete(numericId);
+  }
+  db.prepare('DELETE FROM active_connections WHERE id = ?').run(numericId);
+}
+
+export function kickAllLineConnections(lineId) {
+  const rows = db.prepare('SELECT id FROM active_connections WHERE line_id = ?').all(Number(lineId));
+  for (const r of rows) {
+    kickConnectionSocket(r.id);
+  }
+}
+
 export function recordConnection(req, line, targetType, targetId, targetName, protocol = 'HLS', serverId = 1) {
-  db.prepare("DELETE FROM active_connections WHERE datetime(last_ping_at) < datetime('now', '-15 minutes')").run();
+  pruneStaleConnections();
 
   const ip = extractClientIp(req);
-  const ua = (req.headers['user-agent'] || 'IPTV Player').slice(0, 120);
+  const ua = String(req.headers?.['user-agent'] || 'IPTV Player').trim().slice(0, 255) || 'IPTV Player';
+  const geo = resolveIpGeoSync(ip, req);
+  const country = geo.country || '--';
+  const isp = geo.isp || 'Detectando ISP...';
 
   const existing = db
     .prepare(
-      'SELECT id FROM active_connections WHERE line_id = ? AND ip_address = ? AND target_type = ? AND target_id = ?'
+      'SELECT id, country, isp FROM active_connections WHERE line_id = ? AND ip_address = ? AND target_type = ? AND target_id = ?'
     )
     .get(line.id, ip, targetType, targetId);
 
   if (existing) {
+    const nextCountry = country !== '--' ? country : existing.country || '--';
+    const nextIsp = isp !== 'Detectando ISP...' ? isp : existing.isp || isp;
     db.prepare(
-      "UPDATE active_connections SET last_ping_at = datetime('now'), target_name = ?, protocol = ?, server_id = ? WHERE id = ?"
-    ).run(targetName, protocol, serverId, existing.id);
+      "UPDATE active_connections SET last_ping_at = datetime('now'), target_name = ?, protocol = ?, user_agent = ?, country = ?, isp = ?, server_id = ? WHERE id = ?"
+    ).run(targetName, protocol, ua, nextCountry, nextIsp, serverId, existing.id);
     return { allowed: true, connId: existing.id };
   }
 
@@ -346,12 +435,14 @@ export function recordConnection(req, line, targetType, targetId, targetName, pr
 
   if (activeCount >= line.max_connections) {
     const sameIpOldest = db
-      .prepare('SELECT id FROM active_connections WHERE line_id = ? AND ip_address = ? ORDER BY last_ping_at ASC LIMIT 1')
+      .prepare('SELECT id, country, isp FROM active_connections WHERE line_id = ? AND ip_address = ? ORDER BY last_ping_at ASC LIMIT 1')
       .get(line.id, ip);
     if (sameIpOldest) {
+      const nextCountry = country !== '--' ? country : sameIpOldest.country || '--';
+      const nextIsp = isp !== 'Detectando ISP...' ? isp : sameIpOldest.isp || isp;
       db.prepare(
-        "UPDATE active_connections SET target_type = ?, target_id = ?, target_name = ?, protocol = ?, user_agent = ?, server_id = ?, last_ping_at = datetime('now') WHERE id = ?"
-      ).run(targetType, targetId, targetName, protocol, ua, serverId, sameIpOldest.id);
+        "UPDATE active_connections SET target_type = ?, target_id = ?, target_name = ?, protocol = ?, user_agent = ?, country = ?, isp = ?, server_id = ?, last_ping_at = datetime('now') WHERE id = ?"
+      ).run(targetType, targetId, targetName, protocol, ua, nextCountry, nextIsp, serverId, sameIpOldest.id);
       return { allowed: true, connId: sameIpOldest.id };
     }
     return { allowed: false, error: 'Límite máximo de conexiones simultáneas alcanzado' };
@@ -359,8 +450,8 @@ export function recordConnection(req, line, targetType, targetId, targetName, pr
 
   const info = db.prepare(`
     INSERT INTO active_connections (line_id, username, target_type, target_id, target_name, ip_address, country, isp, user_agent, protocol, server_id)
-    VALUES (?, ?, ?, ?, ?, ?, 'NI', 'Client Network', ?, ?, ?)
-  `).run(line.id, line.username, targetType, targetId, targetName, ip, ua, protocol, serverId);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(line.id, line.username, targetType, targetId, targetName, ip, country, isp, ua, protocol, serverId);
 
   return { allowed: true, connId: Number(info.lastInsertRowid) };
 }
@@ -898,6 +989,17 @@ iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) =
   const fullPath = path.join(HLS_ROOT, safeKey, safeFile);
   if (!fs.existsSync(fullPath)) return res.status(404).send('Segment not ready');
 
+  // Refresh live subscriber connection telemetry (IP, User-Agent, ISP) on local HLS segment fetches
+  if (safeKey.startsWith('stream_')) {
+    const sid = Number(safeKey.replace('stream_', ''));
+    const st = sid ? db.prepare('SELECT id, name FROM streams WHERE id = ?').get(sid) : null;
+    if (st) recordConnection(req, auth.line, 'live', st.id, st.name, 'HLS');
+  } else if (safeKey.startsWith('ch247_')) {
+    const cid = Number(safeKey.replace('ch247_', ''));
+    const ch = cid ? db.prepare('SELECT id, name FROM channels_247 WHERE id = ?').get(cid) : null;
+    if (ch) recordConnection(req, auth.line, 'channel247', ch.id, ch.name, 'HLS');
+  }
+
   if (safeFile.endsWith('.m3u8')) {
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
   } else if (safeFile.endsWith('.ts')) {
@@ -1125,12 +1227,6 @@ async function serveLiveStreamRequest(req, res) {
         }
       } else {
         const ac = new AbortController();
-        req.on('close', () => {
-          ac.abort();
-          if (conn.connId) {
-            db.prepare('DELETE FROM active_connections WHERE id = ?').run(conn.connId);
-          }
-        });
         try {
           const upRes = await fetch(upstreamUrl, {
             headers: { 'User-Agent': stream.user_agent || 'TVLister/2.3' },
@@ -1138,6 +1234,7 @@ async function serveLiveStreamRequest(req, res) {
             signal: ac.signal
           });
           if (upRes.ok && upRes.body) {
+            attachLiveConnectionSocket(conn.connId, req, res, () => ac.abort());
             const upstreamType = (upRes.headers.get('content-type') || '').toLowerCase();
 
             // If upstream is TVLister Media NanoFrame (MNF v1), remux on-the-fly to standard 188-byte MPEG-TS for legacy players!
@@ -1233,11 +1330,9 @@ iptvRouter.get('/mnf/:username/:password/:streamSpec', (req, res) => {
 
   session.addSubscriber(sendChunk);
 
-  req.on('close', () => {
+  attachLiveConnectionSocket(conn.connId, req, res, () => release(sendChunk));
+  req.once('close', () => {
     release(sendChunk);
-    if (conn.connId) {
-      db.prepare('DELETE FROM active_connections WHERE id = ?').run(conn.connId);
-    }
   });
 });
 

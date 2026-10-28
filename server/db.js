@@ -323,6 +323,15 @@ export function initDb() {
       last_scan_summary TEXT DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS ip_geo_cache (
+      ip TEXT PRIMARY KEY,
+      country TEXT DEFAULT '',
+      city TEXT DEFAULT '',
+      isp TEXT DEFAULT '',
+      asn TEXT DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const ensureColumn = (table, column, def) => {

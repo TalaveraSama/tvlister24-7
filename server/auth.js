@@ -138,11 +138,19 @@ export function verifyUpstreamUrl(encoded, sig, streamId) {
 }
 
 export function extractClientIp(req) {
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) {
-    return xff.split(',')[0].trim();
+  const cfIp = req.headers?.['cf-connecting-ip'] || req.headers?.['true-client-ip'];
+  if (typeof cfIp === 'string' && cfIp.trim()) {
+    return cfIp.trim().replace(/^::ffff:/i, '');
   }
-  return (req.socket?.remoteAddress || '127.0.0.1').replace(/^::ffff:/, '');
+  const xff = req.headers?.['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) {
+    return xff.split(',')[0].trim().replace(/^::ffff:/i, '');
+  }
+  const xReal = req.headers?.['x-real-ip'];
+  if (typeof xReal === 'string' && xReal.trim()) {
+    return xReal.trim().replace(/^::ffff:/i, '');
+  }
+  return (req.socket?.remoteAddress || '127.0.0.1').replace(/^::ffff:/i, '');
 }
 
 const KNOWN_RESTREAM_SCANNERS = ['masscan', 'zgrab', 'censys', 'nmap', 'nikto', 'sqlmap'];

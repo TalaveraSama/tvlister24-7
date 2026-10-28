@@ -362,7 +362,8 @@ export default function DashboardPage({ user, onPreview, setActiveTab }) {
                 <th className="px-4 py-3">Línea / Usuario</th>
                 <th className="px-4 py-3">Canal / Contenido</th>
                 <th className="px-4 py-3">IP & País</th>
-                <th className="px-4 py-3">Reproductor / User-Agent</th>
+                <th className="px-4 py-3">ISP / Operador</th>
+                <th className="px-4 py-3">Agente del Player (User-Agent)</th>
                 <th className="px-4 py-3">Protocolo</th>
                 <th className="px-4 py-3 text-right">Acción</th>
               </tr>
@@ -370,22 +371,49 @@ export default function DashboardPage({ user, onPreview, setActiveTab }) {
             <tbody className="divide-y divide-slate-800/60">
               {connections.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                  <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
                     No hay clientes reproduciendo flujos en este instante.
                   </td>
                 </tr>
               ) : (
                 connections.map((c) => (
                   <tr key={c.id} className="hover:bg-slate-800/30">
-                    <td className="px-4 py-3 font-semibold text-white">{c.username}</td>
-                    <td className="px-4 py-3 text-indigo-300 font-medium">{c.target_name}</td>
-                    <td className="px-4 py-3 font-mono text-slate-300">
-                      {c.ip_address}{' '}
-                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 ml-1">
-                        {c.country}
+                    <td className="px-4 py-3 font-semibold text-white">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        {c.username}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-slate-400 truncate max-w-[220px]">{c.user_agent}</td>
+                    <td className="px-4 py-3 text-indigo-300 font-medium">{c.target_name}</td>
+                    <td className="px-4 py-3 font-mono text-amber-300">
+                      {c.ip_address}{' '}
+                      {c.country && c.country !== '--' && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-200 font-sans font-bold ml-1">
+                          {c.country}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className="inline-block px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 text-[11px] font-medium max-w-[200px] truncate"
+                        title={c.isp || 'ISP Desconocido'}
+                      >
+                        {c.isp || 'ISP Desconocido'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 max-w-[280px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px] font-semibold shrink-0">
+                          {c.player_name || 'IPTV Player'}
+                        </span>
+                        <span
+                          className="font-mono text-[11px] text-slate-400 truncate"
+                          title={c.user_agent}
+                        >
+                          {c.user_agent}
+                        </span>
+                      </div>
+                    </td>
                     <td className="px-4 py-3">
                       <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono text-[11px]">
                         {c.protocol}
