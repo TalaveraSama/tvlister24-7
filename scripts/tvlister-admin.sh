@@ -295,9 +295,12 @@ EOF
 cmd_update() {
   local port tmp_script
   port=$(get_current_port)
-  echo "🔄 Actualizando TVLister 24/7 desde GitHub (conservando base de datos y puerto ${port})..."
+  echo "🔄 Actualizando TVLister 24/7 desde GitHub en tiempo real (conservando base de datos y puerto ${port})..."
   tmp_script=$(mktemp /tmp/tvlister_update.XXXXXX.sh)
-  curl -fsSL "https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/arena/85cc9902-tvlister24-7/scripts/install_ubuntu.sh?ts=$(date +%s)" -o "$tmp_script"
+  if ! curl -fsSL -H "Accept: application/vnd.github.raw" -H "Cache-Control: no-cache" \
+    "https://api.github.com/repos/TalaveraSama/tvlister24-7/contents/scripts/install_ubuntu.sh?ref=arena/85cc9902-tvlister24-7" -o "$tmp_script" 2>/dev/null; then
+    curl -fsSL "https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/arena/85cc9902-tvlister24-7/scripts/install_ubuntu.sh" -o "$tmp_script"
+  fi
   PORT="$port" exec bash "$tmp_script"
 }
 
