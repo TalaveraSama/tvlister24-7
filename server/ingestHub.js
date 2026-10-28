@@ -283,11 +283,68 @@ function startBuiltInNodeIngest(cfg) {
   };
 }
 
-export function startIngestServer(mainPort = currentMainPort) {
+function probeFreeTcpPort(candidates, host = '0.0.0.0') {
+  return new Promise((resolve) => {
+    const tryIdx = (idx) => {
+      if (idx >= candidates.length) return resolve(candidates[candidates.length - 1]);
+      const p = candidates[idx];
+      const srv = net.createServer();
+      srv.once('error', () => tryIdx(idx + 1));
+      srv.once('listening', () => srv.close(() => resolve(p)));
+      srv.listen(p, host);
+    };
+    tryIdx(0);
+  });
+}
+
+function probeFreeUdpPort(candidates) {
+  return new Promise((resolve) => {
+    const tryIdx = (idx) => {
+      if (idx >= candidates.length) return resolve(candidates[candidates.length - 1]);
+      const p = candidates[idx];
+      const sock = dgram.createSocket('udp4');
+      sock.once('error', () => {
+        try { sock.close(); } catch {}
+        tryIdx(idx + 1);
+      });
+      sock.once('listening', () => {
+        sock.close(() => resolve(p));
+      });
+      sock.bind(p, '0.0.0.0');
+    };
+    tryIdx(0);
+  });
+}
+
+export async function startIngestServer(mainPort = currentMainPort) {
   currentMainPort = Number(mainPort) || currentMainPort;
   stopIngestServer();
 
-  const cfg = getIngestConfig();
+  let cfg = getIngestConfig();
+  const freeRtmp = await probeFreeTcpPort([cfg.rtmpPort, 19350, 29350]);
+  const freeRtsp = await probeFreeTcpPort([cfg.rtspPort, 18554, 28554]);
+  const freeHls = await probeFreeTcpPort([cfg.hlsInternalPort, 18889, 28888], '127.0.0.1');
+  const freeSrt = await probeFreeUdpPort([cfg.srtPort, 18890, 28890]);
+
+  if (freeRtmp !== cfg.rtmpPort || freeRtsp !== cfg.rtspPort || freeSrt !== cfg.srtPort || freeHls !== cfg.hlsInternalPort) {
+    if (freeRtmp !== cfg.rtmpPort) {
+      pushLog(`[Ingest] Puerto RTMP ${cfg.rtmpPort} en uso en el servidor; asignado ${freeRtmp}`);
+      setSetting('ingest_rtmp_port', freeRtmp);
+    }
+    if (freeRtsp !== cfg.rtspPort) {
+      pushLog(`[Ingest] Puerto RTSP ${cfg.rtspPort} en uso en el servidor; asignado ${freeRtsp}`);
+      setSetting('ingest_rtsp_port', freeRtsp);
+    }
+    if (freeSrt !== cfg.srtPort) {
+      pushLog(`[Ingest] Puerto SRT ${cfg.srtPort} en uso en el servidor; asignado ${freeSrt}`);
+      setSetting('ingest_srt_port', freeSrt);
+    }
+    if (freeHls !== cfg.hlsInternalPort) {
+      setSetting('ingest_hls_port', freeHls);
+    }
+    cfg = getIngestConfig();
+  }
+
   const binPath = findMediaMtxBinary();
 
   // Prefer standalone MediaMTX v1.21.3 if installed, otherwise run Built-in Native Node Engine!

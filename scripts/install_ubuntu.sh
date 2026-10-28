@@ -151,8 +151,7 @@ fi
 
 # Instalar binario estático aislado MediaMTX v1.21.3 para ingesta RTMP/SRT/RTSP + CMAF fMP4 (Zero-Apt)
 if [ ! -x "${RUNTIME_BIN}/mediamtx" ]; then
-  MTX_ARCH="amd64"
-  if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MTX_ARCH="arm64"; fi
+  MTX_ARCH="${FF_ARCH}"
   TMP_MTX=$(mktemp -d)
   if curl -fsSL --max-time 45 "https://github.com/bluenviron/mediamtx/releases/download/v1.21.3/mediamtx_v1.21.3_linux_${MTX_ARCH}.tar.gz" -o "${TMP_MTX}/mtx.tar.gz" 2>/dev/null; then
     tar -xzf "${TMP_MTX}/mtx.tar.gz" -C "${RUNTIME_BIN}" mediamtx 2>/dev/null || true
@@ -164,7 +163,7 @@ if [ ! -x "${RUNTIME_BIN}/mediamtx" ]; then
   rm -rf "$TMP_MTX"
 fi
 
-export PATH="${RUNTIME_BIN}:${NODE_DIR}/bin:${PATH}"
+export PATH="${RUNTIME_BIN}:${NODE_DIR}/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
 # 4. Descargar código fuente actualizado preservando .runtime y data
 echo "[4/6] Descargando código fuente actualizado de TVLister 24/7..."
@@ -195,7 +194,7 @@ cd "$APP_DIR"
 
 # 5. Compilar aplicación con el Node aislado
 echo "[5/6] Instalando dependencias NPM y compilando panel de producción..."
-"${NODE_DIR}/bin/npm" install --no-audit --no-fund
+"${NODE_DIR}/bin/npm" install --include=dev --no-audit --no-fund
 "${NODE_DIR}/bin/npm" run build
 
 mkdir -p /var/lib/tvlister24-7/hls /var/lib/tvlister24-7/playlists "$APP_DIR/data"

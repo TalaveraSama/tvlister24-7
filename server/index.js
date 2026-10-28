@@ -1908,7 +1908,7 @@ app.get('/api/ingest/status', requireAuth, (req, res) => {
 app.post('/api/ingest/install-engine', requireAuth, requireAdmin, async (req, res) => {
   try {
     const binPath = await installMediaMtxBinary();
-    const startRes = startIngestServer(PORT);
+    const startRes = await startIngestServer(PORT);
     const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || 'tu-servidor';
     res.json({ ok: true, binPath, startRes, status: getIngestStatus(hostHeader) });
   } catch (err) {
@@ -1916,7 +1916,7 @@ app.post('/api/ingest/install-engine', requireAuth, requireAdmin, async (req, re
   }
 });
 
-app.post('/api/ingest/control', requireAuth, requireAdmin, (req, res) => {
+app.post('/api/ingest/control', requireAuth, requireAdmin, async (req, res) => {
   const { action = 'restart', config } = req.body || {};
   try {
     if (config && typeof config === 'object') {
@@ -1927,7 +1927,7 @@ app.post('/api/ingest/control', requireAuth, requireAdmin, (req, res) => {
       stopIngestServer();
     } else {
       saveIngestConfig({ enabled: true });
-      startIngestServer(PORT);
+      await startIngestServer(PORT);
     }
     const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || 'tu-servidor';
     res.json(getIngestStatus(hostHeader));
@@ -2243,7 +2243,7 @@ async function startServer() {
       onUpgrade: handleMnfUpgrade,
     });
     if (getIngestConfig().enabled) {
-      startIngestServer(PORT);
+      await startIngestServer(PORT);
     }
   });
 }
