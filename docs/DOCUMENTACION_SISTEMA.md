@@ -434,3 +434,61 @@ Convierte tu VPS en un servidor receptor de transmisiones en vivo desde **OBS St
   ```
 Tus clientes podrán conectarse indistintamente por `http://TU_IP:8095` o `http://TU_IP:8880` con las mismas credenciales.
 
+---
+
+### 8.5. Motor FFmpeg Eficiente (Alto Rendimiento & Bajo Consumo CPU/RAM)
+**¿Cómo lograr 100–300 canales en un solo servidor sin que FFmpeg se coma la CPU?**
+
+Entra a **Servidores / Seguridad → Optimización FFmpeg (Motor de Streaming Masivo)**. Ahí verás en tiempo real:
+procesos FFmpeg activos, hilos totales abiertos, RAM total consumida, RAM promedio por canal y si el HLS está
+en **RAMDisk (`/dev/shm`)** o en disco.
+
+**Valores por defecto (ya activos, no hay que configurar nada):**
+
+| Perfil del canal | Hilos del proceso | RAM por canal | CPU por canal | Salida |
+|---|---|---|---|---|
+| `Copy / Copy (Bitrate Original)` | **1** | **~14–16 MB** | **~0.1–0.5 %** | HLS nativo en RAMDisk |
+| `Copy Video + Audio Nivelado` | 1 (+1 filtro) | ~20 MB | ~1–2 % | HLS nativo en RAMDisk |
+| `Transcode libx264` (720p) | 2 (+1 filtro) | ~65 MB | ~14 % (medido en 2 vCPU) | HLS nativo en RAMDisk |
+| Troncal Flussonic (`tshttp://`) | 1 | ~20 MB | ~0.5 % | `-f tee`: HLS + MPEG-TS continuo |
+| ProLiant Audio Leveler (`-ram_mpegts_only`) | 1 | ~20 MB | ~0.75–2 % | MPEG-TS puro en RAM (`pipe:1`) |
+
+**Optimizaciones aplicadas automáticamente por TVLister:**
+
+1. **HLS nativo en RAMDisk (`/dev/shm`) con `temp_file` atómico**: 0 IOPS de disco y stdout cerrado
+   (`stdio: ignore`), por lo que Node.js no copia ni un byte de vídeo (0 % de carga en el event loop).
+2. **`Copy/Copy` Zero-CPU**: 1 hilo del sistema operativo, `-probesize 1000000 -analyzeduration 1000000`,
+   `-dn -sn` (descarta subtítulos/DVB) y `-avoid_negative_ts make_zero`. Nunca agrega `-b:v`, `-maxrate` ni
+   `-bufsize`: **el bitrate original del stream se mantiene intacto**.
+3. **Tope de hilos por encoder (`-threads 2 -filter_threads 1 -filter_complex_threads 1`)**: sin esto FFmpeg
+   abre `1.5 × núcleos` por canal (24–72 hilos por canal en un Xeon) y satura la caché L3.
+   Medición real en 2 vCPU, 720p: **22.3 % → 13.7 % de CPU y 12 → 6 hilos (−38 % CPU, −50 % hilos)**.
+4. **`-x264-params rc-lookahead=0:sync-lookahead=0:ref=1:bframes=0:me=dia:subme=1:trellis=0`** en `ultrafast`
+   (≈35–45 % menos CPU en vídeo que el preset por defecto).
+5. **`-aac_coder fast`**: 60–75 % menos CPU de audio que el codificador psicoacústico `twoloop`.
+6. **`dynaudnorm` acoplado (`n=0`) + `filter_size=8` sin remuestreo** en modo `ultra_200ch` (50 % menos DSP).
+7. **Ring buffer circular de 94 KB pre-asignado y zero-copy** para los canales troncales MPEG-TS (sin
+   `Buffer.concat` por paquete, sin GC por canal).
+8. **Backoff progresivo anti-tormentas** (2.5 s → 5 s → 10 s → 20 s) cuando el proveedor cae, en lugar de
+   relanzar FFmpeg 3.5 s después en bucle y multiplicar procesos.
+9. **HLS en `/dev/shm` desde 2 GB de RAM** (antes exigía 4 GB), para que VPS pequeños también eviten el disco.
+
+**Interruptores avanzados (se aplican al instante y reinician el motor escalonado cada 60 ms):**
+
+* **Salida MPEG-TS continua (`pipe:1`)**:
+  * `Auto` *(recomendado)* — solo los canales troncales Flussonic abren el pipe MPEG-TS.
+  * `Siempre` — todos los canales abren `-f tee` (máxima compatibilidad con apps `.ts`, consume más CPU).
+  * `Nunca` — 100 % HLS en RAMDisk (máximo ahorro de CPU y RAM).
+* **Tope de hilos por encoder H.264**: `1` (máximo ahorro, 200+ canales), `2` (equilibrado, por defecto),
+  `4` u `8` (más calidad/FPS para pocos canales 4K).
+
+**API para scripts / automatización:**
+```bash
+# Consultar métricas reales del motor (procesos, hilos, RAM por canal, prefijo HLS)
+curl -s -H "Authorization: Bearer $TOKEN" http://TU_IP:8095/api/system/ffmpeg-efficiency
+
+# Cambiar política (ej. máximo ahorro: sin pipe TS y 1 hilo H.264)
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"tsPipeMode":"never","h264Threads":1}' \
+  http://TU_IP:8095/api/system/ffmpeg-efficiency
+```

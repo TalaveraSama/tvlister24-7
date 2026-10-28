@@ -144,18 +144,22 @@ function tryProbeWithFfmpegHeader(url, userAgent = 'TVLister/2.4', timeoutMs = 6
       ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
       : process.env;
 
-    const args = ['-hide_banner', '-nostdin'];
+    // Probe ultra-ligero: 1 hilo, 1 frame, sin audio/subtítulos (100-300 canales sin saturar el Xeon)
+    const args = ['-hide_banner', '-nostdin', '-nostats', '-threads', '1', '-filter_threads', '1'];
     if (/^https?:\/\//i.test(url)) {
       args.push('-rw_timeout', '5000000');
       if (userAgent) args.push('-user_agent', userAgent);
     }
     args.push(
       '-analyzeduration',
-      '1800000',
-      '-probesize',
       '1500000',
+      '-probesize',
+      '1200000',
       '-i',
       url,
+      '-an',
+      '-sn',
+      '-dn',
       '-map',
       '0:v:0',
       '-frames:v',

@@ -315,10 +315,38 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
   const muxrate = Number(slotRow.muxrate_kbps) > 0 ? Number(slotRow.muxrate_kbps) * 1000 : 0;
   const udpUrl = buildUdpTargetFfmpegUrl(slotRow);
 
-  const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
+  const isPureCopy = mode === 'direct_spts';
+  const isVideoCopy = mode !== 'ntsc_sd_wk2500';
+  const args = [];
+  if (inputSpec !== 'pipe:0') args.push('-nostdin');
+  args.push('-hide_banner', '-loglevel', 'error', '-y');
+
+  if (isPureCopy) {
+    args.push('-threads', '1');
+  } else if (isVideoCopy) {
+    args.push('-threads', '1', '-filter_threads', '1', '-filter_complex_threads', '1');
+  } else {
+    args.push('-threads', '2', '-filter_threads', '1', '-filter_complex_threads', '1');
+  }
+
+  const probeSize = isPureCopy ? '1000000' : isVideoCopy ? '1000000' : '1200000';
+  const analyzeDur = isPureCopy ? '800000' : isVideoCopy ? '1000000' : '1500000';
 
   if (inputSpec === 'pipe:0') {
-    args.push('-fflags', '+genpts+igndts+nobuffer', '-f', 'mpegts', '-i', 'pipe:0');
+    args.push(
+      '-probesize',
+      probeSize,
+      '-analyzeduration',
+      analyzeDur,
+      '-fflags',
+      '+genpts+igndts+nobuffer+discardcorrupt',
+      '-flags',
+      'low_delay',
+      '-f',
+      'mpegts',
+      '-i',
+      'pipe:0'
+    );
   } else {
     if (String(inputSpec).startsWith('http')) {
       args.push(
@@ -329,19 +357,30 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
         '-reconnect_streamed',
         '1',
         '-reconnect_delay_max',
-        '5'
+        '4'
       );
     }
-    args.push('-fflags', '+genpts+igndts+nobuffer', '-i', inputSpec);
+    args.push(
+      '-probesize',
+      probeSize,
+      '-analyzeduration',
+      analyzeDur,
+      '-fflags',
+      '+genpts+igndts+nobuffer+discardcorrupt',
+      '-flags',
+      'low_delay',
+      '-i',
+      inputSpec
+    );
   }
 
-  args.push('-map', '0:v:0', '-map', '0:a:0?');
+  args.push('-dn', '-sn', '-map', '0:v:0', '-map', '0:a:0?');
 
   if (mode === 'ntsc_sd_wk2500') {
     // Universal WK2500 Analog Modulator Safe Profile: NTSC 720x480 @ 29.97fps H.264 Main + MP2 192k Leveled Audio
     args.push(
       '-vf',
-      'yadif=0:-1:1,scale=720:480,fps=30000/1001,format=yuv420p',
+      'yadif=0:-1:1,scale=720:480:flags=fast_bilinear,fps=30000/1001,format=yuv420p',
       '-c:v',
       'libx264',
       '-profile:v',
@@ -352,6 +391,8 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
       'ultrafast',
       '-tune',
       'zerolatency',
+      '-x264-params',
+      'rc-lookahead=0:sync-lookahead=0:ref=1:me=dia:subme=1:trellis=0',
       '-b:v',
       '1800k',
       '-maxrate',
@@ -363,7 +404,7 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
       '-sc_threshold',
       '0',
       '-af',
-      buildAudioLevelingFilter('standard'),
+      buildAudioLevelingFilter('ultra_200ch', true),
       '-c:a',
       'mp2',
       '-b:a',
@@ -378,13 +419,11 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
       '-c:v',
       'copy',
       '-af',
-      buildAudioLevelingFilter('standard'),
+      buildAudioLevelingFilter('ultra_200ch', true),
       '-c:a',
       'mp2',
       '-b:a',
       '192k',
-      '-ar',
-      '48000',
       '-ac',
       '2'
     );
@@ -393,13 +432,13 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
       '-c:v',
       'copy',
       '-af',
-      buildAudioLevelingFilter('standard'),
+      buildAudioLevelingFilter('ultra_200ch', true),
       '-c:a',
       'aac',
+      '-aac_coder',
+      'fast',
       '-b:a',
       '128k',
-      '-ar',
-      '48000',
       '-ac',
       '2'
     );

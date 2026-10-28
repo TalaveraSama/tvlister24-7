@@ -21,7 +21,9 @@ import {
   Lock,
   ExternalLink,
   Edit3,
-  X
+  X,
+  Zap,
+  Gauge
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -82,14 +84,21 @@ export default function ServersSecurityPage() {
   const [notice, setNotice] = useState('');
   const [errMsg, setErrMsg] = useState('');
   const [readiness, setReadiness] = useState(null);
+  const [ffEff, setFfEff] = useState(null);
+  const [ffForm, setFfForm] = useState({ tsPipeMode: 'auto', h264Threads: 2 });
 
   const loadAll = async () => {
-    const [data, rdy] = await Promise.all([
+    const [data, rdy, eff] = await Promise.all([
       apiFetch('/api/system'),
-      apiFetch('/api/system/readiness')
+      apiFetch('/api/system/readiness'),
+      apiFetch('/api/system/ffmpeg-efficiency').catch(() => null)
     ]);
     setSys(data);
     setReadiness(rdy);
+    if (eff) {
+      setFfEff(eff);
+      setFfForm({ tsPipeMode: eff.tsPipeMode || 'auto', h264Threads: Number(eff.h264Threads) || 2 });
+    }
     setSettingsForm({
       panel_name: data.settings?.panel_name || 'TVLister 24/7 Panel',
       server_timezone: data.settings?.server_timezone || 'UTC',
@@ -128,6 +137,21 @@ export default function ServersSecurityPage() {
     });
     flash('Configuración general del sistema guardada.');
     loadAll();
+  };
+
+  const handleSaveFfmpegEfficiency = async () => {
+    try {
+      const res = await apiFetch('/api/system/ffmpeg-efficiency', {
+        method: 'PUT',
+        body: JSON.stringify(ffForm)
+      });
+      flash(
+        `Motor FFmpeg optimizado (pipe TS: ${res.tsPipeMode || ffForm.tsPipeMode} · ${res.h264Threads || ffForm.h264Threads} hilos H.264). Reiniciados ${res.restartedStreams || 0} canales activos.`
+      );
+      loadAll();
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudo aplicar la optimización FFmpeg');
+    }
   };
 
   const handleCreateAdmin = async (e) => {
@@ -562,6 +586,85 @@ export default function ServersSecurityPage() {
                 </button>
               </form>
             </div>
+          </div>
+
+          {/* FFmpeg Efficiency Engine */}
+          <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-4">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Zap className="w-4 h-4 text-amber-400" />
+              Optimización FFmpeg (Motor de Streaming Masivo)
+            </h3>
+
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 text-xs">
+              {[
+                { label: 'Procesos FFmpeg', value: ffEff ? ffEff.activeFfmpegProcesses : '—' },
+                { label: 'Hilos Totales', value: ffEff ? ffEff.totalFfmpegThreads : '—' },
+                { label: 'RAM FFmpeg', value: ffEff ? `${ffEff.totalFfmpegRssMb} MB` : '—' },
+                { label: 'RAM por Canal', value: ffEff ? `${ffEff.avgRssMbPerChannel} MB` : '—' },
+                { label: 'Prefijo HLS', value: ffEff?.hlsIsRamDisk ? 'RAMDisk' : 'Disco', good: Boolean(ffEff?.hlsIsRamDisk) },
+                { label: 'Pipe TS', value: ffForm.tsPipeMode === 'always' ? 'Siempre' : ffForm.tsPipeMode === 'never' ? 'Nunca' : 'Auto (Troncal)' }
+              ].map((box) => (
+                <div key={box.label} className="p-3 rounded-xl bg-[#090e1a] border border-slate-800">
+                  <div className="text-slate-400">{box.label}</div>
+                  <div className={`font-mono font-semibold mt-0.5 ${box.good ? 'text-emerald-300' : 'text-white'}`}>
+                    {String(box.value)}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block text-slate-400 mb-1 flex items-center gap-1.5">
+                  <Gauge className="w-3.5 h-3.5 text-cyan-400" /> Salida MPEG-TS continua (pipe:1)
+                </label>
+                <select
+                  value={ffForm.tsPipeMode}
+                  onChange={(e) => setFfForm({ ...ffForm, tsPipeMode: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                >
+                  <option value="auto">Auto — Solo canales troncales Flussonic (Recomendado · menos CPU)</option>
+                  <option value="always">Siempre — Todos los canales (máxima compatibilidad .ts, más CPU)</option>
+                  <option value="never">Nunca — 100% HLS RAMDisk (máximo ahorro de CPU y RAM)</option>
+                </select>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  En <b>Auto</b> o <b>Nunca</b> FFmpeg escribe HLS nativo en /dev/shm y cierra stdout: cero copias
+                  de MPEG-TS hacia Node.js.
+                </div>
+              </div>
+              <div>
+                <label className="block text-slate-400 mb-1">Tope de hilos por encoder H.264 (libx264)</label>
+                <select
+                  value={ffForm.h264Threads}
+                  onChange={(e) => setFfForm({ ...ffForm, h264Threads: Number(e.target.value) })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                >
+                  <option value={1}>1 hilo (máximo ahorro · 200+ canales)</option>
+                  <option value={2}>2 hilos (equilibrado · recomendado)</option>
+                  <option value={4}>4 hilos (más calidad y FPS)</option>
+                  <option value={8}>8 hilos (pocos canales 4K)</option>
+                </select>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  Sin este tope FFmpeg abre 1.5 × núcleos por canal (24–72 hilos por canal en un Xeon), saturando la
+                  caché L3 y subiendo el consumo eléctrico.
+                </div>
+              </div>
+            </div>
+
+            {ffEff?.optimizations?.length > 0 && (
+              <ul className="text-[11px] text-slate-400 space-y-1 list-disc pl-5">
+                {ffEff.optimizations.map((opt) => (
+                  <li key={opt}>{opt}</li>
+                ))}
+              </ul>
+            )}
+
+            <button
+              onClick={handleSaveFfmpegEfficiency}
+              className="w-full py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold inline-flex items-center justify-center gap-1.5 text-xs"
+            >
+              <Zap className="w-3.5 h-3.5" /> Aplicar Optimización y Reiniciar Motor FFmpeg (Escalonado)
+            </button>
           </div>
 
           {/* Nginx + SSL Let's Encrypt Configurator */}

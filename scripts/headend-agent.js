@@ -235,13 +235,17 @@ function normalizeAstraInputUrl(rawUrl = '') {
 }
 
 function buildAudioFilter(preset = 'standard') {
+  if (preset === 'ultra_200ch') {
+    // ProLiant 200+ ch: coupled stereo (n=0 = 50% less DSP), 250 ms window, 8-tap PTS guard, NO resampling
+    return 'aresample=async=1:first_pts=0:filter_size=8,dynaudnorm=f=250:g=11:p=0.90:m=10:r=0.22:n=0:b=1';
+  }
   if (preset === 'voice') {
-    return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=11:p=0.93:m=14:r=0.26:n=1:b=1';
+    return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=11:p=0.93:m=14:r=0.26:n=0:b=1';
   }
   if (preset === 'cinema') {
-    return 'aresample=async=1:first_pts=0,dynaudnorm=f=200:g=17:p=0.88:m=7:r=0.18:n=1:b=1';
+    return 'aresample=async=1:first_pts=0,dynaudnorm=f=200:g=17:p=0.88:m=7:r=0.18:n=0:b=1';
   }
-  return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=13:p=0.90:m=10:r=0.22:n=1:b=1';
+  return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=13:p=0.90:m=10:r=0.22:n=0:b=1';
 }
 
 function isConstant247Mode(mode = 'copy_audio') {
@@ -299,12 +303,44 @@ function buildFfmpegArgs(st) {
   const isCopyVideo = shouldCopyVideoTrack(st, meta);
   const isPureCopy = st.headend_mode === 'copy_pure_247';
 
-  const args = ['-hide_banner', '-loglevel', 'info', '-y'];
+  // -nostats: evita 2 líneas de progreso por segundo por canal en el stderr (200 canales = 400 líneas/s de overhead)
+  // -loglevel info se mantiene para que el agente detecte resolución/entrelazado del "Stream #0:0"
+  const args = ['-nostdin', '-nostats', '-hide_banner', '-loglevel', 'info', '-y'];
 
   if (isCopyVideo) {
-    args.push('-fflags', '+genpts+igndts+nobuffer', '-flags', 'low_delay');
+    // Copy/Copy Zero-CPU: 1 hilo OS, probe 1 MB y descarte de PIDs de datos/subtítulos DVB
+    args.push(
+      '-threads',
+      '1',
+      '-probesize',
+      '1000000',
+      '-analyzeduration',
+      '1000000',
+      '-fflags',
+      '+genpts+igndts+nobuffer+discardcorrupt',
+      '-flags',
+      'low_delay',
+      '-avoid_negative_ts',
+      'make_zero'
+    );
   } else {
-    args.push('-fflags', '+genpts+nobuffer', '-flags', 'low_delay');
+    // Transcode CPU: tope de 2 hilos de encoder + 1 hilo de filtros (evita 24-72 hilos/canal en Xeon multi-core)
+    args.push(
+      '-threads',
+      '2',
+      '-filter_threads',
+      '1',
+      '-filter_complex_threads',
+      '1',
+      '-probesize',
+      '1500000',
+      '-analyzeduration',
+      '1500000',
+      '-fflags',
+      '+genpts+igndts+nobuffer+discardcorrupt',
+      '-flags',
+      'low_delay'
+    );
   }
 
   if (/^https?:\/\//i.test(inputUrl)) {
@@ -322,7 +358,7 @@ function buildFfmpegArgs(st) {
 
   args.push('-i', inputUrl);
   // Strip satellite DVB EIT/Teletext/null stuffing PIDs before uploading to Cloud!
-  args.push('-map', '0:v:0', '-map', '0:a:0?');
+  args.push('-dn', '-sn', '-map', '0:v:0', '-map', '0:a:0?');
 
   if (isCopyVideo) {
     args.push('-c:v', 'copy', '-max_muxing_queue_size', '1024');
@@ -337,11 +373,11 @@ function buildFfmpegArgs(st) {
     }
 
     if (tier === 'sd') {
-      vFilters.push('scale=min(960\\,iw):-2');
+      vFilters.push('scale=min(960\\,iw):-2:flags=fast_bilinear');
     } else if (tier === 'fhd') {
-      vFilters.push('scale=min(1920\\,iw):-2');
+      vFilters.push('scale=min(1920\\,iw):-2:flags=fast_bilinear');
     } else {
-      vFilters.push('scale=min(1280\\,iw):-2');
+      vFilters.push('scale=min(1280\\,iw):-2:flags=fast_bilinear');
     }
 
     if (vFilters.length > 0) {
@@ -357,6 +393,8 @@ function buildFfmpegArgs(st) {
       'ultrafast',
       '-tune',
       'zerolatency',
+      '-x264-params',
+      'rc-lookahead=0:sync-lookahead=0:ref=1:bframes=0:me=dia:subme=1:trellis=0',
       '-b:v',
       `${kbps}k`,
       '-maxrate',
@@ -374,24 +412,20 @@ function buildFfmpegArgs(st) {
   const useAudioLevel =
     !isPureCopy && (audioMode === 'on' || (audioMode !== 'off' && nodeSettings.audio_leveling_enabled));
 
+  // Ultra-density preset: NO se fuerza -ar 48000 (evita remuestreo polyphase 44.1k/48k -> 48k por canal)
+  const noResample = nodeSettings.audio_preset === 'ultra_200ch';
+
   if (isPureCopy && audioMode === 'off') {
     args.push('-c:a', 'copy');
   } else if (useAudioLevel) {
-    args.push(
-      '-af',
-      buildAudioFilter(nodeSettings.audio_preset),
-      '-ac',
-      '2',
-      '-ar',
-      '48000',
-      '-c:a',
-      'aac',
-      '-b:a',
-      nodeSettings.audio_bitrate || '128k'
-    );
+    args.push('-af', buildAudioFilter(nodeSettings.audio_preset), '-ac', '2');
+    if (!noResample) args.push('-ar', '48000');
+    args.push('-c:a', 'aac', '-aac_coder', 'fast', '-b:a', nodeSettings.audio_bitrate || '128k');
   } else {
     // Still ensure AAC compatibility if Astra sends MP2/AC3
-    args.push('-ac', '2', '-ar', '48000', '-c:a', 'aac', '-b:a', '128k');
+    args.push('-ac', '2');
+    if (!noResample) args.push('-ar', '48000');
+    args.push('-c:a', 'aac', '-aac_coder', 'fast', '-b:a', '128k');
   }
 
   args.push(
@@ -402,7 +436,7 @@ function buildFfmpegArgs(st) {
     '-hls_list_size',
     '6',
     '-hls_flags',
-    'delete_segments+independent_segments',
+    'delete_segments+independent_segments+temp_file',
     path.join(outDir, 'index.m3u8')
   );
 
