@@ -2252,7 +2252,7 @@ flussonic2312Router.get('/api/flussonic-2312/proliant-relay-defaults', requireAu
     proliant_lan_url: detectLocalServerLanOrigin(req),
     trunk_username: existingTrunk?.username || 'troncal_flussonic',
     trunk_password: existingTrunk?.password || 'proliant247',
-    audio_preset: presetRow?.value || 'standard',
+    audio_preset: presetRow?.value || 'ultra_200ch',
     audio_bitrate: bitrateRow?.value || '128k'
   });
 });
@@ -2266,9 +2266,9 @@ flussonic2312Router.post(
       proliant_lan_url = '',
       trunk_username = 'troncal_flussonic',
       trunk_password = 'proliant247',
-      audio_preset = 'standard', // 'standard' | 'voice' | 'cinema'
+      audio_preset = 'ultra_200ch', // 'ultra_200ch' | 'standard' | 'voice' | 'cinema'
       audio_bitrate = '128k',
-      proliant_video_mode = 'copy_video_leveled', // 'copy_video_leveled' | 'deint_x264_leveled'
+      proliant_video_mode = 'copy_video_ultralight_200', // 'copy_video_ultralight_200' | 'copy_video_mp2_200' | 'copy_video_leveled' | 'deint_x264_leveled'
       push_local_flussonic = true,
       local_flussonic_url = '',
       local_flussonic_user = 'admin',
@@ -2317,7 +2317,39 @@ flussonic2312Router.post(
         upsertSet.run('audio_leveling_preset', String(audio_preset || 'standard'));
         upsertSet.run('audio_leveling_bitrate', String(audio_bitrate || '128k'));
 
-        if (proliant_video_mode === 'deint_x264_leveled') {
+        if (proliant_video_mode === 'copy_video_ultralight_200') {
+          const existingUltra = db
+            .prepare("SELECT id FROM transcode_profiles WHERE name = 'ProLiant Troncal 200ch+ Ultra-Ligero (Sin Resample · Solo RAM)' LIMIT 1")
+            .get();
+          if (existingUltra) {
+            targetProfileId = existingUltra.id;
+          } else {
+            targetProfileId = Number(
+              db
+                .prepare(
+                  `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+                   VALUES ('ProLiant Troncal 200ch+ Ultra-Ligero (Sin Resample · Solo RAM)', 'copy', 'aac', 'source', ?, 'source', 'none', 'none', '-no_resample -ram_mpegts_only')`
+                )
+                .run(String(audio_bitrate || '128k')).lastInsertRowid
+            );
+          }
+        } else if (proliant_video_mode === 'copy_video_mp2_200') {
+          const existingMp2 = db
+            .prepare("SELECT id FROM transcode_profiles WHERE name = 'ProLiant Troncal 200ch+ MP2 Broadcast (Mínimo CPU · Solo RAM)' LIMIT 1")
+            .get();
+          if (existingMp2) {
+            targetProfileId = existingMp2.id;
+          } else {
+            targetProfileId = Number(
+              db
+                .prepare(
+                  `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+                   VALUES ('ProLiant Troncal 200ch+ MP2 Broadcast (Mínimo CPU · Solo RAM)', 'copy', 'mp2', 'source', '192k', 'source', 'none', 'none', '-no_resample -ram_mpegts_only')`
+                )
+                .run().lastInsertRowid
+            );
+          }
+        } else if (proliant_video_mode === 'deint_x264_leveled') {
           const existingDeint = db
             .prepare("SELECT id FROM transcode_profiles WHERE name = 'ProLiant Anti-Rayas + Audio Nivelado 24/7' LIMIT 1")
             .get();

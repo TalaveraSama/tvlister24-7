@@ -97,9 +97,9 @@ export default function Flussonic2312Page({ onPreview }) {
     proliant_lan_url: '',
     trunk_username: 'troncal_flussonic',
     trunk_password: 'proliant247',
-    audio_preset: 'standard',
+    audio_preset: 'ultra_200ch',
     audio_bitrate: '128k',
-    proliant_video_mode: 'copy_video_leveled',
+    proliant_video_mode: 'copy_video_ultralight_200',
     push_local_flussonic: true,
     local_flussonic_url: 'http://192.168.88.20:8080',
     local_flussonic_user: 'admin',
@@ -1794,19 +1794,22 @@ export default function Flussonic2312Page({ onPreview }) {
                   onChange={(e) => setRelayForm({ ...relayForm, audio_preset: e.target.value })}
                   className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
                 >
-                  <option value="standard">🎚️ TV Estándar (-13 dBFS parejo · Recomendado)</option>
+                  <option value="ultra_200ch">🚀 Cabecera 200+ Canales (Sin Resample -ar · Estéreo Acoplado · Ultra-Ligero)</option>
+                  <option value="standard">🎚️ TV Estándar (-13 dBFS parejo · Con Resample 48 kHz)</option>
                   <option value="voice">🎙️ Deportes & Noticias (Realza voces bajas y frena comerciales)</option>
                   <option value="cinema">🎬 Cine & Películas (Rango dinámico suave)</option>
                 </select>
               </div>
               <div>
-                <label className="text-slate-400 block mb-1">Procesamiento de Video en el ProLiant</label>
+                <label className="text-slate-400 block mb-1">Modo de Salida en el ProLiant (200+ Canales)</label>
                 <select
                   value={relayForm.proliant_video_mode}
                   onChange={(e) => setRelayForm({ ...relayForm, proliant_video_mode: e.target.value })}
                   className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
                 >
-                  <option value="copy_video_leveled">⚡ Copy Video (0% CPU Video) + Audio AAC Nivelado</option>
+                  <option value="copy_video_ultralight_200">⚡ Troncal 200+ Canales AAC Fast (0% Video · Sin Resample · Solo RAM 0 Disco)</option>
+                  <option value="copy_video_mp2_200">🪶 Troncal 200+ Canales MP2 Broadcast (3x Menos CPU aún · Solo RAM 0 Disco)</option>
+                  <option value="copy_video_leveled">🔄 Copy Video + Audio Nivelado Dual (RAM + HLS en Disco)</option>
                   <option value="deint_x264_leveled">📺 Anti-Rayas YADIF x264 + Audio AAC Nivelado</option>
                 </select>
               </div>

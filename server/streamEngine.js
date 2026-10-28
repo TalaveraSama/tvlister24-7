@@ -288,17 +288,22 @@ export function getGlobalAudioLevelingConfig() {
   }
 }
 
-export function buildAudioLevelingFilter(preset = 'standard') {
+export function buildAudioLevelingFilter(preset = 'standard', ultraLightNoResample = false) {
+  if (ultraLightNoResample || preset === 'ultra_200ch') {
+    // High-density 200+ channel headend curve: coupled stereo (n=0 = 50% less DSP + stable L/R image),
+    // 250ms frame window, and lightweight 8-tap PTS drift guard WITHOUT sample-rate conversion!
+    return 'aresample=async=1:first_pts=0:filter_size=8,dynaudnorm=f=250:g=11:p=0.90:m=10:r=0.22:n=0:b=1';
+  }
   if (preset === 'voice') {
-    // Boosts quiet commentators/dialogue and clamps loud commercials
-    return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=11:p=0.93:m=14:r=0.26:n=1:b=1';
+    // Boosts quiet commentators/dialogue and clamps loud commercials (coupled stereo n=0)
+    return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=11:p=0.93:m=14:r=0.26:n=0:b=1';
   }
   if (preset === 'cinema') {
     // Gentle cinema curve with smooth envelope
-    return 'aresample=async=1:first_pts=0,dynaudnorm=f=200:g=17:p=0.88:m=7:r=0.18:n=1:b=1';
+    return 'aresample=async=1:first_pts=0,dynaudnorm=f=200:g=17:p=0.88:m=7:r=0.18:n=0:b=1';
   }
-  // Standard broadcast TV loudness target (-13 dBFS RMS, -0.9 dBFS peak ceiling, zero startup dip)
-  return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=13:p=0.90:m=10:r=0.22:n=1:b=1';
+  // Standard broadcast TV loudness target (-13 dBFS RMS, -0.9 dBFS peak ceiling, coupled stereo n=0)
+  return 'aresample=async=1:first_pts=0,dynaudnorm=f=150:g=13:p=0.90:m=10:r=0.22:n=0:b=1';
 }
 
 export function isStreamAudioLeveled(stream, profile) {
@@ -331,8 +336,27 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
 
   const args = ['-hide_banner', '-loglevel', 'warning', '-y'];
 
+  const noResample =
+    extraStr.includes('-no_resample') || globalAudio.preset === 'ultra_200ch';
+  const ramMpegTsOnly = extraStr.includes('-ram_mpegts_only');
+
   if (isCopyRemux) {
-    args.push('-fflags', '+genpts+igndts+nobuffer', '-flags', 'low_delay');
+    // High-density 200+ channel guard: lock each Copy-Video worker to 1 thread (200 threads instead of 3,200+)
+    // and cap probe buffer to 1 MB / 1.5s for ~18 MB RSS per channel on Xeon headends
+    args.push(
+      '-threads',
+      '1',
+      '-filter_threads',
+      '1',
+      '-probesize',
+      '1000000',
+      '-analyzeduration',
+      '1500000',
+      '-fflags',
+      '+genpts+igndts+nobuffer',
+      '-flags',
+      'low_delay'
+    );
   } else if (isZeroLatency) {
     args.push('-fflags', 'nobuffer', '-flags', 'low_delay');
   }
@@ -376,17 +400,32 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   }
 
   if (levelAudio) {
-    args.push('-af', buildAudioLevelingFilter(globalAudio.preset), '-ac', '2', '-ar', '48000');
+    args.push('-af', buildAudioLevelingFilter(globalAudio.preset, noResample), '-ac', '2');
+    // Only force -ar 48000 when NOT in zero-resample 200+ channel mode (preserves native 44.1kHz/48kHz without polyphase resampling)
+    if (!noResample) {
+      args.push('-ar', '48000');
+    }
   }
 
   args.push('-c:a', aCodec);
   if (aCodec !== 'copy') {
+    if (aCodec === 'aac') {
+      args.push('-aac_coder', 'fast');
+    }
     const aBr = levelAudio
       ? globalAudio.bitrate || '128k'
       : profile?.audio_bitrate && profile.audio_bitrate !== 'source'
       ? profile.audio_bitrate
+      : aCodec === 'mp2'
+      ? '192k'
       : '128k';
     args.push('-b:a', aBr);
+  }
+
+  if (ramMpegTsOnly) {
+    // Pure RAM MPEG-TS Trunk Mode for 200+ channels -> Local Flussonic (0 HLS segment writes to disk!)
+    args.push('-f', 'mpegts', '-mpegts_flags', '+resend_headers', 'pipe:1');
+    return args;
   }
 
   const hlsTime = isZeroLatency ? '2' : '4';
