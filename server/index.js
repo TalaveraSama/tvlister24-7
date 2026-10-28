@@ -63,6 +63,11 @@ import {
   ensureSlateManifestForStream
 } from './offlineSlateEngine.js';
 import {
+  getResolutionScanStatus,
+  startResolutionAutoClassifyJob,
+  detectSingleStreamResolution
+} from './resolutionClassifier.js';
+import {
   iptvRouter,
   authenticateLine,
   isItemAllowedForLine,
@@ -837,6 +842,57 @@ app.post('/api/streams/bulk-action', requireAuth, requireAdmin, (req, res) => {
   }
 
   res.json({ ok: true, affectedCount: targetIds.length });
+});
+
+app.get('/api/streams/auto-resolution/status', requireAuth, (req, res) => {
+  res.json(getResolutionScanStatus());
+});
+
+app.post('/api/streams/auto-resolution/run', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const b = req.body || {};
+    let launchIdx = 0;
+    const job = startResolutionAutoClassifyJob({
+      scope: b.scope || 'all',
+      ids: b.ids || [],
+      category_id: b.category_id || 'all',
+      probeLive: b.probeLive !== false,
+      stream_mode: b.stream_mode || 'ondemand',
+      sdKbps: Number(b.sdKbps) || 1000,
+      hdKbps: Number(b.hdKbps) || 2500,
+      fhdKbps: Number(b.fhdKbps) || 3000,
+      onStreamUpdated: (sid, dbMode, nextStatus) => {
+        if (dbMode === 'transcode' && nextStatus === 'running') {
+          const delay = (launchIdx++ % 40) * 80;
+          setTimeout(() => {
+            try {
+              launchStreamWorkerIfNeeded(sid);
+            } catch {
+              // ignore
+            }
+          }, delay).unref?.();
+        } else {
+          db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(sid);
+        }
+      }
+    });
+    res.json({ ok: true, job });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo iniciar la clasificación automática.' });
+  }
+});
+
+app.post('/api/streams/:id/probe-resolution', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+  if (!stream) return res.status(404).json({ error: 'Canal no encontrado' });
+
+  const info = await detectSingleStreamResolution(stream, { probeLive: true });
+  db.prepare(
+    'UPDATE streams SET detected_resolution = ?, resolution_tier = ?, resolution_source = ? WHERE id = ?'
+  ).run(info.resolution, info.tier, info.source, id);
+
+  res.json({ ok: true, ...info });
 });
 
 function launchStreamWorkerIfNeeded(streamId) {

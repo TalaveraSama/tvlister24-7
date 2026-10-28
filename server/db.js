@@ -351,6 +351,9 @@ export function initDb() {
   ensureColumn('streams', 'xui_id', 'INTEGER');
   ensureColumn('streams', 'offline_slate_mode', "TEXT NOT NULL DEFAULT 'global'");
   ensureColumn('streams', 'offline_slate_url', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'detected_resolution', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'resolution_tier', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'resolution_source', "TEXT DEFAULT ''");
   ensureColumn('vod_items', 'xui_id', 'INTEGER');
   ensureColumn('vod_items', 'backdrop_url', "TEXT DEFAULT ''");
   ensureColumn('vod_items', 'tmdb_id', "TEXT DEFAULT ''");
@@ -441,6 +444,57 @@ export function initDb() {
     db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_text', 'SEÑAL EN RECONEXIÓN - VOLVEMOS EN BREVE')").run();
     db.prepare(
       "INSERT INTO settings (key, value) VALUES ('copy_copy_2500k_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+    ).run();
+  }
+
+  // Ensure Auto-Resolution Tier Profiles exist: SD/480p/540p -> 1.0 Mbps (1000k), HD 720p -> 2.5 Mbps (2500k), FHD 1080p -> 3.0 Mbps (3000k)
+  const autoResMigrated = db.prepare("SELECT value FROM settings WHERE key = 'auto_res_tiers_1m_25m_3m_v1'").get();
+  if (autoResMigrated?.value !== 'true') {
+    const ensureProfileByName = (name, vCodec, aCodec, vBr, aBr, res, preset, hw, extra) => {
+      const existing = db.prepare('SELECT id FROM transcode_profiles WHERE name = ? LIMIT 1').get(name);
+      if (!existing) {
+        db.prepare(
+          'INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(name, vCodec, aCodec, vBr, aBr, res, preset, hw, extra);
+      }
+    };
+
+    ensureProfileByName(
+      'Auto SD/480p/540p — 1.0 Mbps',
+      'libx264',
+      'aac',
+      '1000k',
+      '96k',
+      'source',
+      'ultrafast',
+      'none',
+      '-vf scale=min(960\\,iw):-2 -tune zerolatency -maxrate 1000k -bufsize 2000k'
+    );
+    ensureProfileByName(
+      'Auto HD 720p — 2.5 Mbps',
+      'libx264',
+      'aac',
+      '2500k',
+      '128k',
+      '1280x720',
+      'ultrafast',
+      'none',
+      '-tune zerolatency -maxrate 2500k -bufsize 5000k'
+    );
+    ensureProfileByName(
+      'Auto FHD 1080p — 3.0 Mbps',
+      'libx264',
+      'aac',
+      '3000k',
+      '128k',
+      '1920x1080',
+      'ultrafast',
+      'none',
+      '-tune zerolatency -maxrate 3000k -bufsize 6000k'
+    );
+
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('auto_res_tiers_1m_25m_3m_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
     ).run();
   }
 }
@@ -656,6 +710,9 @@ function seedInitialData() {
   );
   insertProf.run('Direct Stream (Zero Transcode)', 'copy', 'copy', 'source', 'source', 'source', 'none', 'none', '-fflags +genpts+igndts');
   insertProf.run('Copy/Copy Remux 2.5 Mbps (Zero CPU)', 'copy', 'copy', '2500k', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024');
+  insertProf.run('Auto SD/480p/540p — 1.0 Mbps', 'libx264', 'aac', '1000k', '96k', 'source', 'ultrafast', 'none', '-vf scale=min(960\\,iw):-2 -tune zerolatency -maxrate 1000k -bufsize 2000k');
+  insertProf.run('Auto HD 720p — 2.5 Mbps', 'libx264', 'aac', '2500k', '128k', '1280x720', 'ultrafast', 'none', '-tune zerolatency -maxrate 2500k -bufsize 5000k');
+  insertProf.run('Auto FHD 1080p — 3.0 Mbps', 'libx264', 'aac', '3000k', '128k', '1920x1080', 'ultrafast', 'none', '-tune zerolatency -maxrate 3000k -bufsize 6000k');
   insertProf.run('Zero Latency 2.5 Mbps (H.264 CPU)', 'libx264', 'aac', '2500k', '128k', '1280x720', 'ultrafast', 'none', '-tune zerolatency -maxrate 2500k -bufsize 5000k');
   insertProf.run('NVIDIA NVENC Zero-Latency 2.5 Mbps', 'h264_nvenc', 'aac', '2500k', '128k', '1920x1080', 'p2', 'nvenc', '-rc cbr -zerolatency 1 -maxrate 2500k -bufsize 5000k');
   insertProf.run('Full HD 1080p H.264 (CPU Fast)', 'libx264', 'aac', '4000k', '128k', '1920x1080', 'veryfast', 'none', '-g 50 -sc_threshold 0');
