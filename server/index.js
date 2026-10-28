@@ -83,6 +83,7 @@ import {
 } from './iptvApi.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
+import { headendRouter } from './headendManager.js';
 import { syncEpgSourceById, startEpgAutoSyncScheduler } from './epgSync.js';
 import { WebSocketServer } from 'ws';
 import {
@@ -213,6 +214,8 @@ app.get('/api/lb/install.sh', (req, res) => {
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.send(fs.readFileSync(scriptPath, 'utf8'));
 });
+
+app.use(headendRouter);
 
 // ==================== AUTH ROUTES ====================
 app.post('/api/auth/login', (req, res) => {
@@ -589,11 +592,13 @@ app.get('/api/streams', requireAuth, (req, res) => {
     .prepare(
       `SELECT s.*, c.name as category_name, tp.name as profile_name,
               tp.video_codec as profile_video_codec, tp.audio_codec as profile_audio_codec,
-              tp.video_bitrate as profile_video_bitrate, srv.name as server_name
+              tp.video_bitrate as profile_video_bitrate, srv.name as server_name,
+              hn.name as headend_node_name
        FROM streams s
        LEFT JOIN categories c ON c.id = s.category_id
        LEFT JOIN transcode_profiles tp ON tp.id = s.transcode_profile_id
        LEFT JOIN servers srv ON srv.id = s.server_id
+       LEFT JOIN headend_nodes hn ON hn.id = s.headend_node_id
        ORDER BY s.sort_order ASC, s.id ASC`
     )
     .all()

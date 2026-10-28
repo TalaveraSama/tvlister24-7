@@ -6,6 +6,7 @@ import VideoModal from './components/VideoModal.jsx';
 import LoginPage from './pages/LoginPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import LiveStreamsPage from './pages/LiveStreamsPage.jsx';
+import HeadendNodesPage from './pages/HeadendNodesPage.jsx';
 import Channels247Page from './pages/Channels247Page.jsx';
 import VodPage from './pages/VodPage.jsx';
 import UsersDevicesPage from './pages/UsersDevicesPage.jsx';
@@ -88,6 +89,9 @@ export default function App() {
         )}
         {activeTab === 'streams' && user.role === 'admin' && (
           <LiveStreamsPage onPreview={setPreviewItem} onOpenXuiImport={() => setActiveTab('xui-import')} />
+        )}
+        {activeTab === 'headend' && user.role === 'admin' && (
+          <HeadendNodesPage onPreview={setPreviewItem} />
         )}
         {activeTab === 'channels247' && user.role === 'admin' && (
           <Channels247Page onPreview={setPreviewItem} />

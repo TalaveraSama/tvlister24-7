@@ -357,11 +357,15 @@ export function startResolutionAutoClassifyJob({
   if (scope === 'selected' && Array.isArray(ids) && ids.length > 0) {
     const cleanIds = ids.map(Number).filter((n) => n > 0);
     const placeholders = cleanIds.map(() => '?').join(',');
-    targetStreams = db.prepare(`SELECT * FROM streams WHERE id IN (${placeholders})`).all(...cleanIds);
+    targetStreams = db
+      .prepare(`SELECT * FROM streams WHERE headend_node_id IS NULL AND id IN (${placeholders})`)
+      .all(...cleanIds);
   } else if (scope === 'category' && category_id && category_id !== 'all') {
-    targetStreams = db.prepare('SELECT * FROM streams WHERE category_id = ?').all(Number(category_id));
+    targetStreams = db
+      .prepare('SELECT * FROM streams WHERE headend_node_id IS NULL AND category_id = ?')
+      .all(Number(category_id));
   } else {
-    targetStreams = db.prepare('SELECT * FROM streams ORDER BY id ASC').all();
+    targetStreams = db.prepare('SELECT * FROM streams WHERE headend_node_id IS NULL ORDER BY id ASC').all();
   }
 
   if (targetStreams.length === 0) {
@@ -582,7 +586,9 @@ export function startResolutionAutoPilotDaemon(onStreamUpdated = null) {
 
       // 1) Any newly added / imported stream with no tier yet -> classify immediately!
       const unclassified = db
-        .prepare("SELECT id FROM streams WHERE resolution_tier IS NULL OR resolution_tier = '' LIMIT 50")
+        .prepare(
+          "SELECT id FROM streams WHERE headend_node_id IS NULL AND (resolution_tier IS NULL OR resolution_tier = '') LIMIT 50"
+        )
         .all()
         .map((r) => r.id);
 
@@ -602,7 +608,7 @@ export function startResolutionAutoPilotDaemon(onStreamUpdated = null) {
 
       // 2) Re-verify any currently active/playing stream (at most once per 20 min per stream)
       const activePlaying = db
-        .prepare("SELECT id FROM streams WHERE status = 'running' LIMIT 6")
+        .prepare("SELECT id FROM streams WHERE headend_node_id IS NULL AND status = 'running' LIMIT 6")
         .all();
       for (const ap of activePlaying) {
         autoCheckSingleStreamOnPlay(ap.id, (sid) => {
@@ -617,7 +623,7 @@ export function startResolutionAutoPilotDaemon(onStreamUpdated = null) {
       if (Date.now() - lastFallbackRetryMs > 15 * 60 * 1000) {
         lastFallbackRetryMs = Date.now();
         const hintStreams = db
-          .prepare("SELECT id FROM streams WHERE resolution_source = 'name_hint' LIMIT 12")
+          .prepare("SELECT id FROM streams WHERE headend_node_id IS NULL AND resolution_source = 'name_hint' LIMIT 12")
           .all()
           .map((r) => r.id);
         if (hintStreams.length > 0) {

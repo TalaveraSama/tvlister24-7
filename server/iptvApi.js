@@ -490,6 +490,7 @@ function wakeOnDemandTranscodeIfNeeded(stream) {
 
   const audioLeveled = isStreamAudioLeveled(stream, profile);
   const isRemuxOrTranscodeProfile =
+    Boolean(stream.headend_node_id) ||
     audioLeveled ||
     (profile &&
       ((profile.video_codec && profile.video_codec !== 'copy') ||
@@ -1224,8 +1225,9 @@ async function serveLiveStreamRequest(req, res) {
 
   // 1) Local FFmpeg-transcoded / Copy-Remux / Audio-Leveled HLS manifest (waits up to 4.2s on On-Demand cold start)
   const workerKey = `stream_${stream.id}`;
+  const coldWaitMs = stream.headend_node_id ? 10500 : 4200;
   const localManifest = hasActiveWorker
-    ? await waitForFreshWorkerManifest(workerKey, 4200)
+    ? await waitForFreshWorkerManifest(workerKey, coldWaitMs)
     : getFreshLocalHlsManifestPath(workerKey, 18);
   if (localManifest) {
     if (protocol === 'MPEG-TS') {
@@ -1830,9 +1832,11 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
   // 1. Check active local FFmpeg worker for stream / channel247 (also wake On-Demand live streams for preview)
   if (sid > 0 && (kind === 'live' || kind === 'channel247')) {
     let hasWorker = false;
+    let isRemoteHeadend = false;
     if (kind === 'live') {
       const stRow = db.prepare('SELECT * FROM streams WHERE id = ?').get(sid);
       if (stRow && stRow.status !== 'stopped') {
+        isRemoteHeadend = Boolean(stRow.headend_node_id);
         if (stRow.status === 'ondemand_idle') {
           db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(sid);
           stRow.status = 'running';
@@ -1844,7 +1848,7 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
     const localManifest =
       kind === 'live'
         ? hasWorker
-          ? await waitForFreshWorkerManifest(workerKey, 4200)
+          ? await waitForFreshWorkerManifest(workerKey, isRemoteHeadend ? 10500 : 4200)
           : getFreshLocalHlsManifestPath(workerKey, 18)
         : getLocalHlsManifestPath(workerKey);
     if (localManifest) {

@@ -332,6 +332,44 @@ export function initDb() {
       asn TEXT DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS headend_nodes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      public_url TEXT NOT NULL,
+      api_token TEXT UNIQUE NOT NULL,
+      astra_url TEXT DEFAULT 'http://127.0.0.1:8000',
+      astra_auth TEXT DEFAULT '',
+      audio_leveling_enabled INTEGER NOT NULL DEFAULT 1,
+      audio_preset TEXT NOT NULL DEFAULT 'standard',
+      audio_bitrate TEXT NOT NULL DEFAULT '128k',
+      auto_resolution INTEGER NOT NULL DEFAULT 1,
+      sd_kbps INTEGER NOT NULL DEFAULT 1000,
+      hd_kbps INTEGER NOT NULL DEFAULT 2500,
+      fhd_kbps INTEGER NOT NULL DEFAULT 3000,
+      auto_deinterlace INTEGER NOT NULL DEFAULT 1,
+      allowed_cloud_ip TEXT DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'offline',
+      last_heartbeat_at TEXT,
+      hostname TEXT DEFAULT '',
+      cpu_model TEXT DEFAULT '',
+      cpu_cores INTEGER NOT NULL DEFAULT 0,
+      cpu_usage_pct REAL NOT NULL DEFAULT 0,
+      cpu_used_ghz REAL NOT NULL DEFAULT 0,
+      cpu_total_ghz REAL NOT NULL DEFAULT 0,
+      ram_used_gb REAL NOT NULL DEFAULT 0,
+      ram_total_gb REAL NOT NULL DEFAULT 0,
+      ram_usage_pct REAL NOT NULL DEFAULT 0,
+      hls_ramdisk INTEGER NOT NULL DEFAULT 0,
+      active_workers INTEGER NOT NULL DEFAULT 0,
+      vip_count INTEGER NOT NULL DEFAULT 0,
+      ondemand_awake_count INTEGER NOT NULL DEFAULT 0,
+      upload_mbps REAL NOT NULL DEFAULT 0,
+      streams_telemetry_json TEXT NOT NULL DEFAULT '{}',
+      pending_commands_json TEXT NOT NULL DEFAULT '[]',
+      last_astra_scan_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const ensureColumn = (table, column, def) => {
@@ -356,6 +394,12 @@ export function initDb() {
   ensureColumn('streams', 'resolution_source', "TEXT DEFAULT ''");
   ensureColumn('streams', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'audio_leveling_mode', "TEXT NOT NULL DEFAULT 'global'");
+  ensureColumn('streams', 'headend_node_id', 'INTEGER DEFAULT NULL');
+  ensureColumn('streams', 'astra_local_url', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'headend_mode', "TEXT NOT NULL DEFAULT 'ondemand'");
+  ensureColumn('streams', 'deinterlace_mode', "TEXT NOT NULL DEFAULT 'auto'");
+  ensureColumn('streams', 'headend_interlaced', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('streams', 'headend_audio_in', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
 
   db.exec(`

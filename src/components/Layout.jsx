@@ -17,7 +17,8 @@ import {
   X,
   ArrowUp,
   Database,
-  Zap
+  Zap,
+  Cpu
 } from 'lucide-react';
 
 export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpenWebTv, children }) {
@@ -28,6 +29,7 @@ export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpen
   const navItems = [
     { id: 'dashboard', label: 'Dashboard & Monitor', icon: LayoutDashboard, roles: ['admin', 'reseller'] },
     { id: 'streams', label: 'Canales en Vivo', icon: Radio, roles: ['admin'] },
+    { id: 'headend', label: 'Nodo Cabecera (Astra)', icon: Cpu, badge: 'PRO', roles: ['admin'] },
     { id: 'channels247', label: 'Canales 24/7 Studio', icon: Tv2, badge: '24/7', roles: ['admin'] },
     { id: 'vod', label: 'Películas & Series VOD', icon: Film, roles: ['admin'] },
     { id: 'lines', label: 'Líneas, MAG & Enigma2', icon: Users, roles: ['admin', 'reseller'] },

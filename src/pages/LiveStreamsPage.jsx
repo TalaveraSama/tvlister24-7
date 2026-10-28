@@ -1419,6 +1419,14 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                                 AUDIO IGUAL
                               </span>
                             )}
+                          {s.headend_node_id && (
+                            <span
+                              title={`Procesado y nivelado localmente en Nodo Cabecera (${s.headend_node_name || 'ProLiant'}) — La Nube solo hace Copy/Copy (0% CPU)`}
+                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 font-mono text-[9px] font-bold"
+                            >
+                              🖥️ PROLIANT {s.headend_mode === 'vip_247' ? 'VIP 24/7' : 'ON-DEMAND'}
+                            </span>
+                          )}
                           {s.resolution_tier && (
                             <span
                               title={
