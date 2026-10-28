@@ -207,6 +207,8 @@ if [ -f "$SERVICE_FILE" ]; then
 fi
 
 systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
+pkill -f "/opt/tvlister24-7.*server/index.js" >/dev/null 2>&1 || true
+sleep 1
 
 if [ -n "${PORT:-}" ]; then
   CANDIDATE_PORTS="$PORT 8095 8895 9080 9095"

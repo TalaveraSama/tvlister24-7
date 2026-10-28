@@ -32,10 +32,34 @@ if (!fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
   }
 }
 
-export const db = new DatabaseSync(DB_PATH);
+function sleepSyncMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+export function withSqliteBusyRetry(fn, maxAttempts = 12) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      const isBusy =
+        err?.errcode === 5 ||
+        err?.errcode === 6 ||
+        /database is locked|SQLITE_BUSY/i.test(String(err?.message || ''));
+      if (!isBusy || attempt === maxAttempts) throw err;
+      sleepSyncMs(Math.min(1000, attempt * 120));
+    }
+  }
+}
+
+export const db = new DatabaseSync(DB_PATH, { timeout: 30000 });
+
+withSqliteBusyRetry(() => {
+  db.exec('PRAGMA busy_timeout = 30000;');
+  db.exec('PRAGMA journal_mode = WAL;');
+  db.exec('PRAGMA synchronous = NORMAL;');
+  db.exec('PRAGMA wal_autocheckpoint = 1000;');
+  db.exec('PRAGMA foreign_keys = ON;');
+});
 
 export function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const derived = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256').toString('hex');
@@ -53,7 +77,13 @@ let dbInitialized = false;
 
 export function initDb() {
   if (dbInitialized) return;
+  withSqliteBusyRetry(() => {
+    runInitDbBody();
+  });
   dbInitialized = true;
+}
+
+function runInitDbBody() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -490,11 +520,12 @@ export function initDb() {
     cleanLegacyDemoSeedOnce();
   }
 
-  // Ensure panel branding is cleanly TVLister 24/7 on upgraded databases
+  // Ensure panel branding is cleanly TVLister 24/7 on upgraded databases (read-first to avoid write locks on every CLI import)
   const legacyBrandToken = ['Mid', 'night'].join('');
-  db.prepare("UPDATE settings SET value = 'TVLister 24/7 Panel' WHERE key = 'panel_name' AND value LIKE ?").run(
-    `%${legacyBrandToken}%`
-  );
+  const curPanelName = db.prepare("SELECT value FROM settings WHERE key = 'panel_name'").get();
+  if (curPanelName?.value && String(curPanelName.value).toLowerCase().includes(legacyBrandToken.toLowerCase())) {
+    db.prepare("UPDATE settings SET value = 'TVLister 24/7 Panel' WHERE key = 'panel_name'").run();
+  }
   // One-time migration: set Zero Latency / Low-Latency FFmpeg profile to 2.5 Mbps (2500k) & 2500 kbps default
   const zeroLatMigrated = db.prepare("SELECT value FROM settings WHERE key = 'zero_latency_2500k_v1'").get();
   if (zeroLatMigrated?.value !== 'true') {
