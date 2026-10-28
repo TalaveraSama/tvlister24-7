@@ -503,6 +503,10 @@ function runInitDbBody() {
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_streams_sort_order ON streams(sort_order, id);
+    -- Telemetría de conexiones: sin estos índices cada petición de segmento hacía
+    -- un escaneo completo de active_connections (miles de veces por minuto).
+    CREATE INDEX IF NOT EXISTS idx_active_conn_line_ip ON active_connections(line_id, ip_address, target_type, target_id);
+    CREATE INDEX IF NOT EXISTS idx_active_conn_ping ON active_connections(last_ping_at);
     CREATE INDEX IF NOT EXISTS idx_categories_sort_order ON categories(sort_order, id);
 
     CREATE TRIGGER IF NOT EXISTS trg_streams_auto_sort_order

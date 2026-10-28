@@ -20,6 +20,7 @@ import {
   startSupervisedWorker,
   hasWorkerMpegTsFeed,
   subscribeWorkerMpegTs,
+  subscribeWorkerMpegTsAuto,
   getWorkerPid,
   isFfmpegAvailable,
   isStreamAudioLeveled,
@@ -329,7 +330,19 @@ function selectEdgeRedirect(req) {
 
 const activeLiveSockets = new Map(); // connId -> Set<{ close: () => void, hb: NodeJS.Timeout }>
 
-export function pruneStaleConnections() {
+let lastPruneAt = 0;
+const PRUNE_INTERVAL_MS = 30_000;
+
+/**
+ * Limpia conexiones muertas como máximo cada 30 s.
+ * Antes se ejecutaba en CADA petición de segmento: con 145 canales y varios
+ * clientes eso son cientos de DELETE/escaneos por segundo que bloquean el
+ * event loop de Node y provocan tirones en la reproducción.
+ */
+export function pruneStaleConnections(force = false) {
+  const now = Date.now();
+  if (!force && now - lastPruneAt < PRUNE_INTERVAL_MS) return;
+  lastPruneAt = now;
   try {
     db.prepare(
       `DELETE FROM active_connections
@@ -412,10 +425,24 @@ export function kickAllLineConnections(lineId) {
   }
 }
 
+const connTouchCache = new Map();
+const CONN_TOUCH_INTERVAL_MS = 20_000;
+
 export function recordConnection(req, line, targetType, targetId, targetName, protocol = 'HLS', serverId = 1) {
   pruneStaleConnections();
 
   const ip = extractClientIp(req);
+
+  // Un reproductor HLS pide 1 manifiesto + 1 segmento cada 2 s: sin este throttle
+  // se hacía un UPDATE con datetime('now') por cada petición (miles de escrituras
+  // por minuto en SQLite, que es síncrono y bloquea el event loop -> tirones).
+  const touchKey = `${line.id}|${ip}|${targetType}|${targetId}`;
+  const cached = connTouchCache.get(touchKey);
+  if (cached && Date.now() - cached.at < CONN_TOUCH_INTERVAL_MS && cached.connId) {
+    return { allowed: true, connId: cached.connId };
+  }
+  if (connTouchCache.size > 5000) connTouchCache.clear();
+
   const ua = String(req.headers?.['user-agent'] || 'IPTV Player').trim().slice(0, 255) || 'IPTV Player';
   const geo = resolveIpGeoSync(ip, req);
   const country = geo.country || '--';
@@ -433,6 +460,7 @@ export function recordConnection(req, line, targetType, targetId, targetName, pr
     db.prepare(
       "UPDATE active_connections SET last_ping_at = datetime('now'), target_name = ?, protocol = ?, user_agent = ?, country = ?, isp = ?, server_id = ? WHERE id = ?"
     ).run(targetName, protocol, ua, nextCountry, nextIsp, serverId, existing.id);
+    connTouchCache.set(touchKey, { connId: existing.id, at: Date.now() });
     return { allowed: true, connId: existing.id };
   }
 
@@ -460,7 +488,9 @@ export function recordConnection(req, line, targetType, targetId, targetName, pr
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(line.id, line.username, targetType, targetId, targetName, ip, country, isp, ua, protocol, serverId);
 
-  return { allowed: true, connId: Number(info.lastInsertRowid) };
+  const newConnId = Number(info.lastInsertRowid);
+  connTouchCache.set(touchKey, { connId: newConnId, at: Date.now() });
+  return { allowed: true, connId: newConnId };
 }
 
 async function serveSubscriberOfflineSlate(req, res, stream, username, password, protocol, connId = null) {
@@ -1033,6 +1063,37 @@ iptvRouter.get('/panel_api.php', handlePlayerApi);
 iptvRouter.post('/panel_api.php', handlePlayerApi);
 
 // Serve local FFmpeg-transcoded HLS segments securely
+// Contadores ligeros de fallos de segmento por canal (sirven para detectar tirones reales)
+const segMissCounters = new Map();
+const SEG_MISS_WINDOW_MS = 5 * 60 * 1000;
+
+export function noteSegmentMiss(workerKey) {
+  const now = Date.now();
+  const cur = segMissCounters.get(workerKey) || { count: 0, firstAt: now, lastAt: now };
+  if (now - cur.firstAt > SEG_MISS_WINDOW_MS) {
+    cur.count = 0;
+    cur.firstAt = now;
+  }
+  cur.count += 1;
+  cur.lastAt = now;
+  segMissCounters.set(workerKey, cur);
+}
+
+export function getSegmentMissStats() {
+  const now = Date.now();
+  const out = {};
+  let total = 0;
+  for (const [key, cur] of segMissCounters) {
+    if (now - cur.firstAt > SEG_MISS_WINDOW_MS) {
+      segMissCounters.delete(key);
+      continue;
+    }
+    out[key] = cur.count;
+    total += cur.count;
+  }
+  return { total, byWorker: out };
+}
+
 iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) => {
   const { username, password, workerKey, fileName } = req.params;
   const auth = authenticateLine(username, password, req);
@@ -1048,6 +1109,7 @@ iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) =
       fullPath = diskPath;
     } else {
       // Manifiesto/segmento todavía no escrito por FFmpeg: pedir reintento corto al reproductor
+      noteSegmentMiss(safeKey);
       res.setHeader('Retry-After', '1');
       res.setHeader('Cache-Control', 'no-store');
       return res.status(404).send('Segment not ready');
@@ -1070,11 +1132,20 @@ iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) =
     res.setHeader('Cache-Control', 'no-store');
   } else if (safeFile.endsWith('.ts')) {
     res.setHeader('Content-Type', 'video/mp2t');
-    // Los segmentos son inmutables: cache corto en el reproductor evita re-descargas y tirones
-    res.setHeader('Cache-Control', 'public, max-age=10, immutable');
+    // OJO: "immutable, max-age=10" en vivo hacía que, al reiniciarse un canal,
+    // FFmpeg volviera a escribir index0.ts... y el reproductor reutilizara el
+    // segmento VIEJO en caché (salto/repetición = tirón). Ahora se revalida
+    // siempre con ETag: nunca se sirve contenido viejo y se evita re-descargar.
+    res.setHeader('Cache-Control', 'no-cache');
     try {
       const st = fs.statSync(fullPath);
       res.setHeader('Content-Length', String(st.size));
+      const etag = `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+      res.setHeader('ETag', etag);
+      if (String(req.headers['if-none-match'] || '') === etag) {
+        res.removeHeader('Content-Length');
+        return res.status(304).end();
+      }
     } catch {
       // tamaño no disponible (segmento rotando)
     }
@@ -1262,7 +1333,7 @@ async function serveLiveStreamRequest(req, res) {
     res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-TVLister-Engine', 'ProLiant-Continuous-MPEGTS-247');
-    const unsub = subscribeWorkerMpegTs(workerKey, (tsChunk) => {
+    const unsub = subscribeWorkerMpegTsAuto(workerKey, (tsChunk) => {
       if (!res.writableEnded) res.write(tsChunk);
     });
     if (unsub) {
@@ -1284,7 +1355,7 @@ async function serveLiveStreamRequest(req, res) {
       res.setHeader('Content-Type', 'video/mp2t');
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-TVLister-Engine', 'RAMDisk-HLS-to-Continuous-MPEGTS');
-      const tsUnsub = subscribeWorkerMpegTs(workerKey, (tsChunk) => {
+      const tsUnsub = subscribeWorkerMpegTsAuto(workerKey, (tsChunk) => {
         if (!res.writableEnded) res.write(tsChunk);
       });
       if (tsUnsub) {

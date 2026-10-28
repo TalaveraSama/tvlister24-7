@@ -781,7 +781,14 @@ const TS_RING_BYTES = 500 * 188; // 94,000 bytes (exact 188-byte packet multiple
  * Este tailer envía cada segmento EXACTAMENTE UNA VEZ y en orden de secuencia, con
  * lectura en streaming de 64 KB y sin duplicar bytes. Latencia ≈ 1 segmento.
  */
-export function createHlsSegmentTailer({ manifestPath, onChunk, intervalMs = 160, burstSegments = 2 }) {
+export function createHlsSegmentTailer({
+  manifestPath,
+  onChunk,
+  onSegmentStart = null,
+  onSegmentEnd = null,
+  intervalMs = 160,
+  burstSegments = 2
+}) {
   const dir = path.dirname(manifestPath);
   const queue = [];
   let reading = false;
@@ -827,15 +834,24 @@ export function createHlsSegmentTailer({ manifestPath, onChunk, intervalMs = 160
       // Primera conexión: arranca en los últimos `burstSegments` para enganchar PAT/PMT y audio ya
       firstIdx = Math.max(0, names.length - burstSegments);
     } else {
+      // Si FFmpeg se reinició, EXT-X-MEDIA-SEQUENCE retrocede: sin este reenganche el
+      // tailer creía que ya había enviado todo y el canal quedaba congelado para siempre.
+      if (mediaSeq + names.length - 1 < lastSentSeq) {
+        lastSentSeq = mediaSeq - 1;
+      }
       firstIdx = Math.max(0, lastSentSeq + 1 - mediaSeq);
       if (firstIdx >= names.length) return;
     }
 
+    // Sólo se avanza la secuencia hasta lo realmente encolado: si la cola está llena,
+    // los segmentos restantes se piden en el siguiente barrido (antes se saltaban = huecos).
+    let lastQueued = lastSentSeq;
     for (let i = firstIdx; i < names.length; i += 1) {
       if (queue.length >= 24) break;
       queue.push({ seq: mediaSeq + i, name: names[i] });
+      lastQueued = mediaSeq + i;
     }
-    lastSentSeq = mediaSeq + names.length - 1;
+    lastSentSeq = Math.max(lastSentSeq, lastQueued);
   };
 
   const pump = () => {
@@ -846,23 +862,79 @@ export function createHlsSegmentTailer({ manifestPath, onChunk, intervalMs = 160
     const name = queue.shift().name;
     sentCount += 1;
     reading = true;
+    const notifyStart = () => {
+      try {
+        onSegmentStart?.(name);
+      } catch {
+        // ignore
+      }
+    };
+    const notifyEnd = () => {
+      try {
+        onSegmentEnd?.(name);
+      } catch {
+        // ignore
+      }
+    };
 
     const filePath = path.join(dir, name);
     const rs = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
+    let started = false;
+    rs.on('open', () => {
+      // 'open' no cambia el modo del stream (a diferencia de 'readable', que lo pausa)
+      if (!started) {
+        started = true;
+        notifyStart();
+      }
+    });
     rs.on('data', (chunk) => {
+      if (!started) {
+        started = true;
+        notifyStart();
+      }
       try {
         onChunk(chunk);
       } catch {
         // subscriber closed
       }
     });
+    // Si una lectura no termina (archivo reemplazado/truncado a media lectura),
+    // el tailer quedaría bloqueado para siempre y el canal se congelaría.
+    const readTimeout = setTimeout(() => {
+      if (!stopped && reading) {
+        try {
+          rs.destroy();
+        } catch {
+          // ignore
+        }
+        reading = false;
+        if (started) notifyEnd();
+        setImmediate(pump);
+      }
+    }, 20_000);
+    readTimeout.unref?.();
+    const finishRead = () => {
+      clearTimeout(readTimeout);
+    };
+
     rs.on('error', () => {
       // Segmento ya borrado por delete_segments o escritura en curso: se salta sin cortar el flujo
+      finishRead();
       reading = false;
+      if (started) notifyEnd();
+    });
+    rs.on('close', () => {
+      finishRead();
+      if (reading) {
+        reading = false;
+        if (started) notifyEnd();
+      }
     });
     rs.on('end', () => {
+      finishRead();
       reading = false;
       if (!stopped && queue.length > 0) setImmediate(pump);
+      notifyEnd();
     });
   };
 
@@ -878,6 +950,10 @@ export function createHlsSegmentTailer({ manifestPath, onChunk, intervalMs = 160
     },
     get sentSegments() {
       return sentCount;
+    },
+    // Diagnóstico en vivo del tailer (se muestra en el panel de Optimización FFmpeg)
+    get debugState() {
+      return { queued: queue.length, reading, lastSentSeq, sent: sentCount };
     }
   };
 }
@@ -900,6 +976,9 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     tsCarry: Buffer.allocUnsafe(188),
     tsCarryLen: 0,
     hlsTailer: null,
+    tailerSegmentOpen: false,
+    pendingTsSubscribers: new Set(),
+    segmentsProduced: 0,
     restarts: 0,
     lastError: '',
     lastStartAt: 0,
@@ -927,6 +1006,31 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
       onChunk: (chunk) => {
         state.lastHlsAt = Date.now();
         broadcastTs(chunk);
+      },
+      onSegmentStart: () => {
+        state.tailerSegmentOpen = true;
+        state.segmentsProduced += 1;
+        // Los clientes .ts que llegan a mitad de segmento esperan aquí: si entran
+        // a media cadena reciben un TS sin PAT/PMT ni keyframe y el reproductor
+        // arranca a tirones. Se sueltan justo en la frontera del siguiente.
+        if (state.pendingTsSubscribers.size > 0) {
+          for (const sub of state.pendingTsSubscribers) {
+            state.tsSubscribers.add(sub);
+            if (sub.__promoteTimer) {
+              clearTimeout(sub.__promoteTimer);
+              sub.__promoteTimer = null;
+            }
+            try {
+              sub.__onPromoted?.();
+            } catch {
+              // ignore
+            }
+          }
+          state.pendingTsSubscribers.clear();
+        }
+      },
+      onSegmentEnd: () => {
+        state.tailerSegmentOpen = false;
       }
     });
     return state.hlsTailer;
@@ -1086,6 +1190,52 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
   return state.pid;
 }
 
+/**
+ * Suscripción MPEG-TS "auto-reparable": si el worker se reinicia (o todavía no existe),
+ * vuelve a engancharse sola en vez de dejar al reproductor congelado hasta que reconecte.
+ * Esto era un "tirón" permanente: al reiniciar un canal, los clientes .ts se quedaban
+ * sin datos para siempre.
+ */
+export function subscribeWorkerMpegTsAuto(key, onChunk, retryMs = 2000) {
+  let unsub = null;
+  let currentPid = null;
+  let cancelled = false;
+
+  const attach = () => {
+    if (cancelled) return;
+    const pid = getWorkerPid(key);
+    if (unsub && pid === currentPid) return;
+    if (unsub) {
+      try {
+        unsub();
+      } catch {
+        // ignore
+      }
+      unsub = null;
+    }
+    currentPid = pid;
+    const next = subscribeWorkerMpegTs(key, onChunk);
+    if (next) unsub = next;
+  };
+
+  attach();
+  const timer = setInterval(attach, retryMs);
+  timer.unref?.();
+
+  return () => {
+    cancelled = true;
+    clearInterval(timer);
+    if (unsub) {
+      try {
+        unsub();
+      } catch {
+        // ignore
+      }
+      unsub = null;
+    }
+  };
+}
+
 export function hasWorkerMpegTsFeed(key) {
   const state = workers.get(key);
   if (!state || state.stoppedManually || !state.pid) return false;
@@ -1103,17 +1253,34 @@ function subscribeTailer(state, onChunk, _tailer) {
     clearTimeout(state.tailerIdleTimer);
     state.tailerIdleTimer = null;
   }
-  state.tsSubscribers.add(onChunk);
-  return () => {
+
+  const detach = () => {
     state.tsSubscribers.delete(onChunk);
     // Apaga el tailer tras 6 s sin suscriptores (ahorra lectura de segmentos y CPU)
-    if (state.tsSubscribers.size === 0 && !state.usesStdoutPipe && !state.stoppedManually) {
+    if (state.tsSubscribers.size === 0 && state.pendingTsSubscribers.size === 0 && !state.usesStdoutPipe && !state.stoppedManually) {
       state.tailerIdleTimer = setTimeout(() => {
-        if (state.tsSubscribers.size === 0 && state.stopHlsTailer) state.stopHlsTailer();
+        if (state.tsSubscribers.size === 0 && state.pendingTsSubscribers.size === 0 && state.stopHlsTailer) {
+          state.stopHlsTailer();
+        }
       }, 6000);
       state.tailerIdleTimer.unref?.();
     }
   };
+
+  if (state.tailerSegmentOpen) {
+    // Entra a mitad de segmento: se espera la frontera para no entregar basura
+    state.pendingTsSubscribers.add(onChunk);
+    const timer = setTimeout(() => {
+      // Red de seguridad: si el canal se quedó quieto, no dejamos al cliente sin datos
+      if (state.pendingTsSubscribers.delete(onChunk)) state.tsSubscribers.add(onChunk);
+    }, 6000);
+    timer.unref?.();
+    onChunk.__promoteTimer = timer;
+    return detach;
+  }
+
+  state.tsSubscribers.add(onChunk);
+  return detach;
 }
 
 /**
@@ -1217,6 +1384,10 @@ export function getWorkerDiagnostics() {
       pid: state.pid || null,
       restarts: state.restarts,
       subscribers: state.tsSubscribers.size,
+      pendingSubscribers: state.pendingTsSubscribers ? state.pendingTsSubscribers.size : 0,
+      segmentsProduced: state.segmentsProduced || 0,
+      tailer: state.hlsTailer?.debugState || null,
+      segmentOpen: Boolean(state.tailerSegmentOpen),
       usesStdoutPipe: Boolean(state.usesStdoutPipe),
       hlsAgeSec,
       lastError: state.lastError ? state.lastError.split('\n').pop().slice(0, 220) : ''

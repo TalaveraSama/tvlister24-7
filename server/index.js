@@ -89,7 +89,8 @@ import {
   expandStreamUpstreamUrls,
   pruneStaleConnections,
   kickConnectionSocket,
-  kickAllLineConnections
+  kickAllLineConnections,
+  getSegmentMissStats
 } from './iptvApi.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
@@ -1553,6 +1554,9 @@ app.get('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (_req, res) 
       .sort((a, b) => (b.hlsAgeSec ?? 9999) - (a.hlsAgeSec ?? 9999))
       .slice(0, 60),
     hlsRoot: HLS_ROOT,
+    // Diagnóstico de tirones: segmentos pedidos por el reproductor que aún no existían
+    // (cada uno es un hueco en la reproducción) y segmentos generados por canal.
+    segmentMisses: getSegmentMissStats(),
     hlsIsRamDisk: HLS_IS_RAMDISK,
     activeFfmpegProcesses,
     totalFfmpegThreads,

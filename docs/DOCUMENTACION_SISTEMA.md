@@ -612,3 +612,51 @@ El motor actual vuelve a usar valores fijos y probados, sin parámetros experime
   se publica la primera pista disponible (`0:a:0?`), igual que antes.
 - Las secciones §8.5 (motor eficiente), §8.6 (diagnóstico de pegones) y §8.8 (cambio masivo de IP/puerto)
   siguen vigentes.
+
+### 8.10. Corrección de Tirones en el Reproductor (clientes HLS y .ts)
+
+Cinco causas reales encontradas y corregidas, todas fuera del encoder (el motor FFmpeg se dejó igual):
+
+1. **Escrituras SQLite por cada segmento** (`server/iptvApi.js`).
+   `recordConnection()` hacía `DELETE` de conexiones viejas + `UPDATE ... datetime('now')` en **cada**
+   petición de segmento. Con 145 canales y varios clientes eso son cientos/miles de escrituras por minuto
+   en un SQLite síncrono: bloquea el *event loop* de Node y produce microcortes.
+   *Ahora*: limpieza cada 30 s y "toque" de conexión cada 20 s por cliente (cache en memoria).
+   Se añadieron además los índices `idx_active_conn_line_ip` y `idx_active_conn_ping`.
+
+2. **Caché "immutable" de segmentos** (`/hls_out/.../*.ts`).
+   Con `Cache-Control: public, max-age=10, immutable`, al reiniciarse un canal FFmpeg vuelve a escribir
+   `index0.ts`, `index1.ts`… y el reproductor **reutilizaba el segmento viejo de su caché** (salto/repetición).
+   *Ahora*: `Cache-Control: no-cache` + `ETag` (size-mtime) y `304 Not Modified`: nunca sirve contenido viejo
+   y sigue ahorrando re-descargas.
+
+3. **Tailer de segmentos (conversión HLS→MPEG-TS) podía quedarse congelado para siempre**.
+   - Si `EXT-X-MEDIA-SEQUENCE` retrocedía (reinicio de FFmpeg), el tailer creía haber enviado todo y el canal
+     quedaba mudo hasta que el cliente reconectara. Ahora **se reengancha** solo.
+   - Si una lectura no terminaba (archivo reemplazado a media lectura), quedaba bloqueado. Ahora hay
+     **watchdog de 20 s** por segmento.
+   - Con la cola llena se adelantaba la secuencia y **se perdían segmentos** (huecos). Ahora sólo avanza hasta
+     lo realmente encolado.
+4. **`.ts` que arrancaba a mitad de segmento**: el reproductor recibía un TS sin PAT/PMT ni keyframe y arrancaba
+   a tirones. Ahora el cliente se engancha **en la frontera del siguiente segmento** (o a los 6 s como red de
+   seguridad), así el primer paquete siempre incluye PAT/PMT.
+5. **Clientes `.ts` que morían al reiniciar el canal**: la suscripción se perdía con el worker viejo.
+   Ahora `subscribeWorkerMpegTsAuto()` **reengancha automáticamente** cada 2 s si el canal se reinicia;
+   el reproductor ya no necesita reconectar.
+
+**Diagnóstico nuevo** en `GET /api/system/ffmpeg-efficiency` (panel *Optimización FFmpeg*):
+
+| Campo | Qué significa |
+|---|---|
+| `segmentMisses.total` | segmentos pedidos por el reproductor que aún no existían (cada uno = un hueco visible) |
+| `workers[].segmentsProduced` | segmentos generados por el canal desde que arrancó |
+| `workers[].tailer` | estado del tailer: `queued`, `reading`, `lastSentSeq`, `sent` |
+| `workers[].segmentOpen` | si el tailer está a mitad de segmento (entradas nuevas esperan frontera) |
+
+Si `segmentMisses` sube en un canal, ese canal está produciendo segmentos más lento que su bitrate
+(CPU del servidor, red del proveedor o disco del RAMDisk) y ahí es donde el cliente ve el tirón.
+
+**Nota sobre el reparto del flujo `.ts`:** el motor entrega el contenido de cada segmento en cuanto FFmpeg lo
+cierra, así que el tráfico va "a golpes" de un segmento (p. ej. 780 KB cada 2 s) en lugar de un chorro continuo.
+Es el comportamiento normal de HLS→TS y los reproductores lo amortiguan con su buffer; el bitrate medio es el
+del canal (verificado: 465 KB/s ≈ 3,7 Mbps en un canal de 3 Mbps + audio).
