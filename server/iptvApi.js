@@ -24,6 +24,8 @@ import {
   isFfmpegAvailable,
   isStreamAudioLeveled,
   HLS_ROOT,
+  DISK_HLS_ROOT,
+  resolveHlsDirForKey,
   ARCHIVE_ROOT
 } from './streamEngine.js';
 
@@ -1038,8 +1040,19 @@ iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) =
 
   const safeKey = path.basename(workerKey);
   const safeFile = path.basename(fileName);
-  const fullPath = path.join(HLS_ROOT, safeKey, safeFile);
-  if (!fs.existsSync(fullPath)) return res.status(404).send('Segment not ready');
+  // El RAMDisk puede desbordarse con 145 canales HD; resolveHlsDirForKey deriva ese canal a disco
+  let fullPath = path.join(resolveHlsDirForKey(safeKey), safeFile);
+  if (!fs.existsSync(fullPath)) {
+    const diskPath = path.join(DISK_HLS_ROOT, safeKey, safeFile);
+    if (fs.existsSync(diskPath)) {
+      fullPath = diskPath;
+    } else {
+      // Manifiesto/segmento todavía no escrito por FFmpeg: pedir reintento corto al reproductor
+      res.setHeader('Retry-After', '1');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(404).send('Segment not ready');
+    }
+  }
 
   // Refresh live subscriber connection telemetry (IP, User-Agent, ISP) on local HLS segment fetches
   if (safeKey.startsWith('stream_')) {
@@ -1054,11 +1067,27 @@ iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) =
 
   if (safeFile.endsWith('.m3u8')) {
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-store');
   } else if (safeFile.endsWith('.ts')) {
     res.setHeader('Content-Type', 'video/mp2t');
+    // Los segmentos son inmutables: cache corto en el reproductor evita re-descargas y tirones
+    res.setHeader('Cache-Control', 'public, max-age=10, immutable');
+    try {
+      const st = fs.statSync(fullPath);
+      res.setHeader('Content-Length', String(st.size));
+    } catch {
+      // tamaño no disponible (segmento rotando)
+    }
+  } else {
+    res.setHeader('Cache-Control', 'no-store');
   }
-  res.setHeader('Cache-Control', 'no-store');
-  fs.createReadStream(fullPath).pipe(res);
+
+  const stream = fs.createReadStream(fullPath);
+  stream.on('error', () => {
+    if (!res.headersSent) res.status(404).send('Segment not ready');
+    else if (!res.writableEnded) res.end();
+  });
+  stream.pipe(res);
 });
 
 // Stream Shield HLS Upstream Proxy (hides upstream provider URLs/credentials & solves upstream IP-Lock)
@@ -1249,6 +1278,20 @@ async function serveLiveStreamRequest(req, res) {
     : getFreshLocalHlsManifestPath(workerKey, 18);
   if (localManifest) {
     if (protocol === 'MPEG-TS') {
+      // Canal en modo HLS nativo (RAMDisk): se entrega MPEG-TS continuo y ORDENADO desde los segmentos.
+      // (Antes se reenviaba el último segmento cada 1 s -> segmentos repetidos/saltados = "pegones" en HD)
+      if (req.socket) req.socket.setTimeout(0);
+      res.setHeader('Content-Type', 'video/mp2t');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-TVLister-Engine', 'RAMDisk-HLS-to-Continuous-MPEGTS');
+      const tsUnsub = subscribeWorkerMpegTs(workerKey, (tsChunk) => {
+        if (!res.writableEnded) res.write(tsChunk);
+      });
+      if (tsUnsub) {
+        attachLiveConnectionSocket(conn.connId, req, res, tsUnsub);
+        req.once('close', tsUnsub);
+        return;
+      }
       attachLiveConnectionSocket(conn.connId, req, res);
       return pipeSlateContinuousMpegTs(req, res, workerKey);
     }
@@ -1778,8 +1821,12 @@ iptvRouter.get('/api/admin/preview/hls_local/:workerKey/:fileName', (req, res) =
   if (!user) return res.status(401).send('Sesión expirada');
   const safeKey = path.basename(String(req.params.workerKey || ''));
   const safeFile = path.basename(String(req.params.fileName || ''));
-  const fullPath = path.join(HLS_ROOT, safeKey, safeFile);
-  if (!fs.existsSync(fullPath)) return res.status(404).send('Segment not ready');
+  let fullPath = path.join(resolveHlsDirForKey(safeKey), safeFile);
+  if (!fs.existsSync(fullPath)) {
+    const diskPath = path.join(DISK_HLS_ROOT, safeKey, safeFile);
+    if (!fs.existsSync(diskPath)) return res.status(404).send('Segment not ready');
+    fullPath = diskPath;
+  }
   res.setHeader(
     'Content-Type',
     safeFile.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t'

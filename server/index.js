@@ -61,7 +61,11 @@ import {
   getGlobalAudioLevelingConfig,
   invalidateAudioLevelingCache,
   getFfmpegEfficiencyConfig,
-  invalidateFfmpegEfficiencyCache
+  invalidateFfmpegEfficiencyCache,
+  getWorkerDiagnostics,
+  getHlsFreeBytes,
+  estimateHlsFootprintBytes,
+  HLS_WINDOW_SECONDS
 } from './streamEngine.js';
 import {
   SLATES_DIR,
@@ -1309,11 +1313,23 @@ app.get('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (_req, res) 
     // non-linux fallback
   }
 
+  const workerDiag = getWorkerDiagnostics();
+  // Canal congelado = sin PID de FFmpeg o manifiesto HLS que no avanza (>20 s)
+  const stalled = workerDiag.filter((w) => !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20));
+
   res.json({
     ffmpegAvailable: available,
     ffmpegBin: bin,
     tsPipeMode: efficiency.tsPipeMode,
     h264Threads: efficiency.h264Threads,
+    hlsWindowSeconds: HLS_WINDOW_SECONDS,
+    hlsFreeMb: Math.round(getHlsFreeBytes() / (1024 * 1024)),
+    hlsNeededMb: Math.round(estimateHlsFootprintBytes() / (1024 * 1024)),
+    stalledStreams: stalled.length,
+    workers: workerDiag
+      .slice()
+      .sort((a, b) => (b.hlsAgeSec ?? 9999) - (a.hlsAgeSec ?? 9999))
+      .slice(0, 60),
     hlsRoot: HLS_ROOT,
     hlsIsRamDisk: HLS_IS_RAMDISK,
     activeFfmpegProcesses,
@@ -2508,7 +2524,62 @@ app.post('/api/system/maintenance', requireAuth, requireAdmin, (req, res) => {
   if (action === 'restart_streams') {
     db.prepare("UPDATE streams SET uptime_started_at = datetime('now') WHERE status = 'running'").run();
     db.prepare("UPDATE channels_247 SET status = 'running'").run();
-    return res.json({ ok: true, message: 'Motor de canales en vivo y canales 24/7 sincronizado.' });
+    // Reinicia de verdad los procesos FFmpeg (antes sólo actualizaba la fecha y los canales seguían colgados)
+    const runningIds = db
+      .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
+      .all()
+      .map((r) => r.id);
+    scheduleStaggeredStreamLaunches(runningIds, 80);
+    return res.json({
+      ok: true,
+      restartedStreams: runningIds.length,
+      message: `Motor de canales en vivo y 24/7 reiniciado (${runningIds.length} procesos FFmpeg escalonados).`
+    });
+  }
+  if (action === 'restart_stalled_streams') {
+    // Repara únicamente los canales congelados (sin proceso o manifiesto HLS sin avanzar >20 s)
+    const stalledKeys = getWorkerDiagnostics()
+      .filter((w) => !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20))
+      .map((w) => w.key)
+      .filter((k) => /^stream_\d+$/.test(k));
+    const ids = stalledKeys.map((k) => Number(k.replace('stream_', ''))).filter((n) => Number.isInteger(n) && n > 0);
+    for (const id of ids) stopWorker(`stream_${id}`);
+    scheduleStaggeredStreamLaunches(ids, 80);
+    return res.json({
+      ok: true,
+      restartedStreams: ids.length,
+      message:
+        ids.length > 0
+          ? `${ids.length} canales congelados reiniciados de forma escalonada.`
+          : 'No hay canales congelados en este momento.'
+    });
+  }
+  if (action === 'relay_direct_copy_streams') {
+    // 145 canales HD en Copy/Copy sin nivelador no necesitan FFmpeg local: se sirven por Relay Directo
+    // (Stream Shield), liberando CPU, RAM, pipes y espacio de RAMDisk. 0 % CPU de transcodificación.
+    const globalAudioEnabled = getGlobalAudioLevelingConfig().enabled;
+    const rows = db
+      .prepare(
+        `SELECT s.id, s.audio_leveling_mode AS lvl
+           FROM streams s
+           LEFT JOIN transcode_profiles p ON p.id = s.transcode_profile_id
+          WHERE s.stream_mode = 'transcode' AND p.video_codec = 'copy' AND p.audio_codec = 'copy'`
+      )
+      .all()
+      .filter((r) => (globalAudioEnabled ? r.lvl === 'off' : r.lvl !== 'on'));
+
+    for (const r of rows) {
+      stopWorker(`stream_${r.id}`);
+      db.prepare("UPDATE streams SET stream_mode = 'direct', pid = NULL WHERE id = ?").run(r.id);
+    }
+    return res.json({
+      ok: true,
+      convertedStreams: rows.length,
+      message:
+        rows.length > 0
+          ? `${rows.length} canales Copy/Copy pasaron a Relay Directo (0 % CPU FFmpeg). Los que necesitan nivelador se mantuvieron intactos.`
+          : 'No hay canales Copy/Copy sin nivelador para convertir a Relay Directo.'
+    });
   }
   if (action === 'vacuum_db') {
     db.exec('PRAGMA wal_checkpoint(TRUNCATE); VACUUM;');

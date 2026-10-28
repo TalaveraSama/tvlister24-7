@@ -33,30 +33,92 @@ export function resolveFfmpegCompatibleCandidates(rawUrl = '', backupUrl = '') {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_DIR = path.resolve(__dirname, '../streams_runtime');
 
-function resolveOptimalHlsRoot() {
-  if (process.env.HLS_DIR) return path.resolve(process.env.HLS_DIR);
-  // Use Linux kernel tmpfs RAMDisk (/dev/shm) whenever >= 2 GB system RAM & >= 512 MB free on /dev/shm
-  // Eliminates 100% of SSD/SATA disk I/O bottlenecks when generating HLS for 100-300+ live channels!
+export const DISK_HLS_ROOT = path.join(RUNTIME_DIR, 'hls');
+
+// Ventana HLS real en el peor caso: si el origen (Flussonic) tiene GOP de 4 s,
+// hls_time 2 termina produciendo segmentos de 4 s y hls_list_size 6 = 24 s de ventana.
+export const HLS_WINDOW_SECONDS = 24;
+
+/**
+ * Estima cuánto espacio necesita el RAMDisk para TODOS los canales en transcodificación.
+ * Se asume mínimo 6.5 Mbps por canal Copy (puede recibir HD de 8-12 Mbps del Flussonic origen),
+ * porque quedarse sin espacio en tmpfs (ENOSPC) tumba los 145 canales de golpe.
+ */
+export function estimateHlsFootprintBytes() {
   try {
-    if (os.platform() === 'linux' && os.totalmem() >= 1.8 * 1024 ** 3 && fs.existsSync('/dev/shm')) {
+    const rows = db
+      .prepare(
+        `SELECT s.bitrate_kbps AS bitrate, p.video_codec AS vcodec
+           FROM streams s
+           LEFT JOIN transcode_profiles p ON p.id = s.transcode_profile_id
+          WHERE s.stream_mode = 'transcode' AND s.status IN ('running', 'ondemand_idle')`
+      )
+      .all();
+    let bitsPerSecond = 0;
+    for (const r of rows) {
+      const declared = Math.max(800, Number(r.bitrate) || 2500);
+      const effective = r.vcodec === 'copy' ? Math.max(declared, 6500) : declared;
+      bitsPerSecond += effective * 1000;
+    }
+    const windowBytes = Math.ceil((bitsPerSecond / 8) * HLS_WINDOW_SECONDS * 1.35);
+    return windowBytes + 192 * 1024 * 1024;
+  } catch {
+    return 512 * 1024 * 1024;
+  }
+}
+
+export function resolveOptimalHlsRoot() {
+  if (process.env.HLS_DIR) return path.resolve(process.env.HLS_DIR);
+  // Usa tmpfs (/dev/shm) sólo si hay espacio REAL para toda la ventana HLS de todos los canales.
+  try {
+    if (os.platform() === 'linux' && fs.existsSync('/dev/shm')) {
       const st = fs.statfsSync('/dev/shm');
       const freeBytes = Number(st.bavail) * Number(st.bsize);
-      if (freeBytes >= 512 * 1024 ** 2) {
+      const needed = estimateHlsFootprintBytes();
+      if (freeBytes >= needed) {
         const shmDir = '/dev/shm/tvlister_hls';
         fs.mkdirSync(shmDir, { recursive: true });
         return shmDir;
       }
     }
   } catch {
-    // fallback to disk runtime directory
+    // fallback a disco
   }
-  return path.join(RUNTIME_DIR, 'hls');
+  fs.mkdirSync(DISK_HLS_ROOT, { recursive: true });
+  return DISK_HLS_ROOT;
 }
 
 export const HLS_ROOT = resolveOptimalHlsRoot();
 export const HLS_IS_RAMDISK = HLS_ROOT.startsWith('/dev/shm');
 export const PLAYLIST_ROOT = path.join(RUNTIME_DIR, 'playlists');
 export const ARCHIVE_ROOT = path.join(RUNTIME_DIR, 'archive');
+
+let hlsFreeCache = { value: -1, at: 0 };
+
+export function getHlsFreeBytes() {
+  const now = Date.now();
+  if (now - hlsFreeCache.at < 2000) return hlsFreeCache.value;
+  try {
+    const st = fs.statfsSync(HLS_ROOT);
+    hlsFreeCache = { value: Number(st.bavail) * Number(st.bsize), at: now };
+  } catch {
+    hlsFreeCache = { value: 0, at: now };
+  }
+  return hlsFreeCache.value;
+}
+
+/**
+ * Directorio HLS real de un canal. Si el RAMDisk se está quedando sin espacio
+ * (ENOSPC tumbaba canales en producción) ese canal pasa automáticamente a disco.
+ */
+export function resolveHlsDirForKey(key) {
+  const safeKey = path.basename(String(key));
+  if (HLS_IS_RAMDISK && getHlsFreeBytes() < 384 * 1024 * 1024) {
+    fs.mkdirSync(DISK_HLS_ROOT, { recursive: true });
+    return path.join(DISK_HLS_ROOT, safeKey);
+  }
+  return path.join(HLS_ROOT, safeKey);
+}
 
 let ffmpegAvailableCache = null;
 let resolvedFfmpegBin = null;
@@ -110,24 +172,32 @@ export function getWorkerPid(key) {
 }
 
 export function getLocalHlsManifestPath(key) {
-  const manifest = path.join(HLS_ROOT, key, 'index.m3u8');
-  return fs.existsSync(manifest) ? manifest : null;
+  for (const base of [resolveHlsDirForKey(key), path.join(DISK_HLS_ROOT, path.basename(key))]) {
+    const manifest = path.join(base, 'index.m3u8');
+    if (fs.existsSync(manifest)) return manifest;
+  }
+  return null;
 }
 
 export function getFreshLocalHlsManifestPath(key, maxAgeSec = 18) {
-  const manifest = path.join(HLS_ROOT, key, 'index.m3u8');
-  try {
-    if (!fs.existsSync(manifest)) return null;
-    const st = fs.statSync(manifest);
-    if (Date.now() - st.mtimeMs > maxAgeSec * 1000) return null;
-    return manifest;
-  } catch {
-    return null;
+  for (const base of [resolveHlsDirForKey(key), path.join(DISK_HLS_ROOT, path.basename(key))]) {
+    const manifest = path.join(base, 'index.m3u8');
+    try {
+      if (!fs.existsSync(manifest)) continue;
+      const st = fs.statSync(manifest);
+      if (Date.now() - st.mtimeMs > maxAgeSec * 1000) continue;
+      return manifest;
+    } catch {
+      // sigue con la otra ruta
+    }
   }
+  return null;
 }
 
 export function cleanupStreamRuntime(streamId) {
   const dirs = [
+    resolveHlsDirForKey(`stream_${streamId}`),
+    path.join(DISK_HLS_ROOT, `stream_${streamId}`),
     path.join(HLS_ROOT, `stream_${streamId}`),
     path.join(ARCHIVE_ROOT, `stream_${streamId}`)
   ];
@@ -398,34 +468,33 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
       (efficiency.tsPipeMode === 'auto' &&
         (extraStr.includes('-tee_mpegts_pipe') || Boolean(stream?.flussonic_pushed_at))));
 
-  const outDir = path.join(HLS_ROOT, `stream_${stream.id}`);
+  const outDir = resolveHlsDirForKey(`stream_${stream.id}`);
   if (!ramMpegTsOnly) {
     fs.mkdirSync(outDir, { recursive: true });
   }
 
   // -nostdin avoids TTY polling; -loglevel error suppresses high-rate stderr text formatting across 200+ workers
-  const args = ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y'];
+  const args = ['-nostdin', '-hide_banner', '-loglevel', 'warning', '-y'];
 
   const hasCustomThreads = /(?:^|\s)-threads\s+\d+/.test(extraStr);
   const hasCpuVideoScale =
     !isCopyRemux &&
     ((profile?.resolution && profile.resolution !== 'source') || /-vf\b/.test(extraStr) || /-s\b/.test(extraStr));
 
+  // Fuentes HTTP/HLS (Flussonic) necesitan sonda amplia para HD: con 1 MB FFmpeg pierde el SPS/PPS
+  // del primer segmento en canales de 8-12 Mbps y arranca tarde o entrecortado.
+  const isHttpInput = /^https?:\/\//i.test(inputUrl);
+  const probeSize = isHttpInput ? '5000000' : '1500000';
+  const analyzeDuration = isHttpInput ? '4000000' : '1500000';
+  // -avoid_negative_ts sólo cuando emitimos MPEG-TS continuo (pipe), no en HLS puro (evita micro-saltos de PTS)
+  const needTsContinuity = ramMpegTsOnly || dualTeeTsPipe;
+
   if (isPureCopy) {
-    // Pure Copy/Copy Zero-CPU mode: 1 thread, minimal 500 KB probe (~14-16 MB RSS per stream, ~0.08% CPU)
+    // Copy/Copy Zero-CPU: 1 hilo OS, sin re-encode (14-16 MB RSS por canal)
     if (!hasCustomThreads) args.push('-threads', '1');
-    args.push(
-      '-probesize',
-      '1000000',
-      '-analyzeduration',
-      '1000000',
-      '-fflags',
-      '+genpts+igndts+nobuffer+discardcorrupt',
-      '-flags',
-      'low_delay',
-      '-avoid_negative_ts',
-      'make_zero'
-    );
+    args.push('-probesize', probeSize, '-analyzeduration', analyzeDuration);
+    args.push('-fflags', '+genpts+igndts+nobuffer+discardcorrupt', '-flags', 'low_delay');
+    if (needTsContinuity) args.push('-avoid_negative_ts', 'make_zero');
   } else if (isCopyRemux) {
     // Copy Video + Audio encode/level: 1 worker thread + 1 audio filter thread
     if (!hasCustomThreads) args.push('-threads', '1');
@@ -435,16 +504,15 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
       '-filter_complex_threads',
       '1',
       '-probesize',
-      '1000000',
+      probeSize,
       '-analyzeduration',
-      '1200000',
+      analyzeDuration,
       '-fflags',
       '+genpts+igndts+nobuffer+discardcorrupt',
       '-flags',
-      'low_delay',
-      '-avoid_negative_ts',
-      'make_zero'
+      'low_delay'
     );
+    if (needTsContinuity) args.push('-avoid_negative_ts', 'make_zero');
   } else {
     if (profile?.hwaccel === 'nvenc' || vCodec.includes('nvenc')) {
       if (!hasCustomThreads) args.push('-threads', '1');
@@ -461,19 +529,11 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
       args.push('-filter_threads', '1', '-filter_complex_threads', '1');
     }
 
+    args.push('-probesize', probeSize, '-analyzeduration', analyzeDuration);
     if (isZeroLatency) {
-      args.push(
-        '-probesize',
-        '1200000',
-        '-analyzeduration',
-        '1500000',
-        '-fflags',
-        '+genpts+igndts+nobuffer+discardcorrupt',
-        '-flags',
-        'low_delay'
-      );
+      args.push('-fflags', '+genpts+igndts+nobuffer+discardcorrupt', '-flags', 'low_delay');
     } else {
-      args.push('-probesize', '2000000', '-analyzeduration', '2000000', '-fflags', '+genpts+discardcorrupt');
+      args.push('-fflags', '+genpts+discardcorrupt');
     }
   }
 
@@ -545,7 +605,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
       copyExtra.push(tok);
     }
     if (copyExtra.length > 0) args.push(...copyExtra);
-    args.push('-max_muxing_queue_size', '1024');
+    args.push('-max_muxing_queue_size', '2048');
   }
 
   if (levelAudio) {
@@ -579,8 +639,8 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
 
   const hlsTime = isZeroLatency ? '2' : '4';
   const hlsFlags = isZeroLatency
-    ? 'delete_segments+independent_segments+temp_file'
-    : 'delete_segments+append_list+temp_file';
+    ? 'delete_segments+independent_segments+omit_endlist'
+    : 'delete_segments+append_list+omit_endlist';
   const outM3u8 = path.join(outDir, 'index.m3u8');
 
   if (dualTeeTsPipe) {
@@ -589,7 +649,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     args.push(
       '-f',
       'tee',
-      `[f=hls:hls_time=${hlsTime}:hls_list_size=5:hls_flags=${hlsFlags}]${escapedM3u8}|[f=mpegts:mpegts_flags=+resend_headers]pipe:1`
+      `[f=hls:hls_time=${hlsTime}:hls_list_size=6:hls_flags=${hlsFlags}]${escapedM3u8}|[f=mpegts:mpegts_flags=+resend_headers]pipe:1`
     );
     return args;
   }
@@ -602,7 +662,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     '-hls_time',
     hlsTime,
     '-hls_list_size',
-    '5',
+    '6',
     '-hls_flags',
     hlsFlags,
     outM3u8
@@ -620,7 +680,7 @@ export function buildFfmpegArgsForChannel247(channel, profile) {
   if (playlist.length === 0) return null;
 
   fs.mkdirSync(PLAYLIST_ROOT, { recursive: true });
-  const outDir = path.join(HLS_ROOT, `ch247_${channel.id}`);
+  const outDir = resolveHlsDirForKey(`ch247_${channel.id}`);
   fs.mkdirSync(outDir, { recursive: true });
 
   const concatFile = path.join(PLAYLIST_ROOT, `channel247_${channel.id}.txt`);
@@ -710,6 +770,118 @@ export function buildFfmpegCommandForChannel247(channel, profile) {
 
 const TS_RING_BYTES = 500 * 188; // 94,000 bytes (exact 188-byte packet multiple, pre-allocated once per pipe worker)
 
+/**
+ * Tailer de segmentos HLS -> MPEG-TS continuo ORDENADO.
+ *
+ * Antes los clientes .ts de canales en modo HLS recibían `pipeSlateContinuousMpegTs`,
+ * que cada 1000 ms releía el manifiesto y reenviaba el ÚLTIMO segmento completo:
+ * el reproductor recibía segmentos repetidos, fuera de orden y con huecos de 1 s.
+ * Con canales HD (2-3 MB por segmento) eso produce exactamente "pegones" y congelamientos.
+ *
+ * Este tailer envía cada segmento EXACTAMENTE UNA VEZ y en orden de secuencia, con
+ * lectura en streaming de 64 KB y sin duplicar bytes. Latencia ≈ 1 segmento.
+ */
+export function createHlsSegmentTailer({ manifestPath, onChunk, intervalMs = 160, burstSegments = 2 }) {
+  const dir = path.dirname(manifestPath);
+  const queue = [];
+  let reading = false;
+  let stopped = false;
+  let lastStat = { mtimeMs: -1, size: -1 };
+  let timer = null;
+  let lastSentSeq = -1;
+  let sentCount = 0;
+
+  const scanManifest = () => {
+    let st;
+    try {
+      st = fs.statSync(manifestPath);
+    } catch {
+      return;
+    }
+    if (st.mtimeMs === lastStat.mtimeMs && st.size === lastStat.size) return;
+    lastStat = { mtimeMs: st.mtimeMs, size: st.size };
+
+    let mediaSeq = 0;
+    const names = [];
+    try {
+      const text = fs.readFileSync(manifestPath, 'utf8');
+      for (const line of text.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) continue;
+        if (t.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+          mediaSeq = Number(t.split(':')[1]) || 0;
+          continue;
+        }
+        if (t.startsWith('#')) continue;
+        names.push(path.basename(t.split('?')[0]));
+      }
+    } catch {
+      return;
+    }
+    if (names.length === 0) return;
+
+    // Deduplicación por NÚMERO DE SECUENCIA absoluto (EXT-X-MEDIA-SEQUENCE + índice):
+    // evita reenviar segmentos aunque FFmpeg reutilice los nombres de archivo.
+    let firstIdx = 0;
+    if (lastSentSeq < 0) {
+      // Primera conexión: arranca en los últimos `burstSegments` para enganchar PAT/PMT y audio ya
+      firstIdx = Math.max(0, names.length - burstSegments);
+    } else {
+      firstIdx = Math.max(0, lastSentSeq + 1 - mediaSeq);
+      if (firstIdx >= names.length) return;
+    }
+
+    for (let i = firstIdx; i < names.length; i += 1) {
+      if (queue.length >= 24) break;
+      queue.push({ seq: mediaSeq + i, name: names[i] });
+    }
+    lastSentSeq = mediaSeq + names.length - 1;
+  };
+
+  const pump = () => {
+    if (stopped) return;
+    scanManifest();
+    if (reading || queue.length === 0) return;
+
+    const name = queue.shift().name;
+    sentCount += 1;
+    reading = true;
+
+    const filePath = path.join(dir, name);
+    const rs = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
+    rs.on('data', (chunk) => {
+      try {
+        onChunk(chunk);
+      } catch {
+        // subscriber closed
+      }
+    });
+    rs.on('error', () => {
+      // Segmento ya borrado por delete_segments o escritura en curso: se salta sin cortar el flujo
+      reading = false;
+    });
+    rs.on('end', () => {
+      reading = false;
+      if (!stopped && queue.length > 0) setImmediate(pump);
+    });
+  };
+
+  timer = setInterval(pump, intervalMs);
+  timer.unref?.();
+  pump();
+
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+      queue.length = 0;
+    },
+    get sentSegments() {
+      return sentCount;
+    }
+  };
+}
+
 export function startSupervisedWorker(key, argsBuilder, onPidChange) {
   if (!isFfmpegAvailable()) return null;
   stopWorker(key);
@@ -726,9 +898,52 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     ringWritePos: 0,
     ringFilled: 0,
     tsCarry: Buffer.allocUnsafe(188),
-    tsCarryLen: 0
+    tsCarryLen: 0,
+    hlsTailer: null,
+    restarts: 0,
+    lastError: '',
+    lastStartAt: 0,
+    lastHlsAt: 0
   };
   workers.set(key, state);
+
+  const broadcastTs = (chunk) => {
+    if (state.tsSubscribers.size === 0) return;
+    for (const cb of state.tsSubscribers) {
+      try {
+        cb(chunk);
+      } catch {
+        // ignore subscriber write error
+      }
+    }
+  };
+
+  const ensureHlsTailer = () => {
+    if (state.hlsTailer || state.stoppedManually) return state.hlsTailer;
+    const dir = resolveHlsDirForKey(key);
+    const manifestPath = path.join(dir, 'index.m3u8');
+    state.hlsTailer = createHlsSegmentTailer({
+      manifestPath,
+      onChunk: (chunk) => {
+        state.lastHlsAt = Date.now();
+        broadcastTs(chunk);
+      }
+    });
+    return state.hlsTailer;
+  };
+
+  const stopHlsTailer = () => {
+    if (state.hlsTailer) {
+      try {
+        state.hlsTailer.stop();
+      } catch {
+        // ignore
+      }
+      state.hlsTailer = null;
+    }
+  };
+  state.stopHlsTailer = stopHlsTailer;
+  state.ensureHlsTailer = ensureHlsTailer;
 
   const ingestTsStdout = (rawChunk) => {
     if (!rawChunk || rawChunk.length === 0) return;
@@ -817,21 +1032,40 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     const startedAt = Date.now();
     // Kernel /dev/null ('ignore') on all unused FDs -> 0.00% Node.js event-loop load across 200+ HLS channels!
     const child = spawn(bin, args, {
-      stdio: ['ignore', state.usesStdoutPipe ? 'pipe' : 'ignore', 'ignore'],
+      stdio: ['ignore', state.usesStdoutPipe ? 'pipe' : 'pipe', 'pipe'],
       detached: false,
       env
     });
     state.child = child;
     state.pid = child.pid || null;
+    state.lastStartAt = Date.now();
     if (onPidChange) onPidChange(state.pid);
 
     if (state.usesStdoutPipe && child.stdout) {
       child.stdout.on('data', ingestTsStdout);
       child.stdout.on('error', () => {});
     }
+    if (!state.usesStdoutPipe && child.stdout) {
+      // Cierra el pipe cuando FFmpeg escribe HLS puro (no debe llegar nada por stdout)
+      child.stdout.resume();
+    }
+    if (child.stderr) {
+      // Guarda sólo la cola del error para diagnóstico, con límite de 4 lecturas/s por canal
+      // (un origen inestable puede escupir miles de líneas "Non-monotonous DTS" y comerse la CPU)
+      let lastCaptureAt = 0;
+      child.stderr.on('data', (chunk) => {
+        const now = Date.now();
+        if (now - lastCaptureAt < 250) return;
+        lastCaptureAt = now;
+        const txt = chunk.subarray(0, 2048).toString('utf8').trim();
+        if (txt) state.lastError = `${state.lastError} ${txt}`.slice(-400);
+      });
+      child.stderr.on('error', () => {});
+    }
 
     child.on('exit', () => {
       state.pid = null;
+      state.restarts += 1;
       if (onPidChange) onPidChange(null);
       const aliveMs = Date.now() - startedAt;
       if (aliveMs >= 15_000) {
@@ -854,7 +1088,32 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
 
 export function hasWorkerMpegTsFeed(key) {
   const state = workers.get(key);
-  return Boolean(state && state.usesStdoutPipe && !state.stoppedManually);
+  if (!state || state.stoppedManually || !state.pid) return false;
+  if (state.usesStdoutPipe) return true;
+  // Modo HLS nativo: el tailer de segmentos entrega MPEG-TS continuo en orden
+  try {
+    return fs.existsSync(path.join(resolveHlsDirForKey(key), 'index.m3u8'));
+  } catch {
+    return false;
+  }
+}
+
+function subscribeTailer(state, onChunk, _tailer) {
+  if (state.tailerIdleTimer) {
+    clearTimeout(state.tailerIdleTimer);
+    state.tailerIdleTimer = null;
+  }
+  state.tsSubscribers.add(onChunk);
+  return () => {
+    state.tsSubscribers.delete(onChunk);
+    // Apaga el tailer tras 6 s sin suscriptores (ahorra lectura de segmentos y CPU)
+    if (state.tsSubscribers.size === 0 && !state.usesStdoutPipe && !state.stoppedManually) {
+      state.tailerIdleTimer = setTimeout(() => {
+        if (state.tsSubscribers.size === 0 && state.stopHlsTailer) state.stopHlsTailer();
+      }, 6000);
+      state.tailerIdleTimer.unref?.();
+    }
+  };
 }
 
 /**
@@ -863,7 +1122,16 @@ export function hasWorkerMpegTsFeed(key) {
  */
 export function subscribeWorkerMpegTs(key, onChunk) {
   const state = workers.get(key);
-  if (!state || !state.usesStdoutPipe || state.stoppedManually) return null;
+  if (!state || state.stoppedManually) return null;
+
+  if (!state.usesStdoutPipe) {
+    // Canal en modo HLS nativo: stream ORDENADO de segmentos (cada segmento una sola vez)
+    if (!state.ensureHlsTailer) return null;
+    const tailer = state.ensureHlsTailer();
+    if (!tailer) return null;
+    // Encola al suscriptor en el mismo microtask para no perder el primer chunk antes de setHeader
+    return subscribeTailer(state, onChunk, tailer);
+  }
 
   let cancelled = false;
 
@@ -906,6 +1174,14 @@ export function stopWorker(key) {
   const state = workers.get(key);
   if (!state) return;
   state.stoppedManually = true;
+  if (state.tailerIdleTimer) clearTimeout(state.tailerIdleTimer);
+  if (state.stopHlsTailer) {
+    try {
+      state.stopHlsTailer();
+    } catch {
+      // ignore
+    }
+  }
   state.tsSubscribers.clear();
   state.ringBuf = null;
   state.ringFilled = 0;
@@ -919,6 +1195,34 @@ export function stopWorker(key) {
     }
   }
   workers.delete(key);
+}
+
+/**
+ * Diagnóstico en vivo por canal: PID, reinicios de FFmpeg, suscriptores .ts,
+ * antigüedad del manifiesto HLS (si crece, el canal está congelado) y última línea de error.
+ */
+export function getWorkerDiagnostics() {
+  const out = [];
+  for (const [key, state] of workers.entries()) {
+    const dir = resolveHlsDirForKey(key);
+    let hlsAgeSec = null;
+    try {
+      const st = fs.statSync(path.join(dir, 'index.m3u8'));
+      hlsAgeSec = Math.max(0, Math.round((Date.now() - st.mtimeMs) / 1000));
+    } catch {
+      hlsAgeSec = null;
+    }
+    out.push({
+      key,
+      pid: state.pid || null,
+      restarts: state.restarts,
+      subscribers: state.tsSubscribers.size,
+      usesStdoutPipe: Boolean(state.usesStdoutPipe),
+      hlsAgeSec,
+      lastError: state.lastError ? state.lastError.split('\n').pop().slice(0, 220) : ''
+    });
+  }
+  return out;
 }
 
 export function stopAllWorkers() {

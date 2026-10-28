@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
 import {
   HLS_ROOT,
+  resolveHlsDirForKey,
+  createHlsSegmentTailer,
   getFfmpegBin,
   isFfmpegAvailable,
   startSupervisedWorker,
@@ -116,7 +118,7 @@ export function resolveEffectiveSlateForStream(stream) {
 }
 
 function buildSlateFfmpegArgs(workerKey, spec) {
-  const outDir = path.join(HLS_ROOT, workerKey);
+  const outDir = resolveHlsDirForKey(workerKey);
   fs.mkdirSync(outDir, { recursive: true });
 
   const vfScale =
@@ -322,7 +324,7 @@ export async function ensureSlateManifestForStream(stream) {
 export function restartAllSlateWorkers() {
   for (const key of Array.from(slateLastUsed.keys())) {
     stopWorker(key);
-    const dir = path.join(HLS_ROOT, key);
+    const dir = resolveHlsDirForKey(key);
     try {
       if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -333,46 +335,28 @@ export function restartAllSlateWorkers() {
 }
 
 export function pipeSlateContinuousMpegTs(req, res, workerKey) {
-  const dir = path.join(HLS_ROOT, workerKey);
+  const dir = resolveHlsDirForKey(workerKey);
   res.setHeader('Content-Type', 'video/mp2t');
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-TVLister-Fallback', 'offline-slate-loop');
 
-  let closed = false;
-  let lastSentSeg = '';
+  slateLastUsed.set(workerKey, Date.now());
+  const touch = setInterval(() => slateLastUsed.set(workerKey, Date.now()), 30000);
+  touch.unref?.();
 
-  const pumpNextSegment = () => {
-    if (closed || res.writableEnded) return;
-    slateLastUsed.set(workerKey, Date.now());
-    try {
-      const manifestPath = path.join(dir, 'index.m3u8');
-      if (fs.existsSync(manifestPath)) {
-        const lines = fs
-          .readFileSync(manifestPath, 'utf8')
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => l && !l.startsWith('#'));
-        const latestSeg = lines[lines.length - 1];
-        if (latestSeg && latestSeg !== lastSentSeg) {
-          const segPath = path.join(dir, path.basename(latestSeg));
-          if (fs.existsSync(segPath)) {
-            lastSentSeg = latestSeg;
-            const buf = fs.readFileSync(segPath);
-            if (!res.writableEnded) res.write(buf);
-          }
-        }
-      }
-    } catch {
-      // ignore transient read race
+  // Tailer ORDENADO: cada segmento del slate se envía una sola vez y en orden
+  // (el pump anterior repetía el último segmento cada segundo y cortaba la reproducción)
+  const tailer = createHlsSegmentTailer({
+    manifestPath: path.join(dir, 'index.m3u8'),
+    intervalMs: 250,
+    burstSegments: 2,
+    onChunk: (chunk) => {
+      if (!res.writableEnded) res.write(chunk);
     }
-  };
-
-  pumpNextSegment();
-  const timer = setInterval(pumpNextSegment, 1000);
-  timer.unref?.();
+  });
 
   req.once('close', () => {
-    closed = true;
-    clearInterval(timer);
+    clearInterval(touch);
+    tailer.stop();
   });
 }

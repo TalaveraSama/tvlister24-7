@@ -475,7 +475,7 @@ export default function ServersSecurityPage() {
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600/25 hover:bg-indigo-600 text-indigo-200 hover:text-white border border-indigo-500/35 font-semibold transition"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
-                    Sincronizar Motor Live & 24/7
+                    Reiniciar Motor Live & 24/7 (Reinicio Real)
                   </button>
                   <button
                     onClick={() => runMaintenance('clear_connections')}
@@ -602,6 +602,11 @@ export default function ServersSecurityPage() {
                 { label: 'RAM FFmpeg', value: ffEff ? `${ffEff.totalFfmpegRssMb} MB` : '—' },
                 { label: 'RAM por Canal', value: ffEff ? `${ffEff.avgRssMbPerChannel} MB` : '—' },
                 { label: 'Prefijo HLS', value: ffEff?.hlsIsRamDisk ? 'RAMDisk' : 'Disco', good: Boolean(ffEff?.hlsIsRamDisk) },
+                {
+                  label: 'RAMDisk Libre',
+                  value: ffEff ? `${ffEff.hlsFreeMb} / ${ffEff.hlsNeededMb} MB` : '—',
+                  good: ffEff ? ffEff.hlsFreeMb >= ffEff.hlsNeededMb : false
+                },
                 { label: 'Pipe TS', value: ffForm.tsPipeMode === 'always' ? 'Siempre' : ffForm.tsPipeMode === 'never' ? 'Nunca' : 'Auto (Troncal)' }
               ].map((box) => (
                 <div key={box.label} className="p-3 rounded-xl bg-[#090e1a] border border-slate-800">
@@ -651,6 +656,66 @@ export default function ServersSecurityPage() {
               </div>
             </div>
 
+            {(ffEff?.stalledStreams > 0 || (ffEff?.hlsIsRamDisk && ffEff?.hlsFreeMb < ffEff?.hlsNeededMb)) && (
+              <div className="space-y-2">
+                {ffEff?.stalledStreams > 0 && (
+                  <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/40 text-xs flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-rose-200 font-semibold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4" />
+                      {ffEff.stalledStreams} canal(es) congelado(s): FFmpeg sin proceso o HLS sin avanzar más de 20 s
+                    </span>
+                    <button
+                      onClick={() => runMaintenance('restart_stalled_streams')}
+                      className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold"
+                    >
+                      Reparar Solo Canales Congelados
+                    </button>
+                  </div>
+                )}
+                {ffEff?.hlsIsRamDisk && ffEff?.hlsFreeMb < ffEff?.hlsNeededMb && (
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200">
+                    <b>Aviso de RAM para HLS:</b> el RAMDisk tiene {ffEff.hlsFreeMb} MB libres y la ventana HLS de tus
+                    canales necesita ~{ffEff.hlsNeededMb} MB. Los canales excedentes pasan automáticamente a disco para
+                    evitar cortes por falta de espacio (ENOSPC). Amplía <code>/dev/shm</code> o usa menos canales en
+                    transcodificación.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {Array.isArray(ffEff?.workers) && ffEff.workers.length > 0 && (
+              <div className="text-xs">
+                <div className="text-slate-400 mb-1.5 font-semibold">Estado por Canal (los más atrasados primero)</div>
+                <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-800 divide-y divide-slate-800/70">
+                  {ffEff.workers.slice(0, 25).map((w) => {
+                    const bad = !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20);
+                    return (
+                      <div
+                        key={w.key}
+                        className={`px-3 py-1.5 flex items-center justify-between gap-3 font-mono text-[11px] ${
+                          bad ? 'bg-rose-500/10 text-rose-200' : 'text-slate-300'
+                        }`}
+                      >
+                        <span className="truncate">{w.key}</span>
+                        <span className="shrink-0">
+                          PID {w.pid || '—'} · HLS {w.hlsAgeSec === null ? 'sin manifiesto' : `${w.hlsAgeSec}s`} ·
+                          reinicios {w.restarts} · .ts {w.subscribers}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {ffEff.workers.some((w) => w.lastError) && (
+                  <div className="text-[11px] text-slate-500 mt-1.5">
+                    Último error FFmpeg:{' '}
+                    <span className="font-mono text-slate-400">
+                      {ffEff.workers.find((w) => w.lastError)?.lastError}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {ffEff?.optimizations?.length > 0 && (
               <ul className="text-[11px] text-slate-400 space-y-1 list-disc pl-5">
                 {ffEff.optimizations.map((opt) => (
@@ -658,6 +723,21 @@ export default function ServersSecurityPage() {
                 ))}
               </ul>
             )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <button
+                onClick={() => runMaintenance('restart_stalled_streams')}
+                className="py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600 text-rose-200 hover:text-white border border-rose-500/40 font-semibold inline-flex items-center justify-center gap-1.5 text-xs"
+              >
+                <AlertTriangle className="w-3.5 h-3.5" /> Reparar Canales Congelados
+              </button>
+              <button
+                onClick={() => runMaintenance('relay_direct_copy_streams')}
+                className="py-2 rounded-xl bg-cyan-600/20 hover:bg-cyan-600 text-cyan-200 hover:text-white border border-cyan-500/40 font-semibold inline-flex items-center justify-center gap-1.5 text-xs"
+              >
+                <Zap className="w-3.5 h-3.5" /> Copy/Copy sin nivelador → Relay Directo (0 % CPU)
+              </button>
+            </div>
 
             <button
               onClick={handleSaveFfmpegEfficiency}

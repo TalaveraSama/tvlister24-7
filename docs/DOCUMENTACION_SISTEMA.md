@@ -492,3 +492,55 @@ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/j
   -d '{"tsPipeMode":"never","h264Threads":1}' \
   http://TU_IP:8095/api/system/ffmpeg-efficiency
 ```
+---
+
+### 8.6. Diagnóstico de "Pegones" / Inestabilidad en Canales HD (Corregido)
+
+**Síntoma reportado:** con 145 canales HD recibidos por HLS desde un Flussonic, los clientes veían cortes,
+congelamientos y saltos, sobre todo en HD.
+
+**Causas encontradas y corregidas en el motor:**
+
+1. **Bucles de segmentos duplicados para clientes `.ts`** *(causa principal de los "pegones")*.
+   Cuando un canal corría en modo HLS nativo, los clientes MPEG-TS (`.ts`) recibían el **último segmento
+   completo repetido cada 1 segundo**: el reproductor recibía segmentos repetidos, fuera de orden y con
+   huecos de 1 s. En HD (2–3 MB por segmento) eso se traduce en congelamientos y saltos.
+   *Ahora* hay un **tailer de segmentos ordenado y deduplicado por `EXT-X-MEDIA-SEQUENCE`**: cada segmento se
+   envía **exactamente una vez** y en orden, con lectura en streaming de 64 KB.
+   Verificado: 3 clientes `.ts` simultáneos → 100 % de paquetes alineados a 188 bytes y bitrate igual al del origen.
+
+2. **RAMDisk `/dev/shm` sin control de capacidad (ENOSPC)**. Con 145 canales HD la ventana HLS
+   (segmento × 6) puede pedir **2–4 GB** de tmpfs; al llenarse, FFmpeg muere y el canal se queda congelado.
+   *Ahora* el sistema calcula la necesidad real (`estimateHlsFootprintBytes`) y:
+   - sólo usa `/dev/shm` si hay espacio suficiente para **todos** los canales,
+   - deriva automáticamente el canal a disco si el RAMDisk baja de **384 MB libres**,
+   - muestra en el panel `RAMDisk Libre` vs `Necesario` y avisa en amarillo.
+
+3. **Sonda de entrada demasiado pequeña para HD**. Con `-probesize 1 MB` FFmpeg perdía el SPS/PPS del
+   primer segmento en canales de 8–12 Mbps y arrancaba tarde o entrecortado. *Ahora* para fuentes HTTP/HLS
+   usa `-probesize 5 MB -analyzeduration 4 s`.
+
+4. **`-avoid_negative_ts make_zero` aplicado también a HLS puro** (micropausas de PTS). Ahora sólo se usa
+   cuando de verdad se emite MPEG-TS continuo (`pipe:1`).
+
+5. **Diagnóstico por canal en el panel** (`Servidores → Optimización FFmpeg`): PID, antigüedad del manifiesto
+   HLS (si supera 20 s el canal está congelado), reinicios de FFmpeg, suscriptores `.ts` y última línea de
+   error real de FFmpeg (capturada con límite de 4 lecturas/s para no gastar CPU).
+
+6. **Botones de reparación inmediata** (*no cortan a todos los usuarios*):
+   - **Reparar Canales Congelados**: reinicia sólo los canales con PID caído o HLS detenido (>20 s), escalonado cada 80 ms.
+   - **Reiniciar Motor Live & 24/7**: ahora reinicia **de verdad** los procesos FFmpeg (antes sólo actualizaba la fecha).
+   - **Copy/Copy sin nivelador → Relay Directo (0 % CPU)**: para 100+ canales HD que **no** necesitan
+     ecualización, deja de re-multiplexar en local y los sirve por Relay Directo (Stream Shield).
+     Con 145 canales HD esto libera toda la CPU/RAM/pipes del servidor y es la configuración más estable.
+
+7. **Servido de segmentos HLS más robusto**: `Content-Length`, `Cache-Control: public, max-age=10, immutable`
+   para segmentos (el reproductor ya no los re-descarga), `Retry-After: 1` en 404 y cierre limpio si el
+   segmento rota mientras se envía.
+
+**Recomendación para 145 canales HD desde un solo Flussonic:**
+- Si **no** necesitas ecualizar audio, usa **Relay Directo** (0 % FFmpeg) o `Copy/Copy` sólo en los canales
+  que realmente lo requieran.
+- Mantén `tsPipeMode = Auto` y `h264Threads = 2` (valores por defecto) salvo que tengas pocos canales 4K.
+- Vigila `RAMDisk Libre` vs `Necesario`; si el aviso amarillo aparece, amplía `/dev/shm`
+  (`mount -o remount,size=8G /dev/shm`) o reduce canales en transcodificación.
