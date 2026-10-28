@@ -85,6 +85,13 @@ export default function Flussonic2312Page({ onPreview }) {
   const [pastedFlussConf, setPastedFlussConf] = useState('');
   const [linking, setLinking] = useState(false);
 
+  // TS/HLS -> Flussonic M4F Converter State (Tab 5)
+  const [m4fScope, setM4fScope] = useState('all_ts_hls');
+  const [m4fFormat, setM4fFormat] = useState('m4f_scheme');
+  const [m4fPushFirst, setM4fPushFirst] = useState(true);
+  const [m4fTranscodeMode, setM4fTranscodeMode] = useState('copy_pure');
+  const [convertingM4f, setConvertingM4f] = useState(false);
+
   const selectedServer = servers.find((s) => s.id === selectedId) || servers[0] || null;
 
   const showToast = (msg) => {
@@ -455,7 +462,7 @@ export default function Flussonic2312Page({ onPreview }) {
   const handleRevertToOriginalAstra = async () => {
     if (
       !window.confirm(
-        '¿Restaurar los canales migrados a Flussonic de vuelta a sus links originales del Astra Público?'
+        '¿Restaurar los canales migrados a Flussonic de vuelta a sus links originales TS/HLS/Astra?'
       )
     ) {
       return;
@@ -467,9 +474,45 @@ export default function Flussonic2312Page({ onPreview }) {
       });
       await loadServersAndHosts();
       await refreshIpPreview(filterHost);
-      showToast(`↩️ ${res.revertedCount} canales restaurados intactos a sus links originales de Astra Público.`);
+      showToast(`↩️ ${res.revertedCount} canales restaurados intactos a sus links TS/HLS originales.`);
     } catch (err) {
       window.alert(err.message);
+    }
+  };
+
+  const handleConvertTsHlsToM4f = async (e) => {
+    e.preventDefault();
+    setConvertingM4f(true);
+    setErrorNotice('');
+    try {
+      const res = await apiFetch('/api/flussonic-2312/convert-ts-hls-to-m4f', {
+        method: 'POST',
+        body: JSON.stringify({
+          server_id: selectedServer?.id || null,
+          base_url: flussonicOutUrl || selectedServer?.base_url || '',
+          username: flussonicAuthUser || selectedServer?.username || 'admin',
+          password: flussonicAuthPass || '',
+          scope: m4fScope,
+          filter_host: filterHost,
+          m4f_format: m4fFormat,
+          push_to_flussonic: m4fPushFirst,
+          transcode_mode: m4fTranscodeMode,
+          astra_override_host: m4fScope === 'by_host' ? localAstraHost : '',
+          keep_original_as_backup: true
+        })
+      });
+      await loadServersAndHosts();
+      showToast(
+        `⚡ ¡Listo! ${res.convertedCount} canales TS/HLS convertidos a ${
+          res.m4fFormat === 'm4f_scheme' ? 'm4f:// nativo' : 'CMAF index.fmp4.m3u8'
+        } de Flussonic 23.12${
+          m4fPushFirst ? ` (${res.pushedCount} creados en Flussonic API v3)` : ''
+        }. Ejemplo: ${res.sampleM4fUrl}`
+      );
+    } catch (err) {
+      setErrorNotice(err.message);
+    } finally {
+      setConvertingM4f(false);
     }
   };
 
@@ -733,6 +776,17 @@ export default function Flussonic2312Page({ onPreview }) {
           >
             <Upload className="w-3.5 h-3.5" />
             4. Pegar flussonic.conf
+          </button>
+          <button
+            onClick={() => setActiveSubTab('ts_hls_to_m4f')}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold border transition ${
+              activeSubTab === 'ts_hls_to_m4f'
+                ? 'bg-amber-600 text-white border-amber-400 shadow-lg shadow-amber-950/50'
+                : 'bg-[#0e1526] text-amber-300 border-amber-500/40 hover:border-amber-400'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            5. Pasar Streams TS / HLS → M4F Flussonic
           </button>
         </div>
 
@@ -1436,6 +1490,144 @@ export default function Flussonic2312Page({ onPreview }) {
             </button>
           </div>
         </div>
+      )}
+
+      {activeSubTab === 'ts_hls_to_m4f' && (
+        <form
+          onSubmit={handleConvertTsHlsToM4f}
+          className="rounded-2xl bg-[#0e1526] border border-amber-500/40 p-5 space-y-4"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Zap className="w-4 h-4 text-amber-400" />
+                Conversor 1-Clic: Pasar tus Streams MPEG-TS (`.ts`) y HLS (`.m3u8`) a `M4F` de Flussonic 23.12
+              </h2>
+              <p className="text-xs text-slate-400 mt-1">
+                Envía tus canales actuales TS o HLS a tu servidor Flussonic 23.12 (en modo <strong>Copy Puro 0% CPU</strong> o con transcodificador), Flussonic los empaqueta en vivo a <strong>M4F (`m4f://` / CMAF)</strong> y este panel actualiza sus links automáticamente conservando el link TS/HLS original como respaldo.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">
+                URL de tu Flussonic 23.12 (donde saldrá el M4F)
+              </label>
+              <input
+                type="text"
+                placeholder="http://IP_FLUSSONIC:8080"
+                value={flussonicOutUrl || selectedServer?.base_url || ''}
+                onChange={(e) => setFlussonicOutUrl(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">Usuario Flussonic (edit_auth)</label>
+              <input
+                type="text"
+                value={flussonicAuthUser}
+                onChange={(e) => setFlussonicAuthUser(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+              />
+            </div>
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">Contraseña / Cluster Key</label>
+              <input
+                type="password"
+                placeholder="Contraseña edit_auth o cluster_key"
+                value={flussonicAuthPass}
+                onChange={(e) => setFlussonicAuthPass(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">¿Qué canales TS/HLS convertir?</label>
+              <select
+                value={m4fScope}
+                onChange={(e) => setM4fScope(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+              >
+                <option value="all_ts_hls">Todos mis canales TS y HLS del panel ({totalPanelStreams})</option>
+                <option value="by_host">Solo canales de una IP específica</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">Formato M4F a guardar en TVLister</label>
+              <select
+                value={m4fFormat}
+                onChange={(e) => setM4fFormat(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-amber-300 font-semibold"
+              >
+                <option value="m4f_scheme">m4f://IP:PUERTO/canal (Nativo Cluster M4F + Failover)</option>
+                <option value="cmaf">http://IP:PUERTO/canal/index.fmp4.m3u8 (CMAF fMP4)</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">Modo de Empaquetado en Flussonic</label>
+              <select
+                value={m4fTranscodeMode}
+                onChange={(e) => setM4fTranscodeMode(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+              >
+                <option value="copy_pure">⚡ Remux Puro TS/HLS → M4F (0% CPU — Copy directo)</option>
+                <option value="copy_video_aac">🔊 Copy Video + Audio AAC 128k</option>
+                <option value="copy_deint_aac">📺 CPU x264 Anti-Rayas + AAC</option>
+                <option value="nvenc_deint_aac">🚀 GPU NVENC Anti-Rayas + AAC</option>
+              </select>
+            </div>
+          </div>
+
+          {m4fScope === 'by_host' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">IP de Origen TS/HLS a Filtrar</label>
+                <input
+                  type="text"
+                  placeholder="Ej. 181.x.x.x o proveedor.com"
+                  value={filterHost}
+                  onChange={(e) => setFilterHost(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">
+                  Opcional: Reemplazar por IP LAN Local hacia Flussonic (dejar vacío si es internet)
+                </label>
+                <input
+                  type="text"
+                  placeholder="Opcional ej. 192.168.88.10"
+                  value={localAstraHost}
+                  onChange={(e) => setLocalAstraHost(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-cyan-300 font-mono"
+                />
+              </div>
+            </div>
+          )}
+
+          <label className="inline-flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={m4fPushFirst}
+              onChange={(e) => setM4fPushFirst(e.target.checked)}
+              className="rounded accent-amber-500"
+            />
+            Crear/actualizar automáticamente los streams TS y HLS dentro de Flussonic 23.12 vía API v3 (desmarca solo si ya existen en Flussonic y únicamente quieres cambiar los links en el panel a <code>m4f://</code>)
+          </label>
+
+          <div className="flex flex-wrap items-center justify-end gap-3 pt-1">
+            <button
+              type="submit"
+              disabled={convertingM4f}
+              className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-bold shadow-lg shadow-amber-950/50"
+            >
+              {convertingM4f ? 'Convirtiendo TS/HLS a M4F...' : '⚡ Convertir Streams TS / HLS a M4F Ahora'}
+            </button>
+          </div>
+        </form>
       )}
 
       {/* Modal: Register Flussonic 23.12 Server */}

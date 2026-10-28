@@ -99,7 +99,7 @@ export default function App() {
           <Flussonic2312Page onPreview={setPreviewItem} />
         )}
         {activeTab === 'wk2500-catv' && user.role === 'admin' && (
-          <Wk2500CatvPage />
+          <Wk2500CatvPage setActiveTab={setActiveTab} />
         )}
         {activeTab === 'channels247' && user.role === 'admin' && (
           <Channels247Page onPreview={setPreviewItem} />

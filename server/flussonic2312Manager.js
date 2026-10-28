@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import express from 'express';
-import { db } from './db.js';
+import { db, withSqliteBusyRetry } from './db.js';
 import { requireAuth, requireAdmin } from './auth.js';
 import { stopWorker, scheduleDbStreamLaunches } from './streamEngine.js';
 import {
@@ -1977,3 +1977,166 @@ flussonic2312Router.post('/api/flussonic-2312/servers/:id/link-to-panel', requir
     res.status(500).json({ error: err.message });
   }
 });
+
+// ==================== CONVERSOR 1-CLIC: PASAR STREAMS TS / HLS -> M4F DE FLUSSONIC 23.12 ====================
+flussonic2312Router.post('/api/flussonic-2312/convert-ts-hls-to-m4f', requireAuth, requireAdmin, async (req, res) => {
+  const {
+    server_id = null,
+    base_url = '',
+    username = '',
+    password = '',
+    api_token = '',
+    scope = 'all_ts_hls', // 'all_ts_hls' | 'by_host' | 'selected'
+    filter_host = '',
+    selected_stream_ids = [],
+    m4f_format = 'm4f_scheme', // 'm4f_scheme' -> m4f://host:port/key | 'cmaf' -> http://host:port/key/index.fmp4.m3u8
+    push_to_flussonic = true,
+    transcode_mode = 'copy_pure', // 'copy_pure' (0% CPU remux TS/HLS -> M4F) | 'copy_video_aac' | 'copy_deint_aac' | 'nvenc_deint_aac'
+    astra_override_host = '',
+    keep_original_as_backup = true
+  } = req.body || {};
+
+  const srv = upsertFlussonicServerInline({
+    server_id,
+    name: 'Flussonic 23.12 M4F Gateway',
+    base_url,
+    username,
+    password,
+    api_token
+  });
+
+  if (!srv || !srv.base_url) {
+    return res.status(400).json({
+      error: 'Selecciona o escribe la URL de tu servidor Flussonic 23.12 (ej. http://IP_FLUSSONIC:8080) para convertir TS/HLS a M4F.'
+    });
+  }
+
+  const allStreams = db
+    .prepare(
+      `SELECT s.*, c.name as category_name
+       FROM streams s
+       LEFT JOIN categories c ON c.id = s.category_id
+       ORDER BY s.sort_order ASC, s.id ASC`
+    )
+    .all();
+
+  const selectedSet =
+    Array.isArray(selected_stream_ids) && selected_stream_ids.length > 0
+      ? new Set(selected_stream_ids.map(Number).filter((n) => n > 0))
+      : null;
+
+  const candidates = allStreams.filter((row) => {
+    const cur = String(row.source_url || '').trim();
+    if (!cur) return false;
+    if (scope === 'selected') {
+      return selectedSet ? selectedSet.has(row.id) : false;
+    }
+    if (scope === 'by_host') {
+      if (!filter_host) return false;
+      return matchesStreamHostFilter(row, filter_host);
+    }
+    // Default 'all_ts_hls': include HTTP/HTTPS TS, HLS (.m3u8 / hls://), tshttp://, udp://; skip pure mnf:// unless already backed by HTTP
+    if (/^mnfs?:\/\//i.test(cur)) return false;
+    if (/^m4fs?:\/\//i.test(cur) && m4f_format === 'm4f_scheme' && !push_to_flussonic) return false;
+    return true;
+  });
+
+  if (candidates.length === 0) {
+    return res.status(400).json({
+      error: 'No se encontraron canales TS o HLS con ese filtro para pasar a M4F.'
+    });
+  }
+
+  const keyed = assignUniqueFlussonicKeys(candidates);
+  let pushedCount = 0;
+  let pushErrors = [];
+  let effectiveFlussonicBase = srv.base_url;
+
+  if (push_to_flussonic) {
+    try {
+      const pushRes = await pushBatchStreamsToFlussonic2312(srv, keyed, {
+        transcodeMode: transcode_mode,
+        constant247: true,
+        astraOverrideHost: astra_override_host
+      });
+      pushedCount = pushRes.pushedCount || 0;
+      pushErrors = pushRes.errors || [];
+      if (pushRes.effectiveBase) effectiveFlussonicBase = pushRes.effectiveBase;
+
+      if (pushedCount === 0 && keyed.length > 0) {
+        return res.status(400).json({
+          error: `No se pudo crear los streams TS/HLS en Flussonic 23.12 (${pushErrors[0] || 'Verifica IP/credenciales o usa Push SSH Local si está detrás de NAT'}).`,
+          errors: pushErrors.slice(0, 6)
+        });
+      }
+    } catch (err) {
+      return res.status(400).json({
+        error: `Error conectando a Flussonic 23.12 para publicar M4F: ${err.message}`
+      });
+    }
+  }
+
+  const pullProto = m4f_format === 'cmaf' ? 'cmaf' : 'm4f_scheme';
+  const srvForUrl = { ...srv, base_url: effectiveFlussonicBase };
+  const relaunchIds = [];
+  let convertedCount = 0;
+
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const upd = db.prepare(
+        `UPDATE streams
+         SET original_source_url = CASE
+               WHEN (original_source_url IS NULL OR original_source_url = '') THEN ?
+               ELSE original_source_url
+             END,
+             backup_url = CASE
+               WHEN ? = 1 AND (backup_url IS NULL OR backup_url = '') THEN ?
+               ELSE backup_url
+             END,
+             source_url = ?,
+             flussonic_server_id = ?,
+             flussonic_stream_name = ?
+         WHERE id = ?`
+      );
+
+      for (const ch of keyed) {
+        const prevOrigin = getTrueAstraCandidateUrl(ch) || ch.source_url;
+        const m4fUrl = buildFlussonicPullUrl(srvForUrl, ch.flussonic_name, pullProto);
+        stopWorker(`stream_${ch.id}`);
+        upd.run(
+          prevOrigin,
+          keep_original_as_backup ? 1 : 0,
+          prevOrigin,
+          m4fUrl,
+          srv.id || null,
+          ch.flussonic_name,
+          ch.id
+        );
+        if (ch.stream_mode === 'transcode' && ch.status === 'running') {
+          relaunchIds.push(ch.id);
+        }
+        convertedCount += 1;
+      }
+
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  if (relaunchIds.length > 0) {
+    scheduleDbStreamLaunches(relaunchIds, 60);
+  }
+
+  res.json({
+    ok: true,
+    convertedCount,
+    pushedCount,
+    m4fFormat: pullProto,
+    sampleM4fUrl: buildFlussonicPullUrl(srvForUrl, keyed[0]?.flussonic_name || 'canal1', pullProto),
+    errors: pushErrors.slice(0, 5)
+  });
+});
+

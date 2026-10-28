@@ -1,4 +1,5 @@
 import dgram from 'node:dgram';
+import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import express from 'express';
@@ -109,17 +110,95 @@ function isMulticastIp(ip = '') {
   return first >= 224 && first <= 239;
 }
 
+function readSysNetAttr(ifName, attr) {
+  try {
+    return fs.readFileSync(`/sys/class/net/${ifName}/${attr}`, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 export function listHostIpv4Interfaces() {
   const nets = os.networkInterfaces() || {};
   const list = [];
+  const configuredNames = new Set();
+
   for (const [ifName, entries] of Object.entries(nets)) {
+    const operstate = readSysNetAttr(ifName, 'operstate') || 'up';
+    const rawSpeed = Number(readSysNetAttr(ifName, 'speed'));
+    const speedMbps = Number.isFinite(rawSpeed) && rawSpeed > 0 ? rawSpeed : null;
+    const mac = readSysNetAttr(ifName, 'address') || '';
+
     for (const e of entries || []) {
       if ((e.family === 'IPv4' || e.family === 4) && !e.internal) {
-        list.push({ name: ifName, address: e.address, netmask: e.netmask || '' });
+        configuredNames.add(ifName);
+        list.push({
+          name: ifName,
+          address: e.address,
+          netmask: e.netmask || '',
+          cidr: e.cidr || '',
+          operstate,
+          speedMbps,
+          mac: mac || e.mac || ''
+        });
       }
     }
   }
+
   return list;
+}
+
+export function listUnconfiguredPhysicalNics() {
+  try {
+    const configured = new Set(listHostIpv4Interfaces().map((x) => x.name));
+    const names = fs.readdirSync('/sys/class/net').filter((n) => n !== 'lo' && !configured.has(n));
+    return names.map((ifName) => {
+      const operstate = readSysNetAttr(ifName, 'operstate') || 'down';
+      const rawSpeed = Number(readSysNetAttr(ifName, 'speed'));
+      const speedMbps = Number.isFinite(rawSpeed) && rawSpeed > 0 ? rawSpeed : null;
+      const mac = readSysNetAttr(ifName, 'address') || '';
+      return { name: ifName, operstate, speedMbps, mac };
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function getDedicatedWk2500NicConfig() {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'wk2500_dedicated_nic_json'").get();
+    if (!row || !row.value) return { if_name: '', ip_address: '', multicast_subnet: '239.25.0.0/24' };
+    const parsed = JSON.parse(row.value);
+    return {
+      if_name: String(parsed.if_name || '').trim(),
+      ip_address: String(parsed.ip_address || '').trim(),
+      multicast_subnet: String(parsed.multicast_subnet || '239.25.0.0/24').trim()
+    };
+  } catch {
+    return { if_name: '', ip_address: '', multicast_subnet: '239.25.0.0/24' };
+  }
+}
+
+export function saveDedicatedWk2500NicConfig(cfg = {}) {
+  const clean = {
+    if_name: String(cfg.if_name || '').trim(),
+    ip_address: String(cfg.ip_address || '').trim(),
+    multicast_subnet: String(cfg.multicast_subnet || '239.25.0.0/24').trim()
+  };
+  withSqliteBusyRetry(() => {
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES ('wk2500_dedicated_nic_json', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run(JSON.stringify(clean));
+  });
+  return clean;
+}
+
+export function resolveEffectiveBindIp(slotRow = {}) {
+  const perSlot = String(slotRow?.local_interface_ip || '').trim();
+  if (perSlot) return perSlot;
+  const globalDed = getDedicatedWk2500NicConfig();
+  return globalDed.ip_address || '';
 }
 
 /**
@@ -223,8 +302,9 @@ function shouldUseDirectNodeUdpEngine(slotRow, rawUrl, localHls) {
 
 function buildUdpTargetFfmpegUrl(slotRow) {
   const params = [`pkt_size=1316`, `ttl=${Math.max(1, Number(slotRow.ttl) || 16)}`, `buffer_size=1048576`];
-  if (slotRow.local_interface_ip && String(slotRow.local_interface_ip).trim()) {
-    params.push(`localaddr=${encodeURIComponent(String(slotRow.local_interface_ip).trim())}`);
+  const bindIp = resolveEffectiveBindIp(slotRow);
+  if (bindIp) {
+    params.push(`localaddr=${encodeURIComponent(bindIp)}`);
   }
   return `udp://${slotRow.udp_host}:${slotRow.udp_port}?${params.join('&')}`;
 }
@@ -444,10 +524,8 @@ export function startWk2500ChannelWorker(catvCh) {
 
     await new Promise((resolve, reject) => {
       socket.once('error', reject);
-      const bindIp =
-        freshSlot.local_interface_ip && String(freshSlot.local_interface_ip).trim()
-          ? String(freshSlot.local_interface_ip).trim()
-          : '0.0.0.0';
+      const effectiveIp = resolveEffectiveBindIp(freshSlot);
+      const bindIp = effectiveIp || '0.0.0.0';
       socket.bind(0, bindIp, () => {
         socket.removeListener('error', reject);
         try {
@@ -619,7 +697,13 @@ export function startWk2500ChannelWorker(catvCh) {
       }
     }
 
-    const chosenUrl = allCandidates[state.attempt % Math.max(1, allCandidates.length)] || freshUp.rawPrimary;
+    const ffmpegReady = isFfmpegAvailable();
+    const usableCandidates = ffmpegReady
+      ? allCandidates
+      : allCandidates.filter((u) => !/\.m3u8(\?|$)/i.test(u));
+    const pool = usableCandidates.length > 0 ? usableCandidates : allCandidates;
+
+    const chosenUrl = pool[state.attempt % Math.max(1, pool.length)] || freshUp.rawPrimary;
     if (!chosenUrl && !freshUp.localHls) {
       scheduleRetry('Sin URL de origen en el canal asignado');
       return;
@@ -729,9 +813,12 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
   const trunks = db.prepare('SELECT * FROM mnf_trunks ORDER BY id DESC').all();
   const units = db.prepare('SELECT * FROM wk2500_units ORDER BY ch_start ASC, id ASC').all();
   const interfaces = listHostIpv4Interfaces();
+  const unconfiguredNics = listUnconfiguredPhysicalNics();
+  const dedicatedNic = getDedicatedWk2500NicConfig();
 
   let activeStreamingCount = 0;
   let totalMbps = 0;
+  const streamToCatvMap = new Map();
 
   const enrichedSlots = slots.map((row) => {
     const info = getCatvStdChannelInfo(row.catv_ch);
@@ -743,12 +830,29 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
       totalMbps += bitrateKbps / 1000;
     }
     const effectiveSource = row.custom_source_url || row.stream_source_url || '';
+    const effectiveInterfaceIp = resolveEffectiveBindIp(row);
+    const matchedNic = interfaces.find((x) => x.address === effectiveInterfaceIp);
+
+    if (row.stream_id && !streamToCatvMap.has(Number(row.stream_id))) {
+      streamToCatvMap.set(Number(row.stream_id), {
+        catv_ch: row.catv_ch,
+        freq_mhz: info.freq_mhz,
+        udp_host: row.udp_host,
+        udp_port: row.udp_port,
+        enabled: Boolean(row.enabled),
+        live_status: liveStatus,
+        bitrate_kbps: bitrateKbps
+      });
+    }
+
     return {
       ...row,
       enabled: Boolean(row.enabled),
       audio_mhz: info.audio_mhz,
       effective_name: row.custom_name || row.stream_name || '',
       effective_source: effectiveSource,
+      effective_interface_ip: effectiveInterfaceIp,
+      effective_interface_name: matchedNic?.name || (effectiveInterfaceIp ? 'IP dedicada' : 'Automática'),
       upstream_proto: w?.upstream_proto || (effectiveSource ? classifyUpstreamProto(effectiveSource) : '—'),
       live_status: liveStatus,
       live_engine: w?.engine || '',
@@ -756,6 +860,15 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
       packets_sent: w?.packetsSent || 0,
       uptime_sec: w ? Math.floor((Date.now() - w.startedAtMs) / 1000) : 0,
       last_error: w?.lastError || ''
+    };
+  });
+
+  const enrichedStreams = streams.map((st) => {
+    const mapped = streamToCatvMap.get(Number(st.id)) || null;
+    return {
+      ...st,
+      upstream_proto: classifyUpstreamProto(st.source_url || ''),
+      catv_assignment: mapped
     };
   });
 
@@ -768,12 +881,222 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
       streaming_slots: activeStreamingCount,
       total_udp_mbps: Number(totalMbps.toFixed(2))
     },
+    dedicated_nic: dedicatedNic,
     interfaces,
+    unconfigured_nics: unconfiguredNics,
     trunks,
     units,
-    streams,
+    streams: enrichedStreams,
     slots: enrichedSlots
   });
+});
+
+// Set and apply Dedicated Network Interface (NIC) for UDP output toward WK2500 hardware
+wk2500Router.post('/api/wk2500/dedicated-interface', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const {
+    if_name = '',
+    ip_address = '',
+    multicast_subnet = '239.25.0.0/24',
+    apply_to_all_channels = true,
+    ch_start = 2,
+    ch_end = 125
+  } = req.body || {};
+
+  const cleanIp = String(ip_address || '').trim();
+  const interfaces = listHostIpv4Interfaces();
+  const matched = interfaces.find((x) => x.address === cleanIp);
+  const resolvedName = String(if_name || matched?.name || '').trim();
+
+  const saved = saveDedicatedWk2500NicConfig({
+    if_name: resolvedName,
+    ip_address: cleanIp,
+    multicast_subnet
+  });
+
+  const fromCh = Math.max(2, Math.min(125, Number(ch_start) || 2));
+  const toCh = Math.max(fromCh, Math.min(125, Number(ch_end) || 125));
+
+  if (apply_to_all_channels) {
+    withSqliteBusyRetry(() => {
+      db.prepare(
+        "UPDATE wk2500_channels SET local_interface_ip = ?, updated_at = datetime('now') WHERE catv_ch BETWEEN ? AND ?"
+      ).run(cleanIp, fromCh, toCh);
+    });
+  }
+
+  // Hot-rebind any active UDP workers in range onto the newly selected dedicated NIC
+  let reboundCount = 0;
+  for (let ch = fromCh; ch <= toCh; ch++) {
+    const slot = db.prepare('SELECT enabled FROM wk2500_channels WHERE catv_ch = ?').get(ch);
+    if (udpWorkers.has(ch) || slot?.enabled) {
+      startWk2500ChannelWorker(ch);
+      reboundCount += 1;
+    }
+  }
+
+  const linuxRouteCmd =
+    cleanIp && resolvedName
+      ? `sudo ip route replace ${saved.multicast_subnet} dev ${resolvedName} src ${cleanIp}`
+      : '';
+
+  res.json({
+    ok: true,
+    dedicated_nic: saved,
+    reboundCount,
+    linuxRouteCmd
+  });
+});
+
+// Exact Stream -> CATV Channel Number Assignment (e.g. choose whether stream goes on CH 2, CH 3, ..., CH 125, or unassign)
+wk2500Router.post('/api/wk2500/assign-stream-channel', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const { stream_id, target_catv_ch = null, enabled = undefined, swap_if_occupied = true } = req.body || {};
+  const sid = Number(stream_id);
+  if (!sid) return res.status(400).json({ error: 'stream_id requerido.' });
+
+  const streamExists = db.prepare('SELECT id, name FROM streams WHERE id = ?').get(sid);
+  if (!streamExists) return res.status(404).json({ error: 'El canal seleccionado no existe en el panel.' });
+
+  const targetCh =
+    target_catv_ch === null || target_catv_ch === '' || Number(target_catv_ch) === 0
+      ? null
+      : Number(target_catv_ch);
+  if (targetCh !== null && (targetCh < 2 || targetCh > 125)) {
+    return res.status(400).json({ error: 'El número de canal CATV debe estar entre 2 y 125.' });
+  }
+
+  const prevSlots = db.prepare('SELECT * FROM wk2500_channels WHERE stream_id = ?').all(sid);
+  const targetSlot = targetCh ? db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(targetCh) : null;
+  const affectedChs = new Set();
+
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      // If simply unassigning from CATV:
+      if (targetCh === null) {
+        for (const ps of prevSlots) {
+          db.prepare(
+            "UPDATE wk2500_channels SET stream_id = NULL, enabled = 0, updated_at = datetime('now') WHERE catv_ch = ?"
+          ).run(ps.catv_ch);
+          affectedChs.add(ps.catv_ch);
+        }
+      } else {
+        const prevPrimary = prevSlots[0] || null;
+        const occupantSid =
+          targetSlot && targetSlot.stream_id && Number(targetSlot.stream_id) !== sid
+            ? Number(targetSlot.stream_id)
+            : null;
+
+        // Clear previous slots of this stream (or swap occupant into prevPrimary)
+        for (const ps of prevSlots) {
+          if (ps.catv_ch === targetCh) continue;
+          if (swap_if_occupied && occupantSid && prevPrimary && ps.catv_ch === prevPrimary.catv_ch) {
+            db.prepare(
+              "UPDATE wk2500_channels SET stream_id = ?, enabled = ?, updated_at = datetime('now') WHERE catv_ch = ?"
+            ).run(occupantSid, targetSlot.enabled ? 1 : 0, ps.catv_ch);
+          } else {
+            db.prepare(
+              "UPDATE wk2500_channels SET stream_id = NULL, enabled = 0, updated_at = datetime('now') WHERE catv_ch = ?"
+            ).run(ps.catv_ch);
+          }
+          affectedChs.add(ps.catv_ch);
+        }
+
+        const dedIp = getDedicatedWk2500NicConfig().ip_address;
+        const nextEnabled =
+          enabled !== undefined
+            ? enabled
+              ? 1
+              : 0
+            : prevPrimary
+            ? prevPrimary.enabled
+            : targetSlot?.enabled || 0;
+        const nextIfIp = targetSlot?.local_interface_ip || dedIp || '';
+
+        db.prepare(
+          `UPDATE wk2500_channels
+           SET stream_id = ?, local_interface_ip = ?, enabled = ?, updated_at = datetime('now')
+           WHERE catv_ch = ?`
+        ).run(sid, nextIfIp, nextEnabled ? 1 : 0, targetCh);
+        affectedChs.add(targetCh);
+      }
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  for (const ch of affectedChs) {
+    const row = db.prepare('SELECT enabled, stream_id, custom_source_url FROM wk2500_channels WHERE catv_ch = ?').get(ch);
+    if (row && row.enabled && (row.stream_id || row.custom_source_url)) {
+      startWk2500ChannelWorker(ch);
+    } else {
+      stopWk2500ChannelWorker(ch);
+    }
+  }
+
+  res.json({ ok: true, stream_id: sid, target_catv_ch: targetCh });
+});
+
+// Move or Swap two CATV channel numbers directly (e.g. move CH 2 -> CH 3)
+wk2500Router.post('/api/wk2500/swap-or-move', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const fromCh = Number(req.body?.from_ch);
+  const toCh = Number(req.body?.to_ch);
+  if (fromCh < 2 || fromCh > 125 || toCh < 2 || toCh > 125 || fromCh === toCh) {
+    return res.status(400).json({ error: 'Indica dos canales CATV válidos y distintos entre 2 y 125.' });
+  }
+
+  const slotA = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(fromCh);
+  const slotB = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(toCh);
+  if (!slotA || !slotB) return res.status(404).json({ error: 'Canal CATV no encontrado.' });
+
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const upd = db.prepare(
+        `UPDATE wk2500_channels
+         SET stream_id = ?, custom_name = ?, custom_source_url = ?,
+             output_mode = ?, muxrate_kbps = ?, enabled = ?, updated_at = datetime('now')
+         WHERE catv_ch = ?`
+      );
+      upd.run(
+        slotB.stream_id,
+        slotB.custom_name,
+        slotB.custom_source_url,
+        slotB.output_mode,
+        slotB.muxrate_kbps,
+        slotB.stream_id || slotB.custom_source_url ? slotB.enabled : 0,
+        fromCh
+      );
+      upd.run(
+        slotA.stream_id,
+        slotA.custom_name,
+        slotA.custom_source_url,
+        slotA.output_mode,
+        slotA.muxrate_kbps,
+        slotA.stream_id || slotA.custom_source_url ? slotA.enabled : 0,
+        toCh
+      );
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  for (const ch of [fromCh, toCh]) {
+    const row = db.prepare('SELECT enabled, stream_id, custom_source_url FROM wk2500_channels WHERE catv_ch = ?').get(ch);
+    if (row && row.enabled && (row.stream_id || row.custom_source_url)) {
+      startWk2500ChannelWorker(ch);
+    } else {
+      stopWk2500ChannelWorker(ch);
+    }
+  }
+
+  res.json({ ok: true, from_ch: fromCh, to_ch: toCh });
 });
 
 // 1-Click Peer-to-Peer TVLister MNF Trunk Sync (pulls channel list from Origin TVLister VPS via mnf://)
@@ -1055,6 +1378,12 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
   const nextMode = b.output_mode !== undefined ? String(b.output_mode) : existing.output_mode;
   const nextMux = b.muxrate_kbps !== undefined ? Math.max(0, Number(b.muxrate_kbps) || 0) : existing.muxrate_kbps;
   const nextEnabled = b.enabled !== undefined ? (b.enabled ? 1 : 0) : existing.enabled;
+
+  if (nextEnabled && !nextStreamId && !nextCustomUrl) {
+    return res.status(400).json({
+      error: `Primero selecciona qué canal va en el CH ${ch} antes de activar su salida UDP.`
+    });
+  }
 
   withSqliteBusyRetry(() => {
     db.prepare(
