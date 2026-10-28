@@ -70,8 +70,7 @@ import {
   resetFfmpegBinCache,
   getHlsFreeBytes,
   estimateHlsFootprintBytes,
-  HLS_WINDOW_SECONDS,
-  getHlsWindowSeconds
+  HLS_WINDOW_SECONDS
 } from './streamEngine.js';
 import {
   SLATES_DIR,
@@ -1552,7 +1551,7 @@ app.get('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (_req, res) 
     ffmpegBin: bin,
     tsPipeMode: efficiency.tsPipeMode,
     h264Threads: efficiency.h264Threads,
-    hlsWindowSeconds: getHlsWindowSeconds(),
+    hlsWindowSeconds: HLS_WINDOW_SECONDS,
     hlsFreeMb: Math.round(getHlsFreeBytes() / (1024 * 1024)),
     hlsNeededMb: Math.round(estimateHlsFootprintBytes() / (1024 * 1024)),
     stalledStreams: stalled.length,
