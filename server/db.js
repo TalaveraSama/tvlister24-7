@@ -400,6 +400,7 @@ export function initDb() {
   ensureColumn('streams', 'deinterlace_mode', "TEXT NOT NULL DEFAULT 'auto'");
   ensureColumn('streams', 'headend_interlaced', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'headend_audio_in', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'original_source_url', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
 
   db.exec(`

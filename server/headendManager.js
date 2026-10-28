@@ -397,15 +397,61 @@ headendRouter.put('/api/headend/nodes/:id', requireAuth, requireAdmin, (req, res
 
 headendRouter.delete('/api/headend/nodes/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
-  // Restore original astra_local_url back into source_url if detaching node
+  const linked = db.prepare('SELECT id FROM streams WHERE headend_node_id = ?').all(id);
+  for (const s of linked) {
+    stopWorker(`stream_${s.id}`);
+  }
+  // Restore original public source_url (or astra_local_url) cleanly when detaching node
   db.prepare(
     `UPDATE streams
-     SET source_url = CASE WHEN astra_local_url != '' THEN astra_local_url ELSE source_url END,
-         headend_node_id = NULL
+     SET source_url = COALESCE(NULLIF(original_source_url, ''), NULLIF(astra_local_url, ''), source_url),
+         audio_leveling_mode = 'global',
+         headend_node_id = NULL,
+         pid = NULL
      WHERE headend_node_id = ?`
   ).run(id);
   db.prepare('DELETE FROM headend_nodes WHERE id = ?').run(id);
   res.json({ ok: true });
+});
+
+// Return summary of existing Cloud streams & auto-detected public Astra IPs/hosts
+headendRouter.get('/api/headend/existing-summary', requireAuth, (req, res) => {
+  const rows = db
+    .prepare('SELECT id, name, source_url FROM streams WHERE headend_node_id IS NULL ORDER BY sort_order ASC, id ASC')
+    .all();
+
+  const hostMap = new Map();
+  for (const r of rows) {
+    try {
+      const u = new URL(String(r.source_url || '').trim());
+      const h = u.hostname;
+      if (!hostMap.has(h)) {
+        hostMap.set(h, { hostname: h, count: 0, ports: new Set(), sampleUrl: r.source_url, sampleName: r.name });
+      }
+      const entry = hostMap.get(h);
+      entry.count++;
+      if (u.port) entry.ports.add(u.port);
+    } catch {
+      // non-HTTP URL
+    }
+  }
+
+  const hosts = Array.from(hostMap.values())
+    .map((x) => ({
+      hostname: x.hostname,
+      count: x.count,
+      ports: Array.from(x.ports),
+      sampleUrl: x.sampleUrl,
+      sampleName: x.sampleName
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  res.json({
+    totalUnassigned: rows.length,
+    firstChannelName: rows[0]?.name || '',
+    firstChannelUrl: rows[0]?.source_url || '',
+    hosts
+  });
 });
 
 headendRouter.get('/api/headend/nodes/:id/streams', requireAuth, (req, res) => {
@@ -616,7 +662,7 @@ headendRouter.post('/api/headend/nodes/:id/import-astra', requireAuth, requireAd
   }
 });
 
-// 1-Click Migrate Existing Cloud Channels (e.g. user's existing 134 channels!) onto the ProLiant Headend Node!
+// 1-Click Migrate Existing Cloud Channels (e.g. user's existing public-IP Astra channels!) onto the ProLiant Headend Node!
 headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requireAdmin, (req, res) => {
   const nodeId = Number(req.params.id);
   const node = db.prepare('SELECT * FROM headend_nodes WHERE id = ?').get(nodeId);
@@ -625,23 +671,42 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
   const {
     default_headend_mode = 'ondemand',
     vip_top_count = 30,
-    rewrite_host_to_local = ''
+    rewrite_host_to_local = '',
+    filter_hostname = '',
+    limit_count = 0
   } = req.body || {};
 
   const copyProfId = getCopyCopyProfileId();
-  const candidates = db
+  let candidates = db
     .prepare('SELECT * FROM streams WHERE headend_node_id IS NULL ORDER BY sort_order ASC, id ASC')
     .all();
 
+  if (filter_hostname && String(filter_hostname).trim() && filter_hostname !== 'all') {
+    const wantedHost = String(filter_hostname).trim().toLowerCase();
+    candidates = candidates.filter((st) => {
+      try {
+        return new URL(String(st.source_url || '').trim()).hostname.toLowerCase() === wantedHost;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  if (Number(limit_count) > 0) {
+    candidates = candidates.slice(0, Number(limit_count));
+  }
+
   if (candidates.length === 0) {
-    return res.status(400).json({ error: 'Todos los canales ya están vinculados a un Nodo Cabecera o no hay canales.' });
+    return res.status(400).json({ error: 'No hay canales pendientes que coincidan para migrar.' });
   }
 
   db.exec('BEGIN IMMEDIATE;');
   try {
     const upd = db.prepare(
       `UPDATE streams
-       SET astra_local_url = ?,
+       SET original_source_url = CASE WHEN original_source_url != '' THEN original_source_url ELSE source_url END,
+           backup_url = CASE WHEN backup_url = '' THEN source_url ELSE backup_url END,
+           astra_local_url = ?,
            source_url = ?,
            headend_node_id = ?,
            headend_mode = ?,
@@ -654,20 +719,25 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
        WHERE id = ?`
     );
 
+    const rawRewrite = String(rewrite_host_to_local || '').trim();
+
     candidates.forEach((st, idx) => {
       stopWorker(`stream_${st.id}`);
-      let localUrl = st.astra_local_url || st.source_url;
-      if (rewrite_host_to_local && rewrite_host_to_local.trim()) {
-        // Optional helper: e.g. replace public IP of Astra with internal ProLiant LAN IP (192.168.x.x:8000)
+      const origUrl = st.original_source_url || st.source_url;
+      let localUrl = origUrl;
+
+      if (rawRewrite) {
         try {
-          const parsedOld = new URL(localUrl);
-          const parsedNew = new URL(
-            /^https?:\/\//i.test(rewrite_host_to_local.trim())
-              ? rewrite_host_to_local.trim()
-              : `http://${rewrite_host_to_local.trim()}`
-          );
+          const parsedOld = new URL(origUrl);
+          const withProto = /^https?:\/\//i.test(rawRewrite) ? rawRewrite : `http://${rawRewrite}`;
+          const parsedNew = new URL(withProto);
           parsedOld.protocol = parsedNew.protocol;
-          parsedOld.host = parsedNew.host;
+          if (parsedNew.port) {
+            parsedOld.host = parsedNew.host;
+          } else {
+            // Preserve each channel's original Astra port (:8000, :8001, :8002, etc.) when only LAN IP is given!
+            parsedOld.hostname = parsedNew.hostname;
+          }
           localUrl = parsedOld.toString();
         } catch {
           // keep original if UDP or non-HTTP
@@ -683,4 +753,41 @@ headendRouter.post('/api/headend/nodes/:id/attach-existing', requireAuth, requir
     db.exec('ROLLBACK;');
     res.status(500).json({ error: err.message });
   }
+});
+
+// 1-Click Detach Selected (or All) Channels back to Original Public Astra URL on Cloud
+headendRouter.post('/api/headend/nodes/:id/detach-streams', requireAuth, requireAdmin, (req, res) => {
+  const nodeId = Number(req.params.id);
+  const { ids = [], scope = 'selected' } = req.body || {};
+
+  let rows = [];
+  if (scope === 'all') {
+    rows = db.prepare('SELECT id FROM streams WHERE headend_node_id = ?').all(nodeId);
+  } else if (Array.isArray(ids) && ids.length > 0) {
+    const cleanIds = ids.map((n) => Number(n)).filter((n) => n > 0);
+    if (cleanIds.length > 0) {
+      const ph = cleanIds.map(() => '?').join(',');
+      rows = db.prepare(`SELECT id FROM streams WHERE headend_node_id = ? AND id IN (${ph})`).all(nodeId, ...cleanIds);
+    }
+  }
+
+  if (rows.length === 0) {
+    return res.status(400).json({ error: 'Selecciona al menos un canal para regresar a URL pública directa.' });
+  }
+
+  for (const r of rows) {
+    stopWorker(`stream_${r.id}`);
+  }
+
+  const ph = rows.map(() => '?').join(',');
+  db.prepare(
+    `UPDATE streams
+     SET source_url = COALESCE(NULLIF(original_source_url, ''), NULLIF(astra_local_url, ''), source_url),
+         audio_leveling_mode = 'global',
+         headend_node_id = NULL,
+         pid = NULL
+     WHERE headend_node_id = ? AND id IN (${ph})`
+  ).run(nodeId, ...rows.map((r) => r.id));
+
+  res.json({ ok: true, detachedCount: rows.length });
 });

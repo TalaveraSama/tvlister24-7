@@ -48,6 +48,8 @@ export default function HeadendNodesPage({ onPreview }) {
   const [importTab, setImportTab] = useState('migrate'); // 'migrate' | 'scan' | 'paste'
   const [migrateVipCount, setMigrateVipCount] = useState(35);
   const [migrateRewriteHost, setMigrateRewriteHost] = useState('');
+  const [migrateFilterHost, setMigrateFilterHost] = useState('all');
+  const [existingSummary, setExistingSummary] = useState({ totalUnassigned: 0, hosts: [], firstChannelUrl: '' });
   const [pastedAstra, setPastedAstra] = useState('');
   const [discoveredList, setDiscoveredList] = useState([]);
   const [importDefaultMode, setImportDefaultMode] = useState('ondemand');
@@ -62,12 +64,13 @@ export default function HeadendNodesPage({ onPreview }) {
 
   const loadData = async (keepForm = true) => {
     try {
-      const [ndList, allSt] = await Promise.all([
+      const [ndList, summary] = await Promise.all([
         apiFetch('/api/headend/nodes'),
-        apiFetch('/api/streams')
+        apiFetch('/api/headend/existing-summary')
       ]);
       setNodes(ndList);
-      setTotalCloudStreams(allSt.filter((s) => !s.headend_node_id).length);
+      setExistingSummary(summary || { totalUnassigned: 0, hosts: [], firstChannelUrl: '' });
+      setTotalCloudStreams(summary?.totalUnassigned || 0);
 
       const activeId =
         selectedNodeId && ndList.some((n) => n.id === selectedNodeId)
@@ -251,24 +254,66 @@ export default function HeadendNodesPage({ onPreview }) {
     }
   };
 
-  const handleMigrateExistingCloudStreams = async () => {
+  const handleMigrateExistingCloudStreams = async (limitCount = 0) => {
     if (!selectedNode) return;
+    if (selectedNode.status !== 'online') {
+      const ok = window.confirm(
+        '⚠️ Tu Nodo ProLiant aún aparece desconectado (no has ejecutado el comando SSH en el ProLiant).\n\n¿Seguro que deseas migrar los canales antes de encender el agente?'
+      );
+      if (!ok) return;
+    }
     try {
       const res = await apiFetch(`/api/headend/nodes/${selectedNode.id}/attach-existing`, {
         method: 'POST',
         body: JSON.stringify({
           default_headend_mode: 'ondemand',
           vip_top_count: Number(migrateVipCount) || 0,
-          rewrite_host_to_local: migrateRewriteHost
+          rewrite_host_to_local: migrateRewriteHost,
+          filter_hostname: migrateFilterHost,
+          limit_count: limitCount
         })
       });
       setImportOpen(false);
       await loadData(true);
       showToast(
-        `✅ ${res.migratedCount} canales existentes migrados al Nodo ProLiant conservando IDs, EPG y tu orden de parrilla.`
+        `✅ ${res.migratedCount} canal(es) vinculados al Nodo ProLiant conservando IDs, logos, EPG, puertos originales y orden de parrilla.`
       );
     } catch (err) {
       window.alert(err.message);
+    }
+  };
+
+  const handleDetachStreams = async (ids, scope = 'selected') => {
+    if (!selectedNode) return;
+    try {
+      const res = await apiFetch(`/api/headend/nodes/${selectedNode.id}/detach-streams`, {
+        method: 'POST',
+        body: JSON.stringify({ ids, scope })
+      });
+      setSelectedStreamIds([]);
+      await loadData(true);
+      showToast(`↩️ ${res.detachedCount} canal(es) regresados a su URL Pública original en la Nube.`);
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
+  const previewRewrittenUrl = (sampleUrl, rewriteInput) => {
+    if (!sampleUrl) return '';
+    const raw = String(rewriteInput || '').trim();
+    if (!raw) return sampleUrl;
+    try {
+      const oldU = new URL(sampleUrl);
+      const newU = new URL(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`);
+      oldU.protocol = newU.protocol;
+      if (newU.port) {
+        oldU.host = newU.host;
+      } else {
+        oldU.hostname = newU.hostname;
+      }
+      return oldU.toString();
+    } catch {
+      return sampleUrl;
     }
   };
 
@@ -719,6 +764,15 @@ export default function HeadendNodesPage({ onPreview }) {
                   <Zap className="w-3.5 h-3.5 text-cyan-400" />
                   Copy Video + Audio Igual ({selectedStreamIds.length})
                 </button>
+                <button
+                  type="button"
+                  disabled={selectedStreamIds.length === 0}
+                  onClick={() => handleDetachStreams(selectedStreamIds, 'selected')}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 border border-slate-600 font-semibold"
+                  title="Desvincula del ProLiant y restaura su URL pública original intacta"
+                >
+                  ↩️ Regresar a Pública ({selectedStreamIds.length})
+                </button>
               </div>
             </div>
 
@@ -1001,11 +1055,62 @@ export default function HeadendNodesPage({ onPreview }) {
             </div>
 
             {importTab === 'migrate' && (
-              <div className="p-4 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3 text-xs">
+              <div className="p-4 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3.5 text-xs">
                 <p className="text-slate-300 leading-relaxed">
-                  Pasa tus <strong>{totalCloudStreams} canales actuales</strong> para que se procesen y nivelen localmente en el <strong>HP ProLiant</strong> antes de subir a la Nube, <strong>conservando intactos sus IDs, logos, EPG y tu orden de parrilla</strong>.
+                  <strong>¡No importes canales nuevos ni los dupliques!</strong> Como tus{' '}
+                  <strong>{totalCloudStreams} canales actuales</strong> ya son los mismos del Astra (saliendo por IP pública), este asistente los pasa al <strong>HP ProLiant</strong> cambiando automáticamente su IP pública por la IP interna LAN de tu Astra y <strong>conservando intactos cada puerto (:8000, :8001…), IDs de clientes, logos, EPG y tu orden #</strong>.
                 </p>
+
+                {existingSummary.hosts?.length > 0 && (
+                  <div className="p-3 rounded-xl bg-[#0e1526] border border-cyan-500/30 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-cyan-300">
+                        🔍 IP Pública detectada en tus canales actuales:
+                      </span>
+                      <select
+                        value={migrateFilterHost}
+                        onChange={(e) => setMigrateFilterHost(e.target.value)}
+                        className="px-2.5 py-1 rounded-lg bg-[#070b13] border border-slate-700 text-[11px] text-white font-mono"
+                      >
+                        <option value="all">Todos los canales ({totalCloudStreams})</option>
+                        {existingSummary.hosts.map((h) => (
+                          <option key={h.hostname} value={h.hostname}>
+                            Solo {h.hostname} ({h.count} canales{h.ports.length ? ` • :${h.ports.join(', :')}` : ''})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {existingSummary.firstChannelUrl && (
+                      <div className="text-[11px] font-mono space-y-1 bg-[#070b13] p-2.5 rounded-lg border border-slate-800">
+                        <div className="text-slate-400 truncate">
+                          <span className="text-amber-300 font-bold">Antes (Pública): </span>
+                          {existingSummary.firstChannelUrl}
+                        </div>
+                        <div className="text-emerald-300 truncate">
+                          <span className="font-bold">Ahora en ProLiant: </span>
+                          {previewRewrittenUrl(existingSummary.firstChannelUrl, migrateRewriteHost)}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      IP Interna LAN de tu Astra dentro del ProLiant
+                    </label>
+                    <input
+                      type="text"
+                      value={migrateRewriteHost}
+                      onChange={(e) => setMigrateRewriteHost(e.target.value)}
+                      placeholder="ej. 192.168.1.50  (o 127.0.0.1 si es la misma VM)"
+                      className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-emerald-500/40 text-white font-mono"
+                    />
+                    <span className="text-[10px] text-emerald-300/90">
+                      Escribe solo la IP interna (sin puerto) para conservar los puertos :8000, :8001, etc. de cada canal.
+                    </span>
+                  </div>
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
                       ¿Cuántos primeros canales dejar como 🔥 VIP 24/7?
@@ -1022,27 +1127,24 @@ export default function HeadendNodesPage({ onPreview }) {
                       El resto quedará en 🌱 On-Demand Remoto (0 Mbps cuando nadie los mira).
                     </span>
                   </div>
-                  <div>
-                    <label className="block text-slate-300 font-semibold mb-1">
-                      Cambiar IP pública de Astra por IP LAN interna (Opcional)
-                    </label>
-                    <input
-                      type="text"
-                      value={migrateRewriteHost}
-                      onChange={(e) => setMigrateRewriteHost(e.target.value)}
-                      placeholder="ej. http://192.168.1.50:8000 (dejar vacío si no cambia)"
-                      className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
-                    />
-                  </div>
                 </div>
-                <div className="flex justify-end pt-2">
+
+                <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-800">
                   <button
                     type="button"
                     disabled={totalCloudStreams === 0}
-                    onClick={handleMigrateExistingCloudStreams}
+                    onClick={() => handleMigrateExistingCloudStreams(1)}
+                    className="px-4 py-2.5 rounded-xl bg-cyan-600/25 hover:bg-cyan-600/40 border border-cyan-400/40 disabled:opacity-40 text-cyan-200 font-bold"
+                  >
+                    🧪 Probar Primero con 1 Solo Canal Piloto
+                  </button>
+                  <button
+                    type="button"
+                    disabled={totalCloudStreams === 0}
+                    onClick={() => handleMigrateExistingCloudStreams(0)}
                     className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold"
                   >
-                    Migrar {totalCloudStreams} Canales al Nodo ProLiant
+                    🚀 Migrar Todos ({totalCloudStreams}) al ProLiant
                   </button>
                 </div>
               </div>
