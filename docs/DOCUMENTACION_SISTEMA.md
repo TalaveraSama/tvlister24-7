@@ -802,39 +802,49 @@ Antes, si un canal se caía, el panel reproducía una imagen o video en bucle **
 `custom_image` y un PNG subido por `/api/slates/upload` → `HTTP 200` con el manifiesto del bucle;
 `modo global/builtin` resuelve a sin respaldo; canal nuevo creado por API nace en `disabled`.
 
-### 8.14. Failover de origen: manual por defecto (sin doble conexión al proveedor)
+### 8.14. Segundo origen dormido (failover estilo XUI.one)
 
-El segundo origen (`backup_url`) ya **no se usa automáticamente**. Antes, cada worker de FFmpeg y el proxy de
-suscriptores generaban una lista de candidatos con la URL principal **y** la de respaldo, y al primer fallo o
-reintento saltaban a la otra. Con 145 canales eso significaba abrir conexiones hacia dos proveedores distintos:
-el consumo de ancho de banda se duplicaba sin que el panel lo mostrara.
+Cada canal puede tener **dos fuentes**: la principal (`source_url`) y una segunda guardada (`backup_url`).
+La segunda **no está activa**: queda dormida, no abre conexión, no se sondea y no consume ancho de banda
+mientras el principal funcione. Sólo despierta cuando el principal falla de verdad.
 
-**Cómo funciona ahora**
+**Cómo decide el motor** (`resolveStreamInputForAttempt` en `server/streamEngine.js`)
 
-| Ajuste | Efecto |
+| Situación | Fuente usada |
 |---|---|
-| `failover_enabled = false` *(por defecto)* | Cada canal usa **sólo** `source_url`. El segundo origen se guarda y se cambia a mano |
-| `failover_enabled = true` | Comportamiento antiguo: si el principal falla, salta al segundo origen |
+| El principal entrega video | Principal. La secundaria no se toca (0 conexiones, 0 bytes) |
+| Fallos rápidos del principal (2 intentos seguidos sin aguantar 15 s) | Secundaria |
+| Estando en la secundaria y ésta también falla | Alterna la secundaria con un intento al principal cada 8 intentos |
+| El principal vuelve | Sonda ligera cada **60 s** (sólo canales que están en la secundaria) y regresa sola |
 
-Se cambia en **Servidores & Seguridad → Ajustes Globales → “Failover de Origen (segundo source)”**.
+La sonda de retorno pide únicamente los primeros 2 KB de la URL principal y corta la conexión: no descarga
+video. En un canal caído son unos pocos KB por minuto; en un canal sano no se ejecuta nunca.
 
-**Cambio manual de origen**
+**Sin interruptor global**
 
-- Botón **⇄** en la fila del canal (Canales en Vivo): *“Cambiar a respaldo”* / *“Volver al principal”*.
-  La URL se intercambia, se marca `failover_active = 1` y el worker se reinicia en ~120 ms para tomar la nueva.
-- Botones **“A respaldo”** y **“Al principal”** en la barra superior: aplican al lote seleccionado, o a todos
-  si no hay ninguno seleccionado.
-- API: `POST /api/streams/:id/switch-source` `{ target: "backup" | "primary" }` y
-  `POST /api/streams/switch-source-bulk` `{ scope: "selected" | "all" | "category", ids, category_id, target }`.
-  Rechazan con `400` un canal sin segundo origen o que ya está emitiendo el origen pedido.
+Se eliminó el ajuste `failover_enabled` y su selector en *Servidores & Seguridad*: el comportamiento es único
+y no hay nada que configurar. Al arrancar, el panel borra ese ajuste viejo de la base de datos.
 
-El campo del formulario pasó de “URL Fuente Respaldo (Failover)” a **“Segundo Origen (cambio manual)”**.
+**Qué ve el operador**
 
-**Verificado**
+- En **Canales en Vivo**, la fila muestra una etiqueta ámbar **RESPALDO** cuando el canal está emitiendo la
+  fuente secundaria (`active_source = "backup"` en `/api/streams`).
+- El botón **⇄** de la fila **fuerza** el cambio (útil para pruebas o mantenimiento). Vuelve a cambiar al
+  pulsarlo de nuevo. También existen **“A respaldo”** / **“Al principal”** en la barra superior para un lote.
+- Campo del formulario: **“Segundo Origen (dormido)”**.
 
-- `failover_enabled=false`: `resolveFfmpegCompatibleCandidates` devuelve **1** candidato y los intentos 0 y 1 del
-  worker usan la misma URL principal; el proxy de suscriptores también entrega 1 solo candidato.
-- `failover_enabled=true`: vuelve a listar los 2 y el intento 1 usa el respaldo.
-- Proxy en vivo con principal roto: `false` → `503` (no toca el respaldo); `true` → `200` sirviendo el respaldo.
-- Cambio manual ida y vuelta por API: `A respaldo` → `failover_active=1` y URL intercambiada; repetirlo da `400`;
-  `Al principal` → vuelve al estado original. En masa: `switched: 1, skipped: 1` (el canal sin respaldo se omite).
+**API**
+
+- `POST /api/streams/:id/switch-source` `{ target: "backup" | "primary" }` — cambio forzado.
+- `POST /api/streams/switch-source-bulk` `{ scope, ids, category_id, target }` — cambio forzado en lote.
+- `GET /api/streams` — añade `active_source` (`primary` / `backup` / vacío si no hay worker) y `active_source_url`.
+
+**Verificado con dos orígenes reales**
+
+| Prueba | Resultado |
+|---|---|
+| Principal sano 32 s | Principal 34 peticiones · **secundario 0** (dormido) |
+| Se cae el principal | En ~8 s el canal pasa a la secundaria (`active_source = backup`) y sigue emitiendo |
+| Vuelve el principal | A los ~60 s la sonda lo detecta y regresa sola (`active_source = primary`) |
+| Secundaria caída y principal arriba | Vuelve al principal al siguiente intento |
+

@@ -7,36 +7,121 @@ import { db, withSqliteBusyRetry } from './db.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 
 // ============================================================================
-// FAILOVER DE ORIGEN (segundo source) — desactivado por defecto
+// SEGUNDO ORIGEN DORMIDO (estilo XUI.one)
 // ----------------------------------------------------------------------------
-// Cuando está apagado (valor por defecto) el panel NUNCA toca el segundo origen
-// del canal: cada worker usa sólo source_url. Así no se abren conexiones
-// duplicadas hacia el proveedor (eso era lo que subía el ancho de banda).
-// El segundo origen queda guardado y se cambia a mano desde "Cambiar a respaldo".
+// El canal emite sólo su origen principal. La fuente secundaria que el
+// administrador guarde NO se abre, ni se sondea, ni consume ancho de banda:
+// sigue "dormida" en la base de datos. Sólo cuando el principal falla de forma
+// repetida (FFmpeg sale al instante varias veces seguidas) el motor pasa a la
+// secundaria. Mientras está en la secundaria, cada cierto número de intentos
+// hace UN intento de reconexión al principal para volver solo cuando regrese.
 // ============================================================================
-let failoverCache = { at: 0, enabled: false };
+export const SOURCE_FAILOVER = {
+  // Intentos rápidos fallidos con el principal antes de despertar la secundaria
+  primaryAttemptsBeforeBackup: 2,
+  // Estando en la secundaria, cada N intentos se prueba el principal una vez
+  backupAttemptsBeforePrimaryRetry: 8,
+  // Cada cuánto se revisa (con una petición mínima) si el principal ya volvió
+  // mientras el canal está emitiendo la secundaria.
+  recoveryProbeMs: 60000
+};
 
-export function isFailoverEnabled() {
-  if (Date.now() - failoverCache.at < 3000) return failoverCache.enabled;
-  let enabled = false;
-  try {
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'failover_enabled'").get();
-    enabled = row?.value === 'true';
-  } catch {
-    enabled = false;
+// Última fuente realmente usada por worker (para mostrarla en el panel)
+const activeSourceByStream = new Map();
+
+function splitCandidateVariants(rawUrl, backupUrl = '') {
+  const build = (raw) => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return [];
+    if (/^mnfs?:\/\//i.test(trimmed)) {
+      // MNF: convertir /mnf/<u>/<p>/<id>.mnf -> MPEG-TS /live/<u>/<p>/<id>.ts para FFmpeg
+      return [
+        trimmed
+          .replace(/^mnf(s?):\/\//i, 'http$1://')
+          .replace(/\/mnf\/([^/]+)\/([^/]+)\/(\d+)\.mnf\b/i, '/live/$1/$2/$3.ts')
+      ];
+    }
+    return resolveFlussonicUrlCandidates(trimmed).filter(Boolean);
+  };
+  return { primary: build(rawUrl), backup: build(backupUrl) };
+}
+
+/**
+ * Decide qué URL usar en el intento N. La secundaria sólo aparece después de
+ * varios fallos reales del principal; mientras el principal funciona, la
+ * secundaria no se toca en absoluto.
+ */
+export function resolveStreamInputForAttempt(stream, attemptIndex = 0) {
+  const { primary, backup } = splitCandidateVariants(stream?.source_url, stream?.backup_url);
+  const attempt = Math.max(0, Number(attemptIndex) || 0);
+  const primaryFallback = String(stream?.source_url || '').trim();
+
+  if (primary.length === 0 && backup.length === 0) {
+    return { url: primaryFallback, usingBackup: false, hasBackup: false };
   }
-  failoverCache = { at: Date.now(), enabled };
-  return enabled;
+  if (backup.length === 0) {
+    return { url: primary[attempt % primary.length] || primaryFallback, usingBackup: false, hasBackup: false };
+  }
+
+  const threshold = SOURCE_FAILOVER.primaryAttemptsBeforeBackup;
+  if (attempt < threshold) {
+    return { url: primary[attempt % primary.length] || primaryFallback, usingBackup: false, hasBackup: true };
+  }
+
+  // Ya en la secundaria: de vez en cuando se prueba el principal una sola vez
+  const sinceSwitch = attempt - threshold;
+  const retryEvery = SOURCE_FAILOVER.backupAttemptsBeforePrimaryRetry;
+  if (retryEvery > 0 && sinceSwitch > 0 && sinceSwitch % retryEvery === 0) {
+    return { url: primary[0] || primaryFallback, usingBackup: false, hasBackup: true };
+  }
+
+  return { url: backup[sinceSwitch % backup.length], usingBackup: true, hasBackup: true };
 }
 
-export function invalidateFailoverCache() {
-  failoverCache = { at: 0, enabled: false };
+/**
+ * Sondeo MUY ligero del origen principal cuando el canal está emitiendo la
+ * secundaria. Pide sólo los primeros bytes y corta: no descarga video, así que
+ * el costo es de unos pocos KB por minuto y únicamente en los canales caídos.
+ */
+export async function probePrimaryAvailability(stream, timeoutMs = 5000) {
+  const url = String(stream?.source_url || '').trim();
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Range: 'bytes=0-2047',
+        'User-Agent': stream.user_agent || 'TVLister/2.3'
+      },
+      redirect: 'follow',
+      signal: ac.signal
+    });
+    if (!res.ok) return false;
+    const reader = res.body?.getReader();
+    if (reader) {
+      await reader.read();
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-/** Segundo origen efectivo: vacío cuando el failover automático está apagado. */
-export function resolveBackupSource(stream) {
-  if (!isFailoverEnabled()) return '';
-  return String(stream?.backup_url || '').trim();
+/** Última fuente usada por el worker del canal (para la etiqueta RESPALDO del panel). */
+export function getActiveSourceForStream(streamId) {
+  return activeSourceByStream.get(Number(streamId)) || null;
+}
+
+export function clearActiveSourceForStream(streamId) {
+  activeSourceByStream.delete(Number(streamId));
 }
 
 export function resolveFfmpegCompatibleCandidates(rawUrl = '', backupUrl = '') {
@@ -614,8 +699,18 @@ export function isStreamAudioLeveled(stream, profile) {
 }
 
 export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
-  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, resolveBackupSource(stream));
-  const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
+  const attempt = Math.max(0, Number(attemptIndex) || 0);
+  const picked = resolveStreamInputForAttempt(stream, attempt);
+  const inputUrl = picked.url || stream.source_url;
+  if (stream?.id) {
+    activeSourceByStream.set(Number(stream.id), {
+      url: inputUrl,
+      usingBackup: picked.usingBackup,
+      hasBackup: picked.hasBackup,
+      attempt,
+      at: Date.now()
+    });
+  }
 
   const globalAudio = getGlobalAudioLevelingConfig();
   const levelAudio = isStreamAudioLeveled(stream, profile);
@@ -1586,8 +1681,18 @@ export function buildFfmpegArgsForArchive(stream, attemptIndex = 0) {
   const outDir = path.join(ARCHIVE_ROOT, `stream_${stream.id}`);
   fs.mkdirSync(outDir, { recursive: true });
 
-  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, resolveBackupSource(stream));
-  const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
+  const attempt = Math.max(0, Number(attemptIndex) || 0);
+  const picked = resolveStreamInputForAttempt(stream, attempt);
+  const inputUrl = picked.url || stream.source_url;
+  if (stream?.id) {
+    activeSourceByStream.set(Number(stream.id), {
+      url: inputUrl,
+      usingBackup: picked.usingBackup,
+      hasBackup: picked.hasBackup,
+      attempt,
+      at: Date.now()
+    });
+  }
 
   const args = ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-threads', '1'];
   if (stream.user_agent && inputUrl.startsWith('http')) {

@@ -66,8 +66,10 @@ import {
   FFMPEG_ENGINE_LIMITS,
   FFMPEG_ENGINE_DEFAULTS,
   invalidateFfmpegEfficiencyCache,
-  invalidateFailoverCache,
   getWorkerDiagnostics,
+  getActiveSourceForStream,
+  probePrimaryAvailability,
+  SOURCE_FAILOVER,
   getHlsFreeBytes,
   estimateHlsFootprintBytes,
   HLS_WINDOW_SECONDS
@@ -598,10 +600,17 @@ app.get('/api/streams', requireAuth, (req, res) => {
        ORDER BY s.sort_order ASC, s.id ASC`
     )
     .all()
-    .map((s) => ({
-      ...s,
-      archiveStats: getArchiveStats(s.id)
-    }));
+    .map((s) => {
+      const alive = Boolean(getWorkerPid(`stream_${s.id}`));
+      const active = alive ? getActiveSourceForStream(s.id) : null;
+      return {
+        ...s,
+        archiveStats: getArchiveStats(s.id),
+        // 'backup' = el worker está emitiendo la fuente secundaria porque el principal falló
+        active_source: active?.usingBackup ? 'backup' : active?.url ? 'primary' : '',
+        active_source_url: active?.url || ''
+      };
+    });
   res.json(rows);
 });
 
@@ -3348,7 +3357,6 @@ app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
   }
   invalidateFirewallCache();
   invalidateAudioLevelingCache();
-  invalidateFailoverCache();
   res.json({ ok: true });
 });
 
@@ -3873,6 +3881,39 @@ async function startServer() {
       // ignore
     }
   }, 30 * 60 * 1000).unref();
+
+  // Vuelta automática al origen principal: sólo para los canales que están emitiendo la
+  // fuente secundaria. Se pide un fragmento mínimo del principal (no se descarga video),
+  // así no se gasta ancho de banda mientras el canal está sano.
+  let failoverProbeBusy = false;
+  setInterval(async () => {
+    if (failoverProbeBusy) return;
+    failoverProbeBusy = true;
+    try {
+      const candidates = db
+        .prepare("SELECT * FROM streams WHERE status = 'running' AND backup_url != '' AND stream_mode = 'transcode'")
+        .all();
+      for (const stream of candidates) {
+        const active = getActiveSourceForStream(stream.id);
+        if (!active?.usingBackup) continue;
+        const primaryBack = await probePrimaryAvailability(stream);
+        if (!primaryBack) continue;
+        // El principal responde: reiniciar el worker desde el intento 0 (principal primero)
+        stopWorker(`stream_${stream.id}`);
+        setTimeout(() => {
+          try {
+            launchStreamWorkerIfNeeded(stream.id);
+          } catch {
+            // ignore
+          }
+        }, 150).unref?.();
+      }
+    } catch {
+      // ignore transient lock
+    } finally {
+      failoverProbeBusy = false;
+    }
+  }, Math.max(30000, Number(SOURCE_FAILOVER.recoveryProbeMs) || 60000)).unref();
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');

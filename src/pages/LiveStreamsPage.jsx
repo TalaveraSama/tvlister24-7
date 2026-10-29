@@ -1499,7 +1499,17 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             )}
                           </div>
                           <div className="min-w-0">
-                            <div className="font-semibold text-white truncate">{s.name}</div>
+                            <div className="font-semibold text-white truncate flex items-center gap-1.5">
+                          <span className="truncate">{s.name}</span>
+                          {s.active_source === 'backup' && (
+                            <span
+                              className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-bold"
+                              title={`Emitiendo el segundo origen (el principal falló)\n${s.backup_url}`}
+                            >
+                              RESPALDO
+                            </span>
+                          )}
+                        </div>
                             <div className="text-[11px] text-slate-500 font-mono truncate max-w-[240px]">
                               {s.source_url}
                             </div>
@@ -1695,8 +1705,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                               onClick={() => handleSwitchSource(s, s.failover_active ? 'primary' : 'backup')}
                               title={
                                 s.failover_active
-                                  ? `Está emitiendo el segundo origen\n${s.backup_url}\nClic para volver al principal`
-                                  : `Cambiar a respaldo manualmente\n${s.backup_url}`
+                                  ? `Forzado al segundo origen\n${s.backup_url}\nClic para volver al principal`
+                                  : `Forzar el segundo origen ahora (normalmente entra solo si el principal falla)\n${s.backup_url}`
                               }
                               className={`p-1.5 rounded-lg transition ${
                                 s.failover_active
@@ -2384,17 +2394,18 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-slate-300 mb-1 font-medium">Segundo Origen (cambio manual)</label>
+                  <label className="block text-slate-300 mb-1 font-medium">Segundo Origen (dormido)</label>
                   <input
                     type="text"
                     value={form.backup_url}
                     onChange={(e) => setForm({ ...form, backup_url: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-                    placeholder="Opcional · no se usa solo"
+                    placeholder="Opcional · sólo entra si el principal se cae"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Se guarda, pero <b className="text-slate-400">no se reproduce automáticamente</b>. Para usarlo, pulsa
-                    “Cambiar a respaldo” en la fila del canal (y “Volver al principal” para regresar).
+                    Queda <b className="text-slate-400">guardado y dormido</b>: no abre conexión ni gasta ancho de banda
+                    mientras el principal funcione. Si el principal falla, el panel entra solo al segundo origen y vuelve
+                    al principal cuando se recupere.
                   </p>
                 </div>
                 <div>

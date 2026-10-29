@@ -503,6 +503,9 @@ function runInitDbBody() {
   ensureColumn('streams', 'flussonic_stream_name', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
 
+  // Interruptor de failover global retirado: ahora el segundo origen es automático y dormido.
+  db.prepare("DELETE FROM settings WHERE key = 'failover_enabled'").run();
+
   // El bucle de respaldo global fue retirado: los canales que lo usaban quedan sin respaldo
   // (siguen funcionando igual, sólo dejan de mostrar la imagen/video en bucle al caerse).
   db.prepare(

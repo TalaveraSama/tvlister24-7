@@ -48,8 +48,7 @@ export default function ServersSecurityPage() {
     anti_restreaming: 'true',
     proxy_direct_ts: 'false',
     flood_limit_per_min: '240',
-    lb_routing_mode: 'load',
-    failover_enabled: 'false'
+    lb_routing_mode: 'load'
   });
 
   const [newAdmin, setNewAdmin] = useState({ username: '', password: '', email: '', notes: '' });
@@ -107,8 +106,7 @@ export default function ServersSecurityPage() {
       anti_restreaming: data.settings?.anti_restreaming || 'true',
       proxy_direct_ts: data.settings?.proxy_direct_ts || 'false',
       flood_limit_per_min: data.settings?.flood_limit_per_min || '240',
-      lb_routing_mode: data.settings?.lb_routing_mode || 'load',
-      failover_enabled: data.settings?.failover_enabled || 'false'
+      lb_routing_mode: data.settings?.lb_routing_mode || 'load'
     });
     if (data.admins?.length > 0 && !pwdTargetId) {
       setPwdTargetId(data.admins[0].id);
@@ -545,22 +543,6 @@ export default function ServersSecurityPage() {
                       <option value="isp">Afinidad por ISP</option>
                     </select>
                   </div>
-                </div>
-
-                <div>
-                  <label className="block text-slate-400 mb-1">Failover de Origen (segundo source)</label>
-                  <select
-                    value={settingsForm.failover_enabled}
-                    onChange={(e) => setSettingsForm({ ...settingsForm, failover_enabled: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
-                  >
-                    <option value="false">Manual (recomendado) — el segundo origen NO se usa solo</option>
-                    <option value="true">Automático — salta al segundo origen si el principal falla</option>
-                  </select>
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    En modo manual cada canal reproduce únicamente su URL principal; el segundo origen se cambia a mano
-                    con “Cambiar a respaldo” en Canales en Vivo. Evita conexiones duplicadas al proveedor.
-                  </p>
                 </div>
 
                 <div>

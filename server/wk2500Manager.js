@@ -11,7 +11,7 @@ import {
   isFfmpegAvailable,
   buildAudioLevelingFilter,
   getFreshLocalHlsManifestPath,
-  resolveBackupSource
+  resolveStreamInputForAttempt
 } from './streamEngine.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 
@@ -297,8 +297,8 @@ function resolveSlotUpstream(slotRow) {
     streamRow = db.prepare('SELECT * FROM streams WHERE id = ?').get(Number(slotRow.stream_id));
   }
   const rawPrimary = String(slotRow.custom_source_url || streamRow?.source_url || '').trim();
-  // El modulador tampoco salta al segundo origen salvo que el failover esté activado a mano.
-  const rawBackup = resolveBackupSource(streamRow);
+  // Segunda fuente dormida: sólo se intenta si el principal falla repetidamente.
+  const rawBackup = String(streamRow?.backup_url || '').trim();
   const channelTitle = String(slotRow.custom_name || streamRow?.name || `CATV CH ${slotRow.catv_ch}`).trim();
 
   // Check if local 24/7 RAMDisk HLS manifest is already running for this stream
@@ -571,7 +571,8 @@ export function startWk2500ChannelWorker(catvCh) {
     child: null,
     reconnectTimer: null,
     rateTimer: null,
-    attempt: 0
+    attempt: 0,
+    streamingSinceMs: 0
   };
 
   state.rateTimer = setInterval(() => {
@@ -582,11 +583,21 @@ export function startWk2500ChannelWorker(catvCh) {
 
   udpWorkers.set(ch, state);
 
+  // Marca de "este intento sí estaba entregando video": sirve para no quedarse pegado
+  // en la fuente secundaria para siempre cuando el principal ya volvió.
+  const markStreaming = () => {
+    if (state.status !== 'streaming') state.status = 'streaming';
+    if (!state.streamingSinceMs) state.streamingSinceMs = Date.now();
+  };
+
   const scheduleRetry = (errMsg = '') => {
     if (state.stopped || udpWorkers.get(ch) !== state) return;
     state.status = 'reconnecting';
     if (errMsg) state.lastError = String(errMsg).slice(0, 140);
-    state.attempt += 1;
+    const healthyMs = state.streamingSinceMs ? Date.now() - state.streamingSinceMs : 0;
+    // Si el intento aguantó sano > 20 s, la próxima reconexión vuelve a probar el principal.
+    state.attempt = healthyMs >= 20000 ? 0 : state.attempt + 1;
+    state.streamingSinceMs = 0;
     state.reconnectTimer = setTimeout(runCycle, 3000);
   };
 
@@ -627,7 +638,7 @@ export function startWk2500ChannelWorker(catvCh) {
         if (!err) {
           state.packetsSent += 1;
           state.bytesWindow += pkt1316.length;
-          if (state.status !== 'streaming') state.status = 'streaming';
+          markStreaming();
         }
       });
     });
@@ -720,7 +731,7 @@ export function startWk2500ChannelWorker(catvCh) {
             lastProgressTotal = total;
             state.bytesWindow += delta;
             state.packetsSent += Math.ceil(delta / 1316);
-            if (state.status !== 'streaming') state.status = 'streaming';
+            markStreaming();
           }
         }
         nl = progressBuf.indexOf('\n');
@@ -805,7 +816,15 @@ export function startWk2500ChannelWorker(catvCh) {
       : allCandidates.filter((u) => !/\.m3u8(\?|$)/i.test(u));
     const pool = usableCandidates.length > 0 ? usableCandidates : allCandidates;
 
-    const chosenUrl = pool[state.attempt % Math.max(1, pool.length)] || freshUp.rawPrimary;
+    let chosenUrl = '';
+    if (freshUp.streamRow) {
+      // Misma política que el resto del panel: principal siempre; secundaria dormida
+      // hasta que el principal falle varias veces seguidas.
+      const picked = resolveStreamInputForAttempt(freshUp.streamRow, state.attempt);
+      chosenUrl = picked.url || freshUp.rawPrimary;
+    } else {
+      chosenUrl = pool[state.attempt % Math.max(1, pool.length)] || freshUp.rawPrimary;
+    }
     if (!chosenUrl && !freshUp.localHls) {
       scheduleRetry('Sin URL de origen en el canal asignado');
       return;
