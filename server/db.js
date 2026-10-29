@@ -483,7 +483,7 @@ function runInitDbBody() {
   ensureColumn('servers', 'https_port', 'INTEGER');
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'xui_id', 'INTEGER');
-  ensureColumn('streams', 'offline_slate_mode', "TEXT NOT NULL DEFAULT 'global'");
+  ensureColumn('streams', 'offline_slate_mode', "TEXT NOT NULL DEFAULT 'disabled'");
   ensureColumn('streams', 'offline_slate_url', "TEXT DEFAULT ''");
   ensureColumn('streams', 'detected_resolution', "TEXT DEFAULT ''");
   ensureColumn('streams', 'resolution_tier', "TEXT DEFAULT ''");
@@ -500,6 +500,12 @@ function runInitDbBody() {
   ensureColumn('streams', 'flussonic_server_id', 'INTEGER');
   ensureColumn('streams', 'flussonic_stream_name', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+
+  // El bucle de respaldo global fue retirado: los canales que lo usaban quedan sin respaldo
+  // (siguen funcionando igual, sólo dejan de mostrar la imagen/video en bucle al caerse).
+  db.prepare(
+    "UPDATE streams SET offline_slate_mode = 'disabled' WHERE offline_slate_mode IN ('global', 'builtin')"
+  ).run();
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_streams_sort_order ON streams(sort_order, id);
@@ -621,10 +627,6 @@ function runInitDbBody() {
         VALUES ('Copy / Copy (Bitrate Original · Zero CPU)', 'copy', 'copy', 'source', 'copy', 'source', 'none', 'none', '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024')
       `).run();
     }
-    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_enabled', 'true')").run();
-    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_type', 'builtin')").run();
-    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_url', '')").run();
-    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_slate_text', 'SEÑAL EN RECONEXIÓN - VOLVEMOS EN BREVE')").run();
     db.prepare(
       "INSERT INTO settings (key, value) VALUES ('copy_copy_2500k_v1', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
     ).run();

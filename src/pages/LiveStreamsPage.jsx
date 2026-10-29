@@ -47,7 +47,7 @@ const EMPTY_FORM = {
   tv_archive_days: 3,
   bitrate_kbps: 2500,
   user_agent: 'TVLister/2.3 (MPEG-TS; Linux)',
-  offline_slate_mode: 'global',
+  offline_slate_mode: 'disabled',
   offline_slate_url: '',
   audio_leveling_mode: 'global'
 };
@@ -150,15 +150,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [bulkDeleteScope, setBulkDeleteScope] = useState('selected'); // 'selected' | 'category' | 'all'
   const [bulkDeleteCatId, setBulkDeleteCatId] = useState('all');
 
-  // Offline Slate (Image / Video Loop when no stream) Modal
-  const [slateModalOpen, setSlateModalOpen] = useState(false);
-  const [slateConfig, setSlateConfig] = useState({
-    enabled: true,
-    type: 'builtin',
-    url: '',
-    text: 'SEÑAL EN RECONEXIÓN - VOLVEMOS EN BREVE'
-  });
-  const [slateFiles, setSlateFiles] = useState([]);
+  // Respaldo por canal (imagen o video propio). El bucle global del panel ya no existe.
   const [slateUploading, setSlateUploading] = useState(false);
   const [slateNotice, setSlateNotice] = useState('');
 
@@ -196,16 +188,6 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [bulkMode, setBulkMode] = useState('transcode');
   const [bulkProfId, setBulkProfId] = useState(2);
   const [bulkKeepBitrate, setBulkKeepBitrate] = useState(true);
-
-  const loadSlates = async () => {
-    try {
-      const sl = await apiFetch('/api/slates/config');
-      if (sl?.config) setSlateConfig(sl.config);
-      if (Array.isArray(sl?.files)) setSlateFiles(sl.files);
-    } catch {
-      // ignore
-    }
-  };
 
   const loadAudioLeveling = async () => {
     try {
@@ -267,7 +249,6 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
   useEffect(() => {
     loadAll();
-    loadSlates();
     loadAudioLeveling();
     apiFetch('/api/streams/auto-resolution/status')
       .then((st) => {
@@ -584,7 +565,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       tv_archive_days: s.tv_archive_days || 0,
       bitrate_kbps: s.bitrate_kbps || 2500,
       user_agent: s.user_agent || 'TVLister/2.3',
-      offline_slate_mode: s.offline_slate_mode || 'global',
+      offline_slate_mode: s.offline_slate_mode || 'disabled',
       offline_slate_url: s.offline_slate_url || '',
       audio_leveling_mode: s.audio_leveling_mode || 'global'
     });
@@ -612,7 +593,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
         stream_mode: 'transcode',
         transcode_profile_id: copyProf ? String(copyProf.id) : '2',
         bitrate_kbps: '',
-        offline_slate_mode: 'global',
+        offline_slate_mode: 'disabled',
         status: 'running'
       }));
     } else if (presetKey === 'ondemand_copy_2500' || presetKey === 'ondemand_copy_source') {
@@ -621,7 +602,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
         stream_mode: 'ondemand',
         transcode_profile_id: copyProf ? String(copyProf.id) : '2',
         bitrate_kbps: '',
-        offline_slate_mode: 'global'
+        offline_slate_mode: 'disabled'
       }));
     } else if (presetKey === 'zero_h264_2500') {
       setBulkForm((prev) => ({
@@ -629,7 +610,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
         stream_mode: 'transcode',
         transcode_profile_id: zeroProf ? String(zeroProf.id) : '2',
         bitrate_kbps: '2500',
-        offline_slate_mode: 'global',
+        offline_slate_mode: 'disabled',
         status: 'running'
       }));
     } else if (presetKey === 'direct_proxy') {
@@ -638,7 +619,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
         stream_mode: 'direct',
         transcode_profile_id: directProf ? String(directProf.id) : '1',
         bitrate_kbps: '',
-        offline_slate_mode: 'global',
+        offline_slate_mode: 'disabled',
         status: 'running'
       }));
     }
@@ -669,7 +650,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           changes: {
             stream_mode: 'transcode',
             transcode_profile_id: copyProf.id,
-            offline_slate_mode: 'global',
+            offline_slate_mode: 'disabled',
             status: 'running'
           }
         })
@@ -816,7 +797,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     }
   };
 
-  const handleUploadSlateFile = async (e, targetTarget = 'global') => {
+  const handleUploadSlateFile = async (e, targetTarget = 'stream_form') => {
     const file = e.target.files?.[0];
     if (!file) return;
     setSlateUploading(true);
@@ -835,24 +816,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Error subiendo archivo');
 
-      if (Array.isArray(data.files)) setSlateFiles(data.files);
-
-      if (targetTarget === 'global') {
-        const nextCfg = {
-          ...slateConfig,
-          enabled: true,
-          type: data.kind,
-          url: data.url
-        };
-        setSlateConfig(nextCfg);
-        await apiFetch('/api/slates/config', {
-          method: 'PUT',
-          body: JSON.stringify(nextCfg)
-        });
-        setSlateNotice(
-          `✅ ${data.kind === 'image' ? 'Imagen' : 'Video'} "${file.name}" activado en bucle para canales sin señal.`
-        );
-      } else if (targetTarget === 'stream_form') {
+      if (targetTarget === 'stream_form') {
         setForm((prev) => ({
           ...prev,
           offline_slate_mode: data.kind === 'image' ? 'custom_image' : 'custom_video',
@@ -871,21 +835,6 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     } finally {
       setSlateUploading(false);
       e.target.value = '';
-    }
-  };
-
-  const handleSaveGlobalSlate = async (e) => {
-    e.preventDefault();
-    setSlateNotice('');
-    try {
-      const res = await apiFetch('/api/slates/config', {
-        method: 'PUT',
-        body: JSON.stringify(slateConfig)
-      });
-      if (res?.config) setSlateConfig(res.config);
-      setSlateNotice('✅ Señal de respaldo en bucle guardada y activa en todos los canales.');
-    } catch (err) {
-      setSlateNotice(`❌ ${err.message}`);
     }
   };
 
@@ -1207,24 +1156,6 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               Audio Igual {audioConfig.enabled ? '• ON' : '• OFF'}
             </button>
 
-            {/* Offline Video / Image Loop Button */}
-            <button
-              onClick={() => {
-                setSlateNotice('');
-                loadSlates();
-                setSlateModalOpen(true);
-              }}
-              className={`inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition ${
-                slateConfig.enabled
-                  ? 'bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 border-violet-500/35'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
-              }`}
-              title="Configurar imagen o video en bucle cuando un canal no tenga señal"
-            >
-              <Film className="w-4 h-4" />
-              Bucle Sin Stream {slateConfig.enabled ? '• ON' : '• OFF'}
-            </button>
-
             {/* 1-Click Bulk Copy/Copy (Source Bitrate Untouched) */}
             {streams.length > 0 && (
               <button
@@ -1451,7 +1382,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               ) : (
                 filtered.map((s) => {
                   const isChecked = selectedIds.includes(s.id);
-                  const slateMode = s.offline_slate_mode || 'global';
+                  const slateMode = s.offline_slate_mode || 'disabled';
                   return (
                     <tr
                       key={s.id}
@@ -1602,14 +1533,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             Propio
                           </span>
                         ) : (
-                          <span
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
-                              slateConfig.enabled
-                                ? 'bg-violet-500/10 border border-violet-500/25 text-violet-300'
-                                : 'bg-slate-800 text-slate-500'
-                            }`}
-                          >
-                            {slateConfig.enabled ? `Bucle (${slateConfig.type})` : 'Global OFF'}
+                          <span className="text-[10px] text-slate-600" title="Este canal no tiene señal de respaldo: si se cae el origen, el reproductor recibe el error del canal.">
+                            Sin respaldo
                           </span>
                         )}
                       </td>
@@ -2130,10 +2055,9 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                   >
                     <option value="">— Mantener sin cambios —</option>
-                    <option value="global">Usar Bucle Global (Imagen o Video en bucle)</option>
-                    <option value="custom_image">Imagen en Bucle Personalizada</option>
-                    <option value="custom_video">Video en Bucle Personalizado</option>
-                    <option value="disabled">Desactivar respaldo (dar error 503)</option>
+                    <option value="disabled">Sin respaldo (el canal da error si se cae)</option>
+                    <option value="custom_image">Imagen Propia en Bucle (elegida por canal)</option>
+                    <option value="custom_video">Video Propio en Bucle (elegido por canal)</option>
                   </select>
                 </div>
 
@@ -2323,212 +2247,6 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
         </div>
       )}
 
-      {/* ==================== MODAL: SEÑAL OFFLINE (IMAGEN O VIDEO EN BUCLE) ==================== */}
-      {slateModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
-          <div className="w-full max-w-2xl rounded-2xl bg-[#0e1526] border border-slate-800 shadow-2xl overflow-hidden">
-            <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Film className="w-5 h-5 text-violet-400" />
-                <div>
-                  <h3 className="text-sm font-bold text-white">
-                    Señal de Respaldo Automática — Imagen o Video en Bucle (2.5 Mbps)
-                  </h3>
-                  <p className="text-[11px] text-slate-400">
-                    Cuando un canal se cae, queda sin stream o el encoder OBS está apagado, reproduce esta imagen o video en bucle automáticamente.
-                  </p>
-                </div>
-              </div>
-              <button onClick={() => setSlateModalOpen(false)} className="text-slate-400 hover:text-white">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveGlobalSlate} className="p-5 space-y-4 max-h-[82vh] overflow-y-auto text-xs">
-              {slateNotice && (
-                <div className="p-3 rounded-xl bg-slate-900 border border-violet-500/40 text-violet-200 font-medium">
-                  {slateNotice}
-                </div>
-              )}
-
-              <label className="flex items-center justify-between p-3.5 rounded-xl bg-[#090e1a] border border-slate-800 cursor-pointer">
-                <div>
-                  <div className="font-bold text-white">Activar Bucle Automático cuando NO hay Stream</div>
-                  <div className="text-[11px] text-slate-400">
-                    Evita pantalla negra o error de reproducción en TiviMate, Smarters, VLC y WebTV; al volver la señal real retoma el canal solo.
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={slateConfig.enabled}
-                  onChange={(e) => setSlateConfig({ ...slateConfig, enabled: e.target.checked })}
-                  className="w-5 h-5 rounded accent-violet-500"
-                />
-              </label>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                {[
-                  {
-                    id: 'image',
-                    title: '🖼️ Imagen en Bucle',
-                    desc: 'PNG / JPG / WEBP fijo en loop + pista audio AAC'
-                  },
-                  {
-                    id: 'video',
-                    title: '🎬 Video en Bucle',
-                    desc: 'Clip MP4 / TS / MKV repitiéndose sin fin'
-                  },
-                  {
-                    id: 'builtin',
-                    title: '📺 Barras HD Internas',
-                    desc: 'Señal SMPTE HD generada sin subir archivos'
-                  }
-                ].map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => setSlateConfig({ ...slateConfig, type: opt.id })}
-                    className={`p-3 rounded-xl border text-left transition ${
-                      slateConfig.type === opt.id
-                        ? 'bg-violet-600/20 border-violet-500 text-white'
-                        : 'bg-[#090e1a] border-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <div className="font-bold text-xs">{opt.title}</div>
-                    <div className="text-[10px] text-slate-400 mt-1">{opt.desc}</div>
-                  </button>
-                ))}
-              </div>
-
-              {slateConfig.type !== 'builtin' && (
-                <div className="p-4 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <label className="font-semibold text-slate-200">
-                      Subir {slateConfig.type === 'image' ? 'Imagen (PNG, JPG, WEBP)' : 'Video Corto (MP4, TS, MKV)'} desde tu PC:
-                    </label>
-                    <label className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold cursor-pointer transition">
-                      <Upload className="w-3.5 h-3.5" />
-                      {slateUploading ? 'Subiendo archivo...' : 'Subir Imagen o Video'}
-                      <input
-                        type="file"
-                        accept=".png,.jpg,.jpeg,.webp,.mp4,.ts,.mkv,.mov"
-                        onChange={(e) => handleUploadSlateFile(e, 'global')}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-
-                  <div>
-                    <label className="block text-slate-400 mb-1">
-                      O escribe ruta local del servidor / URL directa:
-                    </label>
-                    <input
-                      type="text"
-                      value={slateConfig.url}
-                      onChange={(e) => setSlateConfig({ ...slateConfig, url: e.target.value })}
-                      placeholder="/slates/logo_canal.png o /opt/videos/promo_bucle.mp4"
-                      className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
-                    />
-                  </div>
-
-                  {/* Live Preview of Current Uploaded Image or Video */}
-                  {slateConfig.url && (
-                    <div className="p-3 rounded-xl bg-[#0e1526] border border-slate-800">
-                      <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-2">
-                        Vista previa del recurso en bucle actual:
-                      </div>
-                      {slateConfig.type === 'image' ? (
-                        <img
-                          src={slateConfig.url}
-                          alt="Slate Preview"
-                          className="max-h-40 rounded-lg border border-slate-700 mx-auto object-contain"
-                        />
-                      ) : (
-                        <video
-                          src={slateConfig.url}
-                          controls
-                          loop
-                          muted
-                          className="max-h-44 rounded-lg border border-slate-700 mx-auto"
-                        />
-                      )}
-                    </div>
-                  )}
-
-                  {/* Library of Previously Uploaded Slate Files */}
-                  {slateFiles.length > 0 && (
-                    <div className="space-y-1.5">
-                      <div className="text-[11px] font-semibold text-slate-400">
-                        Archivos subidos en el servidor (clic para usar):
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-36 overflow-y-auto">
-                        {slateFiles.map((f) => (
-                          <div
-                            key={f.fileName}
-                            className={`p-2 rounded-lg border flex items-center justify-between gap-2 ${
-                              slateConfig.url === f.url
-                                ? 'bg-violet-500/15 border-violet-500/50 text-white'
-                                : 'bg-[#0e1526] border-slate-800 text-slate-300'
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setSlateConfig({ ...slateConfig, type: f.kind, url: f.url, enabled: true })
-                              }
-                              className="flex items-center gap-1.5 truncate text-left flex-1"
-                            >
-                              {f.kind === 'image' ? (
-                                <ImageIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                              ) : (
-                                <Film className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                              )}
-                              <span className="truncate">{f.fileName}</span>
-                              <span className="text-[10px] text-slate-500 shrink-0">({f.sizeKb} KB)</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                const res = await apiFetch(
-                                  `/api/slates/files/${encodeURIComponent(f.fileName)}`,
-                                  { method: 'DELETE' }
-                                );
-                                if (Array.isArray(res?.files)) setSlateFiles(res.files);
-                              }}
-                              className="p-1 text-rose-400 hover:text-rose-300"
-                              title="Borrar archivo"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSlateModalOpen(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300"
-                >
-                  Cerrar
-                </button>
-                <button
-                  type="submit"
-                  className="inline-flex items-center gap-1.5 px-5 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold"
-                >
-                  <Save className="w-4 h-4" />
-                  Guardar Configuración de Bucle
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* Add / Edit Single Stream Modal */}
       {modalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
@@ -2704,10 +2422,9 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     onChange={(e) => setForm({ ...form, offline_slate_mode: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
                   >
-                    <option value="global">Usar Bucle Global del Panel</option>
+                    <option value="disabled">Sin respaldo (recomendado)</option>
                     <option value="custom_image">Imagen Propia en Bucle</option>
                     <option value="custom_video">Video Propio en Bucle</option>
-                    <option value="disabled">Desactivado</option>
                   </select>
                 </div>
 

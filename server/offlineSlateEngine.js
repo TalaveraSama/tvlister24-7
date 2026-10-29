@@ -68,53 +68,23 @@ function hasAudioStream(inputPath) {
   return false;
 }
 
-export function getGlobalSlateConfig() {
-  const rows = db
-    .prepare(
-      "SELECT key, value FROM settings WHERE key IN ('offline_slate_enabled', 'offline_slate_type', 'offline_slate_url', 'offline_slate_text')"
-    )
-    .all();
-  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  return {
-    enabled: map.offline_slate_enabled !== 'false',
-    type: map.offline_slate_type || 'builtin', // 'builtin' | 'image' | 'video'
-    url: map.offline_slate_url || '',
-    text: map.offline_slate_text || 'SEÑAL EN RECONEXIÓN - VOLVEMOS EN BREVE'
-  };
-}
-
+// Respaldo SOLO por canal: la imagen/video en bucle que el administrador activa a mano en ese canal.
+// Ya no existe el bucle global del panel (configuración única para todos los canales).
 export function resolveEffectiveSlateForStream(stream) {
-  const mode = String(stream?.offline_slate_mode || 'global');
-  if (mode === 'disabled' || mode === 'none') {
+  const mode = String(stream?.offline_slate_mode || 'disabled');
+  if (mode !== 'custom_image' && mode !== 'custom_video' && mode !== 'custom') {
     return null;
   }
+  const rawUrl = String(stream?.offline_slate_url || '').trim();
+  if (!rawUrl) return null;
 
-  if ((mode === 'custom_image' || mode === 'custom_video' || mode === 'custom') && stream?.offline_slate_url) {
-    const input = resolveSlateLocalOrRemoteInput(stream.offline_slate_url);
-    const kind =
-      mode === 'custom_image'
-        ? 'image'
-        : mode === 'custom_video'
-        ? 'video'
-        : detectMediaKindFromUrl(stream.offline_slate_url);
-    return { type: kind, input, rawUrl: stream.offline_slate_url };
-  }
+  const input = resolveSlateLocalOrRemoteInput(rawUrl);
+  // Un archivo local borrado no debe dejar el canal en negro: se considera sin respaldo.
+  if (input.startsWith('/') && !fs.existsSync(input)) return null;
 
-  const globalCfg = getGlobalSlateConfig();
-  if (!globalCfg.enabled) return null;
-
-  if ((globalCfg.type === 'image' || globalCfg.type === 'video') && globalCfg.url) {
-    const input = resolveSlateLocalOrRemoteInput(globalCfg.url);
-    if (!input.startsWith('/') || fs.existsSync(input)) {
-      return {
-        type: globalCfg.type,
-        input,
-        rawUrl: globalCfg.url
-      };
-    }
-  }
-
-  return { type: 'builtin', input: 'smptehdbars', rawUrl: '' };
+  const kind =
+    mode === 'custom_image' ? 'image' : mode === 'custom_video' ? 'video' : detectMediaKindFromUrl(rawUrl);
+  return { type: kind, input, rawUrl };
 }
 
 function buildSlateFfmpegArgs(workerKey, spec) {
@@ -238,53 +208,8 @@ function buildSlateFfmpegArgs(workerKey, spec) {
     return args;
   }
 
-  // Built-in Broadcast HD Slate (SMPTE HD Bars + Stereo Silent Audio @ 2.5 Mbps)
-  return [
-    '-hide_banner',
-    '-loglevel',
-    'warning',
-    '-y',
-    '-re',
-    '-f',
-    'lavfi',
-    '-i',
-    'smptehdbars=size=1280x720:rate=25',
-    '-f',
-    'lavfi',
-    '-i',
-    'anullsrc=channel_layout=stereo:sample_rate=44100',
-    '-pix_fmt',
-    'yuv420p',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-tune',
-    'zerolatency',
-    '-b:v',
-    '2000k',
-    '-maxrate',
-    '2500k',
-    '-bufsize',
-    '5000k',
-    '-g',
-    '50',
-    '-sc_threshold',
-    '0',
-    '-c:a',
-    'aac',
-    '-b:a',
-    '128k',
-    '-f',
-    'hls',
-    '-hls_time',
-    '2',
-    '-hls_list_size',
-    '6',
-    '-hls_flags',
-    'delete_segments+independent_segments',
-    path.join(outDir, 'index.m3u8')
-  ];
+  // Solo existen respaldos por canal (imagen o video propio); sin respaldo no se genera nada.
+  return null;
 }
 
 export async function ensureSlateManifestForStream(stream) {

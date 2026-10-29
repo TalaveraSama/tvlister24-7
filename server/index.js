@@ -71,12 +71,7 @@ import {
   estimateHlsFootprintBytes,
   HLS_WINDOW_SECONDS
 } from './streamEngine.js';
-import {
-  SLATES_DIR,
-  getGlobalSlateConfig,
-  restartAllSlateWorkers,
-  ensureSlateManifestForStream
-} from './offlineSlateEngine.js';
+import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import {
   getResolutionScanStatus,
   startResolutionAutoClassifyJob,
@@ -534,29 +529,10 @@ function listSlateFiles() {
   }
 }
 
-app.get('/api/slates/config', requireAuth, (req, res) => {
-  res.json({
-    config: getGlobalSlateConfig(),
-    files: listSlateFiles()
-  });
-});
-
-app.put('/api/slates/config', requireAuth, requireAdmin, (req, res) => {
-  const b = req.body || {};
-  const upsert = db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  );
-  if (b.enabled !== undefined) upsert.run('offline_slate_enabled', b.enabled ? 'true' : 'false');
-  if (b.type !== undefined) upsert.run('offline_slate_type', String(b.type || 'builtin'));
-  if (b.url !== undefined) upsert.run('offline_slate_url', String(b.url || '').trim());
-  if (b.text !== undefined) upsert.run('offline_slate_text', String(b.text || '').trim());
-
-  restartAllSlateWorkers();
-  const nextCfg = getGlobalSlateConfig();
-  if (nextCfg.enabled) {
-    ensureSlateManifestForStream({ offline_slate_mode: 'global' }).catch(() => {});
-  }
-  res.json({ ok: true, config: nextCfg, files: listSlateFiles() });
+// El bucle de respaldo global fue retirado: ahora cada canal decide su propio respaldo (o ninguno).
+// Este endpoint sólo lista los archivos subidos para poder elegirlos en un canal.
+app.get('/api/slates/files', requireAuth, (req, res) => {
+  res.json({ files: listSlateFiles() });
 });
 
 app.post(
@@ -767,7 +743,7 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
       String(b.user_agent || 'TVLister/2.3'),
       Number(b.tv_archive_days) || 0,
       Number(b.bitrate_kbps) || 2500,
-      String(b.offline_slate_mode || 'global'),
+      String(b.offline_slate_mode || 'disabled'),
       String(b.offline_slate_url || ''),
       String(b.audio_leveling_mode || 'global')
     );
@@ -831,7 +807,7 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
       String(b.user_agent || 'TVLister/2.3'),
       Number(b.tv_archive_days) || 0,
       nextBitrateKbps,
-      String(b.offline_slate_mode || 'global'),
+      String(b.offline_slate_mode || 'disabled'),
       String(b.offline_slate_url || ''),
       String(b.audio_leveling_mode || 'global'),
       id

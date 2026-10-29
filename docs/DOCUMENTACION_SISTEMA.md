@@ -772,3 +772,32 @@ El plan refresca cada 4 s: estado (`connecting`/`streaming`/`reconnecting`), mot
 - `muxrate 4000`: salida medida **4002 kbps** constante con null packets `0x1FFF`.
 - Multicast real (`239.25.0.4/5` por `eth0`): 2.5 y 1.9 Mbps, `Program/Service_id = canal`, 100 % sync.
 - `-progress`: `3447 kbps / 5083 paquetes` en el panel, creciendo en tiempo real.
+
+### 8.13. Bucle de respaldo global retirado (respaldo sólo por canal)
+
+Antes, si un canal se caía, el panel reproducía una imagen o video en bucle **en todos los canales** desde un
+único ajuste global (`/api/slates/config`, botón "Bucle Sin Stream"). Eso ya no existe.
+
+**Qué cambió**
+
+- Se eliminó el ajuste global y su modal. Los endpoints `GET/PUT /api/slates/config` ya no responden
+  (sólo queda `GET /api/slates/files` para listar los archivos subidos y poder elegirlos por canal).
+- `resolveEffectiveSlateForStream()` sólo devuelve un respaldo si el **propio canal** tiene
+  `offline_slate_mode = custom_image | custom_video` y una URL. Cualquier otro valor (`global`, `builtin`,
+  vacío, `disabled`) significa **sin respaldo**.
+- El valor por defecto al crear un canal es `disabled`, y una migración convierte los canales existentes
+  con `global`/`builtin` a `disabled` al arrancar.
+- Si el archivo local del respaldo se borra, el canal se considera sin respaldo (no queda en negro).
+- Los presets masivos (Copy/Copy, Zero Latency, Directo) ya no activan ningún bucle.
+
+**Cómo queda el comportamiento**
+
+| Ajuste del canal | Si el origen falla |
+|---|---|
+| Sin respaldo (`disabled`, valor por defecto) | El reproductor recibe el `503` real del canal |
+| Imagen propia en bucle | Se sirve el HLS del bucle (header `X-TVLister-Fallback: offline-slate-loop`) |
+| Video propio en bucle | Igual, con el video en loop |
+
+**Verificado:** canal con origen roto y modo `disabled` → `HTTP 503` sin bucle; el mismo canal con
+`custom_image` y un PNG subido por `/api/slates/upload` → `HTTP 200` con el manifiesto del bucle;
+`modo global/builtin` resuelve a sin respaldo; canal nuevo creado por API nace en `disabled`.
