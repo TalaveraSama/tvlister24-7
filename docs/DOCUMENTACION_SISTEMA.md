@@ -282,7 +282,7 @@ Suponiendo que tu servidor responde en `http://TU_IP:8095` (o `https://tv.tudomi
 
 Cuando entras por SSH como `root` a tu servidor Ubuntu, dispones del comando global **`tvlister-admin`**.
 
-* Ejecutar solo `tvlister-admin` abre el **menú interactivo numerado `[1-14]`**.
+* Ejecutar solo `tvlister-admin` abre el **menú interactivo numerado `[1-16]`**.
 * También puedes ejecutar cada acción directamente:
 
 ```bash
@@ -326,6 +326,15 @@ tvlister-admin list-ports
 
 # Instalar y activar el Servidor de Ingesta RTMP (:1935) + SRT (:8890 UDP) + RTSP (:8554) (Zero-Apt)
 tvlister-admin install-ingest
+
+# Motor FFmpeg: ver binario en uso, versión y las 8 rutas candidatas (XUI.one incluido)
+tvlister-admin ffmpeg status
+
+# Fijar el binario: auto | xui | xui44 | xui43 | xui40 | xuilegacy | runtime | bundled | system
+tvlister-admin ffmpeg use xui44
+
+# Descargar un FFmpeg estático moderno en /opt/tvlister24-7/.runtime/bin (zero-apt, con respaldo)
+tvlister-admin ffmpeg install
 
 # Actualizar el panel a la última versión de GitHub sin perder base de datos ni puerto
 tvlister-admin update
@@ -1000,6 +1009,18 @@ arranque con imagen. TVLister replica el efecto sin duplicar datos en vivo:
 - Las respuestas `.ts` llevan `X-Accel-Buffering: no` (no acumular búfer si hay nginx delante).
 - Estadísticas de los últimos 5 minutos en `GET /api/system/ffmpeg-efficiency` → `prebuffer`
   (`waits`, `satisfied`, `timedOut`, `avgMs`) y en las tarjetas de la página **Motor FFmpeg**.
+
+**c) Administración desde SSH (`tvlister-admin ffmpeg`)**
+
+| Comando | Qué hace |
+|---|---|
+| `tvlister-admin ffmpeg status` | Binario en uso, versión, procedencia, preferencia y tabla de las 8 rutas candidatas con su versión real |
+| `tvlister-admin ffmpeg use <id\|auto\|xui>` | Guarda `ffmpeg_bin_preference` en la base de datos (`xui` elige la mejor compilación de XUI.one disponible) |
+| `tvlister-admin ffmpeg install` | Descarga un FFmpeg estático (GitHub 6.1.1 → johnvansickle → paquete npm como espejos), lo deja en `.runtime/bin/ffmpeg`, respalda el anterior y fija la preferencia `runtime` |
+
+El instalador (`install_ubuntu.sh`) ya no se queda con `bin/ffmpeg` de XUI.one: detecta
+`ffmpeg_bin/4.4`, `4.3` y `4.0` y genera un **wrapper auto-reparable** en `.runtime/bin/ffmpeg` que
+vuelve a elegir el binario en cada ejecución (si XUI.one cambia de versión, sigue funcionando).
 
 **Verificado** con un origen HLS real en el sandbox: `?prebuffer=6` con la ventana llena →
 `Wait: 0 / ready`; canal frío con `prebufferWaitMs=3000` → `Wait: 3014 / timeout` sirviendo los
