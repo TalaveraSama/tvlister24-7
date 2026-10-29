@@ -565,6 +565,15 @@ function runInitDbBody() {
   ensureColumn('wk2500_units', 'enabled', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn('wk2500_units', 'notes', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('wk2500_units', 'updated_at', 'TEXT');
+  // Perfil de modulador: marca/modelo, estándar de TV y transporte aceptado por el equipo
+  ensureColumn('wk2500_units', 'brand_model', "TEXT NOT NULL DEFAULT 'generic_2500'");
+  ensureColumn('wk2500_units', 'tv_standard', "TEXT NOT NULL DEFAULT 'ntsc_m'");
+  ensureColumn('wk2500_units', 'pkt_size', 'INTEGER NOT NULL DEFAULT 1316');
+  ensureColumn('wk2500_units', 'rtp', 'INTEGER NOT NULL DEFAULT 0');
+  // Overrides por canal: 0 = hereda del equipo, 1 = valor propio
+  ensureColumn('wk2500_channels', 'pkt_size', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('wk2500_channels', 'rtp', 'INTEGER NOT NULL DEFAULT -1');
+  ensureColumn('wk2500_channels', 'freq_locked', 'INTEGER NOT NULL DEFAULT 0');
 
   ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('bouquets', 'xui_id', 'INTEGER');

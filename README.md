@@ -75,6 +75,12 @@ Con **4 equipos de 32 canales** el panel reparte la grilla completa en un clic: 
 que excedan la capacidad del modelo o que se solapen con otro equipo, y avisa si algún canal queda sin
 modulador. Ver `docs/DOCUMENTACION_SISTEMA.md` §8.22.
 
+Cada equipo se declara con **su marca y modelo** — `CATVSCOPE CSP-2500C` (32 en 1, el más común),
+`Wolck WK-2500C`, `Softel SFT2500C`, `SKD1709B`, `CatCast`, `Ustarlink`, `Shineco` o **genérico** — y con
+**estándar de TV** (`NTSC-M` por defecto en Nicaragua, más PAL B/G, D/K, I, N y M) y **transporte**
+(UDP o UDP+RTP, datagramas de 1316 o 188 bytes). El plan de frecuencias cambia automáticamente con el
+estándar y cualquier canal puede forzar su MHz (HRC/IRC). Ver §8.23.
+
 ---
 
 ## Instalación con Docker Compose

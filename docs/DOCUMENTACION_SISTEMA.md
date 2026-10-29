@@ -1221,3 +1221,72 @@ proveedor agrega canales. En multicast el panel avanza la **tercera octeta** por
 **UI**: tarjetas por equipo con barra de capacidad usada, destino UDP, NIC y accesos *Aplicar / Editar /
 Eliminar*; filtro de la grilla por equipo; badge con el nombre del equipo en cada canal y la etiqueta
 `sin modulador` en los números que ningún equipo cubre.
+
+### 8.23. Perfiles de modulador: CSP-2500C, WK-2500C y clones (marca, estándar y transporte)
+
+Los moduladores IP→analógico **no tienen protocolo propietario**: reciben MPEG-TS sobre UDP (o UDP/RTP) y
+modulan a RF. Por eso el panel sirve igual con el **CATVSCOPE CSP-2500C**, el **Wolck WK-2500C**, el
+**Softel SFT2500C**, el **SKD1709B**, **CatCast**, **Ustarlink**, **Shineco** o cualquier clon genérico.
+Lo que sí cambia entre ellos es la **capacidad**, el **estándar de TV** y el **transporte** aceptado; ahora
+cada equipo se declara con su perfil.
+
+**Ficha del CSP-2500C** (la que usa este panel por defecto para ese modelo)
+
+| Dato | Valor |
+| --- | --- |
+| Entrada | 2 puertos GE, máx. 64 entradas IP, 840 Mbps por puerto |
+| Transporte | **UDP / UDP-RTP**, unicast y multicast, IGMP v2/v3, **1–7 paquetes por datagrama**, SPTS/MPTS, 188/204 bytes |
+| Salidas RF | **32 portadoras** ágiles, 75 Ω F, 47–862 MHz, hasta 112 dBµV |
+| Estándares | **NTSC M/J/4.43, PAL B/G/D/K/M/N** (SECAM en desarrollo) |
+| Gestión | puerto **NMS** 100 Base-T independiente de los GE de datos (web) |
+
+**Perfil por equipo (`wk2500_units`)**
+
+| Campo | Valores | Para qué sirve |
+| --- | --- | --- |
+| `brand_model` | `csp_2500c`, `wolck_wk2500c`, `softel_sft2500c`, `skd1709b`, `catcast_2500`, `ustarlink_ws_m64`, `shineco_snk6388c`, `generic_2500` | Trae valores por defecto y documenta el equipo |
+| `tv_standard` | `ntsc_m` (Nicaragua), `ntsc_j`, `pal_m`, `pal_n`, `pal_bg`, `pal_dk`, `pal_i` | Define **frecuencia exacta del canal** y **separación de audio** |
+| `pkt_size` | `1316` (7×188, el clásico) o `188` (1×188) | Tamaño del datagrama UDP |
+| `rtp` | `0` / `1` | Envuelve el TS en RTP (muxer `rtp_mpegts`, PT 33) |
+
+**Plan de frecuencias por estándar** (`server/catvPlan.js`)
+
+- `ntsc_m`, `ntsc_j`, `pal_m`, `pal_n` → plan **EIA-542 STD cable** (6 MHz, video = borde + 1.25,
+  audio +4.5 MHz). CH 2 = 55.25 MHz, CH 125 = 799.25 MHz.
+- `pal_bg`, `pal_dk`, `pal_i` → plan **CCIR/CENELEC** (E2–E4, S1–S10, E5–E12, S11–S20, E21–E69;
+  audio +5.5 / +6.5 / +6.0 MHz). CH 2 = 48.25 MHz … CH 81 = 855.25 MHz; por encima de 81 la API avisa.
+- Cualquier canal puede **forzar su frecuencia** (HRC/IRC o ajuste fino): se edita el MHz en la columna
+  *Frecuencia RF* y queda marcado en ámbar; el botón **↺** vuelve al plan del estándar.
+
+**Transporte verificado en laboratorio**
+
+| Modo | Comprobación |
+| --- | --- |
+| UDP `pkt_size=1316` | Datagramas de 1316 bytes exactos, 0x47 al inicio |
+| UDP `pkt_size=188` | Un paquete TS por datagrama (188 bytes) |
+| UDP+RTP | Cabecera RTP v2, **payload type 33 (MPEG-TS)**, TS sincronizado en el byte 12 |
+
+El motor directo en Node (sin FFmpeg) emite `pkt_size` 188 o 1316; cuando el equipo pide RTP el canal pasa
+automáticamente por FFmpeg con `-f rtp_mpegts` para llevar timestamps correctos.
+
+**Puesta en marcha del CSP-2500C (paso a paso)**
+
+1. Conecta el puerto **GE de datos** del modulador al mismo switch que la NIC dedicada del panel.
+2. En la web del modulador (puerto **NMS**), asigna IP/red al GE y define el **estándar NTSC-M** y el nivel
+   de salida RF.
+3. En el panel: *UDP / CATV* → **Armado rápido** → marca `CATVSCOPE CSP-2500C`, estándar `NTSC M`, modelo
+   32, cantidad = número de equipos, IP base = IP del primer modulador.
+4. En la web del modulador crea una entrada por canal: `udp://IP:PUERTO` → número de canal RF y
+   frecuencia (el CSV del panel trae canal, MHz de video, MHz de audio, UDP y transporte listos para copiar).
+5. Asigna en el panel qué canal va en cada número y pulsa **Activar asignados**.
+6. Verifica en el panel los Mbps reales por canal y, en el modulador, que cada entrada esté *online*.
+
+**Diagnóstico rápido de "no modula"**
+
+| Síntoma | Causa habitual | Solución |
+| --- | --- | --- |
+| Canal online en el panel pero TV sin imagen | En el modulador la entrada UDP apunta a otro puerto/canal | Revisa `udp://host:puerto` en la web del equipo (puerto = base + canal) |
+| Imagen con nieve o sin color | Estándar distinto (PAL vs NTSC) o frecuencia desviada | Pon el mismo estándar en panel y modulador; ajusta MHz si usas HRC/IRC |
+| Se ve pero sin audio | Separación de audio del estándar (+4.5 / +5.5 / +6.5) | Usa el perfil `copy_mp2_leveled` y el estándar correcto |
+| El modulador marca la entrada como *offline* | Datagramas de tamaño no soportado o RTP no esperado | Cambia `pkt_size` a 1316/188 o activa/desactiva RTP según el equipo |
+| Dos canales se pisan | Dos números RF iguales en equipos distintos | El panel ya lo bloquea (409); corrige los rangos |

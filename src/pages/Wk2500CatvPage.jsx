@@ -83,7 +83,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     base_port: 5000,
     ttl: 16,
     output_mode: 'direct_spts',
-    replace_existing: true
+    replace_existing: true,
+    brand_model: 'csp_2500c',
+    tv_standard: 'ntsc_m',
+    pkt_size: 1316,
+    rtp: false
   });
   const [quickBusy, setQuickBusy] = useState(false);
 
@@ -217,7 +221,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     ttl: 16,
     default_output_mode: 'direct_spts',
     enabled: true,
-    notes: ''
+    notes: '',
+    brand_model: 'csp_2500c',
+    tv_standard: 'ntsc_m',
+    pkt_size: 1316,
+    rtp: false
   });
 
   const openNewUnit = () => {
@@ -243,7 +251,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         ttl: unit.ttl,
         default_output_mode: unit.default_output_mode,
         enabled: Boolean(unit.enabled),
-        notes: unit.notes || ''
+        notes: unit.notes || '',
+        brand_model: unit.brand_model || 'generic_2500',
+        tv_standard: unit.tv_standard || 'ntsc_m',
+        pkt_size: Number(unit.pkt_size || 1316),
+        rtp: Boolean(unit.rtp)
       }
     });
   };
@@ -260,8 +272,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       await loadPlan(true);
       setUnitModal(null);
       showToast(
-        `✅ ${res.unit.name}: ${res.unit.model_channels} canales, CH ${res.unit.ch_start}–${res.unit.ch_end}. ` +
-          `${res.applied?.channels || 0} canales de la grilla reapuntados a udp://${res.unit.dest_ip}:${res.unit.base_port}.`
+        `✅ ${res.unit.name}: ${res.unit.model_channels} canales, CH ${res.unit.ch_start}–${res.unit.ch_end}, ` +
+          `${res.unit.tv_standard} · ${res.unit.pkt_size}B${Number(res.unit.rtp) ? ' + RTP' : ''}. ` +
+          `${res.applied?.channels || 0} canales reapuntados a udp://${res.unit.dest_ip}:${res.unit.base_port}.`
       );
     } catch (err) {
       setErrorNotice(err.message);
@@ -325,7 +338,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           dest_ip: quickForm.dest_ip,
           base_port: Number(quickForm.base_port),
           ttl: Number(quickForm.ttl),
-          default_output_mode: quickForm.output_mode
+          default_output_mode: quickForm.output_mode,
+          brand_model: quickForm.brand_model,
+          tv_standard: quickForm.tv_standard,
+          pkt_size: Number(quickForm.pkt_size),
+          rtp: Boolean(quickForm.rtp)
         })
       });
       await loadPlan(true);
@@ -450,6 +467,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     uncovered_ranges: '2–125',
     uncovered_list: []
   };
+  const brands = plan?.brands || [];
+  const tvStandards = plan?.tv_standards || [{ id: 'ntsc_m', label: 'NTSC M', short: 'NTSC-M', audio_offset_mhz: 4.5 }];
+  const pktSizes = plan?.pkt_sizes || [188, 1316];
   const unitFilterId = unitFilter === 'all' ? null : Number(unitFilter);
 
   const slotMapByCh = new Map(slots.map((s) => [s.catv_ch, s]));
@@ -588,9 +608,46 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-300">
             <Wand2 className="w-3.5 h-3.5 text-emerald-400" /> Armado rápido de equipos
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-2 text-xs items-end">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2 text-xs items-end">
+            <div className="xl:col-span-2">
+              <label className="text-[10px] text-slate-400 block mb-0.5">Marca / modelo del modulador</label>
+              <select
+                value={quickForm.brand_model}
+                onChange={(e) => {
+                  const b = brands.find((x) => x.id === e.target.value);
+                  setQuickForm({
+                    ...quickForm,
+                    brand_model: e.target.value,
+                    tv_standard: b?.default_standard || quickForm.tv_standard,
+                    pkt_size: b?.default_pkt_size || quickForm.pkt_size,
+                    rtp: Boolean(b?.default_rtp)
+                  });
+                }}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+              >
+                {(brands.length ? brands : [{ id: 'generic_2500', label: 'Genérico IP→analógico' }]).map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div>
-              <label className="text-[10px] text-slate-400 block mb-0.5">Modelo</label>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Estándar de TV</label>
+              <select
+                value={quickForm.tv_standard}
+                onChange={(e) => setQuickForm({ ...quickForm, tv_standard: e.target.value })}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+              >
+                {tvStandards.map((st) => (
+                  <option key={st.id} value={st.id}>
+                    {st.short} (audio +{st.audio_offset_mhz} MHz)
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Modelo (canales)</label>
               <select
                 value={quickForm.model_channels}
                 onChange={(e) => setQuickForm({ ...quickForm, model_channels: Number(e.target.value) })}
@@ -663,6 +720,31 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                 onChange={(e) => setQuickForm({ ...quickForm, base_port: Number(e.target.value) })}
                 className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-cyan-300 font-mono"
               />
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Datagrama</label>
+              <select
+                value={quickForm.pkt_size}
+                onChange={(e) => setQuickForm({ ...quickForm, pkt_size: Number(e.target.value) })}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+              >
+                {pktSizes.map((n) => (
+                  <option key={n} value={n}>
+                    {n} B {n === 1316 ? '(7×188)' : '(1×188)'}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-end">
+              <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-300 pb-1.5">
+                <input
+                  type="checkbox"
+                  checked={Boolean(quickForm.rtp)}
+                  onChange={(e) => setQuickForm({ ...quickForm, rtp: e.target.checked })}
+                  className="accent-emerald-500"
+                />
+                UDP + RTP
+              </label>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -744,9 +826,27 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                   udp://{u.dest_ip}:{u.base_port}
                   <span className="text-slate-500"> → puerto CH+N</span>
                 </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="rounded bg-sky-500/12 border border-sky-500/30 px-1.5 py-0.5 text-[9.5px] font-bold text-sky-300">
+                    {u.tv_standard_label || 'NTSC-M'}
+                  </span>
+                  <span className="rounded bg-violet-500/12 border border-violet-500/30 px-1.5 py-0.5 text-[9.5px] font-bold text-violet-300">
+                    {u.pkt_size} B {u.rtp ? '+ RTP' : 'UDP'}
+                  </span>
+                  <span
+                    title={`${u.brand?.label || 'Genérico'}${u.brand?.notes ? ` — ${u.brand.notes}` : ''}`}
+                    className="rounded bg-slate-700/40 border border-slate-600 px-1.5 py-0.5 text-[9.5px] font-semibold text-slate-300"
+                  >
+                    {u.brand?.label || 'Genérico'}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  RF {u.range_freq?.from_mhz || '—'}–{u.range_freq?.to_mhz || '—'} MHz · audio +
+                  {u.audio_offset_mhz ?? 4.5} MHz
+                </div>
                 <div className="text-[10px] text-slate-400">
                   NIC: {u.local_interface_ip || dedicatedNic.ip_address || 'automática'} · TTL {u.ttl} ·{' '}
-                  {u.default_output_mode === 'direct_spts' ? 'Directo 1316B' : u.default_output_mode}
+                  {u.default_output_mode === 'direct_spts' ? 'Directo' : u.default_output_mode}
                 </div>
 
                 <div className="flex items-center gap-1.5 pt-0.5">
@@ -1293,8 +1393,41 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                           </div>
                         </td>
                         <td className="px-3 py-2">
-                          <div className="font-mono font-bold text-slate-200">{slot.freq_mhz} MHz</div>
-                          <div className="text-[10px] text-slate-500">{slot.band_label}</div>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              step="0.25"
+                              key={`f-${slot.catv_ch}-${slot.freq_mhz}-${slot.freq_locked}`}
+                              defaultValue={slot.freq_mhz}
+                              title="Frecuencia de video. Edítala sólo si tu plan usa HRC/IRC u otra grilla."
+                              onBlur={(e) => {
+                                const v = Number(e.target.value);
+                                if (Number.isFinite(v) && v > 40 && v < 1000 && v !== slot.freq_mhz) {
+                                  handleSlotChange(slot.catv_ch, { freq_mhz: v, freq_locked: true });
+                                }
+                              }}
+                              className={`w-20 rounded bg-[#090e1a] border px-1.5 py-1 text-[11px] font-mono font-bold ${
+                                slot.freq_locked
+                                  ? 'border-amber-500/50 text-amber-300'
+                                  : 'border-slate-700 text-slate-200'
+                              }`}
+                            />
+                            <span className="text-[10px] text-slate-500">MHz</span>
+                            {slot.freq_locked ? (
+                              <button
+                                type="button"
+                                title="Volver al plan del estándar del equipo"
+                                onClick={() => handleSlotChange(slot.catv_ch, { freq_locked: false })}
+                                className="rounded border border-slate-700 px-1 text-[10px] text-slate-300 hover:bg-slate-800"
+                              >
+                                ↺
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {slot.unit_standard_short || 'NTSC-M'} · audio {slot.audio_mhz} MHz
+                          </div>
+                          <div className="text-[10px] text-slate-600">{slot.band_label}</div>
                         </td>
                         <td className="px-3 py-2">
                           <select
@@ -1450,6 +1583,52 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                 />
               </div>
 
+              <div className="sm:col-span-2">
+                <label className="mb-1 block text-[11px] text-slate-300">Marca / modelo del modulador</label>
+                <select
+                  value={modalUnit.form.brand_model}
+                  onChange={(e) => {
+                    const b = brands.find((x) => x.id === e.target.value);
+                    setUnitModal({
+                      ...modalUnit,
+                      form: {
+                        ...modalUnit.form,
+                        brand_model: e.target.value,
+                        tv_standard: b?.default_standard || modalUnit.form.tv_standard,
+                        pkt_size: b?.default_pkt_size || modalUnit.form.pkt_size,
+                        rtp: Boolean(b?.default_rtp)
+                      }
+                    });
+                  }}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-white"
+                >
+                  {(brands.length ? brands : [{ id: 'generic_2500', label: 'Genérico IP→analógico' }]).map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.label}
+                    </option>
+                  ))}
+                </select>
+                {(() => {
+                  const b = brands.find((x) => x.id === modalUnit.form.brand_model);
+                  return b?.notes ? <p className="mt-1 text-[10px] leading-snug text-slate-500">{b.notes}</p> : null;
+                })()}
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">Estándar de TV (define frecuencia y audio)</label>
+                <select
+                  value={modalUnit.form.tv_standard}
+                  onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, tv_standard: e.target.value } })}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-white"
+                >
+                  {tvStandards.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.label} · audio +{st.audio_offset_mhz} MHz
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="mb-1 block text-[11px] text-slate-300">Modelo (canales de salida)</label>
                 <select
@@ -1582,6 +1761,37 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">Tamaño de datagrama</label>
+                <select
+                  value={modalUnit.form.pkt_size}
+                  onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, pkt_size: Number(e.target.value) } })}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-white"
+                >
+                  {pktSizes.map((n) => (
+                    <option key={n} value={n}>
+                      {n} bytes {n === 1316 ? '(7 × 188, el clásico)' : '(1 × 188)'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">Transporte</label>
+                <label className="flex items-center gap-2 rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-[11px] text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(modalUnit.form.rtp)}
+                    onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, rtp: e.target.checked } })}
+                    className="accent-emerald-500"
+                  />
+                  Envolver en RTP (UDP + RTP)
+                </label>
+                <p className="mt-1 text-[10px] text-slate-500">
+                  Actívalo si el modulador exige UDP/RTP. Con RTP el canal se emite por FFmpeg para llevar timestamps correctos.
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-2">

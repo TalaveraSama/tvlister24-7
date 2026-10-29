@@ -1,4 +1,16 @@
 import dgram from 'node:dgram';
+import {
+  TV_STANDARDS,
+  TV_STANDARD_IDS,
+  DEFAULT_TV_STANDARD,
+  MODULATOR_BRANDS,
+  PKT_SIZES,
+  getTvStandard,
+  getModulatorBrand,
+  getCatvChannelInfo,
+  maxChannelForStandard,
+  standardCoverage
+} from './catvPlan.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
@@ -23,43 +35,42 @@ const udpWorkers = new Map();
  * Official EIA/CEA-542 NTSC-M Standard (STD) Cable TV Frequency Plan — Channels 2 through 125.
  * 6 MHz channel bandwidth; Visual Carrier = Lower Band Edge + 1.25 MHz; Audio Carrier = Visual + 4.50 MHz.
  */
-export function getCatvStdChannelInfo(catvCh) {
-  const ch = Number(catvCh);
-  let freqMhz = 55.25;
-  let bandLabel = 'VHF Bajo';
+export function getCatvStdChannelInfo(catvCh, standardId = DEFAULT_TV_STANDARD, overrideMhz = null) {
+  // El plan vive en server/catvPlan.js: NTSC-M (EIA-542) o PAL (CCIR/CENELEC),
+  // con la separación de audio propia de cada estándar.
+  return getCatvChannelInfo(catvCh, standardId, overrideMhz);
+}
 
-  if (ch >= 2 && ch <= 4) {
-    freqMhz = 54 + (ch - 2) * 6 + 1.25;
-    bandLabel = 'VHF Bajo (2–4)';
-  } else if (ch >= 5 && ch <= 6) {
-    freqMhz = 76 + (ch - 5) * 6 + 1.25;
-    bandLabel = 'VHF Bajo (5–6)';
-  } else if (ch >= 7 && ch <= 13) {
-    freqMhz = 174 + (ch - 7) * 6 + 1.25;
-    bandLabel = 'VHF Alto (7–13)';
-  } else if (ch >= 14 && ch <= 22) {
-    freqMhz = 120 + (ch - 14) * 6 + 1.25;
-    bandLabel = 'Banda Media (14–22)';
-  } else if (ch >= 23 && ch <= 36) {
-    freqMhz = 216 + (ch - 23) * 6 + 1.25;
-    bandLabel = 'Superbanda (23–36)';
-  } else if (ch >= 37 && ch <= 94) {
-    freqMhz = 300 + (ch - 37) * 6 + 1.25;
-    bandLabel = 'Hiperbanda (37–94)';
-  } else if (ch >= 95 && ch <= 99) {
-    freqMhz = 90 + (ch - 95) * 6 + 1.25;
-    bandLabel = 'FM Baja A-5..A-1 (95–99)';
-  } else if (ch >= 100 && ch <= 125) {
-    freqMhz = 648 + (ch - 100) * 6 + 1.25;
-    bandLabel = 'Ultrabanda (100–125)';
+/**
+ * Transporte efectivo del canal: el canal puede heredar del equipo (0 / -1)
+ * o forzar su propio tamaño de datagrama y RTP.
+ */
+export function resolveEffectiveTransport(slotRow = {}, unitRow = null) {
+  const unitPkt = Number(unitRow?.pkt_size || 0) || 1316;
+  const unitRtp = Number(unitRow?.rtp || 0) === 1;
+  const ownPkt = Number(slotRow?.pkt_size || 0);
+  const ownRtp = Number(slotRow?.rtp ?? -1);
+  const pktSize = PKT_SIZES.includes(ownPkt) ? ownPkt : PKT_SIZES.includes(unitPkt) ? unitPkt : 1316;
+  const rtp = ownRtp === 0 || ownRtp === 1 ? ownRtp === 1 : unitRtp;
+  return { pktSize, rtp };
+}
+
+/** Equipo al que pertenece un canal (por unit_id o por rango). */
+function unitForSlot(slotRow = {}) {
+  if (slotRow.unit_id) {
+    const byId = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(Number(slotRow.unit_id));
+    if (byId) return byId;
   }
+  const row = db
+    .prepare('SELECT * FROM wk2500_units WHERE enabled = 1 AND ? BETWEEN ch_start AND ch_end ORDER BY ch_start ASC LIMIT 1')
+    .get(Number(slotRow.catv_ch) || 0);
+  return row || null;
+}
 
-  return {
-    catv_ch: ch,
-    freq_mhz: Number(freqMhz.toFixed(2)),
-    audio_mhz: Number((freqMhz + 4.5).toFixed(2)),
-    band_label: bandLabel
-  };
+/** Estándar de TV efectivo del canal (el del equipo; NTSC-M si no hay equipo). */
+function standardForSlot(slotRow = {}, unitRow = null) {
+  const unit = unitRow || unitForSlot(slotRow);
+  return getTvStandard(unit?.tv_standard || DEFAULT_TV_STANDARD);
 }
 
 export function computeDefaultUdpAddress(catvCh, ipMode = 'multicast', destIp = '239.25.0.0', basePort = 5000) {
@@ -280,12 +291,18 @@ export function resolveEffectiveBindIp(slotRow = {}) {
  * Aligns incoming MPEG-TS stream to 0x47 188-byte sync boundaries and emits exact
  * 1316-byte (7 x 188B) SPTS UDP payloads required by WK2500 IP-to-Analog hardware.
  */
-export class Ts1316Packetizer {
-  constructor(onPacket1316) {
+export class TsUdpPacketizer {
+  /**
+   * @param {(pkt: Buffer) => void} onPacket
+   * @param {number} pktSize 1316 (7×188, el clásico de estos moduladores) o 188
+   */
+  constructor(onPacket, pktSize = 1316) {
+    this.pktSize = PKT_SIZES.includes(Number(pktSize)) ? Number(pktSize) : 1316;
     this.buf = Buffer.alloc(0);
-    this.outAccum = Buffer.allocUnsafe(1316);
+    this.outAccum = Buffer.allocUnsafe(this.pktSize);
     this.outOffset = 0;
-    this.onPacket1316 = onPacket1316;
+    this.onPacket1316 = onPacket;
+    this.onPacket = onPacket;
   }
 
   push(chunk) {
@@ -319,13 +336,20 @@ export class Ts1316Packetizer {
       this.outOffset += 188;
       pos += 188;
 
-      if (this.outOffset === 1316) {
-        this.onPacket1316(Buffer.from(this.outAccum));
+      if (this.outOffset === this.pktSize) {
+        this.onPacket(Buffer.from(this.outAccum));
         this.outOffset = 0;
       }
     }
 
     this.buf = pos < len ? this.buf.subarray(pos) : Buffer.alloc(0);
+  }
+}
+
+/** Compatibilidad: el motor clásico siempre emitía 1316 bytes. */
+export class Ts1316Packetizer extends TsUdpPacketizer {
+  constructor(onPacket1316) {
+    super(onPacket1316, 1316);
   }
 }
 
@@ -365,6 +389,8 @@ function shouldUseDirectNodeUdpEngine(slotRow, rawUrl, localHls) {
   if (localHls) return false; // Local HLS manifest is best muxed to SPTS via FFmpeg -c copy
   if (slotRow.output_mode !== 'direct_spts') return false;
   if (Number(slotRow.muxrate_kbps) > 0) return false;
+  // RTP necesita timestamps correctos: lo hace FFmpeg con el muxer rtp_mpegts.
+  if (resolveEffectiveTransport(slotRow, unitForSlot(slotRow)).rtp) return false;
   const lower = String(rawUrl || '').trim().toLowerCase();
   if (!lower) return false;
   if (lower.startsWith('mnf://') || lower.startsWith('mnfs://') || lower.endsWith('.mnf')) return true;
@@ -376,20 +402,29 @@ function shouldUseDirectNodeUdpEngine(slotRow, rawUrl, localHls) {
   return false;
 }
 
-function buildUdpTargetFfmpegUrl(slotRow) {
-  const params = [`pkt_size=1316`, `ttl=${Math.max(1, Number(slotRow.ttl) || 16)}`, `buffer_size=1048576`];
+function buildUdpTargetFfmpegUrl(slotRow, transport = null) {
+  const t = transport || resolveEffectiveTransport(slotRow, unitForSlot(slotRow));
+  const params = [
+    `pkt_size=${t.pktSize}`,
+    `ttl=${Math.max(1, Number(slotRow.ttl) || 16)}`,
+    `buffer_size=1048576`
+  ];
   const bindIp = resolveEffectiveBindIp(slotRow);
   if (bindIp) {
     params.push(`localaddr=${encodeURIComponent(bindIp)}`);
   }
-  return `udp://${slotRow.udp_host}:${slotRow.udp_port}?${params.join('&')}`;
+  // rtp:// porque el muxer rtp_mpegts envuelve el TS completo en RTP (lo que
+  // aceptan los moduladores que exigen UDP+RTP).
+  const proto = t.rtp ? 'rtp' : 'udp';
+  return `${proto}://${slotRow.udp_host}:${slotRow.udp_port}?${params.join('&')}`;
 }
 
 function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
   const mode = slotRow.output_mode || 'direct_spts';
   const serviceId = Math.max(1, Number(slotRow.service_id) || Number(slotRow.catv_ch) || 1);
   const muxrate = Number(slotRow.muxrate_kbps) > 0 ? Number(slotRow.muxrate_kbps) * 1000 : 0;
-  const udpUrl = buildUdpTargetFfmpegUrl(slotRow);
+  const transport = resolveEffectiveTransport(slotRow, unitForSlot(slotRow));
+  const udpUrl = buildUdpTargetFfmpegUrl(slotRow, transport);
 
   const isPureCopy = mode === 'direct_spts';
   const isVideoCopy = mode !== 'ntsc_sd_wk2500';
@@ -539,7 +574,7 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
     '-flush_packets',
     '1',
     '-f',
-    'mpegts',
+    transport.rtp ? 'rtp_mpegts' : 'mpegts',
     udpUrl
   );
 
@@ -670,16 +705,18 @@ export function startWk2500ChannelWorker(catvCh) {
       });
     });
 
-    const packetizer = new Ts1316Packetizer((pkt1316) => {
+    const transport = resolveEffectiveTransport(freshSlot, unitForSlot(freshSlot));
+    state.engine = `direct_dgram_${transport.pktSize}`;
+    const packetizer = new TsUdpPacketizer((pkt) => {
       if (state.stopped) return;
-      socket.send(pkt1316, Number(freshSlot.udp_port), freshSlot.udp_host, (err) => {
+      socket.send(pkt, Number(freshSlot.udp_port), freshSlot.udp_host, (err) => {
         if (!err) {
           state.packetsSent += 1;
-          state.bytesWindow += pkt1316.length;
+          state.bytesWindow += pkt.length;
           markStreaming();
         }
       });
-    });
+    }, transport.pktSize);
 
     const ac = new AbortController();
     state.abortController = ac;
@@ -1026,6 +1063,31 @@ function parseUnitPayload(body = {}, existing = null, { unitsForOverlap = [] } =
     return { error: `Perfil de salida no soportado. Usa uno de: ${WK2500_OUTPUT_MODES.join(', ')}.`, status: 400 };
   }
 
+  // Perfil de marca/modelo: define por defecto estándar, tamaño de datagrama y RTP.
+  const brandId = String(body.brand_model ?? existing?.brand_model ?? 'generic_2500').trim();
+  const brand = getModulatorBrand(brandId);
+  const rawStandard = String(body.tv_standard ?? existing?.tv_standard ?? brand.default_standard ?? DEFAULT_TV_STANDARD);
+  if (!TV_STANDARD_IDS.includes(rawStandard)) {
+    return {
+      error: `Estándar de TV "${rawStandard}" no soportado. Usa uno de: ${TV_STANDARD_IDS.join(', ')}.`,
+      status: 400
+    };
+  }
+  const standard = getTvStandard(rawStandard);
+  const maxChForStd = maxChannelForStandard(standard.id);
+  if (chEnd > maxChForStd) {
+    return {
+      error: `Con ${standard.short} el plan de canales llega hasta el ${maxChForStd}; el rango pide hasta el ${chEnd}.`,
+      status: 400
+    };
+  }
+
+  const rawPkt = Number(body.pkt_size ?? existing?.pkt_size ?? brand.default_pkt_size ?? 1316);
+  if (!PKT_SIZES.includes(rawPkt)) {
+    return { error: `El tamaño de datagrama debe ser ${PKT_SIZES.join(' o ')} bytes (recibido: ${rawPkt}).`, status: 400 };
+  }
+  const rtp = body.rtp === undefined ? Number(existing?.rtp ?? (brand.default_rtp ? 1 : 0)) : body.rtp ? 1 : 0;
+
   const interfaceIp = String(body.local_interface_ip ?? existing?.local_interface_ip ?? '').trim();
   if (interfaceIp) {
     const hostIps = listHostIpv4Interfaces().map((x) => x.address);
@@ -1065,7 +1127,11 @@ function parseUnitPayload(body = {}, existing = null, { unitsForOverlap = [] } =
       ttl,
       default_output_mode: outputMode,
       enabled: body.enabled === undefined ? Number(existing?.enabled ?? 1) : body.enabled ? 1 : 0,
-      notes: String(body.notes ?? existing?.notes ?? '').trim()
+      notes: String(body.notes ?? existing?.notes ?? '').trim(),
+      brand_model: brand.id,
+      tv_standard: standard.id,
+      pkt_size: rawPkt,
+      rtp
     }
   };
 }
@@ -1078,6 +1144,7 @@ function applyUnitToChannels(unit) {
   const upd = db.prepare(
     `UPDATE wk2500_channels
      SET unit_id = ?, udp_host = ?, udp_port = ?, local_interface_ip = ?, ttl = ?, output_mode = ?,
+         freq_mhz = CASE WHEN freq_locked = 1 THEN freq_mhz ELSE ? END,
          updated_at = datetime('now')
      WHERE catv_ch = ?`
   );
@@ -1087,7 +1154,17 @@ function applyUnitToChannels(unit) {
     try {
       for (let ch = unit.ch_start; ch <= unit.ch_end; ch++) {
         const addr = computeDefaultUdpAddress(ch, unit.ip_mode, unit.dest_ip, unit.base_port);
-        upd.run(unit.id, addr.udp_host, addr.udp_port, unit.local_interface_ip || '', unit.ttl, unit.default_output_mode, ch);
+        const info = getCatvStdChannelInfo(ch, unit.tv_standard);
+        upd.run(
+          unit.id,
+          addr.udp_host,
+          addr.udp_port,
+          unit.local_interface_ip || '',
+          unit.ttl,
+          unit.default_output_mode,
+          info.freq_mhz,
+          ch
+        );
         touched.push(ch);
       }
       db.exec('COMMIT;');
@@ -1210,7 +1287,9 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
   const streamToCatvMap = new Map();
 
   const enrichedSlots = slots.map((row) => {
-    const info = getCatvStdChannelInfo(row.catv_ch);
+    const unitRow = unitById.get(Number(row.unit_id)) || activeUnits.find((u) => findUnitForChannel([u], row.catv_ch)) || null;
+    const info = getCatvStdChannelInfo(row.catv_ch, unitRow?.tv_standard || DEFAULT_TV_STANDARD, row.freq_locked ? row.freq_mhz : null);
+    const transport = resolveEffectiveTransport(row, unitRow);
     const w = udpWorkers.get(row.catv_ch);
     const liveStatus = w ? w.status : 'stopped';
     const bitrateKbps = w ? w.bitrateKbps : 0;
@@ -1222,8 +1301,7 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
     const effectiveInterfaceIp = resolveEffectiveBindIp(row);
     const matchedNic = interfaces.find((x) => x.address === effectiveInterfaceIp);
 
-    // El equipo se resuelve por unit_id y, si falta, por rango de canales.
-    const unitRow = unitById.get(Number(row.unit_id)) || activeUnits.find((u) => findUnitForChannel([u], row.catv_ch)) || null;
+    // El equipo se resolvió arriba (por unit_id y, si falta, por rango de canales).
     const stats = unitRow ? unitStats.get(Number(unitRow.id)) : null;
     const hasContent = Boolean(row.stream_id || row.custom_source_url);
     if (stats) {
@@ -1252,7 +1330,9 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
     return {
       ...row,
       enabled: Boolean(row.enabled),
+      freq_mhz: info.freq_mhz,
       audio_mhz: info.audio_mhz,
+      band_label: info.band_label,
       effective_name: row.custom_name || row.stream_name || '',
       effective_source: effectiveSource,
       effective_interface_ip: effectiveInterfaceIp,
@@ -1268,7 +1348,15 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
       unit_id: unitRow ? Number(unitRow.id) : null,
       unit_name: unitRow ? unitRow.name : '',
       unit_model_channels: unitRow ? unitCapacity(unitRow) : null,
-      covered_by_unit: Boolean(unitRow)
+      unit_tv_standard: unitRow?.tv_standard || DEFAULT_TV_STANDARD,
+      unit_standard_short: getTvStandard(unitRow?.tv_standard || DEFAULT_TV_STANDARD).short,
+      covered_by_unit: Boolean(unitRow),
+      // Transporte realmente usado por este canal (hereda del equipo o lo fuerza)
+      pkt_size_effective: transport.pktSize,
+      rtp_effective: transport.rtp,
+      pkt_size_own: Number(row.pkt_size || 0) || null,
+      rtp_own: Number(row.rtp ?? -1) === -1 ? null : Number(row.rtp) === 1,
+      freq_locked: Boolean(row.freq_locked)
     };
   });
 
@@ -1302,7 +1390,25 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
       streaming_channels: stats.streaming,
       udp_mbps: Number(stats.mbps.toFixed(2)),
       first_udp: computeDefaultUdpAddress(u.ch_start, u.ip_mode, u.dest_ip, u.base_port),
-      last_udp: computeDefaultUdpAddress(u.ch_end, u.ip_mode, u.dest_ip, u.base_port)
+      last_udp: computeDefaultUdpAddress(u.ch_end, u.ip_mode, u.dest_ip, u.base_port),
+      brand: getModulatorBrand(u.brand_model),
+      brand_model: u.brand_model || 'generic_2500',
+      tv_standard: u.tv_standard || DEFAULT_TV_STANDARD,
+      tv_standard_label: getTvStandard(u.tv_standard).short,
+      audio_offset_mhz: getTvStandard(u.tv_standard).audio_offset_mhz,
+      pkt_size: Number(u.pkt_size || 1316),
+      rtp: Number(u.rtp || 0) === 1,
+      range_freq: (() => {
+        const freqs = [];
+        for (let ch = Number(u.ch_start); ch <= Number(u.ch_end); ch++) {
+          const f = getCatvStdChannelInfo(ch, u.tv_standard).freq_mhz;
+          if (f > 0) freqs.push(f);
+        }
+        return {
+          from_mhz: freqs.length ? Math.min(...freqs) : 0,
+          to_mhz: freqs.length ? Math.max(...freqs) : 0
+        };
+      })()
     };
   });
 
@@ -1324,6 +1430,17 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
     },
     coverage,
     models: WK2500_MODELS,
+    brands: MODULATOR_BRANDS,
+    tv_standards: TV_STANDARDS,
+    pkt_sizes: PKT_SIZES,
+    standards_coverage: TV_STANDARDS.map((st) => ({
+      id: st.id,
+      short: st.short,
+      label: st.label,
+      audio_offset_mhz: st.audio_offset_mhz,
+      max_channel: maxChannelForStandard(st.id),
+      ...standardCoverage(st.id)
+    })),
     dedicated_nic: dedicatedNic,
     interfaces,
     unconfigured_nics: unconfiguredNics,
@@ -1366,8 +1483,9 @@ wk2500Router.post('/api/wk2500/units', requireAuth, requireAdmin, (req, res) => 
   const info = db
     .prepare(
       `INSERT INTO wk2500_units (name, ip_mode, dest_ip, base_port, local_interface_ip, ttl, ch_start, ch_end,
-                                 default_output_mode, model_channels, enabled, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                                 default_output_mode, model_channels, enabled, notes,
+                                 brand_model, tv_standard, pkt_size, rtp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       u.name,
@@ -1381,7 +1499,11 @@ wk2500Router.post('/api/wk2500/units', requireAuth, requireAdmin, (req, res) => 
       u.default_output_mode,
       u.model_channels,
       u.enabled,
-      u.notes
+      u.notes,
+      u.brand_model,
+      u.tv_standard,
+      u.pkt_size,
+      u.rtp
     );
 
   const unit = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(Number(info.lastInsertRowid));
@@ -1410,7 +1532,8 @@ wk2500Router.put('/api/wk2500/units/:id', requireAuth, requireAdmin, (req, res) 
   db.prepare(
     `UPDATE wk2500_units
      SET name = ?, ip_mode = ?, dest_ip = ?, base_port = ?, local_interface_ip = ?, ttl = ?,
-         ch_start = ?, ch_end = ?, default_output_mode = ?, model_channels = ?, enabled = ?, notes = ?
+         ch_start = ?, ch_end = ?, default_output_mode = ?, model_channels = ?, enabled = ?, notes = ?,
+         brand_model = ?, tv_standard = ?, pkt_size = ?, rtp = ?
      WHERE id = ?`
   ).run(
     u.name,
@@ -1425,6 +1548,10 @@ wk2500Router.put('/api/wk2500/units/:id', requireAuth, requireAdmin, (req, res) 
     u.model_channels,
     u.enabled,
     u.notes,
+    u.brand_model,
+    u.tv_standard,
+    u.pkt_size,
+    u.rtp,
     id
   );
 
@@ -1520,7 +1647,11 @@ wk2500Router.post('/api/wk2500/units/quick-setup', requireAuth, requireAdmin, (r
     base_port = 5000,
     local_interface_ip = '',
     ttl = 16,
-    default_output_mode = 'direct_spts'
+    default_output_mode = 'direct_spts',
+    brand_model = 'generic_2500',
+    tv_standard = DEFAULT_TV_STANDARD,
+    pkt_size = 1316,
+    rtp = false
   } = req.body || {};
 
   const model = modelInfoFor(model_channels);
@@ -1566,7 +1697,11 @@ wk2500Router.post('/api/wk2500/units/quick-setup', requireAuth, requireAdmin, (r
         local_interface_ip,
         ttl,
         default_output_mode,
-        enabled: 1
+        enabled: 1,
+        brand_model,
+        tv_standard,
+        pkt_size,
+        rtp
       },
       null,
       { unitsForOverlap: [...baseUnits, ...created] }
@@ -1580,8 +1715,9 @@ wk2500Router.post('/api/wk2500/units/quick-setup', requireAuth, requireAdmin, (r
     const info = db
       .prepare(
         `INSERT INTO wk2500_units (name, ip_mode, dest_ip, base_port, local_interface_ip, ttl, ch_start, ch_end,
-                                   default_output_mode, model_channels, enabled, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                                   default_output_mode, model_channels, enabled, notes,
+                                   brand_model, tv_standard, pkt_size, rtp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         u.name,
@@ -1595,7 +1731,11 @@ wk2500Router.post('/api/wk2500/units/quick-setup', requireAuth, requireAdmin, (r
         u.default_output_mode,
         u.model_channels,
         u.enabled,
-        u.notes
+        u.notes,
+        u.brand_model,
+        u.tv_standard,
+        u.pkt_size,
+        u.rtp
       );
     const row = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(Number(info.lastInsertRowid));
     applyUnitToChannels(row);
@@ -2220,6 +2360,33 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
     return res.status(400).json({ error: 'El TTL multicast debe ser un entero entre 1 y 255.' });
   }
 
+  // Frecuencia RF: heredada del plan del equipo o forzada por el operador (HRC/IRC/ajustes finos).
+  const unlockFreq = b.freq_locked === false || b.freq_mhz === null || b.freq_mhz === '' || b.freq_mhz === undefined;
+  const nextFreqLocked = b.freq_locked !== undefined ? (b.freq_locked ? 1 : 0) : existing.freq_locked;
+  let nextFreq = b.freq_mhz !== undefined && b.freq_mhz !== null && b.freq_mhz !== '' ? Number(b.freq_mhz) : existing.freq_mhz;
+  if (b.freq_mhz !== undefined && b.freq_mhz !== null && b.freq_mhz !== '') {
+    if (!Number.isFinite(nextFreq) || nextFreq < 40 || nextFreq > 1000) {
+      return res.status(400).json({ error: 'La frecuencia de video debe estar entre 40 y 1000 MHz.' });
+    }
+  }
+  let nextFreqLockedFinal = nextFreqLocked ? 1 : 0;
+  if (unlockFreq) nextFreqLockedFinal = 0;
+  if (nextFreqLockedFinal === 0 && b.freq_mhz === undefined) {
+    // Sin override activo se recalcula con el plan del equipo que cubre este canal.
+    const unitRow = unitForSlot({ ...existing, catv_ch: ch });
+    nextFreq = getCatvStdChannelInfo(ch, unitRow?.tv_standard || DEFAULT_TV_STANDARD).freq_mhz;
+  }
+
+  // Transporte por canal: 0 = heredar del equipo; 188/1316 = propio; rtp -1 = heredar
+  const nextPkt = b.pkt_size !== undefined ? Number(b.pkt_size) : Number(existing.pkt_size || 0);
+  if (nextPkt !== 0 && !PKT_SIZES.includes(nextPkt)) {
+    return res.status(400).json({ error: `El tamaño de datagrama debe ser 0 (heredar), ${PKT_SIZES.join(' o ')}.` });
+  }
+  const nextRtp = b.rtp === undefined ? Number(existing.rtp ?? -1) : b.rtp === null ? -1 : b.rtp ? 1 : 0;
+  if (![-1, 0, 1].includes(nextRtp)) {
+    return res.status(400).json({ error: 'rtp debe ser true, false o null (heredar del equipo).' });
+  }
+
   // El par host:puerto ya quedó validado como único, así que dos canales nunca comparten salida UDP.
   withSqliteBusyRetry(() => {
     db.prepare(
@@ -2227,7 +2394,8 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
        SET stream_id = ?, custom_name = ?, custom_source_url = ?,
            udp_host = ?, udp_port = ?, local_interface_ip = ?,
            output_mode = ?, muxrate_kbps = ?, enabled = ?,
-           service_id = ?, ttl = ?, updated_at = datetime('now')
+           service_id = ?, ttl = ?, freq_mhz = ?, freq_locked = ?,
+           pkt_size = ?, rtp = ?, updated_at = datetime('now')
        WHERE catv_ch = ?`
     ).run(
       nextStreamId,
@@ -2241,6 +2409,10 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
       nextEnabled,
       nextServiceId,
       nextTtl,
+      nextFreq,
+      nextFreqLockedFinal,
+      nextPkt,
+      nextRtp,
       ch
     );
   });
@@ -2346,11 +2518,23 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
     )
     .all();
 
+  const unitsById = new Map(listUnitRows().map((u) => [Number(u.id), u]));
+  const infoFor = (r) => {
+    const unit = unitsById.get(Number(r.unit_id)) || db
+      .prepare('SELECT * FROM wk2500_units WHERE enabled = 1 AND ? BETWEEN ch_start AND ch_end ORDER BY ch_start LIMIT 1')
+      .get(Number(r.catv_ch));
+    return {
+      info: getCatvStdChannelInfo(r.catv_ch, unit?.tv_standard || DEFAULT_TV_STANDARD, r.freq_locked ? r.freq_mhz : null),
+      unit,
+      transport: resolveEffectiveTransport(r, unit || null)
+    };
+  };
+
   if (format === 'm3u') {
     const out = ['#EXTM3U'];
     for (const r of rows) {
       const title = r.custom_name || r.stream_name || `CATV CH ${r.catv_ch}`;
-      const info = getCatvStdChannelInfo(r.catv_ch);
+      const { info } = infoFor(r);
       out.push(
         `#EXTINF:-1 tvg-chno="${r.catv_ch}" group-title="${info.band_label}",CH ${r.catv_ch} (${info.freq_mhz} MHz) - ${title}`
       );
@@ -2362,13 +2546,17 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
   }
 
   const csv = [
-    'Canal_CATV,Frecuencia_Video_MHz_NTSC_STD,Portadora_Audio_MHz,Banda_CATV,Nombre_Canal,IP_Destino_UDP,Puerto_UDP,Program_Service_ID,Modo_Salida,Activo_24_7'
+    'Canal_CATV,Estandar_TV,Frecuencia_Video_MHz,Portadora_Audio_MHz,Banda_CATV,Nombre_Canal,' +
+      'IP_Destino_UDP,Puerto_UDP,Transporte,Program_Service_ID,Modo_Salida,Equipo,Activo_24_7'
   ];
   for (const r of rows) {
-    const info = getCatvStdChannelInfo(r.catv_ch);
+    const { info, unit, transport } = infoFor(r);
     const title = String(r.custom_name || r.stream_name || '').replace(/"/g, '""');
+    const unitName = String(unit?.name || '').replace(/"/g, '""');
+    const tx = `UDP${transport.rtp ? '+RTP' : ''}/${transport.pktSize}B`;
     csv.push(
-      `${r.catv_ch},${info.freq_mhz},${info.audio_mhz},"${info.band_label}","${title}",${r.udp_host},${r.udp_port},${r.service_id},${r.output_mode},${r.enabled ? 'SI' : 'NO'}`
+      `${r.catv_ch},${info.standard_short},${info.freq_mhz},${info.audio_mhz},"${info.band_label}","${title}",` +
+        `${r.udp_host},${r.udp_port},${tx},${r.service_id},${r.output_mode},"${unitName}",${r.enabled ? 'SI' : 'NO'}`
     );
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
