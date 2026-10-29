@@ -461,18 +461,69 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     }
   };
 
+  // Descarga un CSV. Con unit → sólo las portadoras de ESE modulador, en su orden.
+  const downloadCsv = async (format, unit = null) => {
+    const qs = new URLSearchParams({ format });
+    if (unit) qs.set('unit_id', String(unit.id));
+    const resp = await fetch(`/api/wk2500/export-table?${qs.toString()}`, {
+      headers: { Authorization: `Bearer ${getToken()}` }
+    });
+    if (!resp.ok) throw new Error('No se pudo generar el CSV');
+
+    // Nombre del archivo tal como lo manda el servidor (equipo + rango de canales)
+    let filename = `wk2500_${format}_2_al_125.csv`;
+    const cd = resp.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    if (m) filename = m[1];
+
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return filename;
+  };
+
   const handleDownloadExport = async (format = 'csv') => {
     try {
-      const resp = await fetch(`/api/wk2500/export-table?format=${format}`, {
-        headers: { Authorization: `Bearer ${getToken()}` }
-      });
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = format === 'm3u' ? 'wk2500_udp_2_al_125.m3u' : 'wk2500_plan_canales_2_al_125.csv';
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadCsv(format);
+      showToast(`⬇ Plan completo descargado (${format === 'm3u' ? 'M3U' : 'CSV'}).`);
+    } catch (err) {
+      setErrorNotice(err.message);
+    }
+  };
+
+  // Un CSV por modulador: es lo que se sube a cada IP analógico.
+  const handleDownloadUnit = async (unit, format = 'csv') => {
+    try {
+      const name = await downloadCsv(format, unit);
+      showToast(
+        `⬇ ${unit.name}: ${unit.carrier_count ?? unit.span} portadoras · ${unit.range_label || ''} → ${name}`
+      );
+    } catch (err) {
+      setErrorNotice(err.message);
+    }
+  };
+
+  const handleDownloadAllUnits = async (format = 'csv') => {
+    const list = plan?.units || [];
+    if (!list.length) {
+      setErrorNotice('Todavía no hay equipos configurados.');
+      return;
+    }
+    try {
+      for (const unit of list) {
+        // Secuencial: algunos navegadores bloquean descargas simultáneas
+        // eslint-disable-next-line no-await-in-loop
+        await downloadCsv(format, unit);
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 350));
+      }
+      showToast(`⬇ ${list.length} CSV generados, uno por modulador.`);
     } catch (err) {
       setErrorNotice(err.message);
     }
@@ -599,11 +650,19 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           </button>
           <button
             type="button"
+            onClick={() => handleDownloadAllUnits('csv')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-lg shadow-amber-950/40"
+          >
+            <Download className="w-3.5 h-3.5" />
+            CSV por modulador ({units.length})
+          </button>
+          <button
+            type="button"
             onClick={() => handleDownloadExport('csv')}
             className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 text-xs font-bold"
           >
             <Download className="w-3.5 h-3.5" />
-            CSV WK2500
+            CSV plan completo
           </button>
         </div>
       </div>
@@ -878,6 +937,34 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                     </div>
                   </div>
                 ) : null}
+
+                {/* CSV de ESTE modulador, en el orden de sus portadoras */}
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadUnit(u, 'csv')}
+                    title={`Descargar el CSV de ${u.name} (${u.carrier_count ?? u.span} portadoras, P1=CH${u.carriers?.[0]?.catv_ch ?? '—'})`}
+                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-amber-600/20 hover:bg-amber-600/35 border border-amber-500/40 px-2 py-1.5 text-[10px] font-bold text-amber-200"
+                  >
+                    <Download className="w-3 h-3" /> CSV
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadUnit(u, 'csv-min')}
+                    title="CSV compacto (Portadora, Canal, MHz, MHz audio, UDP) para la ventana de importación del equipo"
+                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2 py-1.5 text-[10px] font-bold text-slate-300"
+                  >
+                    Import
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadUnit(u, 'm3u')}
+                    title="M3U de las portadoras de este equipo para probar con VLC"
+                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2 py-1.5 text-[10px] font-bold text-slate-300"
+                  >
+                    M3U
+                  </button>
+                </div>
                 <div className="flex flex-wrap items-center gap-1">
                   <span className="rounded bg-sky-500/12 border border-sky-500/30 px-1.5 py-0.5 text-[9.5px] font-bold text-sky-300">
                     {u.tv_standard_label || 'NTSC-M'}

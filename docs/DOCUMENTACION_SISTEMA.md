@@ -1400,3 +1400,49 @@ proceso FFmpeg propio en menos de 6 s, de modo que el siguiente zapeo no paga ar
 ejecute `-version` y fija la preferencia en `runtime`. El instalador hace lo mismo automáticamente si detecta
 XUI.one y todavía no hay binario en el panel. El motor añade `.runtime/lib` a `LD_LIBRARY_PATH` cuando usa el
 binario copiado, así que **el panel ya no depende de que /home/xui exista**.
+
+### 8.27. Un CSV por modulador (en vez de un solo archivo de 124 canales)
+
+Con 4 moduladores, un CSV único no sirve: en la web de cada equipo sólo deben entrar **sus** portadoras.
+El panel genera ahora un archivo por equipo, con las filas en el orden real de sus portadoras.
+
+**Cómo se obtiene**
+
+- En **UDP / CATV → tarjeta del equipo → `CSV`** (o `Import` para el formato compacto, o `M3U`).
+- Botón **«CSV por modulador (N)»** en la cabecera: descarga los N archivos seguidos (uno por equipo).
+- **«CSV plan completo»** sigue existiendo para revisión o respaldo: 124 filas.
+
+**API**
+
+| Llamada | Devuelve |
+| --- | --- |
+| `GET /api/wk2500/export-table?format=csv&unit_id=<id>` | CSV completo del equipo (14 columnas) |
+| `GET /api/wk2500/export-table?format=csv-min&unit_id=<id>` | CSV compacto de 6 columnas para la ventana de importación |
+| `GET /api/wk2500/export-table?format=m3u&unit_id=<id>` | M3U con sólo las portadoras del equipo |
+| `GET /api/wk2500/export-units` | Índice: un renglón por equipo con sus tres URLs |
+
+Sin `unit_id` (o con `unit_id=all`) se obtiene el plan completo, igual que antes.
+
+**Nombre de archivo**
+
+`<equipo>_P1-CH<canal de la portadora 1>_<n>port.csv`
+
+Ejemplos con el reparto real de 4 × 32:
+
+| Equipo | Archivo | Portadoras |
+| --- | --- | --- |
+| CSP-2500C #1 | `CSP_2500C_1_P1-CH95_32port.csv` | 32 |
+| CSP-2500C #2 | `CSP_2500C_2_P1-CH29_32port.csv` | 32 |
+| CSP-2500C #3 | `CSP_2500C_3_P1-CH61_32port.csv` | 32 |
+| CSP-2500C #4 | `CSP_2500C_4_P1-CH93_28port.csv` | 28 |
+
+**Formato compacto (`Import`)**
+
+```
+Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP
+1,95,91.25,95.75,192.168.25.10,5095
+2,2,55.25,59.75,192.168.25.10,5002
+```
+
+Sin comillas ni columnas de relleno: es el que se pega en la carga masiva de estos moduladores. La
+**portadora 1 siempre es la primera fila** y el canal coincide con el que tiene el equipo en su P1.

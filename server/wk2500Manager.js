@@ -2821,9 +2821,34 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
     return Number(a.catv_ch) - Number(b.catv_ch);
   });
 
+  // ---- Filtro por equipo: cada modulador recibe SU propio CSV ----
+  // unit_id=<id>  -> sólo las portadoras de ese equipo (orden de portadora)
+  // unit_id=all / sin parámetro -> plan completo
+  const rawUnit = String(req.query.unit_id ?? req.query.unit ?? '').trim();
+  let unitFilter = null;
+  if (rawUnit && rawUnit !== 'all' && rawUnit !== '0') {
+    unitFilter = unitsById.get(Number(rawUnit)) || null;
+    if (!unitFilter) {
+      return res.status(404).json({ error: `No existe el equipo ${rawUnit}.` });
+    }
+  }
+  const fileRows = unitFilter ? orderedRows.filter((r) => Number(infoFor(r).unit?.id) === Number(unitFilter.id)) : orderedRows;
+  const unitSlug = (u) => {
+    const chans = unitChannelList(u);
+    const base = String(u.name || `equipo_${u.id}`)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Za-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 40) || `equipo_${u.id}`;
+    // Nombre inequívoco: equipo + canal de la portadora 1 + cantidad de portadoras.
+    const first = chans[0] ?? 0;
+    return `${base}_P1-CH${first}_${chans.length}port`;
+  };
+
   if (format === 'm3u') {
     const out = ['#EXTM3U'];
-    for (const r of rows) {
+    for (const r of fileRows) {
       const title = r.custom_name || r.stream_name || `CATV CH ${r.catv_ch}`;
       const { info } = infoFor(r);
       out.push(
@@ -2831,16 +2856,32 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
       );
       out.push(`udp://@${r.udp_host}:${r.udp_port}`);
     }
+    const m3uName = unitFilter ? `${unitSlug(unitFilter)}.m3u` : 'wk2500_udp_2_al_125.m3u';
     res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="wk2500_udp_2_al_125.m3u"');
+    res.setHeader('Content-Disposition', `attachment; filename="${m3uName}"`);
     return res.send(out.join('\n') + '\n');
+  }
+
+  // Formato compacto para la ventana de importación del modulador:
+  // Portadora,Canal,Frecuencia de video,Audio,UDP — sin comillas ni columnas de relleno.
+  if (format === 'csv-min' || format === 'csv_import') {
+    const min = ['Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP'];
+    for (const r of fileRows) {
+      const { info, unit } = infoFor(r);
+      const carrier = unit ? carrierIndex.get(`${unit.id}:${r.catv_ch}`) ?? '' : '';
+      min.push(`${carrier},${r.catv_ch},${info.freq_mhz},${info.audio_mhz},${r.udp_host},${r.udp_port}`);
+    }
+    const minName = unitFilter ? `${unitSlug(unitFilter)}_import.csv` : 'wk2500_import_2_al_125.csv';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${minName}"`);
+    return res.send(min.join('\n') + '\n');
   }
 
   const csv = [
     'Equipo,Portadora,Canal_CATV,Estandar_TV,Frecuencia_Video_MHz,Portadora_Audio_MHz,Banda_CATV,Nombre_Canal,' +
       'IP_Destino_UDP,Puerto_UDP,Transporte,Program_Service_ID,Modo_Salida,Activo_24_7'
   ];
-  for (const r of orderedRows) {
+  for (const r of fileRows) {
     const { info, unit, transport } = infoFor(r);
     const title = String(r.custom_name || r.stream_name || '').replace(/"/g, '""');
     const unitName = String(unit?.name || '').replace(/"/g, '""');
@@ -2851,7 +2892,40 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
         `${r.udp_host},${r.udp_port},${tx},${r.service_id},${r.output_mode},${r.enabled ? 'SI' : 'NO'}`
     );
   }
+  const csvName = unitFilter ? `${unitSlug(unitFilter)}.csv` : 'wk2500_plan_canales_2_al_125.csv';
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="wk2500_plan_canales_2_al_125.csv"');
+  res.setHeader('Content-Disposition', `attachment; filename="${csvName}"`);
   res.send(csv.join('\n') + '\n');
+});
+
+/**
+ * Índice de CSVs por equipo: qué archivo descargar para cada modulador, sin tener
+ * que abrir el plan completo. Lo usa la UI para pintar un botón por equipo.
+ */
+wk2500Router.get('/api/wk2500/export-units', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const units = listUnitRows();
+  res.json({
+    ok: true,
+    units: units.map((u) => {
+      const view = unitPublicView(u);
+      return {
+        id: Number(u.id),
+        name: u.name,
+        dest_ip: u.dest_ip,
+        base_port: u.base_port,
+        carrier_count: view.carrier_count,
+        carrier_1: view.carriers[0]?.catv_ch ?? null,
+        carrier_last: view.carriers[view.carriers.length - 1]?.catv_ch ?? null,
+        channels_text: view.channels_text,
+        range_label: view.range_label,
+        tv_standard: getTvStandard(u.tv_standard || DEFAULT_TV_STANDARD).short,
+        pkt_size: Number(u.pkt_size || 1316),
+        rtp: Number(u.rtp || 0) === 1,
+        url_csv: `/api/wk2500/export-table?format=csv&unit_id=${u.id}`,
+        url_import: `/api/wk2500/export-table?format=csv-min&unit_id=${u.id}`,
+        url_m3u: `/api/wk2500/export-table?format=m3u&unit_id=${u.id}`
+      };
+    })
+  });
 });
