@@ -1446,3 +1446,43 @@ Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Pu
 
 Sin comillas ni columnas de relleno: es el que se pega en la carga masiva de estos moduladores. La
 **portadora 1 siempre es la primera fila** y el canal coincide con el que tiene el equipo en su P1.
+
+### 8.28. Reversión del "zapping rápido" (v2.5.3) — entrega original restaurada
+
+**Qué pasó.** En v2.5.1 se entregaba al reproductor una ventana de sólo 2 segmentos con `#EXT-X-START` para que
+abriera en el borde del directo. El efecto secundario fue peor que el problema: al empezar en el último segmento,
+si ese segmento no arranca en un keyframe (canales en Copy, que no se re-codifican), **el audio decodifica y el
+vídeo se queda congelado**. Además, con una ventana tan corta un reproductor lento pierde segmentos que ya se
+borraron (`delete_segments`) y se queda esperando.
+
+**Qué se hizo (v2.5.3).** Se restauró el comportamiento validado en producción:
+
+| Pieza | Estado |
+| --- | --- |
+| Manifiesto entregado | El que escribe FFmpeg, **tal cual** (con `hls_list_size` completo) |
+| `#EXT-X-START` | Eliminado |
+| Ventana corta (`?window=`) | Eliminada |
+| `+temp_file` en `-hls_flags` | Eliminado |
+| `-force_key_frames` | Eliminado |
+| Precarga de canales vecinos | Eliminada |
+| Espera del primer manifiesto | 4.2 s (valor original) |
+
+Se eliminó el módulo `server/zapFast.js` y la sección **Zapping** de *Motor FFmpeg*. La línea de argumentos de
+FFmpeg vuelve a ser byte a byte la de la versión estable:
+
+```
+-threads 1 -probesize 5000000 -analyzeduration 4000000
+-fflags +genpts+igndts+nobuffer+discardcorrupt -flags low_delay
+-c:v copy -max_muxing_queue_size 2048 -c:a copy
+-f hls -hls_time 2 -hls_list_size 6
+-hls_flags delete_segments+independent_segments+omit_endlist
+```
+
+**Lo que se conserva de v2.5.1** (no toca la reproducción): `tvlister-admin ffmpeg import-xui`, que copia el
+binario de XUI.one a `.runtime/bin` con sus librerías en `.runtime/lib`.
+
+**Comprobación** (canal real servido por el panel): el manifiesto entregado coincide segmento por segmento con
+el que escribe FFmpeg, sin `EXT-X-START`, sin cabeceras de zapping y sin workers de vecinos.
+
+**Si algún día se quiere reintentar el zapeo**, la única vía segura es forzar keyframe en cada segmento
+(`-force_key_frames`) **antes** de acortar la ventana; nunca al revés.

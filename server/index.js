@@ -100,7 +100,6 @@ import {
   getSegmentMissStats,
   getPrebufferStats
 } from './iptvApi.js';
-import { getPrewarmStats } from './zapFast.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
 import { headendRouter } from './headendManager.js';
@@ -1960,7 +1959,6 @@ app.get('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (_req, res) => {
 
   const workerDiag = getWorkerDiagnostics();
   const missStats = getSegmentMissStats();
-  const prewarmStats = getPrewarmStats();
 
   const binInfo = getFfmpegBinInfo();
 
@@ -1984,7 +1982,6 @@ app.get('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (_req, res) => {
     activeWorkers: workerDiag.filter((w) => w.pid).length,
     stalledWorkers: workerDiag.filter((w) => !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20)).length,
     segmentMisses: missStats,
-    zapPrewarm: prewarmStats,
     sampleCommand
   });
 });
@@ -2042,24 +2039,6 @@ app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
   // Prebuffer de entrega (XUI.one: X-XUI-Prebuffer)
   setNum('ffmpeg_prebuffer_segments', values.prebufferSegments, FFMPEG_ENGINE_LIMITS.prebufferSegments, 'Segmentos de prebuffer');
   setNum('ffmpeg_prebuffer_wait_ms', values.prebufferWaitMs, FFMPEG_ENGINE_LIMITS.prebufferWaitMs, 'Espera máxima del prebuffer (ms)');
-
-  // ---- Zapping rápido ----
-  setNum(
-    'ffmpeg_player_window_segments',
-    values.playerWindowSegments,
-    FFMPEG_ENGINE_LIMITS.playerWindowSegments,
-    'Segmentos entregados al reproductor'
-  );
-  setNum('ffmpeg_zap_prewarm_count', values.zapPrewarmCount, FFMPEG_ENGINE_LIMITS.zapPrewarmCount, 'Canales vecinos a precargar');
-  if (values.zapPrewarm !== undefined) {
-    upsert.run('ffmpeg_zap_prewarm', values.zapPrewarm ? 'true' : 'false');
-  }
-  if (values.hlsTempFile !== undefined) {
-    upsert.run('ffmpeg_hls_temp_file', values.hlsTempFile ? 'true' : 'false');
-  }
-  if (values.keyframeAlign !== undefined) {
-    upsert.run('ffmpeg_keyframe_align', values.keyframeAlign ? 'true' : 'false');
-  }
 
   const previousBin = getFfmpegBinPreference();
   if (values.binPreference !== undefined) {
