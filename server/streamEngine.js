@@ -113,7 +113,7 @@ export function getHlsFreeBytes() {
  */
 export function resolveHlsDirForKey(key) {
   const safeKey = path.basename(String(key));
-  if (HLS_IS_RAMDISK && getHlsFreeBytes() < 384 * 1024 * 1024) {
+  if (HLS_IS_RAMDISK && getHlsFreeBytes() < getFfmpegEngineConfig().ramReserveMb * 1024 * 1024) {
     fs.mkdirSync(DISK_HLS_ROOT, { recursive: true });
     return path.join(DISK_HLS_ROOT, safeKey);
   }
@@ -389,30 +389,170 @@ export function invalidateFfmpegEfficiencyCache() {
  *  - tsPipeMode 'never'  : 100% HLS nativo en RAMDisk y stdout cerrado (máximo ahorro de CPU y RAM por canal)
  *  - h264Threads         : tope de hilos por encoder libx264 (evita 24-72 hilos por canal en servidores multi-core)
  */
-export function getFfmpegEfficiencyConfig() {
+export const FFMPEG_ENGINE_DEFAULTS = {
+  tsPipeMode: 'auto',
+  h264Threads: 2,
+  // Sonda de entrada: HTTP/HLS necesita margen para no perder SPS/PPS en HD 8-12 Mbps
+  probeHttp: 5000000,
+  analyzeHttp: 4000000,
+  // Fuentes locales (UDP/RTMP/archivo): arranque rápido
+  probeLocal: 1500000,
+  analyzeLocal: 1500000,
+  // Ventana HLS en RAMDisk
+  hlsTime: 2,
+  hlsListSize: 6,
+  // Nivel de log de FFmpeg ('warning' = diagnóstico, 'error' = mínimo ruido con 200+ canales)
+  logLevel: 'warning',
+  // Reserva mínima del RAMDisk antes de derivar canales a disco (MB)
+  ramReserveMb: 384,
+  // Tailer HLS -> MPEG-TS
+  tailerIntervalMs: 160,
+  tailerBurst: 2,
+  // Los clientes .ts entran en la frontera de segmento (PAT/PMT primero)
+  tsJoinOnSegment: true
+};
+
+export const FFMPEG_ENGINE_LIMITS = {
+  h264Threads: [1, 16],
+  probeHttp: [1000000, 20000000],
+  analyzeHttp: [1000000, 20000000],
+  probeLocal: [200000, 8000000],
+  analyzeLocal: [200000, 8000000],
+  hlsTime: [1, 10],
+  hlsListSize: [3, 12],
+  ramReserveMb: [64, 4096],
+  tailerIntervalMs: [80, 500],
+  tailerBurst: [1, 4]
+};
+
+function clampInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
+/**
+ * Configuración completa del motor FFmpeg de TVLister (editable en la sección
+ * "Motor FFmpeg" del panel). Se cachea 3 s para no consultar SQLite por cada worker.
+ */
+export function getFfmpegEngineConfig() {
   const now = Date.now();
   if (efficiencyCache.value && now < efficiencyCache.expiresAt) {
     return efficiencyCache.value;
   }
+  const d = FFMPEG_ENGINE_DEFAULTS;
+  const L = FFMPEG_ENGINE_LIMITS;
+  let map = {};
   try {
     const rows = db
       .prepare(
-        "SELECT key, value FROM settings WHERE key IN ('ffmpeg_ts_pipe_mode', 'ffmpeg_h264_threads')"
+        `SELECT key, value FROM settings WHERE key IN (
+           'ffmpeg_ts_pipe_mode','ffmpeg_h264_threads','ffmpeg_probe_http','ffmpeg_analyze_http',
+           'ffmpeg_probe_local','ffmpeg_analyze_local','ffmpeg_hls_time','ffmpeg_hls_list_size',
+           'ffmpeg_log_level','ffmpeg_ram_reserve_mb','ffmpeg_tailer_interval_ms','ffmpeg_tailer_burst',
+           'ffmpeg_ts_join_segment'
+         )`
       )
       .all();
-    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    const mode = ['auto', 'always', 'never'].includes(map.ffmpeg_ts_pipe_mode)
-      ? map.ffmpeg_ts_pipe_mode
-      : 'auto';
-    const rawThreads = String(map.ffmpeg_h264_threads ?? '').trim();
-    const threads = /^\d+$/.test(rawThreads) ? Math.min(16, Math.max(1, Number(rawThreads))) : 2;
-    const cfg = { tsPipeMode: mode, h264Threads: threads };
-    efficiencyCache = { value: cfg, expiresAt: now + 3000 };
-    return cfg;
+    map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   } catch {
-    return { tsPipeMode: 'auto', h264Threads: 2 };
+    map = {};
   }
+
+  const cfg = {
+    tsPipeMode: ['auto', 'always', 'never'].includes(map.ffmpeg_ts_pipe_mode)
+      ? map.ffmpeg_ts_pipe_mode
+      : d.tsPipeMode,
+    h264Threads: clampInt(map.ffmpeg_h264_threads, L.h264Threads[0], L.h264Threads[1], d.h264Threads),
+    probeHttp: clampInt(map.ffmpeg_probe_http, L.probeHttp[0], L.probeHttp[1], d.probeHttp),
+    analyzeHttp: clampInt(map.ffmpeg_analyze_http, L.analyzeHttp[0], L.analyzeHttp[1], d.analyzeHttp),
+    probeLocal: clampInt(map.ffmpeg_probe_local, L.probeLocal[0], L.probeLocal[1], d.probeLocal),
+    analyzeLocal: clampInt(map.ffmpeg_analyze_local, L.analyzeLocal[0], L.analyzeLocal[1], d.analyzeLocal),
+    hlsTime: clampInt(map.ffmpeg_hls_time, L.hlsTime[0], L.hlsTime[1], d.hlsTime),
+    hlsListSize: clampInt(map.ffmpeg_hls_list_size, L.hlsListSize[0], L.hlsListSize[1], d.hlsListSize),
+    logLevel: ['warning', 'error'].includes(map.ffmpeg_log_level) ? map.ffmpeg_log_level : d.logLevel,
+    ramReserveMb: clampInt(map.ffmpeg_ram_reserve_mb, L.ramReserveMb[0], L.ramReserveMb[1], d.ramReserveMb),
+    tailerIntervalMs: clampInt(
+      map.ffmpeg_tailer_interval_ms,
+      L.tailerIntervalMs[0],
+      L.tailerIntervalMs[1],
+      d.tailerIntervalMs
+    ),
+    tailerBurst: clampInt(map.ffmpeg_tailer_burst, L.tailerBurst[0], L.tailerBurst[1], d.tailerBurst),
+    tsJoinOnSegment:
+      map.ffmpeg_ts_join_segment === undefined || map.ffmpeg_ts_join_segment === ''
+        ? d.tsJoinOnSegment
+        : String(map.ffmpeg_ts_join_segment) === 'true'
+  };
+
+  efficiencyCache = { value: cfg, expiresAt: now + 3000 };
+  return cfg;
 }
+
+// Compatibilidad: el resto del código sigue llamando a "efficiency"
+export function getFfmpegEfficiencyConfig() {
+  return getFfmpegEngineConfig();
+}
+
+/** Presets del motor (los aplica la API; aquí sólo viven los valores). */
+export const FFMPEG_ENGINE_PRESETS = {
+  masivo: {
+    label: '200+ canales · ahorro extremo',
+    values: {
+      tsPipeMode: 'never',
+      h264Threads: 1,
+      probeHttp: 5000000,
+      analyzeHttp: 4000000,
+      hlsTime: 2,
+      hlsListSize: 6,
+      logLevel: 'error',
+      tailerIntervalMs: 200,
+      tailerBurst: 2,
+      tsJoinOnSegment: true
+    }
+  },
+  equilibrado: {
+    label: 'Equilibrado (recomendado)',
+    values: {
+      tsPipeMode: 'auto',
+      h264Threads: 2,
+      probeHttp: 5000000,
+      analyzeHttp: 4000000,
+      hlsTime: 2,
+      hlsListSize: 6,
+      logLevel: 'warning',
+      tailerIntervalMs: 160,
+      tailerBurst: 2,
+      tsJoinOnSegment: true
+    }
+  },
+  calidad: {
+    label: 'Máxima calidad',
+    values: {
+      tsPipeMode: 'auto',
+      h264Threads: 4,
+      hlsTime: 4,
+      hlsListSize: 6,
+      logLevel: 'warning',
+      tailerIntervalMs: 160,
+      tailerBurst: 2,
+      tsJoinOnSegment: true
+    }
+  },
+  latencia: {
+    label: 'Baja latencia',
+    values: {
+      tsPipeMode: 'auto',
+      h264Threads: 2,
+      hlsTime: 1,
+      hlsListSize: 4,
+      logLevel: 'warning',
+      tailerIntervalMs: 100,
+      tailerBurst: 1,
+      tsJoinOnSegment: true
+    }
+  }
+};
 
 export function buildAudioLevelingFilter(preset = 'standard', ultraLightNoResample = false) {
   if (ultraLightNoResample || preset === 'ultra_200ch') {
@@ -473,8 +613,8 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     fs.mkdirSync(outDir, { recursive: true });
   }
 
-  // -nostdin avoids TTY polling; -loglevel error suppresses high-rate stderr text formatting across 200+ workers
-  const args = ['-nostdin', '-hide_banner', '-loglevel', 'warning', '-y'];
+  // -nostdin avoids TTY polling; el nivel de log se ajusta en Motor FFmpeg (warning = diagnóstico, error = mínimo ruido)
+  const args = ['-nostdin', '-hide_banner', '-loglevel', efficiency.logLevel || 'warning', '-y'];
 
   const hasCustomThreads = /(?:^|\s)-threads\s+\d+/.test(extraStr);
   const hasCpuVideoScale =
@@ -484,8 +624,8 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   // Fuentes HTTP/HLS (Flussonic) necesitan sonda amplia para HD: con 1 MB FFmpeg pierde el SPS/PPS
   // del primer segmento en canales de 8-12 Mbps y arranca tarde o entrecortado.
   const isHttpInput = /^https?:\/\//i.test(inputUrl);
-  const probeSize = isHttpInput ? '5000000' : '1500000';
-  const analyzeDuration = isHttpInput ? '4000000' : '1500000';
+  const probeSize = String(isHttpInput ? efficiency.probeHttp : efficiency.probeLocal);
+  const analyzeDuration = String(isHttpInput ? efficiency.analyzeHttp : efficiency.analyzeLocal);
   // -avoid_negative_ts sólo cuando emitimos MPEG-TS continuo (pipe), no en HLS puro (evita micro-saltos de PTS)
   const needTsContinuity = ramMpegTsOnly || dualTeeTsPipe;
 
@@ -637,7 +777,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     return args;
   }
 
-  const hlsTime = isZeroLatency ? '2' : '4';
+  const hlsTime = String(isZeroLatency ? efficiency.hlsTime : Math.max(4, efficiency.hlsTime));
   const hlsFlags = isZeroLatency
     ? 'delete_segments+independent_segments+omit_endlist'
     : 'delete_segments+append_list+omit_endlist';
@@ -649,7 +789,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     args.push(
       '-f',
       'tee',
-      `[f=hls:hls_time=${hlsTime}:hls_list_size=6:hls_flags=${hlsFlags}]${escapedM3u8}|[f=mpegts:mpegts_flags=+resend_headers]pipe:1`
+      `[f=hls:hls_time=${hlsTime}:hls_list_size=${efficiency.hlsListSize}:hls_flags=${hlsFlags}]${escapedM3u8}|[f=mpegts:mpegts_flags=+resend_headers]pipe:1`
     );
     return args;
   }
@@ -662,7 +802,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     '-hls_time',
     hlsTime,
     '-hls_list_size',
-    '6',
+    String(efficiency.hlsListSize),
     '-hls_flags',
     hlsFlags,
     outM3u8
@@ -1001,8 +1141,12 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     if (state.hlsTailer || state.stoppedManually) return state.hlsTailer;
     const dir = resolveHlsDirForKey(key);
     const manifestPath = path.join(dir, 'index.m3u8');
+    const engine = getFfmpegEngineConfig();
+    state.tsJoinOnSegment = engine.tsJoinOnSegment !== false;
     state.hlsTailer = createHlsSegmentTailer({
       manifestPath,
+      intervalMs: engine.tailerIntervalMs,
+      burstSegments: engine.tailerBurst,
       onChunk: (chunk) => {
         state.lastHlsAt = Date.now();
         broadcastTs(chunk);
@@ -1267,7 +1411,7 @@ function subscribeTailer(state, onChunk, _tailer) {
     }
   };
 
-  if (state.tailerSegmentOpen) {
+  if (state.tailerSegmentOpen && state.tsJoinOnSegment !== false) {
     // Entra a mitad de segmento: se espera la frontera para no entregar basura
     state.pendingTsSubscribers.add(onChunk);
     const timer = setTimeout(() => {

@@ -16,6 +16,7 @@ import BouquetsPage from './pages/BouquetsPage.jsx';
 import ResellersPage from './pages/ResellersPage.jsx';
 import EpgMessagesPage from './pages/EpgMessagesPage.jsx';
 import ServersSecurityPage from './pages/ServersSecurityPage.jsx';
+import FfmpegEnginePage from './pages/FfmpegEnginePage.jsx';
 import XuiImportPage from './pages/XuiImportPage.jsx';
 import IngestProtocolsPage from './pages/IngestProtocolsPage.jsx';
 import WebTvPortal from './pages/WebTvPortal.jsx';
@@ -119,6 +120,7 @@ export default function App() {
         {activeTab === 'xui-import' && user.role === 'admin' && (
           <XuiImportPage setActiveTab={setActiveTab} />
         )}
+        {activeTab === 'ffmpeg-engine' && user.role === 'admin' && <FfmpegEnginePage />}
         {activeTab === 'system' && user.role === 'admin' && <ServersSecurityPage />}
       </Layout>
 

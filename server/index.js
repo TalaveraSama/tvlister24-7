@@ -61,6 +61,10 @@ import {
   getGlobalAudioLevelingConfig,
   invalidateAudioLevelingCache,
   getFfmpegEfficiencyConfig,
+  getFfmpegEngineConfig,
+  FFMPEG_ENGINE_PRESETS,
+  FFMPEG_ENGINE_LIMITS,
+  FFMPEG_ENGINE_DEFAULTS,
   invalidateFfmpegEfficiencyCache,
   getWorkerDiagnostics,
   getHlsFreeBytes,
@@ -1545,7 +1549,7 @@ app.get('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (_req, res) 
     ffmpegBin: bin,
     tsPipeMode: efficiency.tsPipeMode,
     h264Threads: efficiency.h264Threads,
-    hlsWindowSeconds: HLS_WINDOW_SECONDS,
+    hlsWindowSeconds: getFfmpegEngineConfig().hlsTime * getFfmpegEngineConfig().hlsListSize,
     hlsFreeMb: Math.round(getHlsFreeBytes() / (1024 * 1024)),
     hlsNeededMb: Math.round(estimateHlsFootprintBytes() / (1024 * 1024)),
     stalledStreams: stalled.length,
@@ -1605,6 +1609,120 @@ app.put('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (req, res) =
   if (runningIds.length > 0) scheduleStaggeredStreamLaunches(runningIds, 60);
 
   res.json({ ok: true, ...getFfmpegEfficiencyConfig(), restartedStreams: runningIds.length });
+});
+
+/**
+ * Motor FFmpeg de TVLister: estado + configuración efectiva + comando real de ejemplo.
+ * (Sección "Motor FFmpeg" del panel; no confundir con las tarjetas de perfiles por canal.)
+ */
+app.get('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (_req, res) => {
+  const cfg = getFfmpegEngineConfig();
+  const available = isFfmpegAvailable();
+  const sampleStream = db.prepare("SELECT * FROM streams WHERE stream_mode = 'transcode' ORDER BY id LIMIT 1").get();
+  const sampleProfile = sampleStream
+    ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(sampleStream.transcode_profile_id || 1)
+    : db.prepare("SELECT * FROM transcode_profiles WHERE video_codec = 'copy' AND audio_codec = 'copy' ORDER BY id LIMIT 1").get();
+
+  let sampleCommand = '';
+  try {
+    const probeStream = sampleStream || {
+      id: 0,
+      source_url: 'http://mi-proveedor:8080/live/canal/index.m3u8',
+      backup_url: '',
+      status: 'running',
+      audio_leveling_mode: 'off'
+    };
+    sampleCommand = buildFfmpegCommandForStream(probeStream, sampleProfile);
+  } catch {
+    sampleCommand = '';
+  }
+
+  const workerDiag = getWorkerDiagnostics();
+  const missStats = getSegmentMissStats();
+
+  res.json({
+    ok: true,
+    config: cfg,
+    defaults: FFMPEG_ENGINE_DEFAULTS,
+    limits: FFMPEG_ENGINE_LIMITS,
+    presets: Object.entries(FFMPEG_ENGINE_PRESETS).map(([key, p]) => ({ key, label: p.label, values: p.values })),
+    ffmpegAvailable: available,
+    ffmpegBin: available ? getFfmpegBin() : null,
+    hlsRoot: HLS_ROOT,
+    hlsIsRamDisk: HLS_IS_RAMDISK,
+    hlsFreeMb: Math.round(getHlsFreeBytes() / (1024 * 1024)),
+    hlsNeededMb: Math.round(estimateHlsFootprintBytes() / (1024 * 1024)),
+    windowSeconds: cfg.hlsTime * cfg.hlsListSize,
+    activeWorkers: workerDiag.filter((w) => w.pid).length,
+    stalledWorkers: workerDiag.filter((w) => !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20)).length,
+    segmentMisses: missStats,
+    sampleCommand
+  });
+});
+
+app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const upsert = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  );
+  const errors = [];
+
+  // Presets: rellenan los valores antes de validar
+  let values = { ...b };
+  if (b.preset && FFMPEG_ENGINE_PRESETS[b.preset]) {
+    values = { ...FFMPEG_ENGINE_PRESETS[b.preset].values, ...b };
+  }
+
+  const setEnum = (key, input, allowed, label) => {
+    if (input === undefined) return;
+    const v = String(input);
+    if (!allowed.includes(v)) {
+      errors.push(`${label} inválido (${allowed.join(' | ')})`);
+      return;
+    }
+    upsert.run(key, v);
+  };
+
+  const setNum = (key, input, [min, max], label) => {
+    if (input === undefined) return;
+    const n = Number(input);
+    if (!Number.isFinite(n) || n < min || n > max) {
+      errors.push(`${label} debe estar entre ${min} y ${max}`);
+      return;
+    }
+    upsert.run(key, String(Math.round(n)));
+  };
+
+  setEnum('ffmpeg_ts_pipe_mode', values.tsPipeMode, ['auto', 'always', 'never'], 'Salida MPEG-TS');
+  setNum('ffmpeg_h264_threads', values.h264Threads, FFMPEG_ENGINE_LIMITS.h264Threads, 'Hilos H.264');
+  setNum('ffmpeg_probe_http', values.probeHttp, FFMPEG_ENGINE_LIMITS.probeHttp, 'Probe Size HTTP');
+  setNum('ffmpeg_analyze_http', values.analyzeHttp, FFMPEG_ENGINE_LIMITS.analyzeHttp, 'Analysis Duration HTTP');
+  setNum('ffmpeg_probe_local', values.probeLocal, FFMPEG_ENGINE_LIMITS.probeLocal, 'Probe Size local/UDP');
+  setNum('ffmpeg_analyze_local', values.analyzeLocal, FFMPEG_ENGINE_LIMITS.analyzeLocal, 'Analysis Duration local/UDP');
+  setNum('ffmpeg_hls_time', values.hlsTime, FFMPEG_ENGINE_LIMITS.hlsTime, 'Duración de segmento HLS');
+  setNum('ffmpeg_hls_list_size', values.hlsListSize, FFMPEG_ENGINE_LIMITS.hlsListSize, 'Segmentos en el manifiesto');
+  setNum('ffmpeg_ram_reserve_mb', values.ramReserveMb, FFMPEG_ENGINE_LIMITS.ramReserveMb, 'Reserva de RAMDisk');
+  setNum('ffmpeg_tailer_interval_ms', values.tailerIntervalMs, FFMPEG_ENGINE_LIMITS.tailerIntervalMs, 'Intervalo del tailer');
+  setNum('ffmpeg_tailer_burst', values.tailerBurst, FFMPEG_ENGINE_LIMITS.tailerBurst, 'Segmentos iniciales del tailer');
+  setEnum('ffmpeg_log_level', values.logLevel, ['warning', 'error'], 'Nivel de log de FFmpeg');
+
+  if (values.tsJoinOnSegment !== undefined) {
+    upsert.run('ffmpeg_ts_join_segment', values.tsJoinOnSegment ? 'true' : 'false');
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({ error: errors.join('. '), errors });
+  }
+
+  invalidateFfmpegEfficiencyCache();
+
+  const runningIds = db
+    .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
+    .all()
+    .map((r) => r.id);
+  if (runningIds.length > 0) scheduleStaggeredStreamLaunches(runningIds, 80);
+
+  res.json({ ok: true, config: getFfmpegEngineConfig(), restartedStreams: runningIds.length });
 });
 
 app.post('/api/streams/:id/action', requireAuth, requireAdmin, (req, res) => {

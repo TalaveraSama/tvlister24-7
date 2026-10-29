@@ -594,6 +594,11 @@ export default function ServersSecurityPage() {
               <Zap className="w-4 h-4 text-amber-400" />
               Optimización FFmpeg (Motor de Streaming Masivo)
             </h3>
+            <p className="text-[11px] text-slate-500">
+              Métricas y reparación rápida. Los ajustes finos del motor (sonda, ventana HLS, RAMDisk, tailer y
+              comando real de FFmpeg) están en la sección <b className="text-slate-300">Motor FFmpeg</b> del menú
+              lateral.
+            </p>
 
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 text-xs">
               {[

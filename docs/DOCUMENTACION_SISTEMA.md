@@ -660,3 +660,58 @@ Si `segmentMisses` sube en un canal, ese canal está produciendo segmentos más 
 cierra, así que el tráfico va "a golpes" de un segmento (p. ej. 780 KB cada 2 s) en lugar de un chorro continuo.
 Es el comportamiento normal de HLS→TS y los reproductores lo amortiguan con su buffer; el bitrate medio es el
 del canal (verificado: 465 KB/s ≈ 3,7 Mbps en un canal de 3 Mbps + audio).
+
+### 8.11. Sección "Motor FFmpeg" (ajustes del motor de TVLister)
+
+Menú lateral → **Motor FFmpeg** (`activity`). Es la sección donde se afinan los parámetros reales del motor,
+sin depender de perfiles por canal. Todo se guarda en `settings` y se aplica **reiniciando los canales uno por
+uno** (80 ms de separación), nunca a la vez.
+
+**API**
+
+| Método | Ruta | Para qué |
+|---|---|---|
+| `GET` | `/api/system/ffmpeg-engine` | Configuración efectiva, presets, límites, estado (canales activos/congelados, RAMDisk, segmentos faltantes) y **comando real de FFmpeg** |
+| `PUT` | `/api/system/ffmpeg-engine` | Guarda y aplica. Acepta `preset` (`masivo`, `equilibrado`, `calidad`, `latencia`) o campos sueltos |
+
+**Parámetros**
+
+| Ajuste | Clave | Rango | Por defecto |
+|---|---|---|---|
+| Probe Size HTTP/HLS | `ffmpeg_probe_http` | 1–20 MB | 5 000 000 |
+| Analysis Duration HTTP/HLS | `ffmpeg_analyze_http` | 1–20 MB (µs) | 4 000 000 |
+| Probe Size local/UDP | `ffmpeg_probe_local` | 0,2–8 MB | 1 500 000 |
+| Analysis Duration local/UDP | `ffmpeg_analyze_local` | 0,2–8 MB (µs) | 1 500 000 |
+| Duración de segmento HLS | `ffmpeg_hls_time` | 1–10 s | 2 |
+| Segmentos en el manifiesto | `ffmpeg_hls_list_size` | 3–12 | 6 |
+| Reserva de RAMDisk | `ffmpeg_ram_reserve_mb` | 64–4096 MB | 384 |
+| Hilos H.264 | `ffmpeg_h264_threads` | 1–16 | 2 |
+| Nivel de log | `ffmpeg_log_level` | `warning` \| `error` | `warning` |
+| Intervalo del tailer | `ffmpeg_tailer_interval_ms` | 80–500 ms | 160 |
+| Segmentos iniciales del tailer | `ffmpeg_tailer_burst` | 1–4 | 2 |
+| Entrar en frontera de segmento | `ffmpeg_ts_join_segment` | bool | `true` |
+| Salida MPEG-TS continua | `ffmpeg_ts_pipe_mode` | `auto` \| `always` \| `never` | `auto` |
+
+**Presets**
+
+- **200+ canales · ahorro extremo**: TS `never`, 1 hilo, log `error`, tailer 200 ms.
+- **Equilibrado (recomendado)**: lo que viene por defecto (TS `auto`, 2 hilos, log `warning`).
+- **Máxima calidad**: 4 hilos, segmento de 4 s.
+- **Baja latencia**: segmento de 1 s, lista 4, tailer 100 ms, 1 segmento inicial.
+
+**Qué toca cada ajuste en la línea de comandos**
+
+```
+-probesize <probeHttp> -analyzeduration <analyzeHttp>   (HTTP/HLS)
+-probesize <probeLocal> -analyzeduration <analyzeLocal> (UDP/RTMP/archivo)
+-loglevel <warning|error>
+-hls_time <hlsTime> -hls_list_size <hlsListSize>
+-threads 1 (copy) | -threads <h264Threads> (libx264)
+```
+
+Además, sin reiniciar nada: la **reserva de RAMDisk** decide cuándo un canal nuevo se escribe en `/dev/shm` o pasa
+a disco, y el **tailer** usa el intervalo/burst configurados para convertir HLS a MPEG-TS.
+
+**Verificado:** con `hlsTime=3`, `hlsListSize=5`, `logLevel=error`, `probeHttp=6000000` se comprobó en
+`/proc/<pid>/cmdline` que el worker real arranca con `-loglevel error -probesize 6000000 -analyzeduration 5000000
+-hls_time 3 -hls_list_size 5`, y la API rechaza valores fuera de rango con `400`.
