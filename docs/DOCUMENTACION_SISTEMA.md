@@ -908,3 +908,38 @@ Extras de la vista:
 - La paginación se reinicia a la página 1 al cambiar búsqueda, categoría, resolución, estado u orden.
 - El buscador y los filtros se aplican sobre el catálogo completo; "Seleccionar todos" sigue
   marcando los canales filtrados (no sólo la página visible).
+
+### 8.17. Paridad con XUI.one ampliada: clientes, EPG, notas y ficha del canal
+
+Todo lo que XUI.one muestra en su tabla de streams (`ID · Icon · Name · Source · Servers · Clients ·
+Uptime · Actions` + columna EPG) y en su página `stream_view`, portado a TVLister sin tocar la lógica
+de emisión (sigue sin failover; SOURCE 2 sigue siendo manual, ver 8.14).
+
+**Backend**
+
+| Cambio | Detalle |
+|---|---|
+| `GET /api/streams` (enriquecido) | Cada canal trae ahora `clients` (sesiones activas en `active_connections` con `target_type='live'`), `clients_by_protocol` (`{HLS:2, TS:1}`), `epg_now`, `epg_next`, `epg_now_end`, `epg_next_start` y `epg_progress` (0–100 % del programa en curso). Ejecuta `pruneStaleConnections()` antes de contar, así el número es real. |
+| `streams.notes` | Columna nueva (`TEXT`), migrada con `ensureColumn`; aceptada en `POST /api/streams` y `PUT /api/streams/:id` (máx. 2000 caracteres). |
+| `GET /api/epg` | Acepta `channel_id` (epg_channel_id), `hours_back`, `hours_ahead` y `limit`. Sin `channel_id` responde igual que antes (compatible). |
+| Formatos de fecha EPG | TVLister guarda la EPG en ISO (`toISOString()`); otros importadores usan `datetime('now')`. Ambas se normalizan en SQL con `substr(replace(campo,'T',' '),1,19)` antes de comparar. |
+
+**UI (Canales en Vivo)**
+
+- Columna **EPG · Ahora**: programa en curso, barra de progreso y "Después: …"; si no hay EPG avisa
+  `sin EPG` / `Sin EPG cargado`.
+- Columna **Clientes**: número de sesiones viendo el canal (verde si > 0) y desglose por protocolo.
+- **Notas internas**: se editan en el modal del canal, se buscan desde el buscador, se marcan con un
+  ícono en la fila y se leen completas en la ficha.
+- **Vistas rápidas**: `Todo el catálogo`, `Sin señal`, `Sin clientes`, `Sin SOURCE 2`, `Sin logo`,
+  `Sin EPG`, `Sin clasificar`, `Con notas` — cada una con su conteo.
+- **Menú Vista**: densidad de filas (compacta / normal / cómoda), qué columnas se ven y
+  auto-actualización cada 15 s (los contadores de clientes y el avance del EPG se refrescan solos,
+  sólo si la pestaña está visible).
+- **Ficha del canal** (`src/components/StreamDrawer.jsx`), equivalente a `stream_view` de XUI, con
+  panel lateral y pestañas: **Resumen** (estado, uptime, perfil, bitrate, resolución, DVR, respaldo,
+  notas y "ahora en pantalla"), **Fuentes** (SOURCE 1 y SOURCE 2 con host y URL completa + botón de
+  cambio manual), **Clientes** (línea, IP, país, protocolo y hora de conexión, sólo de ese canal),
+  **EPG** (programación del canal) y **FFmpeg** (comando real del motor estable, con botón copiar).
+  Se abre pulsando el nombre del canal o "Ver ficha del canal" en el menú ⋯.
+- **Atajos**: `/` enfoca el buscador; `Esc` limpia la búsqueda o cierra la ficha.

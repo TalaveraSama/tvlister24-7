@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronLeft, ChevronRight, MoreHorizontal } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, MoreHorizontal, X } from 'lucide-react';
 
 /* ============================================================================
  * XUI.one style skin layer for the channel list.
@@ -377,5 +377,157 @@ export function EmptyState({ colSpan, title, hint }) {
         {hint ? <div className="mt-1 text-[11px] text-slate-500">{hint}</div> : null}
       </td>
     </tr>
+  );
+}
+
+/* ------------------------------ extra atoms ----------------------------- */
+
+export function MenuPanel({ label, icon: Icon, children, width = 268, title, active = false }) {
+  const [open, setOpen] = React.useState(false);
+  const btnRef = React.useRef(null);
+  const close = React.useCallback(() => setOpen(false), []);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        title={title || label}
+        onClick={() => setOpen((v) => !v)}
+        className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11.5px] font-semibold transition ${
+          active || open
+            ? 'border-indigo-500/45 bg-indigo-500/12 text-indigo-200'
+            : 'border-slate-700/80 bg-slate-800/60 text-slate-300 hover:text-white'
+        }`}
+      >
+        {Icon ? <Icon className="w-3.5 h-3.5" /> : null}
+        {label ? <span className="whitespace-nowrap">{label}</span> : null}
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      <Popover open={open} onClose={close} anchorRef={btnRef} width={width} maxHeight={460}>
+        {children}
+      </Popover>
+    </>
+  );
+}
+
+export function CheckRow({ checked, onChange, label, hint }) {
+  return (
+    <button
+      type="button"
+      onClick={onChange}
+      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11.5px] text-slate-300 transition hover:bg-slate-700/50 hover:text-white"
+    >
+      <span
+        className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded border ${
+          checked ? 'border-indigo-400 bg-indigo-500 text-white' : 'border-slate-600 bg-slate-800'
+        }`}
+      >
+        {checked ? <Check className="h-2.5 w-2.5" /> : null}
+      </span>
+      <span className="flex-1 truncate">{label}</span>
+      {hint ? <span className="shrink-0 font-mono text-[9px] uppercase text-slate-500">{hint}</span> : null}
+    </button>
+  );
+}
+
+const PROGRESS_TONES = {
+  indigo: 'bg-indigo-400',
+  emerald: 'bg-emerald-400',
+  amber: 'bg-amber-400',
+  sky: 'bg-sky-400',
+  rose: 'bg-rose-400'
+};
+
+export function ProgressBar({ value = 0, tone = 'indigo', className = '' }) {
+  const pct = Math.max(0, Math.min(100, Number(value) || 0));
+  return (
+    <div className={`h-1 w-full overflow-hidden rounded-full bg-slate-700/70 ${className}`}>
+      <div className={`h-full rounded-full ${PROGRESS_TONES[tone] || PROGRESS_TONES.indigo}`} style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+export function Drawer({ open, onClose, title, subtitle, badge, children, footer, width = 520 }) {
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  if (!open || typeof document === 'undefined') return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[90] flex justify-end">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <aside
+        style={{ width }}
+        className="relative flex h-full max-w-[96vw] flex-col border-l border-slate-700/70 bg-[#0b1220] shadow-2xl shadow-black/80"
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-slate-800/80 bg-[#0e1526] px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="truncate text-sm font-bold text-white">{title}</h3>
+              {badge}
+            </div>
+            {subtitle ? <p className="mt-0.5 truncate text-[11px] text-slate-400">{subtitle}</p> : null}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-slate-700/70 bg-slate-800/60 p-1.5 text-slate-400 transition hover:text-white"
+            title="Cerrar"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </header>
+        <div className="flex-1 overflow-y-auto p-4">{children}</div>
+        {footer ? <footer className="border-t border-slate-800/80 bg-[#0e1526] px-4 py-2.5">{footer}</footer> : null}
+      </aside>
+    </div>,
+    document.body
+  );
+}
+
+export function Tabs({ tabs, value, onChange }) {
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-1 border-b border-slate-800/80 pb-2">
+      {tabs.map((tab) => {
+        const active = tab.value === value;
+        const Icon = tab.icon;
+        return (
+          <button
+            key={tab.value}
+            type="button"
+            onClick={() => onChange(tab.value)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition ${
+              active
+                ? 'bg-indigo-500/15 text-indigo-200 ring-1 ring-inset ring-indigo-500/40'
+                : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
+            }`}
+          >
+            {Icon ? <Icon className="h-3 w-3" /> : null}
+            {tab.label}
+            {typeof tab.count === 'number' ? (
+              <span className="font-mono text-[9px] text-slate-500">{tab.count}</span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export function InfoRow({ label, children, mono = false }) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-slate-800/60 py-1.5 last:border-0">
+      <span className="shrink-0 text-[10.5px] uppercase tracking-wide text-slate-500">{label}</span>
+      <span className={`min-w-0 text-right text-[11.5px] text-slate-200 ${mono ? 'font-mono text-[10.5px]' : ''}`}>
+        {children}
+      </span>
+    </div>
   );
 }

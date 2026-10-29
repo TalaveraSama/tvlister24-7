@@ -150,6 +150,7 @@ function runInitDbBody() {
       tv_archive_days INTEGER NOT NULL DEFAULT 0,
       pid INTEGER,
       bitrate_kbps INTEGER NOT NULL DEFAULT 2500,
+      notes TEXT DEFAULT '',
       uptime_started_at TEXT DEFAULT (datetime('now')),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -494,6 +495,7 @@ function runInitDbBody() {
   ensureColumn('streams', 'audio_leveling_mode', "TEXT NOT NULL DEFAULT 'global'");
   ensureColumn('streams', 'headend_node_id', 'INTEGER DEFAULT NULL');
   ensureColumn('streams', 'astra_local_url', "TEXT DEFAULT ''");
+  ensureColumn('streams', 'notes', "TEXT DEFAULT ''");
   ensureColumn('streams', 'headend_mode', "TEXT NOT NULL DEFAULT 'copy_audio'");
   ensureColumn('streams', 'deinterlace_mode', "TEXT NOT NULL DEFAULT 'auto'");
   ensureColumn('streams', 'headend_interlaced', 'INTEGER NOT NULL DEFAULT 0');

@@ -582,7 +582,79 @@ function scheduleStaggeredStreamLaunches(streamIds, delayPerStreamMs = 60) {
 }
 
 // ==================== LIVE STREAMS ====================
+// ==================== ENRIQUECIMIENTO DE LA LISTA DE CANALES (estilo XUI.one) ====================
+// Añade a cada canal los datos vivos que XUI.one muestra en su tabla de streams:
+// clientes conectados (por protocolo) y la programación EPG en curso / siguiente.
+function parseSqliteUtc(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(raw)) {
+    return Date.parse(`${raw.replace(' ', 'T')}${/z$/i.test(raw) ? '' : 'Z'}`);
+  }
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function buildStreamListLiveMaps(rows) {
+  const clientsByStream = new Map();
+  try {
+    const clientRows = db
+      .prepare(
+        `SELECT target_id AS stream_id, protocol, COUNT(*) AS conns
+         FROM active_connections
+         WHERE target_type = 'live'
+         GROUP BY target_id, protocol`
+      )
+      .all();
+    clientRows.forEach((r) => {
+      const id = Number(r.stream_id);
+      if (!id) return;
+      const entry = clientsByStream.get(id) || { clients: 0, byProtocol: {} };
+      const conns = Number(r.conns) || 0;
+      entry.clients += conns;
+      entry.byProtocol[String(r.protocol || 'HLS').toUpperCase()] = conns;
+      clientsByStream.set(id, entry);
+    });
+  } catch {
+    /* la tabla puede no existir todavía en bases muy antiguas */
+  }
+
+  const epgNow = new Map();
+  const epgNext = new Map();
+  const epgIds = [...new Set(rows.map((r) => String(r.epg_channel_id || '').trim()).filter(Boolean))];
+  if (epgIds.length > 0) {
+    const placeholders = epgIds.map(() => '?').join(',');
+    // TVLister guarda la EPG como ISO (`toISOString()`), otras fuentes como `datetime('now')`.
+    // Se normalizan ambos formatos a 'YYYY-MM-DD HH:MM:SS' para poder comparar en SQLite.
+    const programs = db
+      .prepare(
+        `SELECT channel_epg_id, title, start_time, end_time FROM epg_programs
+         WHERE channel_epg_id IN (${placeholders})
+           AND substr(replace(end_time, 'T', ' '), 1, 19) > datetime('now', '-6 hours')`
+      )
+      .all(...epgIds);
+
+    const now = Date.now();
+    programs
+      .map((p) => ({ ...p, start: parseSqliteUtc(p.start_time), end: parseSqliteUtc(p.end_time) }))
+      .filter((p) => p.start && p.end)
+      .sort((a, b) => a.start - b.start)
+      .forEach((p) => {
+        if (p.start <= now && p.end > now) {
+          const prev = epgNow.get(p.channel_epg_id);
+          if (!prev || p.start > prev.start) epgNow.set(p.channel_epg_id, p);
+        } else if (p.start > now && !epgNext.has(p.channel_epg_id)) {
+          epgNext.set(p.channel_epg_id, p);
+        }
+      });
+  }
+
+  return { clientsByStream, epgNow, epgNext };
+}
+
 app.get('/api/streams', requireAuth, (req, res) => {
+  pruneStaleConnections();
+
   const rows = db
     .prepare(
       `SELECT s.*, c.name as category_name, tp.name as profile_name,
@@ -596,12 +668,35 @@ app.get('/api/streams', requireAuth, (req, res) => {
        LEFT JOIN headend_nodes hn ON hn.id = s.headend_node_id
        ORDER BY s.sort_order ASC, s.id ASC`
     )
-    .all()
-    .map((s) => ({
-      ...s,
-      archiveStats: getArchiveStats(s.id)
-    }));
-  res.json(rows);
+    .all();
+
+  const { clientsByStream, epgNow, epgNext } = buildStreamListLiveMaps(rows);
+  const nowMs = Date.now();
+
+  res.json(
+    rows.map((s) => {
+      const live = clientsByStream.get(Number(s.id));
+      const epgId = String(s.epg_channel_id || '').trim();
+      const current = epgId ? epgNow.get(epgId) : null;
+      const following = epgId ? epgNext.get(epgId) : null;
+      const progress =
+        current && current.end > current.start
+          ? Math.max(0, Math.min(100, Math.round(((nowMs - current.start) / (current.end - current.start)) * 100)))
+          : 0;
+      return {
+        ...s,
+        notes: String(s.notes || ''),
+        archiveStats: getArchiveStats(s.id),
+        clients: live?.clients || 0,
+        clients_by_protocol: live?.byProtocol || {},
+        epg_now: current?.title || '',
+        epg_now_end: current ? new Date(current.end).toISOString() : '',
+        epg_next: following?.title || '',
+        epg_next_start: following ? new Date(following.start).toISOString() : '',
+        epg_progress: progress
+      };
+    })
+  );
 });
 
 app.post('/api/streams/reorder', requireAuth, requireAdmin, (req, res) => {
@@ -726,8 +821,8 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
   }
   const info = db
     .prepare(
-      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url, audio_leveling_mode)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url, audio_leveling_mode, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       String(b.name),
@@ -745,7 +840,8 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
       Number(b.bitrate_kbps) || 2500,
       String(b.offline_slate_mode || 'disabled'),
       String(b.offline_slate_url || ''),
-      String(b.audio_leveling_mode || 'global')
+      String(b.audio_leveling_mode || 'global'),
+      String(b.notes || '').slice(0, 2000)
     );
 
   const newId = Number(info.lastInsertRowid);
@@ -790,7 +886,7 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
          name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
          epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
          status = ?, headend_mode = ?, user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
-         offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?
+         offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?, notes = ?
        WHERE id = ?`
     ).run(
       String(b.name || ''),
@@ -810,6 +906,7 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
       String(b.offline_slate_mode || 'disabled'),
       String(b.offline_slate_url || ''),
       String(b.audio_leveling_mode || 'global'),
+      String(b.notes || '').slice(0, 2000),
       id
     );
   });
@@ -2840,8 +2937,23 @@ app.delete('/api/resellers/:id', requireAuth, requireAdmin, (req, res) => {
 // ==================== EPG, OSD MESSAGES & CLIENT CLAIMS ====================
 app.get('/api/epg', requireAuth, (req, res) => {
   const sources = db.prepare('SELECT * FROM epg_sources ORDER BY id DESC').all();
-  const programs = db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC LIMIT 100').all();
-  res.json({ sources, programs });
+  // `channel_id` (opcional) = epg_channel_id del canal, para la ficha del canal.
+  const channelId = String(req.query.channel_id || '').trim();
+  const hoursBack = Math.min(Math.max(Number(req.query.hours_back) || 2, 1), 72);
+  const hoursAhead = Math.min(Math.max(Number(req.query.hours_ahead) || 12, 1), 168);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+  const programs = channelId
+    ? db
+        .prepare(
+          `SELECT * FROM epg_programs
+           WHERE channel_epg_id = ?
+             AND substr(replace(end_time, 'T', ' '), 1, 19) >= datetime('now', ?)
+             AND substr(replace(start_time, 'T', ' '), 1, 19) <= datetime('now', ?)
+           ORDER BY start_time ASC LIMIT ?`
+        )
+        .all(channelId, `-${hoursBack} hours`, `+${hoursAhead} hours`, limit)
+    : db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC LIMIT ?').all(limit);
+  res.json({ sources, programs, channel_id: channelId || null });
 });
 
 app.post('/api/epg/sources', requireAuth, requireAdmin, async (req, res) => {

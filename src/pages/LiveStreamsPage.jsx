@@ -33,7 +33,12 @@ import {
   Globe,
   ArrowLeftRight,
   Filter,
-  Wrench
+  Wrench,
+  Settings2,
+  Users,
+  CalendarClock,
+  StickyNote,
+  Sparkles
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 import {
@@ -45,8 +50,14 @@ import {
   RowMenu,
   Segmented,
   StatusPill,
-  sourceHost
+  sourceHost,
+  CheckRow,
+  MenuHeading,
+  MenuPanel,
+  MenuSeparator,
+  ProgressBar
 } from '../components/StreamsSkin.jsx';
+import StreamDrawer from '../components/StreamDrawer.jsx';
 
 const EMPTY_FORM = {
   name: '',
@@ -63,7 +74,8 @@ const EMPTY_FORM = {
   user_agent: 'TVLister/2.3 (MPEG-TS; Linux)',
   offline_slate_mode: 'disabled',
   offline_slate_url: '',
-  audio_leveling_mode: 'global'
+  audio_leveling_mode: 'global',
+  notes: ''
 };
 
 const EMPTY_PROF = {
@@ -109,6 +121,22 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [groupByCat, setGroupByCat] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [clockNow, setClockNow] = useState(() => Date.now());
+  const [serverFilter, setServerFilter] = useState('all');
+  const [profileFilter, setProfileFilter] = useState('all');
+  const [quickView, setQuickView] = useState('all');
+  const [density, setDensity] = useState('normal'); // 'compact' | 'normal' | 'comfortable'
+  const [columns, setColumns] = useState({
+    order: true,
+    source: true,
+    mode: true,
+    epg: true,
+    clients: true,
+    dvr: true,
+    status: true
+  });
+  const [drawerId, setDrawerId] = useState(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const searchInputRef = React.useRef(null);
 
   // Auto-Resolution Classifier (SD/480p/540p -> 1M, HD 720p -> 2.5M, FHD 1080p -> 3M)
   const [autoResOpen, setAutoResOpen] = useState(false);
@@ -591,7 +619,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       user_agent: s.user_agent || 'TVLister/2.3',
       offline_slate_mode: s.offline_slate_mode || 'disabled',
       offline_slate_url: s.offline_slate_url || '',
-      audio_leveling_mode: s.audio_leveling_mode || 'global'
+      audio_leveling_mode: s.audio_leveling_mode || 'global',
+      notes: s.notes || ''
     });
     setModalOpen(true);
   };
@@ -1055,10 +1084,14 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
   const filtered = streams
     .filter((s) => {
+      const q = search.toLowerCase();
       const matchesSearch =
-        s.name.toLowerCase().includes(search.toLowerCase()) ||
-        s.source_url.toLowerCase().includes(search.toLowerCase()) ||
-        String(s.detected_resolution || '').toLowerCase().includes(search.toLowerCase());
+        s.name.toLowerCase().includes(q) ||
+        s.source_url.toLowerCase().includes(q) ||
+        String(s.backup_url || '').toLowerCase().includes(q) ||
+        String(s.notes || '').toLowerCase().includes(q) ||
+        String(s.category_name || '').toLowerCase().includes(q) ||
+        String(s.detected_resolution || '').toLowerCase().includes(q);
       const matchesCat = catFilter === 'all' || String(s.category_id) === String(catFilter);
       const matchesRes =
         resFilter === 'all' ||
@@ -1073,7 +1106,33 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               : statusFilter === 'source2'
                 ? Boolean(String(s.backup_url || '').trim())
                 : s.status !== 'running' && s.status !== 'ondemand_idle';
-      return matchesSearch && matchesCat && matchesRes && matchesStatus;
+      const matchesServer = serverFilter === 'all' || String(s.server_id) === String(serverFilter);
+      const matchesProfile =
+        profileFilter === 'all' ||
+        (profileFilter === 'copy'
+          ? s.profile_video_codec === 'copy'
+          : profileFilter === 'transcode'
+            ? s.profile_video_codec && s.profile_video_codec !== 'copy'
+            : String(s.transcode_profile_id) === String(profileFilter));
+      const matchesQuick =
+        quickView === 'all'
+          ? true
+          : quickView === 'down'
+            ? s.status !== 'running' && s.status !== 'ondemand_idle'
+            : quickView === 'nosource2'
+              ? !String(s.backup_url || '').trim()
+              : quickView === 'nologo'
+                ? !String(s.logo_url || '').trim()
+                : quickView === 'noepg'
+                  ? !String(s.epg_channel_id || '').trim() || !s.epg_now
+                  : quickView === 'unclassified'
+                    ? !s.resolution_tier
+                    : quickView === 'noclient'
+                      ? !s.clients
+                      : quickView === 'notes'
+                        ? Boolean(String(s.notes || '').trim())
+                        : true;
+      return matchesSearch && matchesCat && matchesRes && matchesStatus && matchesServer && matchesProfile && matchesQuick;
     })
     .sort((a, b) => {
       if (viewSort === 'name_asc') {
@@ -1121,7 +1180,34 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   // Volver a la página 1 cuando cambia cualquier filtro/orden (comportamiento de lista XUI)
   useEffect(() => {
     setPage(1);
-  }, [search, catFilter, resFilter, statusFilter, viewSort, groupByCat, pageSize]);
+  }, [search, catFilter, resFilter, statusFilter, viewSort, groupByCat, pageSize, serverFilter, profileFilter, quickView]);
+
+  // Atajos de teclado: "/" enfoca el buscador, Esc lo limpia
+  useEffect(() => {
+    const onKey = (event) => {
+      const tag = String(event.target?.tagName || '').toLowerCase();
+      const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
+      if (event.key === '/' && !typing) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+      }
+      if (event.key === 'Escape' && typing && event.target === searchInputRef.current) {
+        setSearch('');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Auto-refresco de la lista (clientes conectados + EPG en curso), cada 15 s
+  useEffect(() => {
+    if (!autoRefresh) return undefined;
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      loadAll().catch(() => {});
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [autoRefresh]);
 
   // Reloj para la columna Estado (uptime "up 3d 04h")
   useEffect(() => {
@@ -1135,7 +1221,12 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const downCount = Math.max(0, streams.length - onlineCount - idleCount);
   const source2Count = streams.filter((s) => Boolean(String(s.backup_url || '').trim())).length;
   const advancedFilterCount =
-    (resFilter !== 'all' ? 1 : 0) + (groupByCat ? 1 : 0) + (statusFilter !== 'all' ? 1 : 0);
+    (resFilter !== 'all' ? 1 : 0) +
+    (groupByCat ? 1 : 0) +
+    (statusFilter !== 'all' ? 1 : 0) +
+    (serverFilter !== 'all' ? 1 : 0) +
+    (profileFilter !== 'all' ? 1 : 0) +
+    (quickView !== 'all' ? 1 : 0);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(Math.max(1, page), totalPages);
@@ -1155,6 +1246,22 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const rangeTo = groupByCat ? filtered.length : Math.min(pageStart + pageSize, filtered.length);
 
   // Badge "AUDIO IGUAL": modo por canal + ajuste global de nivelación
+  const drawerStream = drawerId ? streams.find((x) => x.id === drawerId) || null : null;
+  const rowPad = density === 'compact' ? 'py-1' : density === 'comfortable' ? 'py-3' : 'py-2';
+  const visibleColumnCount =
+    2 + ['order', 'source', 'mode', 'epg', 'clients', 'dvr', 'status'].filter((k) => columns[k]).length;
+
+  const quickViews = [
+    { value: 'all', label: 'Todo el catálogo', count: streams.length },
+    { value: 'down', label: 'Sin señal', count: downCount, tone: 'rose' },
+    { value: 'noclient', label: 'Sin clientes', count: streams.filter((x) => !x.clients).length },
+    { value: 'nosource2', label: 'Sin SOURCE 2', count: streams.filter((x) => !String(x.backup_url || '').trim()).length },
+    { value: 'nologo', label: 'Sin logo', count: streams.filter((x) => !String(x.logo_url || '').trim()).length },
+    { value: 'noepg', label: 'Sin EPG', count: streams.filter((x) => !String(x.epg_channel_id || '').trim() || !x.epg_now).length },
+    { value: 'unclassified', label: 'Sin clasificar', count: streams.filter((x) => !x.resolution_tier).length },
+    { value: 'notes', label: 'Con notas', count: streams.filter((x) => String(x.notes || '').trim()).length }
+  ];
+
   const audioLevelOnFor = (st) =>
     st.audio_leveling_mode === 'on' ||
     (st.audio_leveling_mode !== 'off' &&
@@ -1291,6 +1398,12 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 {source2Count} con SOURCE 2 manual
               </span>
             )}
+            {autoRefresh ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-[1px] text-[9.5px] font-bold uppercase tracking-wide text-emerald-300">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                En vivo · 15 s
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -1312,10 +1425,11 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           <div className="relative min-w-[210px] flex-1">
             <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-500" />
             <input
+              ref={searchInputRef}
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar canal, fuente HLS/TS/RTMP..."
+              placeholder="Buscar canal, fuente, notas o categoría…"
               className="h-8 w-full rounded-lg border border-slate-700/80 bg-[#090e1a] pl-8 pr-3 text-[11.5px] text-white focus:border-indigo-500 focus:outline-none"
             />
           </div>
@@ -1350,6 +1464,43 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
             )}
           </button>
 
+          <MenuPanel label="Vista" icon={Settings2} width={252} active={density !== 'normal'} title="Densidad y columnas visibles">
+            <MenuHeading>Actualización automática</MenuHeading>
+            <CheckRow
+              checked={autoRefresh}
+              onChange={() => setAutoRefresh((v) => !v)}
+              label="Refrescar cada 15 s"
+              hint="clientes + EPG"
+            />
+            <MenuSeparator />
+            <MenuHeading>Densidad de las filas</MenuHeading>
+            {[
+              ['compact', 'Compacta'],
+              ['normal', 'Normal'],
+              ['comfortable', 'Cómoda']
+            ].map(([value, label]) => (
+              <CheckRow key={value} checked={density === value} onChange={() => setDensity(value)} label={label} />
+            ))}
+            <MenuSeparator />
+            <MenuHeading>Columnas visibles</MenuHeading>
+            {[
+              ['order', 'Orden (#) y flechas'],
+              ['source', 'Fuente / SOURCE 2'],
+              ['mode', 'Modo & Perfil'],
+              ['epg', 'EPG (ahora / después)'],
+              ['clients', 'Clientes conectados'],
+              ['dvr', 'DVR / Respaldo'],
+              ['status', 'Estado y uptime']
+            ].map(([key, label]) => (
+              <CheckRow
+                key={key}
+                checked={columns[key]}
+                onChange={() => setColumns((prev) => ({ ...prev, [key]: !prev[key] }))}
+                label={label}
+              />
+            ))}
+          </MenuPanel>
+
           {streams.length > 0 && (
             <button
               type="button"
@@ -1362,6 +1513,39 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               {selectedIds.length === streams.length ? 'Deseleccionar' : `Seleccionar ${streams.length}`}
             </button>
           )}
+        </div>
+
+        {/* Vistas rápidas: los mismos atajos con los que XUI filtra su tabla */}
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-800/70 px-3 py-1.5">
+          <span className="mr-1 inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-[0.16em] text-slate-500">
+            <Sparkles className="h-2.5 w-2.5 text-indigo-400" />
+            Vistas
+          </span>
+          {quickViews.map((view) => {
+            const active = quickView === view.value;
+            return (
+              <button
+                key={view.value}
+                type="button"
+                onClick={() => setQuickView(active ? 'all' : view.value)}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-[2px] text-[10px] font-semibold transition ${
+                  active
+                    ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-200'
+                    : view.tone === 'rose'
+                      ? 'border-rose-500/30 bg-rose-500/[0.07] text-rose-300/90 hover:border-rose-500/50'
+                      : 'border-slate-700/70 bg-slate-800/40 text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                }`}
+              >
+                {view.label}
+                <span className={`font-mono text-[9px] ${active ? 'text-indigo-300' : 'text-slate-500'}`}>
+                  {view.count}
+                </span>
+              </button>
+            );
+          })}
+          <span className="ml-auto hidden text-[9.5px] text-slate-600 sm:inline">
+            Atajo: <kbd className="rounded border border-slate-700/70 px-1 font-mono text-[9px]">/</kbd> busca
+          </span>
         </div>
 
         {filtersOpen && (
@@ -1394,6 +1578,40 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 <option value="hd">HD 720p (2.5 Mbps)</option>
                 <option value="fhd">FHD 1080p (3.0 Mbps)</option>
                 <option value="unscanned">Sin clasificar aún</option>
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-slate-500">Servidor</span>
+              <select
+                value={serverFilter}
+                onChange={(e) => setServerFilter(e.target.value)}
+                className="h-8 rounded-lg border border-slate-700/80 bg-[#090e1a] px-2 text-[11.5px] text-slate-200 focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="all">Todos los servidores</option>
+                {servers.map((srv) => (
+                  <option key={srv.id} value={srv.id}>
+                    {srv.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-slate-500">Perfil / Códec</span>
+              <select
+                value={profileFilter}
+                onChange={(e) => setProfileFilter(e.target.value)}
+                className="h-8 rounded-lg border border-slate-700/80 bg-[#090e1a] px-2 text-[11.5px] text-slate-200 focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="all">Todos los perfiles</option>
+                <option value="copy">Sólo Copy / Copy</option>
+                <option value="transcode">Sólo transcodificados</option>
+                {profiles.map((pf) => (
+                  <option key={pf.id} value={pf.id}>
+                    {pf.name}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -1438,6 +1656,9 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                   setStatusFilter('all');
                   setGroupByCat(false);
                   setCatFilter('all');
+                  setServerFilter('all');
+                  setProfileFilter('all');
+                  setQuickView('all');
                 }}
                 className="self-end justify-self-start text-[11px] font-semibold text-slate-400 underline-offset-2 hover:text-white hover:underline"
               >
@@ -1569,19 +1790,21 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     title="Seleccionar todos los filtrados"
                   />
                 </th>
-                <th className="w-[88px] px-2 py-2 font-bold">#</th>
+                <th className={`w-[88px] px-2 py-2 font-bold ${columns.order ? '' : 'hidden'}`}>#</th>
                 <th className="px-2 py-2 font-bold">Canal</th>
-                <th className="px-2 py-2 font-bold">Fuente</th>
-                <th className="px-2 py-2 font-bold">Modo &amp; Perfil</th>
-                <th className="w-[132px] px-2 py-2 font-bold">DVR / Respaldo</th>
-                <th className="w-[112px] px-2 py-2 font-bold">Estado</th>
+                <th className={`px-2 py-2 font-bold ${columns.source ? '' : 'hidden'}`}>Fuente</th>
+                <th className={`px-2 py-2 font-bold ${columns.mode ? '' : 'hidden'}`}>Modo &amp; Perfil</th>
+                <th className={`w-[196px] px-2 py-2 font-bold ${columns.epg ? '' : 'hidden'}`}>EPG · Ahora</th>
+                <th className={`w-[92px] px-2 py-2 font-bold ${columns.clients ? '' : 'hidden'}`}>Clientes</th>
+                <th className={`w-[132px] px-2 py-2 font-bold ${columns.dvr ? '' : 'hidden'}`}>DVR / Respaldo</th>
+                <th className={`w-[112px] px-2 py-2 font-bold ${columns.status ? '' : 'hidden'}`}>Estado</th>
                 <th className="px-3 py-2 text-right font-bold">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {filtered.length === 0 ? (
                 <EmptyState
-                  colSpan={8}
+                  colSpan={visibleColumnCount}
                   title="No hay canales en esta vista"
                   hint="Ajusta la búsqueda, la categoría o los filtros de estado."
                 />
@@ -1600,7 +1823,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     const categoryRow =
                       groupByCat && category !== lastCategory ? (
                         <tr key={`cat-${category}`} className="bg-[#0b1220]">
-                          <td colSpan={8} className="px-3 py-1.5">
+                          <td colSpan={visibleColumnCount} className="px-3 py-1.5">
                             <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
                               <Layers className="h-3 w-3 text-indigo-400" />
                               {category}
@@ -1630,7 +1853,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             />
                           </td>
 
-                          <td className="px-2 py-2 align-middle">
+                          <td className={`px-2 align-middle ${rowPad} ${columns.order ? '' : 'hidden'}`}>
                             <div className="flex items-center gap-1.5">
                               {viewSort === 'lineup' && !search && resFilter === 'all' && (
                                 <div className="flex flex-col gap-0.5">
@@ -1661,7 +1884,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             </div>
                           </td>
 
-                          <td className="px-2 py-2 align-middle">
+                          <td className={`px-2 align-middle ${rowPad}`}>
                             <div className="flex items-center gap-2.5">
                               <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md border border-slate-700/80 bg-slate-800">
                                 {s.logo_url ? (
@@ -1677,9 +1900,20 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                               </div>
                               <div className="min-w-0">
                                 <div className="flex items-center gap-1.5">
-                                  <span className="truncate text-[12.5px] font-semibold text-slate-100 group-hover:text-white">
+                                  <button
+                                    type="button"
+                                    onClick={() => setDrawerId(s.id)}
+                                    title="Abrir la ficha del canal"
+                                    className="truncate text-left text-[12.5px] font-semibold text-slate-100 underline-offset-2 hover:text-white hover:underline"
+                                  >
                                     {s.name}
-                                  </span>
+                                  </button>
+                                  {String(s.notes || '').trim() && (
+                                    <StickyNote
+                                      className="h-3 w-3 shrink-0 text-amber-300/90"
+                                      title={`Nota: ${String(s.notes).trim()}`}
+                                    />
+                                  )}
                                   {hasSource2 && (
                                     <Chip
                                       tone="sky"
@@ -1700,7 +1934,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             </div>
                           </td>
 
-                          <td className="px-2 py-2 align-middle">
+                          <td className={`px-2 align-middle ${rowPad} ${columns.source ? '' : 'hidden'}`}>
                             <div className="flex flex-col gap-1">
                               <div className="flex items-center gap-1.5" title={activeUrl}>
                                 <Globe className="h-3 w-3 shrink-0 text-slate-500" />
@@ -1734,7 +1968,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             </div>
                           </td>
 
-                          <td className="px-2 py-2 align-middle">
+                          <td className={`px-2 align-middle ${rowPad} ${columns.mode ? '' : 'hidden'}`}>
                             <div className="flex max-w-[300px] flex-wrap items-center gap-1">
                               <Chip tone="indigo">{s.stream_mode}</Chip>
                               {s.profile_video_codec === 'copy' && s.stream_mode !== 'direct' && (
@@ -1798,7 +2032,56 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             </div>
                           </td>
 
-                          <td className="px-2 py-2 align-middle">
+                          <td className={`px-2 align-middle ${rowPad} ${columns.epg ? '' : 'hidden'}`}>
+                            {s.epg_now ? (
+                              <div className="max-w-[190px]">
+                                <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wide text-indigo-300">
+                                  <CalendarClock className="h-2.5 w-2.5" />
+                                  Ahora
+                                </div>
+                                <div className="truncate text-[10.5px] font-medium text-slate-200" title={s.epg_now}>
+                                  {s.epg_now}
+                                </div>
+                                <ProgressBar value={s.epg_progress} tone="indigo" className="mt-1" />
+                                {s.epg_next ? (
+                                  <div className="mt-[2px] truncate text-[9px] text-slate-500" title={s.epg_next}>
+                                    Después: {s.epg_next}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <span className="text-[9.5px] text-slate-600" title="Sin programación EPG para este canal">
+                                {s.epg_channel_id ? 'Sin EPG cargado' : 'sin EPG'}
+                              </span>
+                            )}
+                          </td>
+                          <td className={`px-2 align-middle ${rowPad} ${columns.clients ? '' : 'hidden'}`}>
+                            <div className="flex flex-col items-start gap-1">
+                              <span
+                                className={`inline-flex items-center gap-1 rounded border px-1.5 py-[1px] font-mono text-[10px] font-bold ${
+                                  s.clients
+                                    ? 'border-emerald-500/35 bg-emerald-500/12 text-emerald-300'
+                                    : 'border-slate-700/70 bg-slate-800/60 text-slate-500'
+                                }`}
+                                title={
+                                  s.clients
+                                    ? `${s.clients} sesión(es) viendo este canal`
+                                    : 'Nadie está viendo este canal ahora'
+                                }
+                              >
+                                <Users className="h-2.5 w-2.5" />
+                                {s.clients || 0}
+                              </span>
+                              {Object.keys(s.clients_by_protocol || {}).length > 0 && (
+                                <span className="font-mono text-[8.5px] text-slate-500">
+                                  {Object.entries(s.clients_by_protocol)
+                                    .map(([proto, count]) => `${proto}:${count}`)
+                                    .join(' · ')}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className={`px-2 align-middle ${rowPad} ${columns.dvr ? '' : 'hidden'}`}>
                             <div className="flex flex-col items-start gap-1">
                               <button
                                 onClick={() => toggleArchive(s)}
@@ -1842,7 +2125,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             </div>
                           </td>
 
-                          <td className="px-2 py-2 align-middle">
+                          <td className={`px-2 align-middle ${rowPad} ${columns.status ? '' : 'hidden'}`}>
                             <StatusPill
                               status={s.status}
                               uptimeStartedAt={s.uptime_started_at}
@@ -1850,7 +2133,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                             />
                           </td>
 
-                          <td className="px-3 py-2 align-middle">
+                          <td className={`px-3 align-middle ${rowPad}`}>
                             <div className="flex items-center justify-end gap-1">
                               <IconAction
                                 icon={Play}
@@ -1883,6 +2166,11 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                               <IconAction icon={Edit3} label="Editar canal" onClick={() => openEdit(s)} />
                               <RowMenu
                                 items={[
+                                  {
+                                    icon: Radio,
+                                    label: 'Ver ficha del canal',
+                                    onClick: () => setDrawerId(s.id)
+                                  },
                                   {
                                     icon: Monitor,
                                     label:
@@ -1956,6 +2244,26 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           />
         )}
       </div>
+
+      {/* ===== Ficha del canal (equivalente a stream_view de XUI.one) ===== */}
+      <StreamDrawer
+        stream={drawerStream}
+        onClose={() => setDrawerId(null)}
+        now={clockNow}
+        onPreview={onPreview}
+        onEdit={(st) => {
+          setDrawerId(null);
+          openEdit(st);
+        }}
+        onSwitchSource={(st, target) => handleSwitchSource(st, target)}
+        onToggleArchive={(st) => toggleArchive(st)}
+        onAction={(id, action) => handleAction(id, action)}
+        onProbe={(st) => handleProbeSingleStream(st)}
+        onDelete={(id) => {
+          setDrawerId(null);
+          handleDelete(id);
+        }}
+      />
 
       {/* ==================== MODAL: AUDITORÍA DE FUENTES ==================== */}
       {auditOpen && (
@@ -2978,6 +3286,21 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                   />
                 </div>
+                <div className="sm:col-span-4">
+                  <label className="block text-slate-300 mb-1 font-medium">
+                    Notas internas del canal (se ven en la lista y en la ficha)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={form.notes || ''}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white text-xs resize-y"
+                    placeholder="ej. origen del proveedor, incidencias, contacto, mantenimiento…"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-slate-300 mb-1 font-medium">User-Agent Personalizado</label>
                   <input
