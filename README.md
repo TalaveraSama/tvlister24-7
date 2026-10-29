@@ -1,6 +1,6 @@
 # Panel TVLister 24/7 — Servidor IPTV / OTT / VOD (v2.3 Producción Total)
 
-Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, **Canales Lineales 24/7 (Playout Continuo)**, **Películas y Series VOD**, **Importación Nativa desde Base de Datos XUI.one**, **Blindaje Stream Shield Proxy (TS + HLS)**, **Líneas M3U / Xtream API / MAG Stalker / Enigma2**, **Módulo de Resellers con Créditos** y **Portal Cliente WebTV HTML5**.
+Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, **Canales Lineales 24/7 (Playout Continuo)**, **Películas y Series VOD**, **Importación Nativa desde Base de Datos XUI.one**, **Blindaje Stream Shield Proxy (TS + HLS)**, **Líneas M3U / Xtream API / MAG Stalker / Enigma2**, **Módulo de Resellers con Créditos**, **Salida UDP/CATV para moduladores WK2500 (modelos de 32, 64 y 125 canales)** y **Portal Cliente WebTV HTML5**.
 
 📖 **[Manual Completo del Panel, Guía de Uso y Tecnología (`docs/DOCUMENTACION_SISTEMA.md`)](docs/DOCUMENTACION_SISTEMA.md)**
 
@@ -56,6 +56,24 @@ Comandos principales:
 - `tvlister-admin set-port 8895` — Cambiar puerto TCP y abrir firewall (`UFW` + `iptables`).
 - `tvlister-admin update` — Actualizar desde GitHub sin perder base de datos ni puerto.
 - `tvlister-admin release [vX.Y.Z]` — Instalar/actualizar desde un release publicado (paquete con checksum).
+
+---
+
+## Salida UDP / CATV analógica (WK2500)
+
+El módulo *UDP / CATV* genera un SPTS MPEG-TS por número de canal (2 al 125) y lo entrega por una NIC
+dedicada a los moduladores **WK2500**. Soporta **uno o varios equipos**, cada uno con su modelo real:
+
+| Modelo | Canales de salida | Ejemplo de rango |
+| --- | --- | --- |
+| WK2500-32 | 32 | CH 2–33 |
+| WK2500-64 | 64 | CH 2–65 |
+| WK2500-125 | 124 | CH 2–125 |
+
+Con **4 equipos de 32 canales** el panel reparte la grilla completa en un clic: CH 2–33, 34–65, 66–97 y
+98–125 (capacidad 128 para 124 canales), con su IP/puerto UDP y su NIC por equipo. La API rechaza rangos
+que excedan la capacidad del modelo o que se solapen con otro equipo, y avisa si algún canal queda sin
+modulador. Ver `docs/DOCUMENTACION_SISTEMA.md` §8.22.
 
 ---
 

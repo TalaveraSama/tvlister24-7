@@ -446,7 +446,8 @@ function runInitDbBody() {
       ch_start INTEGER NOT NULL DEFAULT 2,
       ch_end INTEGER NOT NULL DEFAULT 125,
       default_output_mode TEXT NOT NULL DEFAULT 'direct_spts',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS wk2500_channels (
@@ -558,6 +559,13 @@ function runInitDbBody() {
   ensureColumn('series', 'tmdb_id', "TEXT DEFAULT ''");
   ensureColumn('series_episodes', 'xui_id', 'INTEGER');
   ensureColumn('categories', 'xui_id', 'INTEGER');
+  // WK2500: cada equipo declara su modelo real (32 / 64 / 125 canales de salida).
+  // El rango [ch_start..ch_end] nunca puede superar la capacidad del modelo.
+  ensureColumn('wk2500_units', 'model_channels', 'INTEGER NOT NULL DEFAULT 125');
+  ensureColumn('wk2500_units', 'enabled', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn('wk2500_units', 'notes', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('wk2500_units', 'updated_at', 'TEXT');
+
   ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('bouquets', 'xui_id', 'INTEGER');
   ensureColumn('lines', 'xui_id', 'INTEGER');

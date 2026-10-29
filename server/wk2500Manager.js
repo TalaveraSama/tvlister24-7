@@ -112,6 +112,45 @@ function isMulticastIp(ip = '') {
 
 export const WK2500_OUTPUT_MODES = ['direct_spts', 'copy_mp2_leveled', 'copy_aac_leveled', 'ntsc_sd_wk2500'];
 
+/**
+ * Modelos reales de modulador WK2500: cambian sólo la CANTIDAD de canales de
+ * salida que puede generar cada equipo, no la grilla CATV (siempre 2..125).
+ *   WK2500-32  -> 32 canales   (p. ej. CH 2..33)
+ *   WK2500-64  -> 64 canales   (p. ej. CH 2..65)
+ *   WK2500-125 -> 124 canales  (CH 2..125, grilla completa)
+ */
+export const WK2500_MODELS = [
+  { id: 'wk2500_32', label: 'WK2500 · 32 canales', channels: 32, hint: '32 salidas RF (suele cubrir CH 2–33)' },
+  { id: 'wk2500_64', label: 'WK2500 · 64 canales', channels: 64, hint: '64 salidas RF (suele cubrir CH 2–65)' },
+  { id: 'wk2500_125', label: 'WK2500 · 125 canales', channels: 125, hint: 'Grilla completa CH 2–125' }
+];
+export const WK2500_MODEL_CHANNELS = WK2500_MODELS.map((m) => m.channels);
+
+export const CATV_MIN_CH = 2;
+export const CATV_MAX_CH = 125;
+export const CATV_TOTAL_SLOTS = CATV_MAX_CH - CATV_MIN_CH + 1; // 124
+
+function modelInfoFor(modelChannels) {
+  const n = Number(modelChannels);
+  return WK2500_MODELS.find((m) => m.channels === n) || null;
+}
+
+function clampCh(n, fallback = CATV_MIN_CH) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(CATV_MIN_CH, Math.min(CATV_MAX_CH, Math.trunc(v)));
+}
+
+function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return Number(aStart) <= Number(bEnd) && Number(bStart) <= Number(aEnd);
+}
+
+function describeRanges(units = []) {
+  return units
+    .map((u) => `CH ${u.ch_start}–${u.ch_end} (${u.name})`)
+    .join(', ');
+}
+
 function isValidIpv4(ip = '') {
   const parts = String(ip).trim().split('.');
   if (parts.length !== 4) return false;
@@ -897,6 +936,237 @@ function parseM3uPlaylistText(m3uText = '') {
   return items;
 }
 
+// ==================== EQUIPOS WK2500: MODELOS 32 / 64 / 125 Y COBERTURA ====================
+
+function listUnitRows() {
+  return db.prepare('SELECT * FROM wk2500_units ORDER BY ch_start ASC, id ASC').all();
+}
+
+/** Capacidad real del equipo (32 / 64 / 125 canales de salida). */
+function unitCapacity(unit = {}) {
+  const byModel = modelInfoFor(unit.model_channels);
+  if (byModel) return byModel.channels;
+  const rangeLen = Math.max(0, Number(unit.ch_end) - Number(unit.ch_start) + 1);
+  return rangeLen || CATV_TOTAL_SLOTS;
+}
+
+/** ¿El canal cae dentro del rango asignado a algún equipo? */
+function findUnitForChannel(units, ch) {
+  return units.find((u) => Number(ch) >= Number(u.ch_start) && Number(ch) <= Number(u.ch_end)) || null;
+}
+
+/**
+ * Valida y normaliza el cuerpo de un equipo WK2500.
+ * Devuelve { unit } o { error, status }.
+ */
+function parseUnitPayload(body = {}, existing = null, { unitsForOverlap = [] } = {}) {
+  const name = String(body.name ?? existing?.name ?? '').trim();
+  const modelChannels = Number(body.model_channels ?? existing?.model_channels ?? 125);
+  const model = modelInfoFor(modelChannels);
+  if (!model) {
+    return { error: `Modelo de WK2500 no válido (${modelChannels}). Usa 32, 64 o 125 canales.`, status: 400 };
+  }
+
+  const rawStart = body.ch_start ?? existing?.ch_start ?? CATV_MIN_CH;
+  const rawEnd = body.ch_end ?? existing?.ch_end ?? null;
+  for (const [label, raw] of [['inicial', rawStart], ['final', rawEnd]]) {
+    if (raw === null || raw === undefined || raw === '') continue;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < CATV_MIN_CH || n > CATV_MAX_CH) {
+      return {
+        error: `El canal ${label} debe ser un número entero entre ${CATV_MIN_CH} y ${CATV_MAX_CH} (recibido: ${raw}).`,
+        status: 400
+      };
+    }
+  }
+  const chStart = Number(rawStart);
+  const chEnd = rawEnd === null || rawEnd === undefined || rawEnd === '' ? Math.min(CATV_MAX_CH, chStart + model.channels - 1) : Number(rawEnd);
+  if (chEnd < chStart) {
+    return { error: `El rango CH ${chStart}–${chEnd} es inválido: el canal final debe ser mayor o igual al inicial.`, status: 400 };
+  }
+  const span = chEnd - chStart + 1;
+  if (span > model.channels) {
+    return {
+      error: `El ${model.label} sólo puede generar ${model.channels} canales y el rango CH ${chStart}–${chEnd} pide ${span}.`,
+      status: 400
+    };
+  }
+
+  // Si no se indica ip_mode pero la IP es unicast, se deduce del propio destino.
+  const declaredMode = body.ip_mode ?? existing?.ip_mode ?? null;
+  const rawDest = body.dest_ip ?? existing?.dest_ip ?? '';
+  const inferredMode = rawDest && isValidIpv4(String(rawDest).trim()) && !isMulticastIp(String(rawDest).trim()) ? 'unicast' : 'multicast';
+  const ipMode = String(declaredMode || inferredMode) === 'unicast' ? 'unicast' : 'multicast';
+  const destIp = String(rawDest || (ipMode === 'unicast' ? '192.168.25.10' : '239.25.0.0')).trim();
+  if (!isValidIpv4(destIp)) {
+    return { error: `La IP destino "${destIp}" no es una IPv4 válida.`, status: 400 };
+  }
+  if (ipMode === 'multicast' && !isMulticastIp(destIp)) {
+    return { error: `El modo multicast requiere un grupo 224.0.0.0–239.255.255.255, no ${destIp}.`, status: 400 };
+  }
+  if (ipMode === 'unicast' && isMulticastIp(destIp)) {
+    return { error: `El modo unicast requiere la IP del WK2500, no el grupo multicast ${destIp}.`, status: 400 };
+  }
+
+  const basePort = Number(body.base_port ?? existing?.base_port ?? 5000);
+  if (!Number.isInteger(basePort) || basePort < 1 || basePort > 65535) {
+    return { error: `El puerto base UDP ${body.base_port} no es válido (1–65535).`, status: 400 };
+  }
+  if (basePort + chEnd > 65535) {
+    return { error: 'El puerto base + el número de canal se sale de 65535; baja el puerto base.', status: 400 };
+  }
+
+  const ttl = Number(body.ttl ?? existing?.ttl ?? 16);
+  if (!Number.isInteger(ttl) || ttl < 1 || ttl > 255) {
+    return { error: 'El TTL multicast debe ser un entero entre 1 y 255.', status: 400 };
+  }
+
+  const outputMode = validateWk2500OutputMode(String(body.default_output_mode ?? existing?.default_output_mode ?? 'direct_spts'));
+  if (!outputMode) {
+    return { error: `Perfil de salida no soportado. Usa uno de: ${WK2500_OUTPUT_MODES.join(', ')}.`, status: 400 };
+  }
+
+  const interfaceIp = String(body.local_interface_ip ?? existing?.local_interface_ip ?? '').trim();
+  if (interfaceIp) {
+    const hostIps = listHostIpv4Interfaces().map((x) => x.address);
+    if (!hostIps.includes(interfaceIp)) {
+      return {
+        error: `La IP de salida ${interfaceIp} no existe en este servidor. IPs disponibles: ${hostIps.join(', ') || 'ninguna'}.`,
+        status: 400
+      };
+    }
+  }
+
+  // Dos equipos no pueden generar el mismo número de canal: se pisarían en el combinador RF.
+  const overlap = unitsForOverlap.find(
+    (u) => Number(u.id) !== Number(existing?.id || 0) && rangesOverlap(chStart, chEnd, u.ch_start, u.ch_end)
+  );
+  if (overlap) {
+    return {
+      error: `El rango CH ${chStart}–${chEnd} se solapa con el equipo "${overlap.name}" (CH ${overlap.ch_start}–${overlap.ch_end}).`,
+      status: 409
+    };
+  }
+
+  if (!name) {
+    return { error: 'Ponle un nombre al equipo (ej. «WK2500 Rack 1»).', status: 400 };
+  }
+
+  return {
+    unit: {
+      name,
+      model_channels: model.channels,
+      ch_start: chStart,
+      ch_end: chEnd,
+      ip_mode: ipMode,
+      dest_ip: destIp,
+      base_port: basePort,
+      local_interface_ip: interfaceIp,
+      ttl,
+      default_output_mode: outputMode,
+      enabled: body.enabled === undefined ? Number(existing?.enabled ?? 1) : body.enabled ? 1 : 0,
+      notes: String(body.notes ?? existing?.notes ?? '').trim()
+    }
+  };
+}
+
+/**
+ * Escribe en la grilla CATV el direccionamiento UDP del equipo (rango, NIC, TTL y perfil)
+ * y marca esos canales con su unit_id. No toca qué stream va en cada canal.
+ */
+function applyUnitToChannels(unit) {
+  const upd = db.prepare(
+    `UPDATE wk2500_channels
+     SET unit_id = ?, udp_host = ?, udp_port = ?, local_interface_ip = ?, ttl = ?, output_mode = ?,
+         updated_at = datetime('now')
+     WHERE catv_ch = ?`
+  );
+  const touched = [];
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      for (let ch = unit.ch_start; ch <= unit.ch_end; ch++) {
+        const addr = computeDefaultUdpAddress(ch, unit.ip_mode, unit.dest_ip, unit.base_port);
+        upd.run(unit.id, addr.udp_host, addr.udp_port, unit.local_interface_ip || '', unit.ttl, unit.default_output_mode, ch);
+        touched.push(ch);
+      }
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  // Los canales que ya estaban emitiendo deben reapuntar su UDP sin reiniciar el panel.
+  let restarted = 0;
+  for (const ch of touched) {
+    if (udpWorkers.has(ch)) {
+      startWk2500ChannelWorker(ch);
+      restarted += 1;
+    }
+  }
+  return { channels: touched.length, restarted };
+}
+
+/** Cobertura completa: qué canales tienen modulador, cuántos quedan fuera y capacidad total. */
+function buildCoverage(units, slots) {
+  const ranges = units
+    .filter((u) => Number(u.enabled) !== 0)
+    .map((u) => ({ id: u.id, name: u.name, ch_start: Number(u.ch_start), ch_end: Number(u.ch_end) }));
+  const covered = new Set();
+  for (const r of ranges) {
+    for (let ch = r.ch_start; ch <= r.ch_end; ch++) covered.add(ch);
+  }
+  const uncovered = [];
+  for (let ch = CATV_MIN_CH; ch <= CATV_MAX_CH; ch++) {
+    if (!covered.has(ch)) uncovered.push(ch);
+  }
+  const totalCapacity = units.reduce((acc, u) => acc + unitCapacity(u), 0);
+  const assignedSlots = (slots || []).filter((s) => s.stream_id || s.custom_source_url);
+  const orphanAssigned = assignedSlots.filter((s) => !covered.has(Number(s.catv_ch))).map((s) => Number(s.catv_ch));
+
+  return {
+    total_capacity: totalCapacity,
+    covered_channels: covered.size,
+    uncovered_channels: uncovered.length,
+    uncovered_ranges: rangesToText(uncovered),
+    uncovered_list: uncovered,
+    orphan_assigned_channels: orphanAssigned
+  };
+}
+
+/** Comprime una lista de números en rangos legibles: [2,3,4,7] -> "2–4, 7". */
+function rangesToText(numbers = []) {
+  if (!numbers.length) return '';
+  const sorted = [...new Set(numbers)].sort((a, b) => a - b);
+  const out = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (let i = 1; i <= sorted.length; i++) {
+    const cur = sorted[i];
+    if (cur === prev + 1) {
+      prev = cur;
+      continue;
+    }
+    out.push(start === prev ? `${start}` : `${start}–${prev}`);
+    start = cur;
+    prev = cur;
+  }
+  return out.join(', ');
+}
+
+/** Reparte los equipos en rangos contiguos desde CH 2 respetando la capacidad del modelo. */
+function sequentialRanges(units, startCh = CATV_MIN_CH) {
+  let cursor = clampCh(startCh);
+  return units.map((u) => {
+    const cap = unitCapacity(u);
+    const chStart = cursor;
+    const chEnd = Math.min(CATV_MAX_CH, chStart + cap - 1);
+    cursor = chEnd + 1;
+    return { ...u, ch_start: chStart, ch_end: chEnd };
+  });
+}
+
 // ==================== API ROUTES: PLAN CATV 2..125, MNF TRUNK SYNC & WK2500 UDP ENGINE ====================
 
 wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
@@ -923,10 +1193,17 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
     .all();
 
   const trunks = db.prepare('SELECT * FROM mnf_trunks ORDER BY id DESC').all();
-  const units = db.prepare('SELECT * FROM wk2500_units ORDER BY ch_start ASC, id ASC').all();
+  const units = listUnitRows();
+  const unitById = new Map(units.map((u) => [Number(u.id), u]));
   const interfaces = listHostIpv4Interfaces();
   const unconfiguredNics = listUnconfiguredPhysicalNics();
   const dedicatedNic = getDedicatedWk2500NicConfig();
+  const activeUnits = units.filter((u) => Number(u.enabled) !== 0);
+
+  const unitStats = new Map();
+  for (const u of units) {
+    unitStats.set(Number(u.id), { assigned: 0, enabled: 0, streaming: 0, mbps: 0 });
+  }
 
   let activeStreamingCount = 0;
   let totalMbps = 0;
@@ -945,6 +1222,19 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
     const effectiveInterfaceIp = resolveEffectiveBindIp(row);
     const matchedNic = interfaces.find((x) => x.address === effectiveInterfaceIp);
 
+    // El equipo se resuelve por unit_id y, si falta, por rango de canales.
+    const unitRow = unitById.get(Number(row.unit_id)) || activeUnits.find((u) => findUnitForChannel([u], row.catv_ch)) || null;
+    const stats = unitRow ? unitStats.get(Number(unitRow.id)) : null;
+    const hasContent = Boolean(row.stream_id || row.custom_source_url);
+    if (stats) {
+      if (hasContent) stats.assigned += 1;
+      if (row.enabled) stats.enabled += 1;
+      if (liveStatus === 'streaming') {
+        stats.streaming += 1;
+        stats.mbps += bitrateKbps / 1000;
+      }
+    }
+
     if (row.stream_id && !streamToCatvMap.has(Number(row.stream_id))) {
       streamToCatvMap.set(Number(row.stream_id), {
         catv_ch: row.catv_ch,
@@ -953,7 +1243,9 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
         udp_port: row.udp_port,
         enabled: Boolean(row.enabled),
         live_status: liveStatus,
-        bitrate_kbps: bitrateKbps
+        bitrate_kbps: bitrateKbps,
+        unit_id: unitRow ? Number(unitRow.id) : null,
+        unit_name: unitRow ? unitRow.name : ''
       });
     }
 
@@ -971,7 +1263,12 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
       bitrate_kbps: bitrateKbps,
       packets_sent: w?.packetsSent || 0,
       uptime_sec: w ? Math.floor((Date.now() - w.startedAtMs) / 1000) : 0,
-      last_error: w?.lastError || ''
+      last_error: w?.lastError || '',
+      // Equipo/modulador que entrega este número de canal
+      unit_id: unitRow ? Number(unitRow.id) : null,
+      unit_name: unitRow ? unitRow.name : '',
+      unit_model_channels: unitRow ? unitCapacity(unitRow) : null,
+      covered_by_unit: Boolean(unitRow)
     };
   });
 
@@ -984,22 +1281,339 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
     };
   });
 
+  const coverage = buildCoverage(units, enrichedSlots);
+
+  const enrichedUnits = units.map((u) => {
+    const cap = unitCapacity(u);
+    const model = modelInfoFor(u.model_channels);
+    const stats = unitStats.get(Number(u.id)) || { assigned: 0, enabled: 0, streaming: 0, mbps: 0 };
+    const span = Math.max(0, Number(u.ch_end) - Number(u.ch_start) + 1);
+    return {
+      ...u,
+      enabled: Number(u.enabled) !== 0,
+      model_label: model ? model.label : `WK2500 · ${cap} canales`,
+      capacity: cap,
+      span,
+      free_capacity: Math.max(0, cap - span),
+      fill_percent: cap ? Math.round((span / cap) * 100) : 0,
+      range_label: `CH ${u.ch_start}–${u.ch_end}`,
+      assigned_channels: stats.assigned,
+      enabled_channels: stats.enabled,
+      streaming_channels: stats.streaming,
+      udp_mbps: Number(stats.mbps.toFixed(2)),
+      first_udp: computeDefaultUdpAddress(u.ch_start, u.ip_mode, u.dest_ip, u.base_port),
+      last_udp: computeDefaultUdpAddress(u.ch_end, u.ip_mode, u.dest_ip, u.base_port)
+    };
+  });
+
   res.json({
     ok: true,
     summary: {
-      total_catv_slots: 124,
+      total_catv_slots: CATV_TOTAL_SLOTS,
       assigned_slots: enrichedSlots.filter((s) => s.stream_id || s.custom_source_url).length,
       enabled_slots: enrichedSlots.filter((s) => s.enabled).length,
       streaming_slots: activeStreamingCount,
-      total_udp_mbps: Number(totalMbps.toFixed(2))
+      total_udp_mbps: Number(totalMbps.toFixed(2)),
+      unit_count: units.length,
+      active_unit_count: activeUnits.length,
+      total_capacity: coverage.total_capacity,
+      covered_channels: coverage.covered_channels,
+      uncovered_channels: coverage.uncovered_channels,
+      uncovered_ranges: coverage.uncovered_ranges,
+      orphan_assigned: coverage.orphan_assigned_channels.length
     },
+    coverage,
+    models: WK2500_MODELS,
     dedicated_nic: dedicatedNic,
     interfaces,
     unconfigured_nics: unconfiguredNics,
     trunks,
-    units,
+    units: enrichedUnits,
     streams: enrichedStreams,
     slots: enrichedSlots
+  });
+});
+
+// ==================== EQUIPOS WK2500: CRUD, AUTO-DISTRIBUCIÓN Y PUESTA EN MARCHA ====================
+
+/** Siguiente IP de la serie para el auto-armado (unicast: última octeta; multicast: tercera octeta). */
+function nextUnitIp(baseIp, index) {
+  const parts = String(baseIp || '').split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  if (isMulticastIp(baseIp)) {
+    parts[2] = (parts[2] + index) % 256;
+    parts[3] = 0;
+  } else {
+    parts[3] = parts[3] + index;
+    if (parts[3] > 254) return null;
+  }
+  return parts.join('.');
+}
+
+wk2500Router.get('/api/wk2500/units', requireAuth, requireAdmin, (req, res) => {
+  const units = listUnitRows();
+  const slots = db.prepare('SELECT catv_ch, stream_id, custom_source_url, enabled FROM wk2500_channels').all();
+  res.json({ ok: true, models: WK2500_MODELS, units, coverage: buildCoverage(units, slots) });
+});
+
+wk2500Router.post('/api/wk2500/units', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const existingUnits = listUnitRows();
+  const parsed = parseUnitPayload(req.body || {}, null, { unitsForOverlap: existingUnits });
+  if (parsed.error) return res.status(parsed.status || 400).json({ error: parsed.error });
+  const u = parsed.unit;
+
+  const info = db
+    .prepare(
+      `INSERT INTO wk2500_units (name, ip_mode, dest_ip, base_port, local_interface_ip, ttl, ch_start, ch_end,
+                                 default_output_mode, model_channels, enabled, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      u.name,
+      u.ip_mode,
+      u.dest_ip,
+      u.base_port,
+      u.local_interface_ip,
+      u.ttl,
+      u.ch_start,
+      u.ch_end,
+      u.default_output_mode,
+      u.model_channels,
+      u.enabled,
+      u.notes
+    );
+
+  const unit = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(Number(info.lastInsertRowid));
+  const applied = applyUnitToChannels(unit);
+  res.status(201).json({ ok: true, unit, applied });
+});
+
+wk2500Router.put('/api/wk2500/units/:id', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const id = Number(req.params.id);
+  const current = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(id);
+  if (!current) return res.status(404).json({ error: 'Equipo WK2500 no encontrado.' });
+
+  const parsed = parseUnitPayload(req.body || {}, current, { unitsForOverlap: listUnitRows() });
+  if (parsed.error) return res.status(parsed.status || 400).json({ error: parsed.error });
+  const u = parsed.unit;
+
+  // Si el rango cambió, los canales que salen del nuevo rango dejan de pertenecer a este equipo.
+  if (Number(u.ch_start) !== Number(current.ch_start) || Number(u.ch_end) !== Number(current.ch_end)) {
+    db.prepare(
+      `UPDATE wk2500_channels SET unit_id = NULL, updated_at = datetime('now')
+       WHERE unit_id = ? AND (catv_ch < ? OR catv_ch > ?)`
+    ).run(id, u.ch_start, u.ch_end);
+  }
+
+  db.prepare(
+    `UPDATE wk2500_units
+     SET name = ?, ip_mode = ?, dest_ip = ?, base_port = ?, local_interface_ip = ?, ttl = ?,
+         ch_start = ?, ch_end = ?, default_output_mode = ?, model_channels = ?, enabled = ?, notes = ?
+     WHERE id = ?`
+  ).run(
+    u.name,
+    u.ip_mode,
+    u.dest_ip,
+    u.base_port,
+    u.local_interface_ip,
+    u.ttl,
+    u.ch_start,
+    u.ch_end,
+    u.default_output_mode,
+    u.model_channels,
+    u.enabled,
+    u.notes,
+    id
+  );
+
+  const unit = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(id);
+  const applied = applyUnitToChannels(unit);
+  res.json({ ok: true, unit, applied });
+});
+
+wk2500Router.post('/api/wk2500/units/:id/apply', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const id = Number(req.params.id);
+  const unit = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(id);
+  if (!unit) return res.status(404).json({ error: 'Equipo WK2500 no encontrado.' });
+  const applied = applyUnitToChannels(unit);
+  res.json({ ok: true, unit, applied });
+});
+
+wk2500Router.delete('/api/wk2500/units/:id', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const id = Number(req.params.id);
+  const unit = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(id);
+  if (!unit) return res.status(404).json({ error: 'Equipo WK2500 no encontrado.' });
+
+  // Sin modulador no hay RF: se apagan los canales del rango para no dejar UDP al aire.
+  let stopped = 0;
+  for (let ch = unit.ch_start; ch <= unit.ch_end; ch++) {
+    if (udpWorkers.has(ch)) {
+      stopWk2500ChannelWorker(ch);
+      stopped += 1;
+    }
+  }
+  db.prepare(
+    "UPDATE wk2500_channels SET enabled = 0, unit_id = NULL, updated_at = datetime('now') WHERE catv_ch BETWEEN ? AND ?"
+  ).run(unit.ch_start, unit.ch_end);
+  db.prepare('DELETE FROM wk2500_units WHERE id = ?').run(id);
+
+  res.json({ ok: true, removed: { id, name: unit.name }, disabledChannels: unit.ch_end - unit.ch_start + 1, stoppedWorkers: stopped });
+});
+
+/** Reasigna rangos contiguos (CH 2 en adelante) según la capacidad real de cada modelo. */
+wk2500Router.post('/api/wk2500/units/auto-distribute', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const { start_ch = CATV_MIN_CH } = req.body || {};
+  const units = listUnitRows();
+  if (!units.length) {
+    return res.status(400).json({ error: 'Todavía no hay equipos WK2500 configurados. Crea al menos uno.' });
+  }
+  const distributed = sequentialRanges(units, Number(start_ch) || CATV_MIN_CH);
+  const upd = db.prepare("UPDATE wk2500_units SET ch_start = ?, ch_end = ?, updated_at = datetime('now') WHERE id = ?");
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare('UPDATE wk2500_channels SET unit_id = NULL').run();
+      for (const u of distributed) upd.run(u.ch_start, u.ch_end, u.id);
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  let restarted = 0;
+  for (const u of distributed) {
+    const fresh = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(u.id);
+    restarted += applyUnitToChannels(fresh).restarted;
+  }
+
+  const freshUnits = listUnitRows();
+  const slots = db.prepare('SELECT catv_ch, stream_id, custom_source_url, enabled FROM wk2500_channels').all();
+  res.json({
+    ok: true,
+    units: freshUnits,
+    restarted,
+    coverage: buildCoverage(freshUnits, slots),
+    message: `Rangos repartidos: ${describeRanges(freshUnits)}.`
+  });
+});
+
+/**
+ * Armado rápido: crea N equipos del mismo modelo con rangos consecutivos y ya deja
+ * la grilla CATV apuntando a cada uno. Ej.: 4 × 32 canales -> CH 2–33, 34–65, 66–97, 98–125.
+ */
+wk2500Router.post('/api/wk2500/units/quick-setup', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const {
+    model_channels = 32,
+    count = 1,
+    start_ch = CATV_MIN_CH,
+    replace_existing = false,
+    name_prefix = 'WK2500',
+    ip_mode = 'unicast',
+    dest_ip = '192.168.25.10',
+    base_port = 5000,
+    local_interface_ip = '',
+    ttl = 16,
+    default_output_mode = 'direct_spts'
+  } = req.body || {};
+
+  const model = modelInfoFor(model_channels);
+  if (!model) return res.status(400).json({ error: 'Modelo no válido: usa 32, 64 o 125 canales.' });
+  const qty = Number(count);
+  if (!Number.isInteger(qty) || qty < 1 || qty > 16) {
+    return res.status(400).json({ error: 'La cantidad de equipos debe ser un entero entre 1 y 16.' });
+  }
+
+  if (replace_existing) {
+    for (const u of listUnitRows()) {
+      for (let ch = u.ch_start; ch <= u.ch_end; ch++) {
+        if (udpWorkers.has(ch)) stopWk2500ChannelWorker(ch);
+      }
+    }
+    db.prepare('UPDATE wk2500_channels SET enabled = 0, unit_id = NULL').run();
+    db.prepare('DELETE FROM wk2500_units').run();
+  }
+
+  const baseUnits = listUnitRows();
+  const created = [];
+  const skipped = [];
+  let cursor = clampCh(Number(start_ch) || CATV_MIN_CH);
+
+  for (let i = 0; i < qty; i++) {
+    if (cursor > CATV_MAX_CH) {
+      skipped.push(`Equipo ${i + 1}: ya no quedan canales libres hasta el CH ${CATV_MAX_CH}.`);
+      continue;
+    }
+    const chStart = cursor;
+    const chEnd = Math.min(CATV_MAX_CH, chStart + model.channels - 1);
+    const destIp = i === 0 ? String(dest_ip).trim() : nextUnitIp(dest_ip, i) || String(dest_ip).trim();
+
+    const parsed = parseUnitPayload(
+      {
+        name: `${name_prefix} ${i + 1}`,
+        model_channels: model.channels,
+        ch_start: chStart,
+        ch_end: chEnd,
+        ip_mode,
+        dest_ip: destIp,
+        base_port,
+        local_interface_ip,
+        ttl,
+        default_output_mode,
+        enabled: 1
+      },
+      null,
+      { unitsForOverlap: [...baseUnits, ...created] }
+    );
+    if (parsed.error) {
+      skipped.push(`Equipo ${i + 1}: ${parsed.error}`);
+      cursor = chEnd + 1;
+      continue;
+    }
+    const u = parsed.unit;
+    const info = db
+      .prepare(
+        `INSERT INTO wk2500_units (name, ip_mode, dest_ip, base_port, local_interface_ip, ttl, ch_start, ch_end,
+                                   default_output_mode, model_channels, enabled, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        u.name,
+        u.ip_mode,
+        u.dest_ip,
+        u.base_port,
+        u.local_interface_ip,
+        u.ttl,
+        u.ch_start,
+        u.ch_end,
+        u.default_output_mode,
+        u.model_channels,
+        u.enabled,
+        u.notes
+      );
+    const row = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(Number(info.lastInsertRowid));
+    applyUnitToChannels(row);
+    created.push(row);
+    cursor = chEnd + 1;
+  }
+
+  const units = listUnitRows();
+  const slots = db.prepare('SELECT catv_ch, stream_id, custom_source_url, enabled FROM wk2500_channels').all();
+  const coverage = buildCoverage(units, slots);
+  res.status(created.length ? 201 : 400).json({
+    ok: created.length > 0,
+    created,
+    skipped,
+    coverage,
+    message: created.length
+      ? `${created.length} × ${model.label} listos: ${describeRanges(created)}. Cobertura ${coverage.covered_channels}/${CATV_TOTAL_SLOTS} canales.`
+      : 'No se pudo crear ningún equipo.'
   });
 });
 
@@ -1564,6 +2178,18 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
     });
   }
 
+  // Sin un equipo WK2500 que cubra este número no hay salida RF posible.
+  if (nextEnabled) {
+    const unitsNow = listUnitRows();
+    if (unitsNow.length && !findUnitForChannel(unitsNow.filter((u) => Number(u.enabled) !== 0), ch)) {
+      return res.status(400).json({
+        error:
+          `El CH ${ch} no lo cubre ningún modulador WK2500 activo. ` +
+          `Equipos actuales: ${describeRanges(unitsNow) || 'ninguno'}. Ajusta el rango en la sección de equipos.`
+      });
+    }
+  }
+
   const target = validateWk2500UdpTarget({ udp_host: nextHost, udp_port: nextPort, catv_ch: ch });
   if (!target.ok) return res.status(target.status || 400).json({ error: target.error });
 
@@ -1674,11 +2300,23 @@ wk2500Router.post('/api/wk2500/control', requireAuth, requireAdmin, (req, res) =
     });
   }
 
+  // Si hay equipos declarados, sólo se encienden los números que algún modulador puede generar.
+  const unitsNow = listUnitRows().filter((u) => Number(u.enabled) !== 0);
+  const startable = unitsNow.length
+    ? assigned.filter((row) => Boolean(findUnitForChannel(unitsNow, row.catv_ch)))
+    : assigned;
+  const skippedUncovered = assigned.length - startable.length;
+  if (startable.length === 0) {
+    return res.status(400).json({
+      error: `Ninguno de los canales asignados está cubierto por tus equipos WK2500 (${describeRanges(unitsNow)}).`
+    });
+  }
+
   const upd = db.prepare("UPDATE wk2500_channels SET enabled = 1, updated_at = datetime('now') WHERE catv_ch = ?");
   withSqliteBusyRetry(() => {
     db.exec('BEGIN IMMEDIATE;');
     try {
-      for (const row of assigned) upd.run(row.catv_ch);
+      for (const row of startable) upd.run(row.catv_ch);
       db.exec('COMMIT;');
     } catch (e) {
       db.exec('ROLLBACK;');
@@ -1686,13 +2324,13 @@ wk2500Router.post('/api/wk2500/control', requireAuth, requireAdmin, (req, res) =
     }
   });
 
-  assigned.forEach((row, idx) => {
+  startable.forEach((row, idx) => {
     setTimeout(() => {
       startWk2500ChannelWorker(row.catv_ch);
     }, idx * 55).unref?.();
   });
 
-  res.json({ ok: true, startedCount: assigned.length });
+  res.json({ ok: true, startedCount: startable.length, skippedUncovered });
 });
 
 // Export CSV / M3U table for fast programming of WK2500 IP-to-Analog Modulator UI

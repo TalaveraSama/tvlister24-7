@@ -733,6 +733,8 @@ Módulo `server/wk2500Manager.js` + página `src/pages/Wk2500CatvPage.jsx`. Conv
 **Grilla y direccionamiento**
 
 - 124 slots fijos: **CH 2 al 125**, con frecuencia y audio estándar NTSC calculados por canal.
+- Los slots se reparten entre **uno o varios moduladores** según el modelo de cada equipo (32, 64 o 125
+  canales). Ver §8.22.
 - Dirección por defecto en multicast: `239.25.0.<canal>` puerto `5000 + canal`, TTL 16.
 - TTL, Service ID, host/puerto, perfil y NIC de salida son editables **por canal**.
 - Trailer NIT/SDT: el `service_id` del canal viaja en la SDT y en el PAT (`Program = catv_ch`), con
@@ -1153,3 +1155,69 @@ git tag v2.3.1 && git push origin v2.3.1      # .github/workflows/release.yml co
 
 En local, sin CI: `bash scripts/build_release.sh v2.3.1` genera `release/` con los tres artefactos y el
 comando `gh release create` listo para ejecutar.
+
+### 8.22. Modelos de WK2500 (32 / 64 / 125 canales) y varios equipos en la misma grilla
+
+Los moduladores WK2500 no tienen todos la misma capacidad: existen de **32, 64 y 125 canales** de salida.
+El panel ya no asume un único equipo de 125: cada modulador se registra con su modelo, su rango de canales
+y su propia salida UDP.
+
+**Qué cambió**
+
+- Tabla `wk2500_units`: `model_channels` (32/64/125), `ch_start`–`ch_end`, `ip_mode`, `dest_ip`,
+  `base_port`, `local_interface_ip`, `ttl`, `default_output_mode`, `enabled` y notas.
+- Cada canal de la grilla guarda su `unit_id`, así que la tabla muestra qué equipo entrega cada número.
+- **Validación de capacidad**: un WK2500 de 32 canales no puede tener un rango de 59 números; la API
+  responde `400` explicando la capacidad real del modelo.
+- **Sin solapes**: dos equipos no pueden generar el mismo número de canal (se pisarían en el combinador
+  RF); la API responde `409` indicando con qué equipo choca.
+- **Cobertura visible**: el panel calcula cuántos de los 124 canales tienen modulador, qué rangos quedan
+  sin cubrir (`CH 34–125`, por ejemplo) y avisa si hay streams asignados a números fuera de cobertura.
+- **Sin modulador no hay RF**: activar un canal fuera de la cobertura de todos los equipos se rechaza con
+  `400`; el "Activar asignados" sólo enciende los números cubiertos y reporta `skippedUncovered`.
+
+**Armado rápido (el caso de 4 equipos de 32 canales)**
+
+En la sección *UDP / CATV (WK2500)* → **Armado rápido de equipos**:
+
+| Campo | Ejemplo |
+| --- | --- |
+| Modelo | 32 canales |
+| Cantidad | 4 |
+| Desde CH | 2 |
+| Salida UDP | Unicast (IP por equipo) |
+| IP base | `192.168.25.10` (el panel suma +1 por equipo) |
+| Puerto base | 5000 (puerto = base + canal) |
+
+Resultado:
+
+| Equipo | Rango RF | Capacidad usada | Destino UDP |
+| --- | --- | --- | --- |
+| WK2500 1 | CH 2–33 | 32/32 | `192.168.25.10:5002 … :5033` |
+| WK2500 2 | CH 34–65 | 32/32 | `192.168.25.11:5034 … :5065` |
+| WK2500 3 | CH 66–97 | 32/32 | `192.168.25.12:5066 … :5097` |
+| WK2500 4 | CH 98–125 | 28/32 | `192.168.25.13:5098 … :5125` |
+
+124 canales con 128 de capacidad: los 4 números sobrantes del último equipo quedan libres por si el
+proveedor agrega canales. En multicast el panel avanza la **tercera octeta** por equipo
+(`239.25.0.0`, `239.25.1.0`, `239.25.2.0`, …) y el último octeto sigue siendo el número de canal.
+
+**Endpoints nuevos**
+
+| Método | Ruta | Qué hace |
+| --- | --- | --- |
+| `GET` | `/api/wk2500/units` | Equipos, modelos disponibles y cobertura |
+| `POST` | `/api/wk2500/units` | Crea un equipo y reescribe su rango en la grilla |
+| `PUT` | `/api/wk2500/units/:id` | Edita modelo, rango, UDP, NIC, TTL o perfil |
+| `DELETE` | `/api/wk2500/units/:id` | Elimina el equipo y **desactiva** sus canales (sin modulador no hay RF) |
+| `POST` | `/api/wk2500/units/:id/apply` | Reaplica el direccionamiento UDP a su rango sin reiniciar el panel |
+| `POST` | `/api/wk2500/units/auto-distribute` | Reparte rangos contiguos desde CH 2 según la capacidad de cada modelo |
+| `POST` | `/api/wk2500/units/quick-setup` | Crea N equipos del mismo modelo con rangos consecutivos (ej. 4 × 32) |
+
+`GET /api/wk2500/plan` ahora devuelve además `models`, `coverage` (`total_capacity`, `covered_channels`,
+`uncovered_ranges`, `orphan_assigned_channels`) y, por equipo, `capacity`, `span`, `fill_percent`,
+`assigned_channels`, `streaming_channels` y su primer/último destino UDP.
+
+**UI**: tarjetas por equipo con barra de capacidad usada, destino UDP, NIC y accesos *Aplicar / Editar /
+Eliminar*; filtro de la grilla por equipo; badge con el nombre del equipo en cada canal y la etiqueta
+`sin modulador` en los números que ningún equipo cubre.

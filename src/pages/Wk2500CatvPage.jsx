@@ -11,7 +11,15 @@ import {
   AlertTriangle,
   ArrowLeftRight,
   Power,
-  HardDrive
+  HardDrive,
+  Cpu,
+  Plus,
+  Pencil,
+  Trash2,
+  Layers,
+  Wand2,
+  Save,
+  X
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -61,6 +69,23 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     muxrate_kbps: 0
   });
   const [applyingBulk, setApplyingBulk] = useState(false);
+
+  // Equipos WK2500 (modelos de 32 / 64 / 125 canales)
+  const [unitFilter, setUnitFilter] = useState('all');
+  const [unitModal, setUnitModal] = useState(null); // { id?, form }
+  const [savingUnit, setSavingUnit] = useState(false);
+  const [quickForm, setQuickForm] = useState({
+    model_channels: 32,
+    count: 4,
+    start_ch: 2,
+    ip_mode: 'unicast',
+    dest_ip: '192.168.25.10',
+    base_port: 5000,
+    ttl: 16,
+    output_mode: 'direct_spts',
+    replace_existing: true
+  });
+  const [quickBusy, setQuickBusy] = useState(false);
 
   const showToast = (msg) => {
     setErrorNotice('');
@@ -180,6 +205,139 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     }
   };
 
+  const emptyUnitForm = (model = 32) => ({
+    name: '',
+    model_channels: model,
+    ch_start: 2,
+    ch_end: 2 + model - 1,
+    ip_mode: 'unicast',
+    dest_ip: '192.168.25.10',
+    base_port: 5000,
+    local_interface_ip: '',
+    ttl: 16,
+    default_output_mode: 'direct_spts',
+    enabled: true,
+    notes: ''
+  });
+
+  const openNewUnit = () => {
+    const models = plan?.models || [];
+    const model = models[0]?.channels || 32;
+    const used = (plan?.units || []).map((u) => Number(u.ch_end) + 1);
+    const next = used.length ? Math.min(125, Math.max(...used)) : 2;
+    setUnitModal({ id: null, form: { ...emptyUnitForm(model), name: `WK2500 ${(plan?.units?.length || 0) + 1}`, ch_start: next, ch_end: Math.min(125, next + model - 1) } });
+  };
+
+  const openEditUnit = (unit) => {
+    setUnitModal({
+      id: unit.id,
+      form: {
+        name: unit.name,
+        model_channels: unit.model_channels,
+        ch_start: unit.ch_start,
+        ch_end: unit.ch_end,
+        ip_mode: unit.ip_mode,
+        dest_ip: unit.dest_ip,
+        base_port: unit.base_port,
+        local_interface_ip: unit.local_interface_ip || '',
+        ttl: unit.ttl,
+        default_output_mode: unit.default_output_mode,
+        enabled: Boolean(unit.enabled),
+        notes: unit.notes || ''
+      }
+    });
+  };
+
+  const handleSaveUnit = async (e) => {
+    e.preventDefault();
+    if (!unitModal) return;
+    setSavingUnit(true);
+    setErrorNotice('');
+    try {
+      const res = unitModal.id
+        ? await apiFetch(`/api/wk2500/units/${unitModal.id}`, { method: 'PUT', body: JSON.stringify(unitModal.form) })
+        : await apiFetch('/api/wk2500/units', { method: 'POST', body: JSON.stringify(unitModal.form) });
+      await loadPlan(true);
+      setUnitModal(null);
+      showToast(
+        `✅ ${res.unit.name}: ${res.unit.model_channels} canales, CH ${res.unit.ch_start}–${res.unit.ch_end}. ` +
+          `${res.applied?.channels || 0} canales de la grilla reapuntados a udp://${res.unit.dest_ip}:${res.unit.base_port}.`
+      );
+    } catch (err) {
+      setErrorNotice(err.message);
+    } finally {
+      setSavingUnit(false);
+    }
+  };
+
+  const handleDeleteUnit = async (unit) => {
+    if (!window.confirm(`¿Eliminar el equipo "${unit.name}" (CH ${unit.ch_start}–${unit.ch_end})? Sus canales quedarán desactivados.`)) return;
+    setErrorNotice('');
+    try {
+      const res = await apiFetch(`/api/wk2500/units/${unit.id}`, { method: 'DELETE' });
+      await loadPlan(true);
+      showToast(`🗑 Equipo "${unit.name}" eliminado. ${res.disabledChannels} canales desactivados.`);
+    } catch (err) {
+      setErrorNotice(err.message);
+    }
+  };
+
+  const handleApplyUnit = async (unit) => {
+    setErrorNotice('');
+    try {
+      const res = await apiFetch(`/api/wk2500/units/${unit.id}/apply`, { method: 'POST' });
+      await loadPlan(true);
+      showToast(
+        `🔁 "${unit.name}" aplicado: ${res.applied.channels} canales con udp://${unit.dest_ip}:${unit.base_port}. ` +
+          `${res.applied.restarted} reactivados en caliente.`
+      );
+    } catch (err) {
+      setErrorNotice(err.message);
+    }
+  };
+
+  const handleAutoDistribute = async () => {
+    setErrorNotice('');
+    try {
+      const res = await apiFetch('/api/wk2500/units/auto-distribute', {
+        method: 'POST',
+        body: JSON.stringify({ start_ch: 2 })
+      });
+      await loadPlan(true);
+      showToast(`📐 ${res.message}`);
+    } catch (err) {
+      setErrorNotice(err.message);
+    }
+  };
+
+  const handleQuickSetup = async () => {
+    setQuickBusy(true);
+    setErrorNotice('');
+    try {
+      const res = await apiFetch('/api/wk2500/units/quick-setup', {
+        method: 'POST',
+        body: JSON.stringify({
+          model_channels: Number(quickForm.model_channels),
+          count: Number(quickForm.count),
+          start_ch: Number(quickForm.start_ch),
+          replace_existing: Boolean(quickForm.replace_existing),
+          ip_mode: quickForm.ip_mode,
+          dest_ip: quickForm.dest_ip,
+          base_port: Number(quickForm.base_port),
+          ttl: Number(quickForm.ttl),
+          default_output_mode: quickForm.output_mode
+        })
+      });
+      await loadPlan(true);
+      if (res.skipped?.length) setWarningNotice(res.skipped.join(' · '));
+      showToast(`⚙️ ${res.message}`);
+    } catch (err) {
+      setErrorNotice(err.message);
+    } finally {
+      setQuickBusy(false);
+    }
+  };
+
   const handleSlotChange = async (catvCh, patch) => {
     setErrorNotice('');
     try {
@@ -279,9 +437,25 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     total_udp_mbps: 0
   };
 
+  const units = plan?.units || [];
+  const models = plan?.models || [
+    { id: 'wk2500_32', label: 'WK2500 · 32 canales', channels: 32 },
+    { id: 'wk2500_64', label: 'WK2500 · 64 canales', channels: 64 },
+    { id: 'wk2500_125', label: 'WK2500 · 125 canales', channels: 125 }
+  ];
+  const coverage = plan?.coverage || {
+    total_capacity: 0,
+    covered_channels: 0,
+    uncovered_channels: 124,
+    uncovered_ranges: '2–125',
+    uncovered_list: []
+  };
+  const unitFilterId = unitFilter === 'all' ? null : Number(unitFilter);
+
   const slotMapByCh = new Map(slots.map((s) => [s.catv_ch, s]));
 
   const filteredSlots = slots.filter((s) => {
+    if (unitFilterId && Number(s.unit_id) !== unitFilterId) return false;
     if (filterMode === 'assigned' && !s.stream_id && !s.custom_source_url) return false;
     if (filterMode === 'enabled' && !s.enabled) return false;
     if (filterMode === 'streaming' && s.live_status !== 'streaming') return false;
@@ -309,6 +483,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     );
   });
 
+  const modalUnit = unitModal;
+  const modalSpan = modalUnit ? Number(modalUnit.form.ch_end) - Number(modalUnit.form.ch_start) + 1 : 0;
+  const modalCap = Number(modalUnit?.form.model_channels || 32);
+  const modalSpanError = Boolean(modalUnit) && modalSpan > modalCap;
+
   return (
     <div className="space-y-5">
       {/* Header Banner */}
@@ -316,10 +495,10 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         <div className="space-y-1">
           <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-500/35 text-amber-300 text-[11px] font-bold">
             <Tv className="w-3.5 h-3.5" />
-            SALIDA UDP POR TARJETA DEDICADA · CONTROL POR CANAL (CH 2 AL 125) · SOPORTE MNF / M4F / TS / HLS
+            SALIDA UDP POR TARJETA DEDICADA · MODELOS 32 / 64 / 125 CANALES · GRILLA CH 2 AL 125 · MNF / M4F / TS / HLS
           </div>
           <h1 className="text-xl font-bold text-white">
-            Moduladores Analógicos WK2500 — Selección Exacta de Canal (2, 3, 4... 125) y Red Dedicada
+            Moduladores Analógicos WK2500 — Varios equipos (32 / 64 / 125 canales) y Selección Exacta de Canal (2... 125)
           </h1>
           <p className="text-xs text-slate-300 max-w-3xl leading-relaxed">
             Saca todos tus flujos UDP SPTS (`1316 bytes`) por una <strong>segunda tarjeta de red dedicada</strong> hacia tus equipos{' '}
@@ -364,6 +543,255 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             CSV WK2500
           </button>
         </div>
+      </div>
+
+      {/* ==================== EQUIPOS WK2500: MODELOS 32 / 64 / 125 ==================== */}
+      <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/35 p-4 space-y-3.5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Cpu className="w-4 h-4 text-emerald-400" />
+            <h2 className="text-sm font-bold text-white">
+              Tus moduladores WK2500 — modelos de 32, 64 y 125 canales
+            </h2>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
+            <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/35 text-emerald-300">
+              {units.length} equipo{units.length === 1 ? '' : 's'}
+            </span>
+            <span className="px-2.5 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/35 text-cyan-300">
+              Capacidad {coverage.total_capacity} canales
+            </span>
+            <span
+              className={`px-2.5 py-0.5 rounded-full border ${
+                coverage.uncovered_channels === 0
+                  ? 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+                  : 'bg-amber-500/15 border-amber-500/40 text-amber-200'
+              }`}
+            >
+              Cobertura {coverage.covered_channels}/124
+              {coverage.uncovered_channels > 0 ? ` · sin modulador: CH ${coverage.uncovered_ranges}` : ' · grilla completa'}
+            </span>
+          </div>
+        </div>
+
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Cada equipo genera un número limitado de canales RF según su modelo: el de{' '}
+          <strong className="text-slate-200">32</strong> cubre 32 números (ej. CH 2–33), el de{' '}
+          <strong className="text-slate-200">64</strong> cubre 64 y el de <strong className="text-slate-200">125</strong> toda la
+          grilla 2–125. Con <strong className="text-emerald-300">4 equipos de 32 canales</strong> cubres los{' '}
+          <strong className="text-emerald-300">124 canales</strong> completos: CH 2–33, 34–65, 66–97 y 98–125. Los rangos no
+          pueden solaparse porque se pisarían en el combinador RF.
+        </p>
+
+        {/* Armado rápido */}
+        <div className="rounded-xl border border-slate-700 bg-[#090e1a] p-3 space-y-2">
+          <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-300">
+            <Wand2 className="w-3.5 h-3.5 text-emerald-400" /> Armado rápido de equipos
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-2 text-xs items-end">
+            <div>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Modelo</label>
+              <select
+                value={quickForm.model_channels}
+                onChange={(e) => setQuickForm({ ...quickForm, model_channels: Number(e.target.value) })}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+              >
+                {models.map((m) => (
+                  <option key={m.id} value={m.channels}>
+                    {m.channels} canales
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Cantidad</label>
+              <input
+                type="number"
+                min={1}
+                max={16}
+                value={quickForm.count}
+                onChange={(e) => setQuickForm({ ...quickForm, count: Number(e.target.value) })}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-emerald-300 font-bold"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Desde CH</label>
+              <input
+                type="number"
+                min={2}
+                max={125}
+                value={quickForm.start_ch}
+                onChange={(e) => setQuickForm({ ...quickForm, start_ch: Number(e.target.value) })}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-amber-300 font-bold"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Salida UDP</label>
+              <select
+                value={quickForm.ip_mode}
+                onChange={(e) =>
+                  setQuickForm({
+                    ...quickForm,
+                    ip_mode: e.target.value,
+                    dest_ip: e.target.value === 'multicast' ? '239.25.0.0' : '192.168.25.10'
+                  })
+                }
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+              >
+                <option value="unicast">Unicast (IP por equipo)</option>
+                <option value="multicast">Multicast 239.x</option>
+              </select>
+            </div>
+            <div className="xl:col-span-2">
+              <label className="text-[10px] text-slate-400 block mb-0.5">
+                IP base {quickForm.ip_mode === 'unicast' ? '(se suma 1 por equipo)' : '(3ª octeta +1 por equipo)'}
+              </label>
+              <input
+                type="text"
+                value={quickForm.dest_ip}
+                onChange={(e) => setQuickForm({ ...quickForm, dest_ip: e.target.value })}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-cyan-300 font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400 block mb-0.5">Puerto base</label>
+              <input
+                type="number"
+                min={1}
+                max={65000}
+                value={quickForm.base_port}
+                onChange={(e) => setQuickForm({ ...quickForm, base_port: Number(e.target.value) })}
+                className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-cyan-300 font-mono"
+              />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleQuickSetup}
+              disabled={quickBusy}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-bold"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              {quickBusy ? 'Creando equipos…' : `Crear ${quickForm.count} × ${quickForm.model_channels} canales`}
+            </button>
+            <button
+              type="button"
+              onClick={handleAutoDistribute}
+              disabled={units.length === 0}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-600 text-slate-200 text-xs font-bold"
+            >
+              <Layers className="w-3.5 h-3.5" /> Repartir rangos 2 → 125
+            </button>
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-300">
+              <input
+                type="checkbox"
+                checked={quickForm.replace_existing}
+                onChange={(e) => setQuickForm({ ...quickForm, replace_existing: e.target.checked })}
+                className="accent-emerald-500"
+              />
+              Reemplazar los equipos actuales
+            </label>
+            <button
+              type="button"
+              onClick={openNewUnit}
+              className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#090e1a] hover:bg-slate-800 border border-emerald-500/40 text-emerald-200 text-xs font-bold"
+            >
+              <Plus className="w-3.5 h-3.5" /> Añadir equipo manualmente
+            </button>
+          </div>
+        </div>
+
+        {/* Tarjetas de equipos */}
+        {units.length === 0 ? (
+          <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-3 text-[11.5px] text-amber-100">
+            Aún no hay equipos declarados. Si tienes <strong>4 moduladores de 32 canales</strong>, elige «32 canales», cantidad{' '}
+            <strong>4</strong> y pulsa <strong>Crear equipos</strong>: la grilla quedará repartida en CH 2–33, 34–65, 66–97 y 98–125
+            con su IP UDP asignada a cada uno.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+            {units.map((u, idx) => (
+              <div key={u.id} className="rounded-xl border border-slate-700 bg-[#090e1a] p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-[13px] font-bold text-white">{u.name}</div>
+                    <div className="text-[10px] text-slate-400">
+                      Equipo {idx + 1} · {u.range_label}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded px-1.5 py-0.5 text-[9.5px] font-bold uppercase bg-emerald-500/15 border border-emerald-500/35 text-emerald-300">
+                    {u.model_channels} CH
+                  </span>
+                </div>
+
+                <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className={`h-full ${u.fill_percent >= 100 ? 'bg-emerald-500' : 'bg-amber-500'}`}
+                    style={{ width: `${Math.min(100, u.fill_percent || 0)}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-slate-400">
+                  <span>
+                    {u.span}/{u.capacity} canales usados
+                  </span>
+                  <span className={u.streaming_channels ? 'text-emerald-300 font-bold' : ''}>
+                    {u.streaming_channels} al aire
+                  </span>
+                </div>
+
+                <div className="rounded-lg bg-[#0e1526] border border-slate-800 px-2 py-1.5 text-[10px] font-mono text-cyan-300 break-all">
+                  udp://{u.dest_ip}:{u.base_port}
+                  <span className="text-slate-500"> → puerto CH+N</span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  NIC: {u.local_interface_ip || dedicatedNic.ip_address || 'automática'} · TTL {u.ttl} ·{' '}
+                  {u.default_output_mode === 'direct_spts' ? 'Directo 1316B' : u.default_output_mode}
+                </div>
+
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => handleApplyUnit(u)}
+                    title="Reescribir en la grilla la IP/puerto/NIC de este equipo"
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-[10.5px] font-bold text-slate-200"
+                  >
+                    <Save className="w-3 h-3" /> Aplicar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openEditUnit(u)}
+                    title="Editar equipo"
+                    className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteUnit(u)}
+                    title="Eliminar equipo"
+                    className="px-2 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600/35 border border-rose-500/40 text-rose-300"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {coverage.uncovered_channels > 0 && units.length > 0 && (
+          <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-2.5 text-[11px] text-amber-100">
+            ⚠️ Los canales <strong>CH {coverage.uncovered_ranges}</strong> no tienen modulador asignado: no saldrán por RF. Añade otro
+            equipo o amplía el rango de uno existente (si el modelo lo permite).
+          </div>
+        )}
+        {coverage.orphan_assigned_channels?.length > 0 && (
+          <div className="rounded-xl border border-rose-500/35 bg-rose-500/10 p-2.5 text-[11px] text-rose-100">
+            Hay {coverage.orphan_assigned_channels.length} canal(es) con stream asignado fuera de la cobertura: CH{' '}
+            {coverage.orphan_assigned_channels.join(', ')}. Muévelos a un número cubierto o amplía los equipos.
+          </div>
+        )}
       </div>
 
       {/* Dedicated Network Interface (NIC) Selector Card */}
@@ -642,6 +1070,21 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {units.length > 0 && (
+              <select
+                value={unitFilter}
+                onChange={(e) => setUnitFilter(e.target.value)}
+                className="px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-emerald-500/40 text-xs text-emerald-200 font-semibold"
+                title="Ver sólo los canales que entrega un equipo"
+              >
+                <option value="all">Todos los equipos ({units.length})</option>
+                {units.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name} · {u.range_label}
+                  </option>
+                ))}
+              </select>
+            )}
             <select
               value={filterMode}
               onChange={(e) => setFilterMode(e.target.value)}
@@ -806,12 +1249,30 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                     const isLive = slot.live_status === 'streaming';
                     const hasAssigned = Boolean(slot.stream_id || slot.custom_source_url);
                     return (
-                      <tr key={slot.catv_ch} className="hover:bg-slate-800/25">
+                      <tr
+                        key={slot.catv_ch}
+                        className={`hover:bg-slate-800/25 ${slot.covered_by_unit ? '' : 'opacity-55'}`}
+                      >
                         <td className="px-3 py-2">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 font-bold font-mono">
                               CH {slot.catv_ch}
                             </span>
+                            {slot.unit_name ? (
+                              <span
+                                title={`Este canal lo genera el equipo ${slot.unit_name} (${slot.unit_model_channels} canales)`}
+                                className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-500/12 border border-emerald-500/30 text-[9.5px] font-bold text-emerald-300"
+                              >
+                                {slot.unit_name}
+                              </span>
+                            ) : (
+                              <span
+                                title="Ningún equipo WK2500 cubre este número: no tendrá salida RF"
+                                className="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-500/12 border border-rose-500/30 text-[9.5px] font-bold text-rose-300"
+                              >
+                                sin modulador
+                              </span>
+                            )}
                             {hasAssigned && (
                               <select
                                 value=""
@@ -949,6 +1410,253 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           </div>
         )}
       </div>
+
+      {/* ==================== MODAL: EQUIPO WK2500 ==================== */}
+      {modalUnit ? (
+        <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center overflow-y-auto bg-black/80 p-4">
+          <form
+            onSubmit={handleSaveUnit}
+            className="w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-800 bg-[#0e1526] shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-slate-800 bg-[#131c31] px-4 py-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <Cpu className="h-4 w-4 text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Modulador WK2500</div>
+                  <div className="truncate text-sm font-bold text-white">
+                    {modalUnit.id ? 'Editar equipo' : 'Nuevo equipo'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUnitModal(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 text-xs">
+              <div className="sm:col-span-2">
+                <label className="mb-1 block text-[11px] text-slate-300">Nombre del equipo</label>
+                <input
+                  type="text"
+                  required
+                  value={modalUnit.form.name}
+                  onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, name: e.target.value } })}
+                  placeholder="Ej. WK2500 Rack 1"
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-white"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">Modelo (canales de salida)</label>
+                <select
+                  value={modalUnit.form.model_channels}
+                  onChange={(e) => {
+                    const model = Number(e.target.value);
+                    const start = Number(modalUnit.form.ch_start) || 2;
+                    setUnitModal({
+                      ...modalUnit,
+                      form: {
+                        ...modalUnit.form,
+                        model_channels: model,
+                        ch_end: Math.min(125, start + model - 1)
+                      }
+                    });
+                  }}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-white"
+                >
+                  {models.map((m) => (
+                    <option key={m.id} value={m.channels}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-[11px] text-slate-300">Canal inicial</label>
+                  <input
+                    type="number"
+                    min={2}
+                    max={125}
+                    value={modalUnit.form.ch_start}
+                    onChange={(e) => {
+                      const start = Number(e.target.value);
+                      setUnitModal({
+                        ...modalUnit,
+                        form: {
+                          ...modalUnit.form,
+                          ch_start: start,
+                          ch_end: Math.min(125, start + Number(modalUnit.form.model_channels) - 1)
+                        }
+                      });
+                    }}
+                    className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-2.5 py-2 text-amber-300 font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-slate-300">Canal final</label>
+                  <input
+                    type="number"
+                    min={2}
+                    max={125}
+                    value={modalUnit.form.ch_end}
+                    onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, ch_end: Number(e.target.value) } })}
+                    className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-2.5 py-2 text-amber-300 font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="sm:col-span-2 rounded-xl border border-slate-800 bg-[#090e1a] px-3 py-2 text-[11px]">
+                <span className={modalSpanError ? 'text-rose-300 font-bold' : 'text-slate-300'}>
+                  Rango CH {modalUnit.form.ch_start}–{modalUnit.form.ch_end} = {modalSpan} canales
+                  {modalSpanError
+                    ? ` · excede la capacidad del modelo (${modalCap}).`
+                    : ` · capacidad usada ${Math.round((modalSpan / modalCap) * 100)}% de ${modalCap}.`}
+                </span>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">Tipo de salida UDP</label>
+                <select
+                  value={modalUnit.form.ip_mode}
+                  onChange={(e) =>
+                    setUnitModal({
+                      ...modalUnit,
+                      form: {
+                        ...modalUnit.form,
+                        ip_mode: e.target.value,
+                        dest_ip: e.target.value === 'multicast' ? '239.25.0.0' : '192.168.25.10'
+                      }
+                    })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-white"
+                >
+                  <option value="unicast">Unicast — IP del WK2500</option>
+                  <option value="multicast">Multicast — grupo 239.x</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">IP destino del equipo</label>
+                <input
+                  type="text"
+                  required
+                  value={modalUnit.form.dest_ip}
+                  onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, dest_ip: e.target.value } })}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-cyan-300 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">Puerto base UDP</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={65000}
+                  value={modalUnit.form.base_port}
+                  onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, base_port: Number(e.target.value) } })}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-cyan-300 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] text-slate-300">Tarjeta NIC de salida</label>
+                <select
+                  value={modalUnit.form.local_interface_ip || ''}
+                  onChange={(e) =>
+                    setUnitModal({ ...modalUnit, form: { ...modalUnit.form, local_interface_ip: e.target.value } })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-cyan-300"
+                >
+                  <option value="">
+                    {dedicatedNic.ip_address ? `Global (${dedicatedNic.ip_address})` : 'Automática'}
+                  </option>
+                  {interfaces.map((iface) => (
+                    <option key={`${iface.name}-${iface.address}`} value={iface.address}>
+                      {iface.name} ({iface.address})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-[11px] text-slate-300">TTL</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={255}
+                    value={modalUnit.form.ttl}
+                    onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, ttl: Number(e.target.value) } })}
+                    className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-2.5 py-2 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-slate-300">Perfil</label>
+                  <select
+                    value={modalUnit.form.default_output_mode}
+                    onChange={(e) =>
+                      setUnitModal({ ...modalUnit, form: { ...modalUnit.form, default_output_mode: e.target.value } })
+                    }
+                    className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-2 py-2 text-white"
+                  >
+                    <option value="direct_spts">Directo 1316B</option>
+                    <option value="copy_mp2_leveled">Copy + MP2</option>
+                    <option value="copy_aac_leveled">Copy + AAC</option>
+                    <option value="ntsc_sd_wk2500">NTSC 480 SD</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="sm:col-span-2 flex items-center gap-2">
+                <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(modalUnit.form.enabled)}
+                    onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, enabled: e.target.checked } })}
+                    className="accent-emerald-500"
+                  />
+                  Equipo activo (sus canales pueden salir al aire)
+                </label>
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="mb-1 block text-[11px] text-slate-300">Notas (opcional)</label>
+                <input
+                  type="text"
+                  value={modalUnit.form.notes || ''}
+                  onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, notes: e.target.value } })}
+                  placeholder="Ej. Rack 2, combinador 3, canal 2 al 33"
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-white"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-slate-800 bg-[#131c31] px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setUnitModal(null)}
+                className="rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-bold text-slate-200 hover:bg-slate-700"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={savingUnit || modalSpanError}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-40"
+              >
+                <Save className="h-3.5 w-3.5" />
+                {savingUnit ? 'Guardando…' : modalUnit.id ? 'Guardar cambios' : 'Crear equipo'}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 }
