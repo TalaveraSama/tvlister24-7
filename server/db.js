@@ -570,6 +570,8 @@ function runInitDbBody() {
   ensureColumn('wk2500_units', 'tv_standard', "TEXT NOT NULL DEFAULT 'ntsc_m'");
   ensureColumn('wk2500_units', 'pkt_size', 'INTEGER NOT NULL DEFAULT 1316');
   ensureColumn('wk2500_units', 'rtp', 'INTEGER NOT NULL DEFAULT 0');
+  // Lista explícita de canales por equipo (orden = orden de portadora). NULL = rango contiguo.
+  ensureColumn('wk2500_units', 'channels_json', 'TEXT');
   // Overrides por canal: 0 = hereda del equipo, 1 = valor propio
   ensureColumn('wk2500_channels', 'pkt_size', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('wk2500_channels', 'rtp', 'INTEGER NOT NULL DEFAULT -1');

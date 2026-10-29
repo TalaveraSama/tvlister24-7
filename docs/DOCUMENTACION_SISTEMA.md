@@ -1314,3 +1314,48 @@ La sección **Motor FFmpeg** se reorganizó para que se entienda de un vistazo y
 
 **Regla de oro:** los argumentos del motor no cambiaron. Esta sección sólo cambia *cómo se edita* la misma
 configuración de siempre; con todo en `Por defecto` la línea de FFmpeg es idéntica a la validada en producción.
+
+### 8.25. Bloques de canales no contiguos por equipo (lista por portadora)
+
+Un equipo IP→analógico no tiene por qué generar un rango corrido de canales: sus **portadoras son ágiles** y
+cada una se sintoniza en cualquier frecuencia. Por eso el panel permite **declarar la lista exacta de canales
+de cada equipo, en el orden de sus portadoras RF**.
+
+**Formato del campo «Canales del equipo»**
+
+- `95, 2-28, 96-99` → la **portadora 1** del equipo emite el canal 95, la 2 el canal 2, … y la última el 99.
+- Rangos con `-`, `–`, `..` o `a`; separadores `,` o `;`; se admite `P1:95` (el prefijo se ignora).
+- Se conserva **el orden escrito**: la primera entrada siempre es la portadora 1.
+- **Vacío = rango contiguo** (del canal inicial al final), como antes.
+
+**Ejemplo real: 4 × 32 canales, 124 canales, con los canales de FM agrupados**
+
+| Equipo | Lista | Portadoras | Canales |
+| --- | --- | --- | --- |
+| U1 | `95, 2-28, 96-99` | 32/32 | 95, 2–28, 96–99 |
+| U2 | `29-60` | 32/32 | 29–60 |
+| U3 | `61-92` | 32/32 | 61–92 |
+| U4 | `93-94, 100-125` | 28/32 | 93–94, 100–125 |
+
+**Reglas que aplica el panel**
+
+1. Un número de canal **sólo puede vivir en un equipo**; si se repite, `409` con el nombre del equipo que lo
+   tiene. La comparación es canal por canal (los bloques ya no son rangos).
+2. La lista no puede exceder la capacidad del modelo (`32/64/125`) ni el máximo canal del estándar (81 en PAL).
+3. Casilla **«quitar esos canales al otro equipo»**: al guardar, el panel recorta la lista del equipo anterior
+   en lugar de rechazar el cambio. Evita tener que reordenar los equipos a mano.
+4. Los canales que salen de una lista **dejan de pertenecer al equipo** pero no se apagan ni pierden su stream.
+
+**Exportación CSV en orden de programación**
+
+El CSV trae ahora `Equipo, Portadora, Canal_CATV, …` y las filas van **equipo por equipo y, dentro de cada uno,
+en el orden de sus portadoras**: la primera fila es la portadora 1. Así se teclea o se importa en la web del
+modulador de arriba abajo, sin reordenar nada.
+
+**Frecuencias: nunca se mueven**
+
+La lista cambia **dónde se sienta** cada canal dentro del equipo, no su frecuencia. El canal 95 sigue siendo
+91.25 MHz (+4.5 de audio) aunque esté en la portadora 1. La frecuencia la dicta el estándar de TV, no la posición.
+
+**Aviso de campo:** los canales 95–99 (91.25–115.25 MHz) caen en la banda de FM y los 14–22 en la aeronáutica.
+Si aparece ruido en esos canales, se ajusta en el equipo (`Aeronautical Radio Offset`), no en el panel.

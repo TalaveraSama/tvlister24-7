@@ -87,7 +87,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     brand_model: 'csp_2500c',
     tv_standard: 'ntsc_m',
     pkt_size: 1316,
-    rtp: false
+    rtp: false,
+    steal_from_others: false
   });
   const [quickBusy, setQuickBusy] = useState(false);
 
@@ -209,11 +210,44 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     }
   };
 
+  // Lista explícita de canales por equipo, en el ORDEN de sus portadoras RF.
+  // Acepta "95, 2-28, 96-99" (también 95;2-28 y rangos con – o ..).
+  const parseChannelsText = (text) => {
+    const out = [];
+    const push = (n) => {
+      const v = Number(n);
+      if (Number.isInteger(v) && v >= 2 && v <= 125 && !out.includes(v)) out.push(v);
+    };
+    for (const chunk of String(text || '').replace(/;/g, ',').split(',')) {
+      const part = chunk.trim();
+      if (!part) continue;
+      const body = part.includes(':') ? part.split(':').pop().trim() : part;
+      const range = body.match(/^(\d{1,3})\s*(?:-|–|\.\.|a)\s*(\d{1,3})$/i);
+      if (range) {
+        const a = Number(range[1]);
+        const b = Number(range[2]);
+        if (b >= a) for (let ch = a; ch <= b; ch++) push(ch);
+        continue;
+      }
+      if (/^\d{1,3}$/.test(body)) push(Number(body));
+    }
+    return out;
+  };
+
+  const channelsTextValue = (form) => {
+    if (form?.channels_text !== undefined) return form.channels_text;
+    if (!form) return '';
+    const out = [];
+    for (let ch = Number(form.ch_start); ch <= Number(form.ch_end); ch++) out.push(ch);
+    return out.join(', ');
+  };
+
   const emptyUnitForm = (model = 32) => ({
     name: '',
     model_channels: model,
     ch_start: 2,
     ch_end: 2 + model - 1,
+    channels_text: '',
     ip_mode: 'unicast',
     dest_ip: '192.168.25.10',
     base_port: 5000,
@@ -225,7 +259,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     brand_model: 'csp_2500c',
     tv_standard: 'ntsc_m',
     pkt_size: 1316,
-    rtp: false
+    rtp: false,
+    steal_from_others: false
   });
 
   const openNewUnit = () => {
@@ -244,6 +279,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         model_channels: unit.model_channels,
         ch_start: unit.ch_start,
         ch_end: unit.ch_end,
+        channels_text: unit.channels_input || unit.channels_text || '',
         ip_mode: unit.ip_mode,
         dest_ip: unit.dest_ip,
         base_port: unit.base_port,
@@ -255,7 +291,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         brand_model: unit.brand_model || 'generic_2500',
         tv_standard: unit.tv_standard || 'ntsc_m',
         pkt_size: Number(unit.pkt_size || 1316),
-        rtp: Boolean(unit.rtp)
+        rtp: Boolean(unit.rtp),
+        steal_from_others: false
       }
     });
   };
@@ -272,7 +309,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       await loadPlan(true);
       setUnitModal(null);
       showToast(
-        `✅ ${res.unit.name}: ${res.unit.model_channels} canales, CH ${res.unit.ch_start}–${res.unit.ch_end}, ` +
+        `✅ ${res.unit.name}: ${res.unit.carrier_count || res.unit.model_channels} portadoras (${res.unit.channels_text || `CH ${res.unit.ch_start}–${res.unit.ch_end}`}), ` +
           `${res.unit.tv_standard} · ${res.unit.pkt_size}B${Number(res.unit.rtp) ? ' + RTP' : ''}. ` +
           `${res.applied?.channels || 0} canales reapuntados a udp://${res.unit.dest_ip}:${res.unit.base_port}.`
       );
@@ -504,9 +541,15 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   });
 
   const modalUnit = unitModal;
-  const modalSpan = modalUnit ? Number(modalUnit.form.ch_end) - Number(modalUnit.form.ch_start) + 1 : 0;
+  const modalChannels = modalUnit ? parseChannelsText(channelsTextValue(modalUnit.form)) : [];
+  const modalExplicit = Boolean(modalUnit && String(modalUnit.form.channels_text || '').trim());
+  const modalSpan = modalUnit
+    ? modalExplicit
+      ? modalChannels.length
+      : Number(modalUnit.form.ch_end) - Number(modalUnit.form.ch_start) + 1
+    : 0;
   const modalCap = Number(modalUnit?.form.model_channels || 32);
-  const modalSpanError = Boolean(modalUnit) && modalSpan > modalCap;
+  const modalSpanError = Boolean(modalUnit) && (modalSpan > modalCap || (modalExplicit && modalChannels.length === 0));
 
   return (
     <div className="space-y-5">
@@ -803,7 +846,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                     </div>
                   </div>
                   <span className="shrink-0 rounded px-1.5 py-0.5 text-[9.5px] font-bold uppercase bg-emerald-500/15 border border-emerald-500/35 text-emerald-300">
-                    {u.model_channels} CH
+                    {u.carrier_count ?? u.span ?? u.model_channels}/{u.model_channels} CH
                   </span>
                 </div>
 
@@ -826,6 +869,15 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                   udp://{u.dest_ip}:{u.base_port}
                   <span className="text-slate-500"> → puerto CH+N</span>
                 </div>
+                {u.explicit_list ? (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-2 py-1.5 text-[9.5px] leading-snug text-amber-200">
+                    <div className="font-bold uppercase tracking-wide text-amber-300">Lista por portadora</div>
+                    <div className="mt-0.5 font-mono break-all">
+                      {u.carriers?.slice(0, 3).map((c) => `P${c.carrier}=CH${c.catv_ch}`).join(' · ')}
+                      {u.carrier_count > 3 ? ` … P${u.carrier_count}=CH${u.carriers[u.carrier_count - 1].catv_ch}` : ''}
+                    </div>
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap items-center gap-1">
                   <span className="rounded bg-sky-500/12 border border-sky-500/30 px-1.5 py-0.5 text-[9.5px] font-bold text-sky-300">
                     {u.tv_standard_label || 'NTSC-M'}
@@ -1690,13 +1742,93 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                 </div>
               </div>
 
-              <div className="sm:col-span-2 rounded-xl border border-slate-800 bg-[#090e1a] px-3 py-2 text-[11px]">
-                <span className={modalSpanError ? 'text-rose-300 font-bold' : 'text-slate-300'}>
-                  Rango CH {modalUnit.form.ch_start}–{modalUnit.form.ch_end} = {modalSpan} canales
+              <div className="sm:col-span-2">
+                <label className="mb-1 flex items-center justify-between text-[11px] text-slate-300">
+                  <span>
+                    Canales del equipo <span className="text-slate-500">— en el orden de las portadoras RF</span>
+                  </span>
+                  {modalExplicit ? (
+                    <button
+                      type="button"
+                      onClick={() => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, channels_text: '' } })}
+                      className="text-[10px] text-sky-300 hover:text-sky-200"
+                    >
+                      volver a rango contiguo
+                    </button>
+                  ) : null}
+                </label>
+                <input
+                  type="text"
+                  value={modalUnit.form.channels_text ?? ''}
+                  onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, channels_text: e.target.value } })}
+                  placeholder={`vacío = rango ${modalUnit.form.ch_start}-${modalUnit.form.ch_end} · o escribe 95, 2-28, 96-99`}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 font-mono text-amber-300"
+                />
+                <p className="mt-1 text-[10px] leading-snug text-slate-500">
+                  La <b>primera</b> de la lista va a la portadora 1 del equipo. Ej.: «95, 2-28, 96-99» deja CH95 en la
+                  portadora 1 y CH2 en la 2. Vacío = rango contiguo del canal inicial al final.
+                </p>
+              </div>
+
+              {(() => {
+                const ocupados = modalChannels.filter((ch) => {
+                  const owner = (units || []).find(
+                    (u) => Number(u.id) !== Number(modalUnit.id) && (u.channels || []).includes(ch)
+                  );
+                  return owner;
+                });
+                if (!ocupados.length) return null;
+                const dueños = [
+                  ...new Set(
+                    ocupados.map(
+                      (ch) =>
+                        (units || []).find((u) => Number(u.id) !== Number(modalUnit.id) && (u.channels || []).includes(ch))
+                          ?.name || ''
+                    )
+                  )
+                ];
+                return (
+                  <label className="sm:col-span-2 flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(modalUnit.form.steal_from_others)}
+                      onChange={(e) =>
+                        setUnitModal({ ...modalUnit, form: { ...modalUnit.form, steal_from_others: e.target.checked } })
+                      }
+                      className="mt-0.5 accent-amber-500"
+                    />
+                    <span>
+                      <b>{ocupados.length} canal(es) ya los genera otro equipo</b> ({dueños.join(', ')}). Marca esta casilla
+                      para <b>quitárselos</b> y asignarlos aquí (se recalcula la lista del otro equipo).
+                    </span>
+                  </label>
+                );
+              })()}
+
+              <div className="sm:col-span-2 rounded-xl border border-slate-800 bg-[#090e1a] px-3 py-2 text-[11px] space-y-1.5">
+                <div className={modalSpanError ? 'text-rose-300 font-bold' : 'text-slate-300'}>
+                  {modalExplicit
+                    ? `${modalChannels.length} portadoras · P1 = CH ${modalChannels[0] ?? '—'}`
+                    : `Rango CH ${modalUnit.form.ch_start}–${modalUnit.form.ch_end} = ${modalSpan} canales`}
                   {modalSpanError
-                    ? ` · excede la capacidad del modelo (${modalCap}).`
-                    : ` · capacidad usada ${Math.round((modalSpan / modalCap) * 100)}% de ${modalCap}.`}
-                </span>
+                    ? ` · excede la capacidad del modelo (${modalCap}) o la lista está vacía.`
+                    : ` · capacidad usada ${Math.round((modalSpan / modalCap) * 100)}% de ${modalCap} (${Math.max(0, modalCap - modalSpan)} libres).`}
+                </div>
+                {modalExplicit && modalChannels.length ? (
+                  <div className="flex flex-wrap gap-1">
+                    {modalChannels.slice(0, 40).map((ch, idx) => (
+                      <span
+                        key={ch}
+                        className="rounded border border-slate-700 bg-[#0e1526] px-1.5 py-0.5 font-mono text-[9.5px] text-slate-300"
+                      >
+                        <span className="text-slate-500">P{idx + 1}</span> CH{ch}
+                      </span>
+                    ))}
+                    {modalChannels.length > 40 ? (
+                      <span className="px-1 text-[9.5px] text-slate-500">+{modalChannels.length - 40} más…</span>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
               <div>

@@ -1,6 +1,6 @@
 {
   "name": "tvlister24-7",
-  "version": "2.4.1",
+  "version": "2.5.0",
   "description": "TVLister 24/7 Panel: Self-Hosted IPTV/OTT/VOD & 24/7 Linear Channel Streaming Server",
   "type": "module",
   "scripts": {
