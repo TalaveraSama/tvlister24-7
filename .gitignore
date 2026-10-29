@@ -8,3 +8,6 @@ streams_runtime/
 
 # Harness temporal de pruebas (jsdom/esbuild)
 .tmp-harness/
+
+# Binarios del runtime aislado (Node/FFmpeg descargados por el instalador)
+.runtime/

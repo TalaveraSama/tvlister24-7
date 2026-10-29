@@ -292,6 +292,174 @@ EOF
   fi
 }
 
+cmd_ffmpeg() {
+  local sub="${1:-status}"
+  cd "$APP_DIR"
+  case "$sub" in
+    status | "")
+      "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { getFfmpegBinInfo } from "./server/streamEngine.js";
+        const info = getFfmpegBinInfo();
+        console.log("============================================================");
+        console.log("  TVLister 24/7 — Motor FFmpeg                            ");
+        console.log("============================================================");
+        console.log("  Binario en uso : " + (info.available ? info.bin : "NO DETECTADO (Modo Direct Stream)"));
+        console.log("  Versión        : " + (info.version || "—"));
+        console.log("  Procedencia    : " + info.label);
+        console.log("  Preferencia    : " + info.preference + "  (auto = orden del motor)");
+        console.log("  XUI.one        : " + (info.xuiInstalled > 0
+          ? info.xuiInstalled + " compilación(es) ejecutables en " + info.xuiPath
+          : "no detectado en " + info.xuiPath));
+        console.log("");
+        console.log("  Candidatos (id · etiqueta · versión):");
+        for (const b of info.binaries) {
+          const inUse = b.path && b.path === info.bin;
+          const mark = inUse ? "  <== EN USO" : "";
+          console.log("   " + (b.ok ? "[OK]  " : "[--]  ") + b.id.padEnd(10) + " " + b.label.padEnd(36) + " " + (b.ok ? (b.version || "ok") : (b.error || "no disponible")) + mark);
+          if (b.path) console.log("             " + b.path);
+        }
+        console.log("");
+        console.log("  Elegir otro:   tvlister-admin ffmpeg use <id|auto|xui>");
+        console.log("  Descargar uno: tvlister-admin ffmpeg install");
+        console.log("============================================================");
+      '
+      ;;
+    use)
+      local target="${2:-}"
+      if [ -z "$target" ]; then
+        echo "Uso: tvlister-admin ffmpeg use <auto|xui|xui44|xui43|xui40|xuilegacy|runtime|bundled|system>"
+        return 1
+      fi
+      FF_TARGET="$target" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { db, initDb } from "./server/db.js";
+        import { isValidFfmpegPreference, detectFfmpegBinaries } from "./server/streamEngine.js";
+        initDb();
+        let target = String(process.env.FF_TARGET || "").trim();
+        const bins = detectFfmpegBinaries({ force: true });
+        if (target === "xui") {
+          const pick = ["xui44", "xui43", "xui40", "xuilegacy"].find((id) => bins.some((b) => b.id === id && b.ok));
+          if (!pick) {
+            console.error("[ERROR] XUI.one no tiene ningún FFmpeg ejecutable en /home/xui/bin/ffmpeg_bin");
+            process.exit(1);
+          }
+          target = pick;
+        }
+        if (!isValidFfmpegPreference(target)) {
+          console.error("[ERROR] Binario desconocido: " + target);
+          process.exit(1);
+        }
+        db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+          .run("ffmpeg_bin_preference", target);
+        const chosen = bins.find((b) => b.id === target);
+        console.log("  Preferencia guardada: " + target + (chosen ? "  (" + chosen.path + ")" : ""));
+        if (chosen && !chosen.ok) {
+          console.log("  [AVISO] Ese binario no ejecuta ahora mismo: el motor usará el orden automático.");
+        }
+        console.log("  Aplica el cambio con: tvlister-admin restart");
+      '
+      ;;
+    install)
+      local arch tmp dl_ok version
+      arch=$(uname -m)
+      case "$arch" in
+        x86_64 | amd64) arch=x64 ;;
+        aarch64 | arm64) arch=arm64 ;;
+        *)
+          echo "[ERROR] Arquitectura no soportada: $arch"
+          return 1
+          ;;
+      esac
+      tmp=$(mktemp -d)
+      mkdir -p "$APP_DIR/.runtime/bin"
+      dl_ok=0
+
+      # Espejo 1: GitHub (ffmpeg 6.x estático, sin dependencias del sistema)
+      echo "  Descargando FFmpeg estático (${arch}) desde GitHub…"
+      if curl -fL --retry 3 --max-time 300 \
+        "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-${arch}.gz" \
+        -o "$tmp/ffmpeg.gz" 2>/dev/null; then
+        if gunzip -c "$tmp/ffmpeg.gz" >"$tmp/ffmpeg" 2>/dev/null; then
+          chmod +x "$tmp/ffmpeg"
+          if "$tmp/ffmpeg" -version >/dev/null 2>&1; then
+            dl_ok=1
+          fi
+        fi
+      fi
+
+      # Espejo 2: johnvansickle (última compilación estática)
+      if [ "$dl_ok" -eq 0 ] && command -v xz >/dev/null 2>&1; then
+        echo "  GitHub no respondió; probando johnvansickle.com…"
+        local ff_arch
+        case "$arch" in
+          x64) ff_arch=amd64 ;;
+          *) ff_arch=arm64 ;;
+        esac
+        if curl -fL --retry 3 --max-time 300 \
+          "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${ff_arch}-static.tar.xz" \
+          -o "$tmp/ffmpeg.tar.xz" 2>/dev/null; then
+          tar -xJf "$tmp/ffmpeg.tar.xz" --strip-components=1 -C "$tmp" 2>/dev/null || true
+          if [ -f "$tmp/ffmpeg" ]; then
+            chmod +x "$tmp/ffmpeg"
+            if "$tmp/ffmpeg" -version >/dev/null 2>&1; then
+              dl_ok=1
+            fi
+          fi
+        fi
+      fi
+
+      # Espejo 3: paquete npm (mismo binario estático que ya usa TVLister)
+      if [ "$dl_ok" -eq 0 ]; then
+        echo "  Probando el paquete npm @ffmpeg-installer…"
+        if curl -fsSL --retry 3 --max-time 300 \
+          "https://registry.npmjs.org/@ffmpeg-installer/linux-${arch}/-/linux-${arch}-4.1.0.tgz" \
+          -o "$tmp/ffmpeg.tgz" 2>/dev/null; then
+          tar -xzf "$tmp/ffmpeg.tgz" -C "$tmp" package/ffmpeg 2>/dev/null || true
+          if [ -f "$tmp/package/ffmpeg" ]; then
+            chmod +x "$tmp/package/ffmpeg" || true
+            if "$tmp/package/ffmpeg" -version >/dev/null 2>&1; then
+              cp -f "$tmp/package/ffmpeg" "$tmp/ffmpeg"
+              dl_ok=1
+            fi
+          fi
+        fi
+      fi
+
+      if [ "$dl_ok" -eq 0 ]; then
+        echo "[ERROR] No se pudo descargar un FFmpeg ejecutable."
+        echo "        Alternativa sin descargar nada: tvlister-admin ffmpeg use xui"
+        rm -rf "$tmp"
+        return 1
+      fi
+
+      if [ -f "$APP_DIR/.runtime/bin/ffmpeg" ]; then
+        cp -f "$APP_DIR/.runtime/bin/ffmpeg" "$APP_DIR/.runtime/bin/ffmpeg.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+      fi
+      cp -f "$tmp/ffmpeg" "$APP_DIR/.runtime/bin/ffmpeg"
+      chmod +x "$APP_DIR/.runtime/bin/ffmpeg"
+      version=$("$APP_DIR/.runtime/bin/ffmpeg" -version | head -n1)
+      echo "  [OK] Instalado en $APP_DIR/.runtime/bin/ffmpeg"
+      echo "       $version"
+      rm -rf "$tmp"
+
+      FF_TARGET=runtime "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { db, initDb } from "./server/db.js";
+        import { invalidateFfmpegBinCache, getFfmpegBinInfo } from "./server/streamEngine.js";
+        initDb();
+        db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+          .run("ffmpeg_bin_preference", "runtime");
+        invalidateFfmpegBinCache(true);
+        const info = getFfmpegBinInfo();
+        console.log("  Preferencia: runtime → " + info.bin + (info.version ? " (" + info.version + ")" : ""));
+        console.log("  Aplica el cambio con: tvlister-admin restart");
+      '
+      ;;
+    *)
+      echo "Uso: tvlister-admin ffmpeg [status|use <id>|install]"
+      return 1
+      ;;
+  esac
+}
+
 cmd_update() {
   local port tmp_script
   port=$(get_current_port)
@@ -441,6 +609,9 @@ case "$ACTION" in
   update)
     cmd_update
     ;;
+  ffmpeg)
+    cmd_ffmpeg "${2:-status}" "${3:-}"
+    ;;
   *)
     echo "============================================================"
     echo "  TVLister 24/7 — Consola de Administración del Sistema     "
@@ -460,9 +631,10 @@ case "$ACTION" in
     echo " 13) Actualizar panel desde GitHub sin perder datos (update)"
     echo " 14) Reiniciar motor TVLister 24/7 (restart)"
     echo " 15) Ver logs en vivo (logs)"
+    echo " 16) Motor FFmpeg: ver, elegir o instalar binario (ffmpeg)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-15]: " opt
+    read -r -p "Selecciona una opción [0-16]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -479,6 +651,7 @@ case "$ACTION" in
       13) cmd_update ;;
       14) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
       15) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
+      16) cmd_ffmpeg "status" "" ;;
       *) exit 0 ;;
     esac
     ;;

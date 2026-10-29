@@ -482,6 +482,22 @@ export default function FfmpegEnginePage() {
           Cambiar de binario reinicia los canales de forma escalonada (80 ms entre uno y otro). Si el binario elegido
           deja de existir, el motor vuelve solo al orden automático: un canal nunca se queda sin FFmpeg.
         </div>
+        <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Terminal className="w-3.5 h-3.5 shrink-0 text-slate-600" />
+          Desde SSH:{' '}
+          <code className="px-1.5 py-0.5 rounded bg-[#090e1a] border border-slate-800 text-slate-300">
+            tvlister-admin ffmpeg status
+          </code>
+          <code className="px-1.5 py-0.5 rounded bg-[#090e1a] border border-slate-800 text-slate-300">
+            tvlister-admin ffmpeg use xui44
+          </code>
+          <code className="px-1.5 py-0.5 rounded bg-[#090e1a] border border-slate-800 text-slate-300">
+            tvlister-admin ffmpeg install
+          </code>
+          <span className="text-slate-600">
+            (instala un FFmpeg estático moderno en .runtime/bin sin tocar el sistema)
+          </span>
+        </div>
       </div>
 
       {/* Ajustes agrupados */}

@@ -157,8 +157,8 @@ export const FFMPEG_BIN_CHOICES = [
     id: 'runtime',
     label: 'TVLister .runtime',
     group: 'tvlister',
-    hint: 'Binario estático descargado por tvlister-admin install (zero-apt).',
-    path: () => '/opt/tvlister24-7/.runtime/bin/ffmpeg'
+    hint: 'Binario estático descargado por tvlister-admin ffmpeg install (zero-apt).',
+    path: () => path.join(process.env.APP_DIR || '/opt/tvlister24-7', '.runtime/bin/ffmpeg')
   },
   {
     id: 'xui44',

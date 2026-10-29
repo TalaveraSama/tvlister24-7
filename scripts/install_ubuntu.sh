@@ -91,26 +91,48 @@ if [ -f "${RUNTIME_BIN}/ffmpeg" ] && [ -x "${RUNTIME_BIN}/ffmpeg" ]; then
   fi
 fi
 
-# Probar rutas conocidas de XUI.one (/home/xui/bin/ffmpeg/ffmpeg o archivo /home/xui/bin/ffmpeg)
-if [ "$FFMPEG_READY" -eq 0 ]; then
-  for XUI_FF in "/home/xui/bin/ffmpeg/ffmpeg" "/home/xui/bin/ffmpeg"; do
-    if [ -f "$XUI_FF" ] && [ -x "$XUI_FF" ]; then
-      rm -f "${RUNTIME_BIN}/ffmpeg"
-      cat >"${RUNTIME_BIN}/ffmpeg" <<EOF
+# Probar las compilaciones de XUI.one. XUI instala 4.4 / 4.3 / 4.0 en
+# /home/xui/bin/ffmpeg_bin/<versión>/ffmpeg (más las rutas antiguas bin/ffmpeg).
+# Se genera un wrapper AUTO-REPARABLE: revalida en cada ejecución, así una
+# actualización de XUI.one (que cambia de versión) no deja el canal sin FFmpeg.
+XUI_FF_FOUND=""
+for XUI_FF in \
+  "/home/xui/bin/ffmpeg_bin/4.4/ffmpeg" \
+  "/home/xui/bin/ffmpeg_bin/4.3/ffmpeg" \
+  "/home/xui/bin/ffmpeg_bin/4.0/ffmpeg" \
+  "/home/xui/bin/ffmpeg/ffmpeg"; do
+  if [ -f "$XUI_FF" ] && [ -x "$XUI_FF" ] && "$XUI_FF" -version >/dev/null 2>&1; then
+    XUI_FF_FOUND="$XUI_FF"
+    break
+  fi
+done
+
+if [ "$FFMPEG_READY" -eq 0 ] && [ -n "$XUI_FF_FOUND" ]; then
+  rm -f "${RUNTIME_BIN}/ffmpeg"
+  cat >"${RUNTIME_BIN}/ffmpeg" <<'EOF'
 #!/usr/bin/env bash
-export LD_LIBRARY_PATH="/home/xui/bin/ffmpeg:/home/xui/lib:\${LD_LIBRARY_PATH:-}"
-exec "${XUI_FF}" "\$@"
+# Wrapper FFmpeg de XUI.one generado por TVLister 24/7.
+# Revalida en cada arranque: si XUI.one cambia de versión, sigue funcionando.
+for FF in \
+  /home/xui/bin/ffmpeg_bin/4.4/ffmpeg \
+  /home/xui/bin/ffmpeg_bin/4.3/ffmpeg \
+  /home/xui/bin/ffmpeg_bin/4.0/ffmpeg \
+  /home/xui/bin/ffmpeg/ffmpeg; do
+  if [ -x "$FF" ]; then
+    export LD_LIBRARY_PATH="$(dirname "$FF"):/home/xui/bin/ffmpeg:/home/xui/lib:${LD_LIBRARY_PATH:-}"
+    exec "$FF" "$@"
+  fi
+done
+echo "TVLister: XUI.one no tiene un FFmpeg ejecutable. Ejecuta: tvlister-admin ffmpeg install" >&2
+exit 127
 EOF
-      chmod +x "${RUNTIME_BIN}/ffmpeg"
-      if "${RUNTIME_BIN}/ffmpeg" -version >/dev/null 2>&1; then
-        FFMPEG_READY=1
-        echo "      Vinculado FFmpeg de XUI.one (${XUI_FF}) en modo solo-lectura."
-        break
-      else
-        rm -f "${RUNTIME_BIN}/ffmpeg"
-      fi
-    fi
-  done
+  chmod +x "${RUNTIME_BIN}/ffmpeg"
+  if "${RUNTIME_BIN}/ffmpeg" -version >/dev/null 2>&1; then
+    FFMPEG_READY=1
+    echo "      Vinculado FFmpeg de XUI.one (${XUI_FF_FOUND}) en modo solo-lectura (wrapper auto-reparable)."
+  else
+    rm -f "${RUNTIME_BIN}/ffmpeg"
+  fi
 fi
 
 # Probar FFmpeg del sistema (evitando apuntarse a sí mismo)
