@@ -294,18 +294,31 @@ export function invalidateFfmpegBinCache(scan = true) {
   resolvedFfmpegBin = null;
   resolvedFfmpegPref = null;
   ffmpegAvailableCache = null;
+  ffmpegPrefCache = { value: null, expiresAt: 0 };
   if (scan) detectFfmpegBinaries({ force: true });
 }
 
-/** Preferencia guardada: 'auto' o el id de FFMPEG_BIN_CHOICES. */
+let ffmpegPrefCache = { value: null, expiresAt: 0 };
+
+/**
+ * Preferencia guardada: 'auto' o el id de FFMPEG_BIN_CHOICES.
+ * Se cachea 3 s: getFfmpegBin() se llama en cada arranque de worker y no debe
+ * consultar SQLite 145 veces durante un reinicio escalonado.
+ */
 export function getFfmpegBinPreference() {
+  const now = Date.now();
+  if (ffmpegPrefCache.value !== null && now < ffmpegPrefCache.expiresAt) {
+    return ffmpegPrefCache.value;
+  }
+  let value = 'auto';
   try {
     const row = db.prepare("SELECT value FROM settings WHERE key = 'ffmpeg_bin_preference'").get();
-    const value = String(row?.value || 'auto').trim();
-    return value || 'auto';
+    value = String(row?.value || 'auto').trim() || 'auto';
   } catch {
-    return 'auto';
+    value = 'auto';
   }
+  ffmpegPrefCache = { value, expiresAt: now + 3000 };
+  return value;
 }
 
 export function isValidFfmpegPreference(value) {
