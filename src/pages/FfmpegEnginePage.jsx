@@ -13,7 +13,9 @@ import {
   Radio,
   Activity,
   RefreshCw,
-  Info
+  Info,
+  Binary,
+  Timer
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -107,6 +109,24 @@ const FIELDS_NUM = [
     step: 1,
     group: 'tailer',
     hint: 'Cuántos segmentos se envían de golpe al entrar un cliente .ts (arranque rápido sin congelar).'
+  },
+  {
+    key: 'prebufferSegments',
+    label: 'Segmentos de prebuffer',
+    min: 0,
+    max: 6,
+    step: 1,
+    group: 'buffer',
+    hint: '0 = apagado (comportamiento validado). Con 2–3 el manifiesto no se entrega hasta tener esa ventana lista y el .ts arranca con imagen.'
+  },
+  {
+    key: 'prebufferWaitMs',
+    label: 'Espera máxima del prebuffer (ms)',
+    min: 500,
+    max: 15000,
+    step: 500,
+    group: 'buffer',
+    hint: 'Tope de espera cuando el canal acaba de arrancar. Pasado ese tiempo se sirve lo que haya: nunca deja al reproductor sin respuesta.'
   }
 ];
 
@@ -199,6 +219,41 @@ export default function FfmpegEnginePage() {
     }
   };
 
+  const rescanBinaries = async () => {
+    setBusy(true);
+    setErrMsg('');
+    try {
+      const res = await apiFetch('/api/system/ffmpeg-binaries/scan', { method: 'POST' });
+      setData((prev) => ({
+        ...(prev || {}),
+        binaries: res.binaries || [],
+        binInfo: res,
+        ffmpegBin: res.bin,
+        ffmpegAvailable: res.available
+      }));
+      setNotice(
+        res.available
+          ? `Binario en uso: ${res.bin} (${res.version || 'versión sin identificar'})`
+          : 'No se pudo ejecutar ningún FFmpeg: el panel queda en Modo Direct Stream.'
+      );
+      setTimeout(() => setNotice(''), 6000);
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudo re-detectar los binarios');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseBinary = (id) => {
+    setField('binPreference', id);
+    setNotice(
+      id === 'auto'
+        ? 'Se usará el binario automático del motor. Pulsa Guardar para aplicarlo.'
+        : 'Binario seleccionado. Pulsa Guardar para aplicarlo (los canales se reinician escalonados).'
+    );
+    setTimeout(() => setNotice(''), 5000);
+  };
+
   const ramOk = data ? data.hlsFreeMb >= data.hlsNeededMb : true;
   const windowSeconds = form ? form.hlsTime * form.hlsListSize : 0;
   const segMisses = data?.segmentMisses?.total ?? 0;
@@ -221,6 +276,12 @@ export default function FfmpegEnginePage() {
       title: 'Entrega a reproductores MPEG-TS (.ts)',
       icon: Activity,
       color: 'text-fuchsia-400'
+    },
+    {
+      id: 'buffer',
+      title: 'Prebuffer de entrega al cliente (XUI.one · X-XUI-Prebuffer)',
+      icon: Timer,
+      color: 'text-indigo-400'
     }
   ];
 
@@ -251,7 +312,7 @@ export default function FfmpegEnginePage() {
         </div>
 
         {/* Estado en vivo */}
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 text-xs mt-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-7 gap-2.5 text-xs mt-4">
           {[
             {
               label: 'Canales activos',
@@ -278,6 +339,11 @@ export default function FfmpegEnginePage() {
               label: 'Segmentos faltantes (5 min)',
               value: data ? `${segMisses}` : '—',
               good: segMisses === 0
+            },
+            {
+              label: 'Prebuffer (5 min)',
+              value: data ? `${data.prebuffer?.waits ?? 0}` : '—',
+              good: (data?.prebuffer?.timedOut ?? 0) === 0
             }
           ].map((box) => (
             <div key={box.label} className="p-3 rounded-xl bg-[#090e1a] border border-slate-800">
@@ -323,6 +389,101 @@ export default function FfmpegEnginePage() {
         </div>
       </div>
 
+      {/* Binarios FFmpeg · paridad XUI.one */}
+      <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Binary className="w-4 h-4 text-indigo-400" /> Binario FFmpeg · compatibilidad XUI.one
+            </h3>
+            <p className="text-[11px] text-slate-400 mt-1 max-w-3xl leading-relaxed">
+              XUI.one trae tres compilaciones en{' '}
+              <span className="font-mono text-slate-300">/home/xui/bin/ffmpeg_bin/{'{4.4,4.3,4.0}'}</span> y elige
+              según su ajuste <span className="font-mono text-slate-300">ffmpeg_cpu</span> (4.0 para GPU/NVENC y audio
+              AC3/DTS heredado). TVLister reutiliza esos binarios ya instalados —sin descargar ni instalar nada— y
+              permite fijar cuál usar. Elegir binario <b>no</b> cambia la línea de argumentos del motor.
+            </p>
+          </div>
+          <button
+            onClick={rescanBinaries}
+            disabled={busy}
+            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Volver a detectar
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 text-xs">
+          {[
+            {
+              id: 'auto',
+              label: 'Automático (orden del motor)',
+              hint: '.runtime → XUI 4.4 → 4.3 → 4.0 → bin/ffmpeg → empaquetado → PATH',
+              path: data?.ffmpegBin || 'sin resolver',
+              version: data?.binInfo?.version,
+              ok: Boolean(data?.ffmpegAvailable),
+              group: 'auto',
+              sizeMb: null
+            },
+            ...(data?.binaries || []).map((b) => ({ ...b, hint: b.hint }))
+          ].map((opt) => {
+            const selected = (form?.binPreference || 'auto') === opt.id;
+            const isAuto = opt.id === 'auto';
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => chooseBinary(opt.id)}
+                className={`text-left p-3 rounded-xl border transition ${
+                  selected
+                    ? 'bg-indigo-500/15 border-indigo-500/50'
+                    : opt.ok
+                      ? 'bg-[#090e1a] border-slate-800 hover:border-slate-600'
+                      : 'bg-[#090e1a] border-slate-900 opacity-60 hover:opacity-100'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        selected ? 'bg-indigo-400' : opt.ok ? 'bg-emerald-400' : 'bg-slate-600'
+                      }`}
+                    />
+                    <span className={`font-semibold truncate ${selected ? 'text-indigo-100' : 'text-slate-200'}`}>
+                      {opt.label}
+                    </span>
+                    {opt.group === 'xui' && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-200 text-[9px] font-bold">
+                        XUI
+                      </span>
+                    )}
+                    {selected && (
+                      <span className="px-1.5 py-0.5 rounded bg-indigo-500/25 border border-indigo-400/40 text-indigo-100 text-[9px] font-bold">
+                        EN USO
+                      </span>
+                    )}
+                  </div>
+                  <span
+                    className={`font-mono text-[10px] shrink-0 ${opt.ok ? 'text-emerald-300' : 'text-slate-500'}`}
+                  >
+                    {opt.ok ? opt.version || 'ok' : 'no disponible'}
+                  </span>
+                </div>
+                <div className="font-mono text-[10px] text-slate-400 mt-1 truncate">{opt.path || '—'}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">{opt.hint || opt.error || ''}</div>
+                {opt.sizeMb ? <div className="text-[10px] text-slate-600 mt-0.5">{opt.sizeMb} MB</div> : null}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="text-[11px] text-slate-500 flex items-start gap-1.5">
+          <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          Cambiar de binario reinicia los canales de forma escalonada (80 ms entre uno y otro). Si el binario elegido
+          deja de existir, el motor vuelve solo al orden automático: un canal nunca se queda sin FFmpeg.
+        </div>
+      </div>
+
       {/* Ajustes agrupados */}
       {form &&
         groups.map((group) => (
@@ -364,6 +525,30 @@ export default function FfmpegEnginePage() {
                 </div>
               )}
             </div>
+
+            {group.id === 'buffer' && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-[11px]">
+                {[
+                  { label: 'Esperas (5 min)', value: data?.prebuffer?.waits ?? 0, tone: 'text-slate-200' },
+                  { label: 'Satisfechas', value: data?.prebuffer?.satisfied ?? 0, tone: 'text-emerald-300' },
+                  { label: 'Tiempo agotado', value: data?.prebuffer?.timedOut ?? 0, tone: 'text-amber-300' },
+                  { label: 'Espera media', value: `${data?.prebuffer?.avgMs ?? 0} ms`, tone: 'text-sky-300' }
+                ].map((box) => (
+                  <div key={box.label} className="p-3 rounded-xl bg-[#090e1a] border border-slate-800">
+                    <div className="text-slate-400">{box.label}</div>
+                    <div className={`font-mono font-semibold mt-0.5 ${box.tone}`}>{String(box.value)}</div>
+                  </div>
+                ))}
+                <div className="col-span-2 sm:col-span-4 text-slate-500 leading-relaxed">
+                  El prebuffer es el comportamiento de XUI.one al servir <span className="font-mono">/admin/live</span>:
+                  manda primero lo ya escrito para que el decodificador arranque con imagen. Aquí nunca duplica datos en
+                  vivo — sólo espera a que la ventana tenga los segmentos pedidos (o al tope de espera). Los
+                  reproductores pueden pedirlo por su cuenta con la cabecera{' '}
+                  <span className="font-mono text-slate-300">X-XUI-Prebuffer: 1</span> o{' '}
+                  <span className="font-mono text-slate-300">?prebuffer=3</span>.
+                </div>
+              </div>
+            )}
 
             {group.id === 'tailer' && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
@@ -429,7 +614,11 @@ export default function FfmpegEnginePage() {
         </pre>
         <div className="flex flex-wrap gap-2 text-[11px] text-slate-400">
           <span className="px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-800">
-            Binario: <span className="font-mono text-slate-200">{data?.ffmpegBin || 'no detectado'}</span>
+            Binario:{' '}
+            <span className="font-mono text-slate-200">
+              {data?.ffmpegBin || 'no detectado'}
+              {data?.binInfo?.version ? ` · ${data.binInfo.version}` : ''}
+            </span>
           </span>
           <span className="px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-800">
             HLS en: <span className="font-mono text-slate-200">{data?.hlsRoot || '—'}</span>

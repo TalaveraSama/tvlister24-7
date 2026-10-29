@@ -5,3 +5,6 @@ data/
 streams_runtime/
 .env
 *.log
+
+# Harness temporal de pruebas (jsdom/esbuild)
+.tmp-harness/

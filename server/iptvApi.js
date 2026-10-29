@@ -22,6 +22,7 @@ import {
   subscribeWorkerMpegTs,
   subscribeWorkerMpegTsAuto,
   getWorkerPid,
+  getFfmpegEngineConfig,
   isFfmpegAvailable,
   isStreamAudioLeveled,
   HLS_ROOT,
@@ -1097,6 +1098,126 @@ export function getSegmentMissStats() {
   return { total, byWorker: out };
 }
 
+// ============================================================================
+// PREBUFFER DE ENTREGA (equivalente al X-XUI-Prebuffer de XUI.one)
+// ----------------------------------------------------------------------------
+// XUI.one, antes de entregar el TS en vivo, manda los segmentos ya escritos para
+// que el decodificador arranque con imagen y PAT/PMT. Aquí se replica el
+// comportamiento sin duplicar datos: se espera a que la ventana HLS tenga N
+// segmentos (0 = apagado, comportamiento validado) y se refleja en el burst
+// inicial del tailer MPEG-TS (streamEngine: burstSegments).
+// ============================================================================
+const PREBUFFER_WINDOW_MS = 5 * 60 * 1000;
+let prebufferStats = { windowStart: Date.now(), waits: 0, satisfied: 0, timedOut: 0, totalWaitMs: 0 };
+
+function countManifestSegments(text = '') {
+  let n = 0;
+  for (const line of String(text).split(/\r?\n/)) {
+    const t = line.trim();
+    if (t && !t.startsWith('#')) n += 1;
+  }
+  return n;
+}
+
+/** Segmentos de prebuffer pedidos por el reproductor (cabecera XUI o ?prebuffer=). */
+export function resolvePrebufferRequest(req) {
+  const engine = getFfmpegEngineConfig();
+  const configured = Math.max(0, Number(engine?.prebufferSegments) || 0);
+  const waitMs = Math.max(0, Number(engine?.prebufferWaitMs) || 0);
+  const raw = req?.get?.('x-xui-prebuffer') ?? req?.query?.prebuffer;
+  if (raw === undefined || raw === null || raw === '') {
+    return { segments: configured, waitMs, source: 'config' };
+  }
+  const txt = String(raw).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(txt)) {
+    return { segments: configured || 3, waitMs, source: 'xui-header' };
+  }
+  const n = Number(txt);
+  if (Number.isFinite(n)) {
+    return { segments: Math.min(6, Math.max(0, Math.round(n))), waitMs, source: 'request' };
+  }
+  return { segments: configured, waitMs, source: 'config' };
+}
+
+function notePrebufferWait(waitedMs, satisfied) {
+  const now = Date.now();
+  if (now - prebufferStats.windowStart > PREBUFFER_WINDOW_MS) {
+    prebufferStats = { windowStart: now, waits: 0, satisfied: 0, timedOut: 0, totalWaitMs: 0 };
+  }
+  prebufferStats.waits += 1;
+  prebufferStats.totalWaitMs += waitedMs;
+  if (satisfied) prebufferStats.satisfied += 1;
+  else prebufferStats.timedOut += 1;
+}
+
+export function getPrebufferStats() {
+  const now = Date.now();
+  if (now - prebufferStats.windowStart > PREBUFFER_WINDOW_MS) {
+    prebufferStats = { windowStart: now, waits: 0, satisfied: 0, timedOut: 0, totalWaitMs: 0 };
+  }
+  const avgMs = prebufferStats.waits > 0 ? Math.round(prebufferStats.totalWaitMs / prebufferStats.waits) : 0;
+  return {
+    windowSeconds: Math.round(PREBUFFER_WINDOW_MS / 1000),
+    ...prebufferStats,
+    avgMs
+  };
+}
+
+/** Lee el manifiesto y, si hace falta, espera a que tenga `segments` segmentos. */
+async function readManifestWithPrebuffer(manifestPath, { segments, waitMs }) {
+  const read = () => {
+    try {
+      return fs.readFileSync(manifestPath, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  let text = read();
+  if (!text || segments <= 0) return { text, waitedMs: 0, satisfied: true, applied: false };
+  if (countManifestSegments(text) >= segments) return { text, waitedMs: 0, satisfied: true, applied: true };
+
+  const startedAt = Date.now();
+  const deadline = startedAt + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 150));
+    const next = read();
+    if (!next) continue;
+    text = next;
+    if (countManifestSegments(next) >= segments) {
+      const waitedMs = Date.now() - startedAt;
+      notePrebufferWait(waitedMs, true);
+      return { text: next, waitedMs, satisfied: true, applied: true };
+    }
+  }
+  const waitedMs = Date.now() - startedAt;
+  notePrebufferWait(waitedMs, false);
+  return { text: read() || text, waitedMs, satisfied: false, applied: true };
+}
+
+/**
+ * Sirve un manifiesto HLS local reescribiendo sus segmentos a /hls_out/… y
+ * aplicando el prebuffer estilo XUI.one. Devuelve true si ya respondió.
+ */
+async function serveLocalHlsManifest(req, res, manifestPath, { username, password, workerKey }) {
+  const pre = resolvePrebufferRequest(req);
+  const { text, waitedMs, satisfied } = await readManifestWithPrebuffer(manifestPath, pre);
+  if (!text) {
+    res.status(404).send('Manifiesto HLS no disponible');
+    return true;
+  }
+  const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${workerKey}/`;
+  const rewritten = text.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  res.setHeader('Cache-Control', 'no-store');
+  if (pre.segments > 0) {
+    res.setHeader('X-TVLister-Prebuffer', String(pre.segments));
+    res.setHeader('X-TVLister-Prebuffer-Wait', String(waitedMs));
+    res.setHeader('X-TVLister-Prebuffer-State', satisfied ? 'ready' : 'timeout');
+  }
+  res.send(rewritten);
+  return true;
+}
+
 iptvRouter.get('/hls_out/:username/:password/:workerKey/:fileName', (req, res) => {
   const { username, password, workerKey, fileName } = req.params;
   const auth = authenticateLine(username, password, req);
@@ -1281,12 +1402,7 @@ async function serveLiveStreamRequest(req, res) {
     const workerKey = `ch247_${ch.id}`;
     const localManifest = getLocalHlsManifestPath(workerKey);
     if (localManifest) {
-      const content = fs.readFileSync(localManifest, 'utf8');
-      const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${workerKey}/`;
-      const rewritten = content.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-      res.setHeader('Cache-Control', 'no-store');
-      return res.send(rewritten);
+      return serveLocalHlsManifest(req, res, localManifest, { username, password, workerKey });
     }
 
     const state = computeChannel247LiveState(ch);
@@ -1335,6 +1451,7 @@ async function serveLiveStreamRequest(req, res) {
     if (req.socket) req.socket.setTimeout(0);
     res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('X-TVLister-Engine', 'ProLiant-Continuous-MPEGTS-247');
     const unsub = subscribeWorkerMpegTsAuto(workerKey, (tsChunk) => {
       if (!res.writableEnded) res.write(tsChunk);
@@ -1357,6 +1474,7 @@ async function serveLiveStreamRequest(req, res) {
       if (req.socket) req.socket.setTimeout(0);
       res.setHeader('Content-Type', 'video/mp2t');
       res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Accel-Buffering', 'no');
       res.setHeader('X-TVLister-Engine', 'RAMDisk-HLS-to-Continuous-MPEGTS');
       const tsUnsub = subscribeWorkerMpegTsAuto(workerKey, (tsChunk) => {
         if (!res.writableEnded) res.write(tsChunk);
@@ -1369,12 +1487,7 @@ async function serveLiveStreamRequest(req, res) {
       attachLiveConnectionSocket(conn.connId, req, res);
       return pipeSlateContinuousMpegTs(req, res, workerKey);
     }
-    const content = fs.readFileSync(localManifest, 'utf8');
-    const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${workerKey}/`;
-    const rewritten = content.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Cache-Control', 'no-store');
-    return res.send(rewritten);
+    return serveLocalHlsManifest(req, res, localManifest, { username, password, workerKey });
   }
 
   // 2) Local file path on server disk (e.g. XUI.one local media)

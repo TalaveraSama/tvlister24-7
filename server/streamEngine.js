@@ -1,5 +1,5 @@
 import os from 'node:os';
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -130,39 +130,242 @@ export function resolveHlsDirForKey(key) {
 
 let ffmpegAvailableCache = null;
 let resolvedFfmpegBin = null;
+let resolvedFfmpegPref = null;
+let ffmpegProbeCache = { list: null, expiresAt: 0 };
 
 // Map<key, { child, timer, stoppedManually, pid }>
 const workers = new Map();
 
-export function getFfmpegBin() {
-  if (resolvedFfmpegBin) return resolvedFfmpegBin;
-  const candidates = [
-    process.env.FFMPEG_PATH,
-    '/opt/tvlister24-7/.runtime/bin/ffmpeg',
-    '/home/xui/bin/ffmpeg/ffmpeg',
-    '/home/xui/bin/ffmpeg',
-    path.resolve(process.cwd(), 'node_modules/@ffmpeg-installer/linux-x64/ffmpeg'),
-    'ffmpeg'
-  ].filter(Boolean);
+/**
+ * Registro de binarios FFmpeg — paridad con XUI.one.
+ * XUI.one instala TRES compilaciones y elige según el ajuste "ffmpeg_cpu":
+ *   4.4 (por defecto), 4.3 y 4.0 (esta última se usa para GPU/NVENC y para
+ *   fuentes con audio AC3/DTS heredado). Sus binarios viven en
+ *   /home/xui/bin/ffmpeg_bin/<versión>/ffmpeg.
+ * TVLister los reutiliza tal cual (zero-apt, nada que descargar) y permite
+ * fijar cuál usar sin tocar la línea de argumentos del motor.
+ */
+export const FFMPEG_BIN_CHOICES = [
+  {
+    id: 'env',
+    label: 'Variable FFMPEG_PATH',
+    group: 'tvlister',
+    hint: 'Ruta forzada por la variable de entorno FFMPEG_PATH del servicio.',
+    path: () => (process.env.FFMPEG_PATH ? String(process.env.FFMPEG_PATH) : '')
+  },
+  {
+    id: 'runtime',
+    label: 'TVLister .runtime',
+    group: 'tvlister',
+    hint: 'Binario estático descargado por tvlister-admin install (zero-apt).',
+    path: () => '/opt/tvlister24-7/.runtime/bin/ffmpeg'
+  },
+  {
+    id: 'xui44',
+    label: 'XUI.one · FFmpeg 4.4',
+    group: 'xui',
+    hint: 'Compilación por defecto de XUI.one (module ffmpeg_cpu=4.4).',
+    path: () => '/home/xui/bin/ffmpeg_bin/4.4/ffmpeg'
+  },
+  {
+    id: 'xui43',
+    label: 'XUI.one · FFmpeg 4.3',
+    group: 'xui',
+    hint: 'Respaldo intermedio de XUI.one (module ffmpeg_cpu=4.3).',
+    path: () => '/home/xui/bin/ffmpeg_bin/4.3/ffmpeg'
+  },
+  {
+    id: 'xui40',
+    label: 'XUI.one · FFmpeg 4.0 (GPU / AC3-DTS)',
+    group: 'xui',
+    hint: 'La versión que XUI.one fuerza con NVENC/GPU y con audio AC3/DTS heredado.',
+    path: () => '/home/xui/bin/ffmpeg_bin/4.0/ffmpeg'
+  },
+  {
+    id: 'xuilegacy',
+    label: 'XUI.one · bin/ffmpeg',
+    group: 'xui',
+    hint: 'Instalaciones antiguas de XUI.one que no usan ffmpeg_bin/<versión>.',
+    path: () => '/home/xui/bin/ffmpeg/ffmpeg'
+  },
+  {
+    id: 'bundled',
+    label: 'Incluido en TVLister',
+    group: 'tvlister',
+    hint: 'Copia empaquetada en node_modules (@ffmpeg-installer) como último recurso.',
+    path: () => path.resolve(process.cwd(), 'node_modules/@ffmpeg-installer/linux-x64/ffmpeg')
+  },
+  {
+    id: 'system',
+    label: 'FFmpeg del sistema (PATH)',
+    group: 'system',
+    hint: 'El "ffmpeg" que esté en el PATH del servicio.',
+    path: () => 'ffmpeg'
+  }
+];
 
-  for (const bin of candidates) {
-    try {
-      if (bin.startsWith('/') && (!fs.existsSync(bin) || fs.statSync(bin).isDirectory())) {
-        continue;
+/** Orden de auto-detección: idéntico al histórico para no cambiar el binario en caliente. */
+const FFMPEG_AUTO_ORDER = ['env', 'runtime', 'xui44', 'xui43', 'xui40', 'xuilegacy', 'bundled', 'system'];
+
+function ffmpegChoiceById(id) {
+  return FFMPEG_BIN_CHOICES.find((c) => c.id === id) || null;
+}
+
+/** Variables de entorno que necesitan los binarios de XUI.one (libs propias). */
+export function ffmpegEnvFor(bin = '') {
+  if (!String(bin).startsWith('/home/xui/')) return process.env;
+  const libDirs = ['/home/xui/bin/ffmpeg', '/home/xui/lib'];
+  const versionDir = path.dirname(String(bin));
+  if (versionDir.startsWith('/home/xui/')) libDirs.unshift(versionDir);
+  return {
+    ...process.env,
+    LD_LIBRARY_PATH: `${libDirs.join(':')}:${process.env.LD_LIBRARY_PATH || ''}`
+  };
+}
+
+/** Ejecuta `<bin> -version` y devuelve versión + build (o el motivo del fallo). */
+export function probeFfmpegBinary(bin) {
+  const out = { ok: false, version: null, build: null, error: null };
+  if (!bin) {
+    out.error = 'Ruta vacía';
+    return out;
+  }
+  try {
+    if (bin.startsWith('/') && (!fs.existsSync(bin) || fs.statSync(bin).isDirectory())) {
+      out.error = 'No existe';
+      return out;
+    }
+    const txt = execFileSync(bin, ['-version'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: ffmpegEnvFor(bin),
+      timeout: 5000,
+      maxBuffer: 1024 * 1024
+    }).toString('utf8');
+    const first = txt.split(/\r?\n/)[0] || '';
+    out.version = (first.match(/ffmpeg version (\S+)/i) || [])[1] || first.slice(0, 64) || 'desconocida';
+    out.build = (txt.match(/configuration:(.*)/i) || [])[1]?.trim().slice(0, 240) || null;
+    out.ok = true;
+    return out;
+  } catch (err) {
+    out.error = err?.status === 127 ? 'No ejecutable' : 'No responde a -version';
+    return out;
+  }
+}
+
+/**
+ * Lista todos los binarios conocidos con su estado real (versión incluida).
+ * Se cachea 60 s: sólo se ejecuta al abrir la sección "Motor FFmpeg" o al
+ * resolver el binario por primera vez.
+ */
+export function detectFfmpegBinaries({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && ffmpegProbeCache.list && now < ffmpegProbeCache.expiresAt) {
+    return ffmpegProbeCache.list;
+  }
+  const list = FFMPEG_BIN_CHOICES.map((choice) => {
+    const binPath = choice.path();
+    let sizeMb = null;
+    if (binPath && binPath.startsWith('/')) {
+      try {
+        sizeMb = Number((fs.statSync(binPath).size / (1024 * 1024)).toFixed(1));
+      } catch {
+        sizeMb = null;
       }
-      const env = bin.startsWith('/home/xui/')
-        ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
-        : process.env;
-      execSync(`"${bin}" -version`, { stdio: 'ignore', env });
-      resolvedFfmpegBin = bin;
+    }
+    const probe = probeFfmpegBinary(binPath);
+    return {
+      id: choice.id,
+      label: choice.label,
+      group: choice.group,
+      hint: choice.hint,
+      path: binPath,
+      exists: Boolean(binPath) && (!binPath.startsWith('/') || fs.existsSync(binPath)),
+      sizeMb,
+      ok: probe.ok,
+      version: probe.version,
+      error: probe.error
+    };
+  });
+  ffmpegProbeCache = { list, expiresAt: now + 60_000 };
+  return list;
+}
+
+export function invalidateFfmpegBinCache(scan = true) {
+  resolvedFfmpegBin = null;
+  resolvedFfmpegPref = null;
+  ffmpegAvailableCache = null;
+  if (scan) detectFfmpegBinaries({ force: true });
+}
+
+/** Preferencia guardada: 'auto' o el id de FFMPEG_BIN_CHOICES. */
+export function getFfmpegBinPreference() {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'ffmpeg_bin_preference'").get();
+    const value = String(row?.value || 'auto').trim();
+    return value || 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+export function isValidFfmpegPreference(value) {
+  const v = String(value || '').trim();
+  return v === 'auto' || Boolean(ffmpegChoiceById(v));
+}
+
+/**
+ * Resuelve el binario a ejecutar. Con 'auto' mantiene exactamente el mismo
+ * orden histórico (runtime → XUI → empaquetado → PATH) para no cambiar de
+ * binario en producción sin que el administrador lo pida.
+ */
+export function getFfmpegBin() {
+  const pref = getFfmpegBinPreference();
+  if (resolvedFfmpegBin && resolvedFfmpegPref === pref) return resolvedFfmpegBin;
+
+  const candidates = [];
+  if (pref !== 'auto') {
+    const chosen = ffmpegChoiceById(pref);
+    if (chosen) candidates.push(chosen.id);
+  }
+  for (const id of FFMPEG_AUTO_ORDER) {
+    if (!candidates.includes(id)) candidates.push(id);
+  }
+
+  const detected = new Map(detectFfmpegBinaries().map((b) => [b.id, b]));
+  for (const id of candidates) {
+    const info = detected.get(id);
+    if (info?.ok && info.path) {
+      resolvedFfmpegBin = info.path;
+      resolvedFfmpegPref = pref;
       ffmpegAvailableCache = true;
-      return bin;
-    } catch {
-      // try next
+      return resolvedFfmpegBin;
     }
   }
+  resolvedFfmpegPref = pref;
   ffmpegAvailableCache = false;
   return 'ffmpeg';
+}
+
+/** Datos para el panel: binario en uso, versión, preferencia y alternativas. */
+export function getFfmpegBinInfo() {
+  const bin = getFfmpegBin();
+  const preference = getFfmpegBinPreference();
+  const binaries = detectFfmpegBinaries();
+  const inUse = binaries.find((b) => b.path === bin) || null;
+  const xuiInstalled = binaries.filter((b) => b.group === 'xui' && b.ok).length;
+  return {
+    bin,
+    preference,
+    inUseId: inUse?.id || null,
+    label: inUse?.label || 'No detectado',
+    version: inUse?.version || null,
+    available: Boolean(ffmpegAvailableCache),
+    xuiInstalled,
+    xuiPath: '/home/xui/bin/ffmpeg_bin',
+    xuiPresent: fs.existsSync('/home/xui/bin/ffmpeg_bin') || fs.existsSync('/home/xui'),
+    alternatives: binaries.filter((b) => b.ok).length,
+    binaries
+  };
 }
 
 export function isFfmpegAvailable() {
@@ -417,7 +620,13 @@ export const FFMPEG_ENGINE_DEFAULTS = {
   tailerIntervalMs: 160,
   tailerBurst: 2,
   // Los clientes .ts entran en la frontera de segmento (PAT/PMT primero)
-  tsJoinOnSegment: true
+  tsJoinOnSegment: true,
+  // Prebuffer de entrega (equivalente al X-XUI-Prebuffer de XUI.one).
+  // 0 = apagado: se sirve el manifiesto tal cual llega, comportamiento validado.
+  prebufferSegments: 0,
+  prebufferWaitMs: 3000,
+  // Binario FFmpeg elegido ('auto' = orden histórico del motor)
+  binPreference: 'auto'
 };
 
 export const FFMPEG_ENGINE_LIMITS = {
@@ -430,7 +639,9 @@ export const FFMPEG_ENGINE_LIMITS = {
   hlsListSize: [3, 12],
   ramReserveMb: [64, 4096],
   tailerIntervalMs: [80, 500],
-  tailerBurst: [1, 4]
+  tailerBurst: [1, 4],
+  prebufferSegments: [0, 6],
+  prebufferWaitMs: [500, 15000]
 };
 
 function clampInt(value, min, max, fallback) {
@@ -458,7 +669,8 @@ export function getFfmpegEngineConfig() {
            'ffmpeg_ts_pipe_mode','ffmpeg_h264_threads','ffmpeg_probe_http','ffmpeg_analyze_http',
            'ffmpeg_probe_local','ffmpeg_analyze_local','ffmpeg_hls_time','ffmpeg_hls_list_size',
            'ffmpeg_log_level','ffmpeg_ram_reserve_mb','ffmpeg_tailer_interval_ms','ffmpeg_tailer_burst',
-           'ffmpeg_ts_join_segment'
+           'ffmpeg_ts_join_segment','ffmpeg_prebuffer_segments','ffmpeg_prebuffer_wait_ms',
+           'ffmpeg_bin_preference'
          )`
       )
       .all();
@@ -490,7 +702,22 @@ export function getFfmpegEngineConfig() {
     tsJoinOnSegment:
       map.ffmpeg_ts_join_segment === undefined || map.ffmpeg_ts_join_segment === ''
         ? d.tsJoinOnSegment
-        : String(map.ffmpeg_ts_join_segment) === 'true'
+        : String(map.ffmpeg_ts_join_segment) === 'true',
+    prebufferSegments: clampInt(
+      map.ffmpeg_prebuffer_segments,
+      L.prebufferSegments[0],
+      L.prebufferSegments[1],
+      d.prebufferSegments
+    ),
+    prebufferWaitMs: clampInt(
+      map.ffmpeg_prebuffer_wait_ms,
+      L.prebufferWaitMs[0],
+      L.prebufferWaitMs[1],
+      d.prebufferWaitMs
+    ),
+    binPreference: isValidFfmpegPreference(map.ffmpeg_bin_preference)
+      ? String(map.ffmpeg_bin_preference)
+      : d.binPreference
   };
 
   efficiencyCache = { value: cfg, expiresAt: now + 3000 };
@@ -1154,7 +1381,9 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     state.hlsTailer = createHlsSegmentTailer({
       manifestPath,
       intervalMs: engine.tailerIntervalMs,
-      burstSegments: engine.tailerBurst,
+      // XUI.one manda los últimos segmentos ya escritos al conectar (X-XUI-Prebuffer).
+      // Aquí se traduce al burst inicial del tailer: nunca duplica datos del pipe en vivo.
+      burstSegments: Math.max(engine.tailerBurst, engine.prebufferSegments || 0),
       onChunk: (chunk) => {
         state.lastHlsAt = Date.now();
         broadcastTs(chunk);
@@ -1281,9 +1510,7 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     }
 
     const bin = getFfmpegBin();
-    const env = bin.startsWith('/home/xui/')
-      ? { ...process.env, LD_LIBRARY_PATH: `/home/xui/bin/ffmpeg:/home/xui/lib:${process.env.LD_LIBRARY_PATH || ''}` }
-      : process.env;
+    const env = ffmpegEnvFor(bin);
 
     const startedAt = Date.now();
     // Kernel /dev/null ('ignore') on all unused FDs -> 0.00% Node.js event-loop load across 200+ HLS channels!

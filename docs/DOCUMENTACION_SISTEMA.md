@@ -943,3 +943,65 @@ de emisión (sigue sin failover; SOURCE 2 sigue siendo manual, ver 8.14).
   **EPG** (programación del canal) y **FFmpeg** (comando real del motor estable, con botón copiar).
   Se abre pulsando el nombre del canal o "Ver ficha del canal" en el menú ⋯.
 - **Atajos**: `/` enfoca el buscador; `Esc` limpia la búsqueda o cierra la ficha.
+
+### 8.18. Capa de entrega estilo XUI.one: binarios FFmpeg versionados y prebuffer
+
+Lo único que se toma del *pipeline* de XUI.one es la **entrega al cliente**, nunca la línea de
+argumentos del motor (que sigue estable, ver 8.11). Se aplica en `server/streamEngine.js`,
+`server/iptvApi.js`, `server/index.js` y en la página **Motor FFmpeg**.
+
+**a) Registro de binarios FFmpeg (paridad con `ffmpeg_cpu` de XUI.one)**
+
+XUI.one instala tres compilaciones (`/home/xui/bin/ffmpeg_bin/{4.4,4.3,4.0}/ffmpeg`) y elige
+según `ffmpeg_cpu`, usando 4.0 para GPU/NVENC y audio AC3/DTS heredado. TVLister ahora las detecta
+y las reutiliza tal cual (zero-apt: no descarga ni instala nada).
+
+| Binario | Ruta | Cuándo aparece |
+|---|---|---|
+| `env` | `$FFMPEG_PATH` | Si el servicio define la variable |
+| `runtime` | `/opt/tvlister24-7/.runtime/bin/ffmpeg` | Instalación zero-apt de TVLister |
+| `xui44` | `/home/xui/bin/ffmpeg_bin/4.4/ffmpeg` | XUI.one 1.5.x (valor por defecto de `ffmpeg_cpu`) |
+| `xui43` | `/home/xui/bin/ffmpeg_bin/4.3/ffmpeg` | XUI.one con `ffmpeg_cpu=4.3` |
+| `xui40` | `/home/xui/bin/ffmpeg_bin/4.0/ffmpeg` | GPU/NVENC y fuentes AC3/DTS |
+| `xuilegacy` | `/home/xui/bin/ffmpeg/ffmpeg` | Instalaciones antiguas de XUI.one |
+| `bundled` | `node_modules/@ffmpeg-installer/...` | Último recurso del paquete |
+| `system` | `ffmpeg` del `PATH` | Servidor con FFmpeg del sistema |
+
+- `getFfmpegBin()` resuelve la preferencia guardada en `settings.ffmpeg_bin_preference`
+  (`auto` = orden histórico del motor: `env → runtime → 4.4 → 4.3 → 4.0 → bin/ffmpeg → empaquetado → PATH`).
+  Si el binario elegido desaparece, **cae solo al orden automático**: un canal nunca se queda sin FFmpeg.
+- `LD_LIBRARY_PATH` se compone automáticamente para los binarios de XUI (`/home/xui/bin/ffmpeg`,
+  `/home/xui/lib` y el directorio de la versión).
+- `GET /api/system/ffmpeg-engine` devuelve `binInfo` (binario en uso, versión real, idioma de origen)
+  y `binaries` (las 8 rutas con `ok`, `version`, `sizeMb` y motivo del fallo).
+- `PUT /api/system/ffmpeg-engine` acepta `binPreference`; cambiarlo invalida la caché y reinicia los
+  canales de forma escalonada. `POST /api/system/ffmpeg-binaries/scan` fuerza una re-detección
+  (útil después de actualizar XUI.one o `.runtime`).
+- La línea de argumentos **no** cambia: el binario sólo sustituye el ejecutable.
+
+**b) Prebuffer de entrega (`X-XUI-Prebuffer`)**
+
+XUI.one, al servir `/admin/live`, manda primero los segmentos ya escritos para que el decodificador
+arranque con imagen. TVLister replica el efecto sin duplicar datos en vivo:
+
+| Ajuste | Rango | Por defecto | Efecto |
+|---|---|---|---|
+| `prebufferSegments` (`ffmpeg_prebuffer_segments`) | 0–6 | `0` (apagado) | Segmentos mínimos antes de entregar el manifiesto y tamaño del burst inicial del tailer MPEG-TS |
+| `prebufferWaitMs` (`ffmpeg_prebuffer_wait_ms`) | 500–15000 | `3000` | Tope de espera cuando el canal acaba de arrancar |
+
+- El reproductor puede pedirlo por su cuenta: cabecera `X-XUI-Prebuffer: 1` (usa el valor
+  configurado, o 3 si está en 0) o `?prebuffer=3` (1–6). Sin cabecera ni parámetro se respeta el
+  ajuste del motor, así que con `0` el comportamiento es exactamente el validado.
+- Respuesta del manifiesto: `X-TVLister-Prebuffer`, `X-TVLister-Prebuffer-Wait` (ms reales) y
+  `X-TVLister-Prebuffer-State: ready|timeout`. Si se agota la espera se sirve lo que haya: nunca se
+  deja al reproductor sin respuesta.
+- En MPEG-TS el prebuffer se traduce al **burst inicial del tailer** (`max(tailerBurst,
+  prebufferSegments)`), que entra en frontera de segmento: no hay paquetes duplicados ni saltos.
+- Las respuestas `.ts` llevan `X-Accel-Buffering: no` (no acumular búfer si hay nginx delante).
+- Estadísticas de los últimos 5 minutos en `GET /api/system/ffmpeg-efficiency` → `prebuffer`
+  (`waits`, `satisfied`, `timedOut`, `avgMs`) y en las tarjetas de la página **Motor FFmpeg**.
+
+**Verificado** con un origen HLS real en el sandbox: `?prebuffer=6` con la ventana llena →
+`Wait: 0 / ready`; canal frío con `prebufferWaitMs=3000` → `Wait: 3014 / timeout` sirviendo los
+segmentos disponibles; canal frío con `prebufferWaitMs=12000` → `Wait: 4060 / ready` con 3 segmentos;
+binario elegido inexistente → sigue emitiendo con el automático.

@@ -67,6 +67,11 @@ import {
   FFMPEG_ENGINE_DEFAULTS,
   invalidateFfmpegEfficiencyCache,
   getWorkerDiagnostics,
+  getFfmpegBinInfo,
+  getFfmpegBinPreference,
+  detectFfmpegBinaries,
+  invalidateFfmpegBinCache,
+  isValidFfmpegPreference,
   getHlsFreeBytes,
   estimateHlsFootprintBytes,
   HLS_WINDOW_SECONDS
@@ -89,7 +94,8 @@ import {
   pruneStaleConnections,
   kickConnectionSocket,
   kickAllLineConnections,
-  getSegmentMissStats
+  getSegmentMissStats,
+  getPrebufferStats
 } from './iptvApi.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
@@ -1819,6 +1825,8 @@ app.get('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (_req, res) 
     // Diagnóstico de tirones: segmentos pedidos por el reproductor que aún no existían
     // (cada uno es un hueco en la reproducción) y segmentos generados por canal.
     segmentMisses: getSegmentMissStats(),
+    // Prebuffer de entrega (XUI.one): esperas y resultado en los últimos 5 min
+    prebuffer: getPrebufferStats(),
     hlsIsRamDisk: HLS_IS_RAMDISK,
     activeFfmpegProcesses,
     totalFfmpegThreads,
@@ -1898,6 +1906,8 @@ app.get('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (_req, res) => {
   const workerDiag = getWorkerDiagnostics();
   const missStats = getSegmentMissStats();
 
+  const binInfo = getFfmpegBinInfo();
+
   res.json({
     ok: true,
     config: cfg,
@@ -1906,6 +1916,10 @@ app.get('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (_req, res) => {
     presets: Object.entries(FFMPEG_ENGINE_PRESETS).map(([key, p]) => ({ key, label: p.label, values: p.values })),
     ffmpegAvailable: available,
     ffmpegBin: available ? getFfmpegBin() : null,
+    // Registro de binarios: las 3 compilaciones de XUI.one + runtime/.runtime + empaquetado
+    binInfo,
+    binaries: binInfo.binaries,
+    prebuffer: getPrebufferStats(),
     hlsRoot: HLS_ROOT,
     hlsIsRamDisk: HLS_IS_RAMDISK,
     hlsFreeMb: Math.round(getHlsFreeBytes() / (1024 * 1024)),
@@ -1968,11 +1982,27 @@ app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
     upsert.run('ffmpeg_ts_join_segment', values.tsJoinOnSegment ? 'true' : 'false');
   }
 
+  // Prebuffer de entrega (XUI.one: X-XUI-Prebuffer)
+  setNum('ffmpeg_prebuffer_segments', values.prebufferSegments, FFMPEG_ENGINE_LIMITS.prebufferSegments, 'Segmentos de prebuffer');
+  setNum('ffmpeg_prebuffer_wait_ms', values.prebufferWaitMs, FFMPEG_ENGINE_LIMITS.prebufferWaitMs, 'Espera máxima del prebuffer (ms)');
+
+  const previousBin = getFfmpegBinPreference();
+  if (values.binPreference !== undefined) {
+    if (!isValidFfmpegPreference(values.binPreference)) {
+      errors.push('Binario FFmpeg inválido (auto o un id detectado)');
+    } else {
+      upsert.run('ffmpeg_bin_preference', String(values.binPreference));
+    }
+  }
+
   if (errors.length > 0) {
     return res.status(400).json({ error: errors.join('. '), errors });
   }
 
   invalidateFfmpegEfficiencyCache();
+
+  const binChanged = values.binPreference !== undefined && String(values.binPreference) !== previousBin;
+  if (binChanged) invalidateFfmpegBinCache(false);
 
   const runningIds = db
     .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
@@ -1980,7 +2010,23 @@ app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
     .map((r) => r.id);
   if (runningIds.length > 0) scheduleStaggeredStreamLaunches(runningIds, 80);
 
-  res.json({ ok: true, config: getFfmpegEngineConfig(), restartedStreams: runningIds.length });
+  res.json({
+    ok: true,
+    config: getFfmpegEngineConfig(),
+    restartedStreams: runningIds.length,
+    binChanged,
+    binInfo: getFfmpegBinInfo()
+  });
+});
+
+/**
+ * Re-detección manual de binarios FFmpeg (las 3 versiones de XUI.one, .runtime,
+ * empaquetado y PATH). Útil después de instalar/actualizar XUI.one o .runtime.
+ */
+app.post('/api/system/ffmpeg-binaries/scan', requireAuth, requireAdmin, (_req, res) => {
+  invalidateFfmpegBinCache(true);
+  const info = getFfmpegBinInfo();
+  res.json({ ok: true, ...info, scanned: detectFfmpegBinaries().length });
 });
 
 app.post('/api/streams/:id/action', requireAuth, requireAdmin, (req, res) => {
