@@ -848,3 +848,31 @@ y no hay nada que configurar. Al arrancar, el panel borra ese ajuste viejo de la
 | Vuelve el principal | A los ~60 s la sonda lo detecta y regresa sola (`active_source = primary`) |
 | Secundaria caída y principal arriba | Vuelve al principal al siguiente intento |
 
+
+### 8.15. Auditoría de fuentes y limpieza de respaldos (evitar sesiones duplicadas)
+
+En **Canales en Vivo → botón “Fuentes”** hay un resumen de **de quién jala cada canal**:
+
+- Tabla por host con dos columnas: **como principal** y **como respaldo**.
+- Contadores: canales totales, canales con segundo origen y canales donde el respaldo apunta al
+  **mismo host** que el principal (esos no aportan nada y generan una conexión extra).
+- Botón **“Quitar respaldos de este host”** por fila y **“Quitar TODOS los respaldos”** al pie.
+  Nunca toca el origen principal del canal; sólo vacía `backup_url` (y `failover_active`).
+
+**Por qué importa (caso Astra):** cuando el respaldo de los 145 canales apuntaba al Astra local, el
+servidor de Astra mostraba **dos sesiones por canal** — la del `TVLister/2.3` (panel pidiendo el respaldo) y
+la del `Streamer 23.12` (Flussonic local jalando del Astra). Con el segundo origen dormido (8.14) la sesión del
+panel desaparece mientras el principal esté sano; y con esta auditoría puedes borrar esos respaldos viejos de
+una sola vez.
+
+**API**
+
+- `GET /api/streams/source-audit` — hosts con conteo de principal/respaldo, nombres de ejemplo y
+  `sameHostPrimaryAndBackup`.
+- `POST /api/streams/purge-second-sources` — `{ host?: "192.168.88.10", dry_run?: true, only_same_host?: true }`.
+  Acepta la IP con o sin puerto y devuelve cuántos canales se limpiarían o se limpiaron.
+
+**Verificado** con 7 canales de prueba (6 con Flussonic nube como principal, 5 con respaldo Astra, 1 con
+respaldo de otro proveedor y 1 repetido): la auditoría reportó `principal:6 / respaldo:5` para cada host,
+el `dry_run` avisó `wouldClear: 5` sin escribir, “redundantes” limpió 1, el borrado por host limpió 4 y
+dejó intacto el respaldo del otro proveedor.

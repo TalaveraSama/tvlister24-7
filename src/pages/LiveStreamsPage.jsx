@@ -128,6 +128,10 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
   // Cambio masivo de IP/Puerto de origen
   const [repHostOpen, setRepHostOpen] = useState(false);
+  // Auditoría de fuentes: detecta qué host usa cada canal como principal y como respaldo
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditData, setAuditData] = useState(null);
+  const [auditBusy, setAuditBusy] = useState(false);
   const [repHostBusy, setRepHostBusy] = useState(false);
   const [repHostPreview, setRepHostPreview] = useState(null);
   const [repHostExtra, setRepHostExtra] = useState([]);
@@ -938,6 +942,43 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     loadAll();
   };
 
+  // ==================== AUDITORÍA DE FUENTES / LIMPIEZA DE RESPALDOS ====================
+  const loadSourceAudit = async () => {
+    setAuditBusy(true);
+    try {
+      const res = await apiFetch('/api/streams/source-audit');
+      setAuditData(res);
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
+  const openSourceAudit = () => {
+    setAuditOpen(true);
+    loadSourceAudit();
+  };
+
+  const purgeSecondSources = async (host) => {
+    const label = host ? `los respaldos que apuntan a ${host}` : 'TODOS los segundos orígenes';
+    if (!window.confirm(`¿Borrar ${label}? El origen principal de cada canal NO se toca.`)) return;
+    setAuditBusy(true);
+    try {
+      const res = await apiFetch('/api/streams/purge-second-sources', {
+        method: 'POST',
+        body: JSON.stringify(host ? { host } : {})
+      });
+      setBulkNotice(`✅ Se quitaron los respaldos de ${res.cleared} canales.`);
+      setTimeout(() => setBulkNotice(''), 6000);
+      await Promise.all([loadSourceAudit(), loadAll()]);
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
   // ==================== CAMBIO MANUAL DE ORIGEN (sin failover automático) ====================
   const handleSwitchSource = async (s, target) => {
     const label = target === 'backup' ? 'el segundo origen' : 'el origen principal';
@@ -1207,6 +1248,16 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 Copy/Copy Masivo (Bitrate Original)
               </button>
             )}
+
+            {/* Auditoría de fuentes: qué host usa cada canal y limpieza de respaldos */}
+            <button
+              onClick={openSourceAudit}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition"
+              title="Ver de qué host jala cada canal y borrar respaldos que ya no quieres"
+            >
+              <Globe className="w-4 h-4 text-sky-300" />
+              Fuentes
+            </button>
 
             {/* Cambio manual de origen en masa (sin failover automático) */}
             {streams.length > 0 && (
@@ -1743,6 +1794,149 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           </table>
         </div>
       </div>
+
+      {/* ==================== MODAL: AUDITORÍA DE FUENTES ==================== */}
+      {auditOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-4xl rounded-2xl bg-[#0e1526] border border-slate-800 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Globe className="w-5 h-5 text-sky-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Fuentes de los Canales (quién jala de dónde)</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Muestra el host del origen principal y del respaldo. Los respaldos están dormidos: sólo se conectan
+                    si el principal falla.
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setAuditOpen(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
+              {auditBusy && !auditData && <div className="text-slate-400">Analizando canales...</div>}
+
+              {auditData && (
+                <>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
+                      <div className="text-slate-400 text-[11px]">Canales</div>
+                      <div className="text-lg font-bold text-white">{auditData.totalChannels}</div>
+                    </div>
+                    <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
+                      <div className="text-slate-400 text-[11px]">Con segundo origen</div>
+                      <div className="text-lg font-bold text-violet-300">{auditData.channelsWithBackup}</div>
+                    </div>
+                    <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
+                      <div className="text-slate-400 text-[11px]">Principal = respaldo (mismo host)</div>
+                      <div className={`text-lg font-bold ${auditData.sameHostCount ? 'text-amber-300' : 'text-slate-300'}`}>
+                        {auditData.sameHostCount}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-slate-800">
+                    <table className="w-full text-left">
+                      <thead className="bg-[#131c31] text-[11px] uppercase text-slate-400">
+                        <tr>
+                          <th className="px-3 py-2">Host</th>
+                          <th className="px-3 py-2 text-center">Como principal</th>
+                          <th className="px-3 py-2 text-center">Como respaldo</th>
+                          <th className="px-3 py-2">Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/70">
+                        {auditData.hosts.map((h) => (
+                          <tr key={h.host} className="hover:bg-slate-800/25">
+                            <td className="px-3 py-2 font-mono text-slate-200">
+                              {h.host}
+                              <div className="text-[10px] text-slate-500 truncate max-w-[280px]">{h.channels.join(', ')}</div>
+                            </td>
+                            <td className="px-3 py-2 text-center font-bold text-emerald-300">{h.primary}</td>
+                            <td className="px-3 py-2 text-center font-bold text-violet-300">{h.backup}</td>
+                            <td className="px-3 py-2">
+                              {h.backup > 0 ? (
+                                <button
+                                  onClick={() => purgeSecondSources(h.host)}
+                                  disabled={auditBusy}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-500/35 font-semibold disabled:opacity-40"
+                                >
+                                  Quitar respaldos de este host
+                                </button>
+                              ) : (
+                                <span className="text-slate-600">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                        {auditData.hosts.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="px-3 py-6 text-center text-slate-500">
+                              No hay canales con URL todavía.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {auditData.sameHostCount > 0 && (
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/35 text-amber-100">
+                      Hay {auditData.sameHostCount} canales cuyo respaldo apunta al <b>mismo host</b> que el principal
+                      (no aporta nada y gasta una conexión extra).{' '}
+                      <button
+                        onClick={async () => {
+                          setAuditBusy(true);
+                          try {
+                            const res = await apiFetch('/api/streams/purge-second-sources', {
+                              method: 'POST',
+                              body: JSON.stringify({ only_same_host: true })
+                            });
+                            setBulkNotice(`✅ Respaldos redundantes quitados en ${res.cleared} canales.`);
+                            setTimeout(() => setBulkNotice(''), 6000);
+                            await Promise.all([loadSourceAudit(), loadAll()]);
+                          } catch (err) {
+                            window.alert(err.message);
+                          } finally {
+                            setAuditBusy(false);
+                          }
+                        }}
+                        className="underline font-bold hover:text-white"
+                      >
+                        Quitarlos ahora
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between items-center pt-2 border-t border-slate-800">
+                    <button
+                      onClick={() => purgeSecondSources('')}
+                      disabled={auditBusy || auditData.channelsWithBackup === 0}
+                      className="px-3 py-2 rounded-xl bg-rose-600/80 hover:bg-rose-600 text-white font-semibold disabled:opacity-40"
+                    >
+                      Quitar TODOS los respaldos ({auditData.channelsWithBackup})
+                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={loadSourceAudit}
+                        disabled={auditBusy}
+                        className="px-3 py-2 rounded-xl bg-slate-800 text-slate-200 font-semibold disabled:opacity-40"
+                      >
+                        {auditBusy ? 'Analizando...' : 'Actualizar'}
+                      </button>
+                      <button onClick={() => setAuditOpen(false)} className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300">
+                        Cerrar
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ==================== MODAL: CAMBIO MASIVO DE IP / PUERTO DE ORIGEN ==================== */}
       {repHostOpen && (

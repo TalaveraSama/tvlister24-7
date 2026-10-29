@@ -882,6 +882,107 @@ app.post('/api/streams/:id/switch-source', requireAuth, requireAdmin, (req, res)
   res.json(result);
 });
 
+// ==================== AUDITORÍA DE FUENTES Y LIMPIEZA DE RESPALDOS ====================
+// Sirve para detectar canales que siguen apuntando a un host que ya no se quiere usar
+// (por ejemplo un Astra viejo) y para borrar esos respaldos de golpe, sin tocar el
+// origen principal de cada canal.
+function hostOfUrl(raw = '') {
+  const val = String(raw || '').trim();
+  if (!val) return '';
+  try {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(val)) return new URL(val).host.toLowerCase();
+    const m = val.match(/^([^/?#]+)/);
+    return (m ? m[1] : '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+app.get('/api/streams/source-audit', requireAuth, requireAdmin, (req, res) => {
+  const rows = db
+    .prepare('SELECT id, name, source_url, backup_url, status, stream_mode FROM streams ORDER BY sort_order ASC, id ASC')
+    .all();
+
+  const hosts = new Map();
+  const bothSameHost = [];
+  let withBackup = 0;
+
+  for (const row of rows) {
+    const primaryHost = hostOfUrl(row.source_url);
+    const backupHost = hostOfUrl(row.backup_url);
+    if (backupHost) withBackup += 1;
+    if (primaryHost && backupHost && primaryHost === backupHost) {
+      bothSameHost.push({ id: row.id, name: row.name, host: primaryHost });
+    }
+
+    const touch = (host, kind) => {
+      if (!host) return;
+      if (!hosts.has(host)) hosts.set(host, { host, primary: 0, backup: 0, channels: [] });
+      const entry = hosts.get(host);
+      entry[kind] += 1;
+      if (entry.channels.length < 12) entry.channels.push(row.name);
+    };
+    touch(primaryHost, 'primary');
+    touch(backupHost, 'backup');
+  }
+
+  res.json({
+    ok: true,
+    totalChannels: rows.length,
+    channelsWithBackup: withBackup,
+    hosts: Array.from(hosts.values()).sort((a, b) => b.primary + b.backup - (a.primary + a.backup)),
+    sameHostPrimaryAndBackup: bothSameHost.slice(0, 50),
+    sameHostCount: bothSameHost.length
+  });
+});
+
+// Borra el segundo origen de los canales cuyo respaldo apunta a `host` (o de todos si host va vacío).
+app.post('/api/streams/purge-second-sources', requireAuth, requireAdmin, (req, res) => {
+  const wantHost = String(req.body?.host || '').trim().toLowerCase();
+  const dryRun = req.body?.dry_run === true;
+  const onlyProblems = req.body?.only_same_host === true;
+
+  const rows = db.prepare('SELECT id, name, source_url, backup_url FROM streams WHERE backup_url != \'\'').all();
+  // Se puede escribir la IP sola (192.168.88.10) o con puerto (192.168.88.10:8000)
+  const matchesHost = (backupHost) =>
+    !wantHost ||
+    backupHost === wantHost ||
+    backupHost.split(':')[0] === wantHost.split(':')[0];
+  const targets = rows.filter((row) => {
+    const backupHost = hostOfUrl(row.backup_url);
+    if (!matchesHost(backupHost)) return false;
+    if (onlyProblems && hostOfUrl(row.source_url) !== backupHost) return false;
+    return true;
+  });
+
+  if (dryRun) {
+    return res.json({
+      ok: true,
+      dryRun: true,
+      wouldClear: targets.length,
+      sample: targets.slice(0, 8).map((r) => r.name)
+    });
+  }
+
+  if (targets.length === 0) {
+    return res.json({ ok: true, cleared: 0, sample: [] });
+  }
+
+  const upd = db.prepare("UPDATE streams SET backup_url = '', failover_active = 0 WHERE id = ?");
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      for (const row of targets) upd.run(row.id);
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  res.json({ ok: true, cleared: targets.length, sample: targets.slice(0, 8).map((r) => r.name) });
+});
+
 app.post('/api/streams/switch-source-bulk', requireAuth, requireAdmin, (req, res) => {
   const { scope = 'selected', ids = [], category_id = null, target = 'backup' } = req.body || {};
   const wantTarget = target === 'primary' ? 'primary' : 'backup';
