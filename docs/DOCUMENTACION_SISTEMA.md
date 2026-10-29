@@ -1290,3 +1290,27 @@ automáticamente por FFmpeg con `-f rtp_mpegts` para llevar timestamps correctos
 | Se ve pero sin audio | Separación de audio del estándar (+4.5 / +5.5 / +6.5) | Usa el perfil `copy_mp2_leveled` y el estándar correcto |
 | El modulador marca la entrada como *offline* | Datagramas de tamaño no soportado o RTP no esperado | Cambia `pkt_size` a 1316/188 o activa/desactiva RTP según el equipo |
 | Dos canales se pisan | Dos números RF iguales en equipos distintos | El panel ya lo bloquea (409); corrige los rangos |
+
+### 8.24. Motor FFmpeg simplificado (opciones estáticas y cambios visibles)
+
+La sección **Motor FFmpeg** se reorganizó para que se entienda de un vistazo y no se toque el motor por accidente.
+
+**Cómo funciona ahora**
+
+1. **Todo está bloqueado por defecto.** Cada opción es un recuadro con su valor actual, su valor de fábrica y
+   una etiqueta `Por defecto` o `Modificado`. Para tocar algo hay que pulsar **Permitir cambios**; sin eso los
+   campos son de sólo lectura.
+2. **La descripción nunca cambia.** El texto explicativo de cada opción es fijo (qué hace y por qué ese valor),
+   no se reescribe solo ni depende de otros campos.
+3. **Todo cambio queda plasmado en su recuadro.** Al modificar una opción, su recuadro pasa a ámbar y escribe
+   literalmente *«Cambiado de X a Y»*, además de la etiqueta `Sin guardar` mientras no se aplique. El botón ↺
+   devuelve esa opción a su valor de fábrica.
+4. **Dos niveles.** Se ven 6 opciones básicas (segmento, segmentos en el manifiesto, hilos H.264, reserva de
+   RAMDisk, registro y salida MPEG-TS). El resto (sondas HTTP/UDP, tailer, prebuffer) queda tras
+   **Mostrar opciones avanzadas**, junto a las estadísticas del prebuffer.
+5. **Perfiles rápidos** (Estable, Baja latencia, etc.) sólo rellenan valores en el formulario: no aplican nada
+   hasta pulsar **Guardar y reiniciar escalonado**.
+6. El **Comando real que ejecuta FFmpeg** y el selector de binario quedan plegados, para que no dominen la página.
+
+**Regla de oro:** los argumentos del motor no cambiaron. Esta sección sólo cambia *cómo se edita* la misma
+configuración de siempre; con todo en `Por defecto` la línea de FFmpeg es idéntica a la validada en producción.
