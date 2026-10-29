@@ -1061,7 +1061,9 @@ y `backup_url` no vacío):
 
 Secuencia: 3 revisiones seguidas con caída (≈30 s) → se ejecuta **el mismo cambio que el botón ⇄**
 (intercambio de URL + `failover_active` + reinicio del worker). Entre cambios hay un **enfriamiento de
-120 s** para evitar rebotes. Si el respaldo también falla estando activo, el monitor **regresa al origen
+120 s** y, si se acumulan **3 conmutaciones en 15 minutos** (los dos orígenes están fallando), el monitor
+**se bloquea** con el estado `ERROR` y el motivo en el panel hasta que la ventana se vacíe: así no se
+reinicia el canal en bucle. Si el respaldo también falla estando activo, el monitor **regresa al origen
 original** (nunca se queda atrapado en un respaldo muerto); la vuelta por recuperación del principal es
 manual. El respaldo **nunca** se sondea mientras está dormido.
 
@@ -1070,7 +1072,9 @@ UI: en la columna *Fuente* aparece el badge **AUTO** con semáforo y estado (`VI
 `GET /api/streams` expone `auto_failover` y `failover_health` (`state`, `reason`, `switchedTo`,
 `lastSwitchAt`) por canal.
 
-**Verificado de punta a punta** con dos orígenes HLS reales: el respaldo recibió 0 peticiones mientras el
-principal emitía; al matar el principal el canal conmutó en ~24 s (nuevo worker, HLS fresco); al morir el
-respaldo volvió solo al principal en ~24 s. Bouquets: asignar `[1,2]` y luego `[2]` actualizó ambos sin
+**Verificado de punta a punta** con dos orígenes HLS reales: el respaldo recibió **0 peticiones a
+`index.m3u8`** mientras el principal emitía; al matar el principal el canal conmutó en ~24–50 s (nuevo
+worker, HLS fresco, `failover_active=1`); al morir el respaldo volvió solo al principal en ~24 s. El
+bloqueo anti-rebote se probó con un tick acelerado: 2 conmutaciones y luego `ERROR` con
+“conmutaciones repetidas”, liberándose al vaciarse la ventana. Bouquets: asignar `[1,2]` y luego `[2]` actualizó ambos sin
 tocar el resto del catálogo.

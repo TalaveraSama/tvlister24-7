@@ -37,6 +37,15 @@ let timer = null;
 let switchSourceFn = null;
 const watch = new Map(); // id -> { strikes, state, reason, lastSwitchAt, probeFailures, probeTick, switchedTo }
 
+// Parámetros ajustables (los tests y el arranque normal usan los mismos valores)
+const opts = {
+  tickMs: TICK_MS,
+  strikes: STRIKES_TO_SWITCH,
+  cooldownMs: SWITCH_COOLDOWN_MS,
+  maxSwitches: 3,
+  windowMs: 15 * 60_000
+};
+
 /** Sonda mínima: pide sólo 2 KB del origen activo y corta la descarga. */
 async function probeUpstreamAlive(rawUrl) {
   const url = String(rawUrl || '').trim();
@@ -102,8 +111,18 @@ async function runTick() {
   for (const row of rows) {
     const id = Number(row.id);
     const entry =
-      watch.get(id) ||
-      { strikes: 0, state: 'ok', reason: '', lastSwitchAt: 0, probeFailures: 0, probeTick: 0, switchedTo: '' };
+      watch.get(id) || {
+        strikes: 0,
+        state: 'ok',
+        reason: '',
+        lastSwitchAt: 0,
+        probeFailures: 0,
+        probeTick: 0,
+        switchedTo: '',
+        switchTimes: [],
+        locked: false,
+        healthyTicks: 0
+      };
 
     let down = false;
     let reason = '';
@@ -133,8 +152,23 @@ async function runTick() {
     entry.state = down ? 'down' : 'ok';
     entry.reason = down ? reason : '';
 
-    const cooldownOk = Date.now() - (entry.lastSwitchAt || 0) > SWITCH_COOLDOWN_MS;
-    if (down && entry.strikes >= STRIKES_TO_SWITCH && cooldownOk && typeof switchSourceFn === 'function') {
+    const now = Date.now();
+    // Anti-rebote: los cambios se cuentan en una ventana móvil. Si se supera el
+    // máximo (los dos orígenes están fallando) se deja de conmutar y se avisa.
+    // El bloqueo se libera solo: cuando los cambios viejos salen de la ventana.
+    entry.switchTimes = (entry.switchTimes || []).filter((t) => now - t < opts.windowMs);
+    entry.locked = entry.switchTimes.length >= opts.maxSwitches;
+    if (entry.locked) {
+      entry.state = 'error';
+      entry.reason = `conmutaciones repetidas (${entry.switchTimes.length} en ${Math.round(
+        opts.windowMs / 60000
+      )} min): revisa ambos orígenes`;
+      watch.set(id, entry);
+      continue;
+    }
+
+    const cooldownOk = now - (entry.lastSwitchAt || 0) > opts.cooldownMs;
+    if (!entry.locked && down && entry.strikes >= opts.strikes && cooldownOk && typeof switchSourceFn === 'function') {
       const onBackup = Number(row.failover_active) === 1;
       const target = onBackup ? 'primary' : 'backup';
       let result = { ok: false, error: 'sin manejador' };
@@ -147,6 +181,7 @@ async function runTick() {
         entry.strikes = 0;
         entry.probeFailures = 0;
         entry.lastSwitchAt = Date.now();
+        entry.switchTimes = [...(entry.switchTimes || []), Date.now()];
         entry.switchedTo = target;
         entry.state = 'switched';
         entry.reason = reason;
@@ -163,8 +198,20 @@ async function runTick() {
   }
 }
 
-export function startAutoFailoverMonitor({ switchSource, tickMs = TICK_MS } = {}) {
+export function startAutoFailoverMonitor({
+  switchSource,
+  tickMs = TICK_MS,
+  strikes = STRIKES_TO_SWITCH,
+  cooldownMs = SWITCH_COOLDOWN_MS,
+  maxSwitches = 3,
+  windowMs = 15 * 60_000
+} = {}) {
   if (switchSource) switchSourceFn = switchSource;
+  opts.tickMs = tickMs;
+  opts.strikes = strikes;
+  opts.cooldownMs = cooldownMs;
+  opts.maxSwitches = maxSwitches;
+  opts.windowMs = windowMs;
   if (timer) return;
   timer = setInterval(() => {
     runTick().catch(() => {
