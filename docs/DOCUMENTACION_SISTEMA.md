@@ -802,54 +802,43 @@ Antes, si un canal se caía, el panel reproducía una imagen o video en bucle **
 `custom_image` y un PNG subido por `/api/slates/upload` → `HTTP 200` con el manifiesto del bucle;
 `modo global/builtin` resuelve a sin respaldo; canal nuevo creado por API nace en `disabled`.
 
-### 8.14. Segundo origen dormido (failover estilo XUI.one)
+### 8.14. SOURCE 2 manual (no hay failover)
 
-Cada canal puede tener **dos fuentes**: la principal (`source_url`) y una segunda guardada (`backup_url`).
-La segunda **no está activa**: queda dormida, no abre conexión, no se sondea y no consume ancho de banda
-mientras el principal funcione. Sólo despierta cuando el principal falla de verdad.
+Cada canal tiene **un solo source activo**. Opcionalmente el administrador puede **agregar un segundo source**
+a ese canal concreto; se guarda y **no se usa nunca por sí solo**.
 
-**Cómo decide el motor** (`resolveStreamInputForAttempt` en `server/streamEngine.js`)
+**Cómo se agrega**
 
-| Situación | Fuente usada |
+En **Canales en Vivo → Editar canal**, debajo de *“URL Fuente Principal”* hay un botón
+**“+ Agregar Source”**. Al pulsarlo aparece el campo *“Source 2 (manual)”* con su botón **Quitar**.
+Se guarda en `streams.backup_url` (se aplica `trim`, un valor vacío significa “sin source 2”).
+
+**Qué hace el motor**
+
+| Situación | Comportamiento |
 |---|---|
-| El principal entrega video | Principal. La secundaria no se toca (0 conexiones, 0 bytes) |
-| Fallos rápidos del principal (2 intentos seguidos sin aguantar 15 s) | Secundaria |
-| Estando en la secundaria y ésta también falla | Alterna la secundaria con un intento al principal cada 8 intentos |
-| El principal vuelve | Sonda ligera cada **60 s** (sólo canales que están en la secundaria) y regresa sola |
+| El canal tiene source 2 guardado | El worker **sigue emitiendo el source original**; el 2 no se abre, no se sondea y no consume ancho de banda |
+| El source original se cae | El canal queda caído. **No** salta al source 2. NO hay reintentos hacia el source 2 |
+| El operador quiere usar el source 2 | Pulsa **⇄** en la fila del canal: se intercambian las URL y el worker se reinicia (~120 ms). Otra pulsación lo regresa |
 
-La sonda de retorno pide únicamente los primeros 2 KB de la URL principal y corta la conexión: no descarga
-video. En un canal caído son unos pocos KB por minuto; en un canal sano no se ejecuta nunca.
-
-**Sin interruptor global**
-
-Se eliminó el ajuste `failover_enabled` y su selector en *Servidores & Seguridad*: el comportamiento es único
-y no hay nada que configurar. Al arrancar, el panel borra ese ajuste viejo de la base de datos.
-
-**Qué ve el operador**
-
-- En **Canales en Vivo**, la fila muestra una etiqueta ámbar **RESPALDO** cuando el canal está emitiendo la
-  fuente secundaria (`active_source = "backup"` en `/api/streams`).
-- El botón **⇄** de la fila **fuerza** el cambio (útil para pruebas o mantenimiento). Vuelve a cambiar al
-  pulsarlo de nuevo. También existen **“A respaldo”** / **“Al principal”** en la barra superior para un lote.
-- Campo del formulario: **“Segundo Origen (dormido)”**.
+Se eliminaron por completo: el interruptor global `failover_enabled`, el failover automático
+(`resolveStreamInputForAttempt`), la sonda de recuperación de 60 s y el scheduler asociado.
 
 **API**
 
-- `POST /api/streams/:id/switch-source` `{ target: "backup" | "primary" }` — cambio forzado.
-- `POST /api/streams/switch-source-bulk` `{ scope, ids, category_id, target }` — cambio forzado en lote.
-- `GET /api/streams` — añade `active_source` (`primary` / `backup` / vacío si no hay worker) y `active_source_url`.
+- `POST /api/streams/:id/switch-source` `{ target: "backup" | "primary" }` — cambio manual de source.
+- `POST /api/streams/switch-source-bulk` — el mismo cambio para varios canales (sólo API, sin botón en la UI).
+- La columna `streams.failover_active` sólo indica que el canal está emitiendo su source 2 de forma manual.
 
-**Verificado con dos orígenes reales**
+**Verificado**
 
-| Prueba | Resultado |
-|---|---|
-| Principal sano 32 s | Principal 34 peticiones · **secundario 0** (dormido) |
-| Se cae el principal | En ~8 s el canal pasa a la secundaria (`active_source = backup`) y sigue emitiendo |
-| Vuelve el principal | A los ~60 s la sonda lo detecta y regresa sola (`active_source = primary`) |
-| Secundaria caída y principal arriba | Vuelve al principal al siguiente intento |
+- Con el source original sano: 6 peticiones servidas por el original y **0 peticiones al source 2**.
+- Con el source original caído: `0/5` peticiones servidas y el source 2 recibió **0 peticiones** (no entra solo).
+- Tras pulsar ⇄: las peticiones pasan al source 2 (`{40272: 3}`), y el source original queda guardado como 2.
+- Todos los intentos de FFmpeg (`attempt 0,1,2,5,9`) usan la misma URL del source activo; nunca el 2.
+- Canal CATV del modulador: el proceso arranca con la URL del source activo, no con el 2.
 
-
-### 8.15. Auditoría de fuentes y limpieza de respaldos (evitar sesiones duplicadas)
+### 8.15. Auditoría de fuentes y limpieza de SOURCE 2 (evitar sesiones duplicadas)
 
 En **Canales en Vivo → botón “Fuentes”** hay un resumen de **de quién jala cada canal**:
 
@@ -861,9 +850,8 @@ En **Canales en Vivo → botón “Fuentes”** hay un resumen de **de quién ja
 
 **Por qué importa (caso Astra):** cuando el respaldo de los 145 canales apuntaba al Astra local, el
 servidor de Astra mostraba **dos sesiones por canal** — la del `TVLister/2.3` (panel pidiendo el respaldo) y
-la del `Streamer 23.12` (Flussonic local jalando del Astra). Con el segundo origen dormido (8.14) la sesión del
-panel desaparece mientras el principal esté sano; y con esta auditoría puedes borrar esos respaldos viejos de
-una sola vez.
+la del `Streamer 23.12` (Flussonic local jalando del Astra). Como el SOURCE 2 es manual (8.14) el panel
+ya no abre esa sesión por su cuenta; y con esta auditoría puedes borrar esos sources viejos de una sola vez.
 
 **API**
 

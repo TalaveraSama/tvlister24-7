@@ -969,7 +969,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
         method: 'POST',
         body: JSON.stringify(host ? { host } : {})
       });
-      setBulkNotice(`✅ Se quitaron los respaldos de ${res.cleared} canales.`);
+      setBulkNotice(`✅ Se quitaron los SOURCE 2 de ${res.cleared} canales.`);
       setTimeout(() => setBulkNotice(''), 6000);
       await Promise.all([loadSourceAudit(), loadAll()]);
     } catch (err) {
@@ -981,7 +981,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
   // ==================== CAMBIO MANUAL DE ORIGEN (sin failover automático) ====================
   const handleSwitchSource = async (s, target) => {
-    const label = target === 'backup' ? 'el segundo origen' : 'el origen principal';
+    const label = target === 'backup' ? 'su SOURCE 2' : 'su source original';
     if (!window.confirm(`¿Pasar "${s.name}" a ${label}? El canal se reinicia para tomar la nueva URL.`)) return;
     try {
       await apiFetch(`/api/streams/${s.id}/switch-source`, {
@@ -990,27 +990,6 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       });
       setBulkNotice(`✅ "${s.name}" ahora emite desde ${label}.`);
       setTimeout(() => setBulkNotice(''), 5000);
-      await loadAll();
-    } catch (err) {
-      window.alert(err.message);
-    }
-  };
-
-  const handleBulkSwitchSource = async (target) => {
-    const scope = selectedIds.length > 0 ? 'selected' : 'all';
-    const label = target === 'backup' ? 'su segundo origen' : 'su origen principal';
-    const countLabel = scope === 'all' ? `TODOS los ${streams.length} canales` : `${selectedIds.length} canales seleccionados`;
-    if (!window.confirm(`¿Pasar ${countLabel} a ${label}? Los canales se reinician para tomar la nueva URL.`)) return;
-    try {
-      const res = await apiFetch('/api/streams/switch-source-bulk', {
-        method: 'POST',
-        body: JSON.stringify({ scope, ids: selectedIds, target })
-      });
-      setBulkNotice(
-        `✅ ${res.switched} canales pasados a ${label}.` +
-          (res.skipped ? ` (${res.skipped} sin segundo origen o ya estaban ahí)` : '')
-      );
-      setTimeout(() => setBulkNotice(''), 7000);
       await loadAll();
     } catch (err) {
       window.alert(err.message);
@@ -1258,28 +1237,6 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
               <Globe className="w-4 h-4 text-sky-300" />
               Fuentes
             </button>
-
-            {/* Cambio manual de origen en masa (sin failover automático) */}
-            {streams.length > 0 && (
-              <div className="inline-flex items-center rounded-xl border border-sky-500/35 bg-sky-500/10 overflow-hidden">
-                <button
-                  onClick={() => handleBulkSwitchSource('backup')}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sky-200 hover:bg-sky-500/20 text-xs font-semibold transition"
-                  title="Pasar los canales seleccionados (o todos) a su segundo origen guardado"
-                >
-                  <ArrowLeftRight className="w-4 h-4" />
-                  A respaldo
-                </button>
-                <span className="w-px self-stretch bg-sky-500/30" />
-                <button
-                  onClick={() => handleBulkSwitchSource('primary')}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sky-200 hover:bg-sky-500/20 text-xs font-semibold transition"
-                  title="Regresar los canales seleccionados (o todos) a su origen principal"
-                >
-                  Al principal
-                </button>
-              </div>
-            )}
 
             {/* Bulk Edit Button */}
             <button
@@ -1551,16 +1508,18 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                           </div>
                           <div className="min-w-0">
                             <div className="font-semibold text-white truncate flex items-center gap-1.5">
-                          <span className="truncate">{s.name}</span>
-                          {s.active_source === 'backup' && (
-                            <span
-                              className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-bold"
-                              title={`Emitiendo el segundo origen (el principal falló)\n${s.backup_url}`}
-                            >
-                              RESPALDO
-                            </span>
-                          )}
-                        </div>
+                              <span className="truncate">{s.name}</span>
+                              {Boolean(String(s.backup_url || '').trim()) && (
+                                <span
+                                  className="shrink-0 px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/35 text-sky-300 text-[9px] font-bold"
+                                  title={`Tiene un segundo source guardado (manual, no entra solo)\n${String(
+                                    s.backup_url
+                                  ).trim()}`}
+                                >
+                                  SOURCE 2
+                                </span>
+                              )}
+                            </div>
                             <div className="text-[11px] text-slate-500 font-mono truncate max-w-[240px]">
                               {s.source_url}
                             </div>
@@ -1756,8 +1715,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                               onClick={() => handleSwitchSource(s, s.failover_active ? 'primary' : 'backup')}
                               title={
                                 s.failover_active
-                                  ? `Forzado al segundo origen\n${s.backup_url}\nClic para volver al principal`
-                                  : `Forzar el segundo origen ahora (normalmente entra solo si el principal falla)\n${s.backup_url}`
+                                  ? `Este canal está emitiendo su SOURCE 2\n${s.backup_url}\nClic para volver al source original`
+                                  : `Emitir desde el SOURCE 2 de este canal (manual)\n${s.backup_url}\nClic para cambiar`
                               }
                               className={`p-1.5 rounded-lg transition ${
                                 s.failover_active
@@ -1805,8 +1764,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 <div>
                   <h3 className="text-sm font-bold text-white">Fuentes de los Canales (quién jala de dónde)</h3>
                   <p className="text-[11px] text-slate-400">
-                    Muestra el host del origen principal y del respaldo. Los respaldos están dormidos: sólo se conectan
-                    si el principal falla.
+                    Muestra de qué host jala cada canal. El SOURCE 2 es manual: se guarda y no se usa hasta que tú
+                    cambies a él en ese canal.
                   </p>
                 </div>
               </div>
@@ -1826,11 +1785,11 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       <div className="text-lg font-bold text-white">{auditData.totalChannels}</div>
                     </div>
                     <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
-                      <div className="text-slate-400 text-[11px]">Con segundo origen</div>
+                      <div className="text-slate-400 text-[11px]">Con SOURCE 2 manual</div>
                       <div className="text-lg font-bold text-violet-300">{auditData.channelsWithBackup}</div>
                     </div>
                     <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
-                      <div className="text-slate-400 text-[11px]">Principal = respaldo (mismo host)</div>
+                      <div className="text-slate-400 text-[11px]">Source 1 = Source 2 (mismo host)</div>
                       <div className={`text-lg font-bold ${auditData.sameHostCount ? 'text-amber-300' : 'text-slate-300'}`}>
                         {auditData.sameHostCount}
                       </div>
@@ -1863,7 +1822,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                                   disabled={auditBusy}
                                   className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-500/35 font-semibold disabled:opacity-40"
                                 >
-                                  Quitar respaldos de este host
+                                  Quitar SOURCE 2 de este host
                                 </button>
                               ) : (
                                 <span className="text-slate-600">—</span>
@@ -1884,7 +1843,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
                   {auditData.sameHostCount > 0 && (
                     <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/35 text-amber-100">
-                      Hay {auditData.sameHostCount} canales cuyo respaldo apunta al <b>mismo host</b> que el principal
+                      Hay {auditData.sameHostCount} canales cuyo SOURCE 2 apunta al <b>mismo host</b> que el principal
                       (no aporta nada y gasta una conexión extra).{' '}
                       <button
                         onClick={async () => {
@@ -1894,7 +1853,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                               method: 'POST',
                               body: JSON.stringify({ only_same_host: true })
                             });
-                            setBulkNotice(`✅ Respaldos redundantes quitados en ${res.cleared} canales.`);
+                            setBulkNotice(`✅ SOURCE 2 redundantes quitados en ${res.cleared} canales.`);
                             setTimeout(() => setBulkNotice(''), 6000);
                             await Promise.all([loadSourceAudit(), loadAll()]);
                           } catch (err) {
@@ -1916,7 +1875,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       disabled={auditBusy || auditData.channelsWithBackup === 0}
                       className="px-3 py-2 rounded-xl bg-rose-600/80 hover:bg-rose-600 text-white font-semibold disabled:opacity-40"
                     >
-                      Quitar TODOS los respaldos ({auditData.channelsWithBackup})
+                      Quitar TODOS los SOURCE 2 ({auditData.channelsWithBackup})
                     </button>
                     <div className="flex gap-2">
                       <button
@@ -2584,24 +2543,46 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                   className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
                   placeholder="https://servidor.com/live/canal/index.m3u8"
                 />
+
+                {/* Source adicional (manual): se agrega a mano en este canal, no entra solo */}
+                {form.backup_url ? (
+                  <div className="mt-2 rounded-xl border border-slate-700 bg-[#0b1120] p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-sky-300">Source 2 (manual)</span>
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form, backup_url: '' })}
+                        className="text-[10px] font-semibold text-rose-300 hover:text-rose-200"
+                      >
+                        Quitar
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={form.backup_url}
+                      onChange={(e) => setForm({ ...form, backup_url: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                      placeholder="https://otro-proveedor.com/live/canal/index.m3u8"
+                    />
+                    <p className="text-[10px] text-slate-500">
+                      Se guarda sin usarse. Para emitir desde aquí, pulsa <b className="text-slate-400">⇄</b> en la fila
+                      del canal (y otra vez para regresar).
+                    </p>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, backup_url: ' ' })}
+                    className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 text-[11px] font-semibold transition"
+                    title="Agregar un segundo source solo a este canal (manual, no entra solo)"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Agregar Source
+                  </button>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-slate-300 mb-1 font-medium">Segundo Origen (dormido)</label>
-                  <input
-                    type="text"
-                    value={form.backup_url}
-                    onChange={(e) => setForm({ ...form, backup_url: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-                    placeholder="Opcional · sólo entra si el principal se cae"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    Queda <b className="text-slate-400">guardado y dormido</b>: no abre conexión ni gasta ancho de banda
-                    mientras el principal funcione. Si el principal falla, el panel entra solo al segundo origen y vuelve
-                    al principal cuando se recupere.
-                  </p>
-                </div>
                 <div>
                   <label className="block text-slate-300 mb-1 font-medium">URL Logo / Icono PNG</label>
                   <input

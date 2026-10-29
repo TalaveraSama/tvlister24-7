@@ -130,10 +130,10 @@ export function isItemAllowedForLine(line, kind, itemId) {
 }
 
 export function expandStreamUpstreamUrls(stream) {
-  // El origen principal va primero y SIEMPRE se intenta solo. El segundo origen sólo
-  // aparece al final de la lista, así que únicamente se toca si el principal falla:
-  // mientras el canal esté sano no se abre ninguna conexión a la fuente secundaria.
-  const rawList = [stream?.source_url, stream?.backup_url].filter(Boolean);
+  // Sin failover: se reproduce únicamente el source activo del canal (source_url).
+  // Si el canal tiene un segundo source guardado, NO se toca hasta que el
+  // administrador cambie a él a mano.
+  const rawList = [stream?.source_url].filter(Boolean);
   const expanded = [];
   for (const raw of rawList) {
     const trimmed = String(raw).trim();

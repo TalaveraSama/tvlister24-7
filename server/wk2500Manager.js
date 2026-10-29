@@ -10,8 +10,7 @@ import {
   getFfmpegBin,
   isFfmpegAvailable,
   buildAudioLevelingFilter,
-  getFreshLocalHlsManifestPath,
-  resolveStreamInputForAttempt
+  getFreshLocalHlsManifestPath
 } from './streamEngine.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 
@@ -297,8 +296,8 @@ function resolveSlotUpstream(slotRow) {
     streamRow = db.prepare('SELECT * FROM streams WHERE id = ?').get(Number(slotRow.stream_id));
   }
   const rawPrimary = String(slotRow.custom_source_url || streamRow?.source_url || '').trim();
-  // Segunda fuente dormida: sólo se intenta si el principal falla repetidamente.
-  const rawBackup = String(streamRow?.backup_url || '').trim();
+  // Sin failover: el modulador emite el source activo del canal y nada más.
+  const rawBackup = '';
   const channelTitle = String(slotRow.custom_name || streamRow?.name || `CATV CH ${slotRow.catv_ch}`).trim();
 
   // Check if local 24/7 RAMDisk HLS manifest is already running for this stream
@@ -816,15 +815,7 @@ export function startWk2500ChannelWorker(catvCh) {
       : allCandidates.filter((u) => !/\.m3u8(\?|$)/i.test(u));
     const pool = usableCandidates.length > 0 ? usableCandidates : allCandidates;
 
-    let chosenUrl = '';
-    if (freshUp.streamRow) {
-      // Misma política que el resto del panel: principal siempre; secundaria dormida
-      // hasta que el principal falle varias veces seguidas.
-      const picked = resolveStreamInputForAttempt(freshUp.streamRow, state.attempt);
-      chosenUrl = picked.url || freshUp.rawPrimary;
-    } else {
-      chosenUrl = pool[state.attempt % Math.max(1, pool.length)] || freshUp.rawPrimary;
-    }
+    const chosenUrl = pool[state.attempt % Math.max(1, pool.length)] || freshUp.rawPrimary;
     if (!chosenUrl && !freshUp.localHls) {
       scheduleRetry('Sin URL de origen en el canal asignado');
       return;
