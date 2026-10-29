@@ -38,7 +38,8 @@ import {
   Users,
   CalendarClock,
   StickyNote,
-  Sparkles
+  Sparkles,
+  Activity
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 import {
@@ -58,6 +59,7 @@ import {
   ProgressBar
 } from '../components/StreamsSkin.jsx';
 import StreamDrawer from '../components/StreamDrawer.jsx';
+import SourceDiagnosticModal from '../components/SourceDiagnosticModal.jsx';
 
 const EMPTY_FORM = {
   name: '',
@@ -225,6 +227,9 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [bouquets, setBouquets] = useState([]);
+  const [diagStream, setDiagStream] = useState(null);
+  const [diagReport, setDiagReport] = useState(null);
+  const [diagBusy, setDiagBusy] = useState(false);
 
   const [ffmpegModal, setFfmpegModal] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -980,6 +985,25 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     }
     setModalOpen(false);
     loadAll();
+  };
+
+  const runDiagnostic = async (st) => {
+    if (!st) return;
+    setDiagBusy(true);
+    setDiagReport(null);
+    try {
+      const report = await apiFetch(`/api/streams/${st.id}/diagnose`, { method: 'POST' });
+      setDiagReport(report);
+    } catch (err) {
+      setDiagReport({ error: err.message || 'No se pudo completar el diagnóstico' });
+    } finally {
+      setDiagBusy(false);
+    }
+  };
+
+  const openDiagnostic = (st) => {
+    setDiagStream(st);
+    runDiagnostic(st);
   };
 
   const handleAction = async (id, action) => {
@@ -2240,6 +2264,11 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                                     onClick: () => handleProbeSingleStream(s)
                                   },
                                   {
+                                    icon: Activity,
+                                    label: 'Diagnosticar origen',
+                                    onClick: () => openDiagnostic(s)
+                                  },
+                                  {
                                     icon: Terminal,
                                     label: 'Ver comando FFmpeg',
                                     onClick: () => showFfmpeg(s)
@@ -2325,6 +2354,19 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
           handleDelete(id);
         }}
       />
+
+      {diagStream ? (
+        <SourceDiagnosticModal
+          stream={diagStream}
+          report={diagReport}
+          busy={diagBusy}
+          onRun={() => runDiagnostic(diagStream)}
+          onClose={() => {
+            setDiagStream(null);
+            setDiagReport(null);
+          }}
+        />
+      ) : null}
 
       {/* ==================== MODAL: AUDITORÍA DE FUENTES ==================== */}
       {auditOpen && (

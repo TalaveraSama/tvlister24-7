@@ -1078,3 +1078,38 @@ worker, HLS fresco, `failover_active=1`); al morir el respaldo volvió solo al p
 bloqueo anti-rebote se probó con un tick acelerado: 2 conmutaciones y luego `ERROR` con
 “conmutaciones repetidas”, liberándose al vaciarse la ventana. Bouquets: asignar `[1,2]` y luego `[2]` actualizó ambos sin
 tocar el resto del catálogo.
+
+### 8.20. Diagnóstico de reproducción por canal (origen → motor → entrega)
+
+Cuando un canal “no se ve”, el panel ya no se limita a decir *“La fuente de origen no respondió”*:
+prueba el recorrido completo **desde el servidor** y devuelve dónde se corta.
+
+**Cómo se usa:** en *Canales en Vivo*, menú **⋯ → Diagnosticar origen** (o el botón **Diagnosticar
+origen** dentro del Monitor en Vivo cuando falla). El reporte se puede **Copiar** para enviarlo al
+proveedor.
+
+**Qué prueba cada paso**
+
+| Paso | Qué hace | Qué reporta |
+| --- | --- | --- |
+| 1. Origen (proveedor) | Descarga la URL activa con el User-Agent del canal y sondea **4 KB del primer segmento** | HTTP real, ms, content-type, presencia de `#EXTM3U`, nº de segmentos, `ECONNREFUSED`, `ECONNRESET`, DNS, timeout 8 s, 401/403/404 |
+| 2. Motor local | `getWorkerDiagnostics()` + frescura del manifiesto en `/dev/shm` (≤18 s) | PID de FFmpeg, segmentos, edad del manifiesto, rutas RAM/disco |
+| 3. Entrega (URL de línea) | Pide `/live/<user>/<pass>/<id>.m3u8` de la primera línea activa y un segmento | 403 (bouquet/IP), 404 (id), 503 (canal detenido), manifiesto y bytes del segmento real |
+
+La **Source 2 dormida** también se sondea, pero **sólo como informe** (`inactive`): nunca altera el
+veredicto porque el panel no la está reproduciendo.
+
+**Veredictos**
+
+- `ORIGEN_CAIDO` — el proveedor no entrega: afecta al panel **y** a IPTV Smarters/decos/VLC por igual.
+- `SOURCE2_DISPONIBLE` — Source 1 caída pero la Source 2 (dormida) responde: conviene conmutar a mano o
+  activar el respaldo automático del canal.
+- `MOTOR_CAIDO` — el origen responde pero FFmpeg no produce HLS local.
+- `ENTREGA_FALLA` — origen y motor bien, pero la URL de línea/bouquet falla.
+- `OK` — todo el recorrido responde (si además no hay líneas activas, la entrega queda **Omitida**).
+
+**Endpoint:** `POST /api/streams/:id/diagnose` (admin) →
+`{ ok, stream{source_url enmascarada, backup_url, failover_active, auto_failover}, steps[origin|engine|delivery], verdict{code,title,text,hints}, elapsedMs, checkedAt }`.
+Los tokens de las URLs se enmascaran (`token=abc1***`) para poder pegar el reporte sin filtrar credenciales.
+El error `502 UPSTREAM_ERROR` del Monitor en Vivo ahora incluye `detail{url,status,reason,tried}` y un
+`hint` que remite a este diagnóstico.

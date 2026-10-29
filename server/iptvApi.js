@@ -2130,6 +2130,7 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
 
   const candidates = expandStreamUpstreamUrls(streamObj);
   const isLocalIngest = /^https?:\/\/127\.0\.0\.1:\d+\/live\//i.test(rawUrl);
+  let lastUpstreamFailure = null;
 
   for (const upstreamUrl of candidates) {
     const cleanPath = upstreamUrl.split('?')[0].toLowerCase();
@@ -2148,7 +2149,20 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
       });
       clearTimeout(timer);
 
-      if (!upRes.ok || !upRes.body) continue;
+      if (!upRes.ok || !upRes.body) {
+        lastUpstreamFailure = {
+          url: upstreamUrl,
+          status: upRes.status,
+          reason:
+            upRes.status === 401 || upRes.status === 403
+              ? 'el origen rechaza el acceso (token/IP/User-Agent)'
+              : upRes.status === 404
+                ? 'la ruta del canal no existe en el origen'
+                : `el origen respondió HTTP ${upRes.status}`,
+          tried: candidates.length
+        };
+        continue;
+      }
 
       const cType = (upRes.headers.get('content-type') || '').toLowerCase();
       const isHls = cType.includes('mpegurl') || cleanPath.endsWith('.m3u8');
@@ -2176,8 +2190,24 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
         res.setHeader('Cache-Control', 'no-store');
         return Readable.fromWeb(upRes.body).pipe(res);
       }
-    } catch {
+    } catch (err) {
       clearTimeout(timer);
+      const code = err?.cause?.code || err?.code || '';
+      lastUpstreamFailure = {
+        url: upstreamUrl,
+        status: null,
+        reason:
+          err?.name === 'AbortError' || code === 'ABORT_ERR'
+            ? 'el origen no respondió en 7 s (timeout)'
+            : code === 'ENOTFOUND'
+              ? 'el dominio del origen no resuelve (DNS)'
+              : code === 'ECONNREFUSED'
+                ? 'conexión rechazada: puerto cerrado o servicio caído'
+                : code === 'ECONNRESET'
+                  ? 'el origen cortó la conexión'
+                  : err?.message || 'error de red',
+        tried: candidates.length
+      };
     }
   }
 
@@ -2218,9 +2248,18 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
     });
   }
 
+  const failure = lastUpstreamFailure || {};
   return res.status(502).json({
     code: 'UPSTREAM_ERROR',
     error: 'La fuente de origen no respondió o está temporalmente fuera de línea.',
+    detail: {
+      // el token de la URL se enmascara: el admin puede identificar el origen sin exponerlo
+      url: String(failure.url || rawUrl || '').replace(/([?&](?:token|password|pass|key|auth)=)([^&]{4})[^&]*/gi, '$1$2***'),
+      status: failure.status || null,
+      reason: failure.reason || 'sin respuesta',
+      tried: failure.tried || candidates.length
+    },
+    hint: 'Abre el menú ⋯ del canal → Diagnosticar origen para ver el recorrido completo.'
   });
 });
 

@@ -78,6 +78,7 @@ import {
 } from './streamEngine.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
+import { diagnoseStream } from './diagnostics.js';
 import {
   getResolutionScanStatus,
   startResolutionAutoClassifyJob,
@@ -999,6 +1000,23 @@ function switchStreamSourceRow(row, target) {
 
   return { ok: true, id: row.id, name: row.name, nowOn: target === 'backup' ? 'respaldo' : 'principal' };
 }
+
+/**
+ * Diagnóstico de reproducción: origen → motor → entrega al reproductor.
+ * Devuelve un reporte con estado, tiempos y acciones concretas para cada paso.
+ */
+app.post('/api/streams/:id/diagnose', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'ID de canal inválido' });
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  try {
+    const report = await diagnoseStream(id, { baseUrl });
+    if (!report?.ok) return res.status(404).json({ error: report?.error || 'Canal no encontrado' });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo completar el diagnóstico' });
+  }
+});
 
 app.post('/api/streams/:id/switch-source', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);

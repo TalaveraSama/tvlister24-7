@@ -41,6 +41,8 @@ export default function VideoModal({ item, onClose }) {
   const [muted, setMuted] = useState(false);
   const [resolution, setResolution] = useState('');
   const [live247State, setLive247State] = useState(item?.liveState || null);
+  const [diagnosis, setDiagnosis] = useState(null);
+  const [diagBusy, setDiagBusy] = useState(false);
 
   useEffect(() => {
     setLive247State(item?.liveState || null);
@@ -122,7 +124,14 @@ export default function VideoModal({ item, onClose }) {
             return;
           }
           if (data?.error) {
-            setError(data.error);
+            const d = data.detail || {};
+            const extra =
+              d.reason || d.status
+                ? ` (${d.status ? `HTTP ${d.status} · ` : ''}${d.reason || ''}${
+                    d.url ? ` · ${String(d.url).replace(/([?&](?:token|password|pass)=)([^&]{4})[^&]*/gi, '$1$2***')}` : ''
+                  })`
+                : '';
+            setError(`${data.error}${extra}`);
             return;
           }
         }
@@ -190,6 +199,23 @@ export default function VideoModal({ item, onClose }) {
       }
     };
   }, [playableUrl, retryTick]);
+
+  const runDiagnosis = async () => {
+    if (!item?.id || item.kind !== 'live') return;
+    setDiagBusy(true);
+    try {
+      const res = await fetch(`/api/streams/${item.id}/diagnose`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}` }
+      });
+      const data = await res.json();
+      setDiagnosis(data);
+    } catch (err) {
+      setDiagnosis({ error: err?.message || 'No se pudo completar el diagnóstico' });
+    } finally {
+      setDiagBusy(false);
+    }
+  };
 
   if (!item) return null;
 
@@ -268,13 +294,55 @@ export default function VideoModal({ item, onClose }) {
                   Auto-conectando automáticamente cada 3 segundos en cuanto recibamos video...
                 </p>
               )}
-              <button
-                onClick={() => setRetryTick((t) => t + 1)}
-                className="mt-1 inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                Reintentar Ahora
-              </button>
+              <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+                <button
+                  onClick={() => setRetryTick((t) => t + 1)}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Reintentar Ahora
+                </button>
+                {item.kind === 'live' && item.id ? (
+                  <button
+                    onClick={runDiagnosis}
+                    disabled={diagBusy}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-100 text-xs font-semibold border border-slate-700"
+                  >
+                    {diagBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Radio className="w-3.5 h-3.5" />}
+                    {diagBusy ? 'Diagnosticando…' : 'Diagnosticar origen'}
+                  </button>
+                ) : null}
+              </div>
+
+              {diagnosis && !diagnosis.error ? (
+                <div className="mt-3 w-full max-w-xl rounded-xl border border-slate-700 bg-slate-900/80 p-3 text-left">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Diagnóstico</div>
+                  <div className="mt-1 text-xs font-semibold text-slate-100">{diagnosis.verdict?.title}</div>
+                  <p className="mt-1 text-[11px] leading-snug text-slate-300">{diagnosis.verdict?.text}</p>
+                  <div className="mt-2 space-y-1">
+                    {(diagnosis.steps || []).map((st) => (
+                      <div key={st.id} className="flex items-start gap-1.5 text-[10.5px]">
+                        <span className={st.ok ? 'text-emerald-400' : 'text-rose-400'}>{st.ok ? '✓' : '✗'}</span>
+                        <span className="text-slate-400">
+                          <b className="text-slate-200">{st.label}:</b> {st.detail}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {diagnosis.verdict?.hints?.length ? (
+                    <ul className="mt-2 space-y-0.5">
+                      {diagnosis.verdict.hints.map((h, i) => (
+                        <li key={i} className="text-[10.5px] text-amber-200/90">
+                          → {h}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+              {diagnosis?.error ? (
+                <div className="mt-3 text-[11px] text-rose-300">{diagnosis.error}</div>
+              ) : null}
             </div>
           )}
         </div>
