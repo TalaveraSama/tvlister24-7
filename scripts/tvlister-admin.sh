@@ -543,6 +543,85 @@ cmd_ffmpeg() {
   esac
 }
 
+cmd_tune() {
+  # Configuración recomendada según el hardware real de este servidor.
+  # Uso: tvlister-admin tune [show|apply]
+  local mode="${1:-show}"
+  cd "$APP_DIR"
+  case "$mode" in
+    show | "")
+      TUNE_MODE=show "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { computeRecommendation } from "./server/tune.js";
+        initDb();
+        const r = computeRecommendation();
+        const h = r.hardware;
+        const w = r.workload;
+        const pad = (s, n) => String(s).padEnd(n);
+        console.log("============================================================");
+        console.log("  TVLister 24/7 — Configuracion recomendada para este equipo");
+        console.log("============================================================");
+        console.log("  Nucleos            : " + h.cores);
+        console.log("  RAM                : " + h.ramMb + " MB");
+        console.log("  RAMDisk (/dev/shm) : " + (h.shm.exists
+          ? h.shm.totalMb + " MB totales, " + h.shm.freeMb + " MB libres"
+          : "no disponible (se usa disco)"));
+        console.log("  Ventana HLS        : ~" + h.neededMb + " MB (peor caso: GOP de 4 s)");
+        console.log("  Canales            : " + w.total + " (" + w.transcode + " en el motor, " +
+          w.reencode + " re-codificando, " + w.audioLeveled + " con audio nivelado)");
+        console.log("  Moduladores CATV   : " + w.units + " equipos, " + w.catvEnabled + "/" + w.catvSlots + " canales activos");
+        console.log("  Perfil detectado   : " + r.summary.profile);
+        console.log("");
+        console.log("  Ajuste                 Actual        Recomendado");
+        console.log("  ----------------------------------------------------------");
+        for (const i of r.items) {
+          const mark = i.changed ? " *" : "  ";
+          console.log(mark + " " + pad(i.label, 34) + pad(i.current, 13) + i.recommended);
+        }
+        console.log("  ----------------------------------------------------------");
+        console.log("  (*) = distinto de lo recomendado");
+        console.log("");
+        if (r.warnings.length) {
+          console.log("  AVISOS:");
+          for (const x of r.warnings) console.log("   - " + x);
+          console.log("");
+        }
+        if (r.summary.upToDate) {
+          console.log("  [OK] La configuracion ya es la recomendada.");
+        } else {
+          console.log("  Aplicar con: tvlister-admin tune apply");
+        }
+        console.log("============================================================");
+      '
+      ;;
+    apply)
+      TUNE_MODE=apply "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { applyRecommendation } from "./server/tune.js";
+        import { invalidateFfmpegEfficiencyCache } from "./server/streamEngine.js";
+        initDb();
+        const { applied, recommendation } = applyRecommendation();
+        if (!applied.length) {
+          console.log("  [OK] Nada que cambiar: ya estaba en los valores recomendados.");
+        } else {
+          console.log("  Aplicados " + applied.length + " ajuste(s):");
+          for (const a of applied) {
+            console.log("   - " + a.key + ": " + a.from + " -> " + a.to);
+          }
+        }
+        invalidateFfmpegEfficiencyCache();
+        for (const w of recommendation.warnings) console.log("  [AVISO] " + w);
+        console.log("");
+        console.log("  Aplica a todos los canales con: tvlister-admin restart");
+      '
+      ;;
+    *)
+      echo "Uso: tvlister-admin tune [show|apply]"
+      return 1
+      ;;
+  esac
+}
+
 cmd_release() {
   # Instala/actualiza desde un release publicado (paquete .tar.gz + checksum),
   # sin depender de la rama de git. Uso: tvlister-admin release [vX.Y.Z]
@@ -718,6 +797,9 @@ case "$ACTION" in
   release)
     cmd_release "${2:-latest}"
     ;;
+  tune)
+    cmd_tune "${2:-show}"
+    ;;
   ffmpeg)
     cmd_ffmpeg "${2:-status}" "${3:-}"
     ;;
@@ -742,9 +824,10 @@ case "$ACTION" in
     echo " 15) Ver logs en vivo (logs)"
     echo " 16) Motor FFmpeg: ver, elegir, instalar o copiar el de XUI.one (ffmpeg)"
     echo " 17) Instalar/actualizar desde un release publicado (release)"
+    echo " 18) Configuracion recomendada segun el hardware (tune)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-17]: " opt
+    read -r -p "Selecciona una opción [0-18]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -763,6 +846,7 @@ case "$ACTION" in
       15) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
       16) cmd_ffmpeg "status" "" ;;
       17) cmd_release "latest" ;;
+      18) cmd_tune "show" ;;
       *) exit 0 ;;
     esac
     ;;

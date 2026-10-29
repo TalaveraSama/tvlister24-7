@@ -1486,3 +1486,62 @@ el que escribe FFmpeg, sin `EXT-X-START`, sin cabeceras de zapping y sin workers
 
 **Si algún día se quiere reintentar el zapeo**, la única vía segura es forzar keyframe en cada segmento
 (`-force_key_frames`) **antes** de acortar la ventana; nunca al revés.
+
+### 8.29. Configuración recomendada según el hardware (v2.5.4)
+
+El panel calcula **por sí mismo** cuál es la mejor configuración del motor para la máquina donde está
+instalado. No inventa opciones ni toca la línea de argumentos de FFmpeg: **sólo escribe valores de los
+ajustes que ya existen** en *Motor FFmpeg*.
+
+**Qué mide**
+
+| Dato | De dónde sale | Para qué se usa |
+| --- | --- | --- |
+| Núcleos de CPU | `os.cpus()` | Hilos de x264 / decodificación |
+| RAM total | `/proc/meminfo` | Reserva de RAM del sistema |
+| `/dev/shm` (total y libre) | `statfs /dev/shm` | Ventana HLS en memoria y reserva |
+| Canales en el motor | `streams` + perfil asignado | Copy vs re-codificación, nivel de log |
+| Moduladores / portadoras | `wk2500_units`, `wk2500_channels` | Perfil de cabecera |
+
+Con eso estima el **espacio de la ventana HLS** (`hls_time × hls_list_size` por canal) y avisa cuando la
+ventana completa no cabe en la RAMDisk.
+
+**Cómo se ejecuta**
+
+```bash
+tvlister-admin tune            # muestra el cuadro comparativo (no escribe nada)
+tvlister-admin tune apply      # escribe sólo lo que difiere
+```
+
+También en el panel: **Motor FFmpeg → «Recomendado para este servidor»**, con el botón *Aplicar N ajuste(s)*.
+La tarjeta desaparece del camino cuando todo ya está aplicado (*Ya está aplicada*).
+
+**API**
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| `GET` | `/api/system/tune` | `{hardware, workload, items[], warnings[], summary}` (sólo admin) |
+| `POST` | `/api/system/tune/apply` | Aplica todo, o sólo las claves enviadas: `{"only":["h264Threads"]}` |
+
+**Valores que recomienda** (todos son ajustes existentes)
+
+| Ajuste | Recomendación |
+| --- | --- |
+| Segmento HLS | 2 s, manifiesto de 6 (12 s de ventana) |
+| Sondas | HTTP/HLS 5 MB, 4 s · local 1.5 MB, 1.5 s |
+| Modo de tubería TS | `auto` con `join_on_segment` |
+| Hilos x264 | 1 si ≤ 2 núcleos · 2 por defecto · 4 si ≥ 16 núcleos y ≤ 4 canales re-codificando |
+| Nivel de log | `error` con ≥ 100 canales · `warning` por debajo |
+| Lector de segmentos | cada 160 ms, ráfaga 2 |
+| Reserva de RAM | 10 % de `/dev/shm`, entre 128 y 2048 MB |
+| Prebuffer | 0 segmentos, 3000 ms de espera |
+| Binario FFmpeg | sin cambios (respeta el que ya esté seleccionado) |
+
+**Aplicar no reinicia nada.** Escribe en SQLite y devuelve el mensaje con los ajustes aplicados; para que
+todos los canales tomen el valor nuevo hay que pulsar *Guardar y reiniciar escalonado* (o
+`tvlister-admin restart`). Es intencional: un reinicio masivo tira los canales de los moduladores.
+
+**Ejemplo real** (servidor de 2 núcleos, 3.9 GB de RAM, `/dev/shm` de 1.9 GB, 145 canales en Copy): el cuadro
+recomienda `h264_threads 1`, `log_level error` y `ram_reserve 197 MB`, y advierte que la ventana completa
+(~4.6 GB) no cabe en la RAMDisk: los canales que exceden la RAM bajan solos a disco, y la sugerencia es
+llevar `/dev/shm` a ~7 GB si se quiere todo en memoria.

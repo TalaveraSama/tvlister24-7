@@ -222,6 +222,8 @@ export default function FfmpegEnginePage() {
   const [editMode, setEditMode] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showCommand, setShowCommand] = useState(false);
+  const [tune, setTune] = useState(null);
+  const [tuneBusy, setTuneBusy] = useState(false);
 
   const load = async (silent = false) => {
     try {
@@ -234,12 +236,36 @@ export default function FfmpegEnginePage() {
     }
   };
 
+  const loadTune = async () => {
+    try {
+      const res = await apiFetch('/api/system/tune');
+      setTune(res);
+    } catch {
+      setTune(null);
+    }
+  };
+
   useEffect(() => {
     load();
+    loadTune();
     const timer = setInterval(() => load(true), 15000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const applyTune = async () => {
+    setTuneBusy(true);
+    setErrMsg('');
+    try {
+      const res = await apiFetch('/api/system/tune/apply', { method: 'POST', body: JSON.stringify({}) });
+      flash(res.message || 'Recomendación aplicada.');
+      await Promise.all([load(true), loadTune()]);
+    } catch (err) {
+      setErrMsg(err.message || 'No se pudo aplicar la recomendación');
+    } finally {
+      setTuneBusy(false);
+    }
+  };
 
   const setField = (key, value) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -574,6 +600,85 @@ export default function FfmpegEnginePage() {
           <AlertTriangle className="h-4 w-4 shrink-0" /> {errMsg}
         </div>
       )}
+
+      {/* ================= Recomendado para este servidor ================= */}
+      {tune ? (
+        <div className="rounded-2xl border border-sky-500/30 bg-gradient-to-br from-[#0f1a2b] to-[#0e1526] p-4">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h3 className="flex items-center gap-2 text-sm font-bold text-white">
+                <Gauge className="h-4 w-4 text-sky-400" /> Recomendado para este servidor
+              </h3>
+              <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                Calculado con el hardware real ({tune.hardware?.cores} núcleos · {tune.hardware?.ramMb} MB RAM ·{' '}
+                {tune.hardware?.shm?.exists ? `${tune.hardware.shm.totalMb} MB en /dev/shm` : 'sin RAMDisk'}) y la carga
+                actual ({tune.workload?.transcode} canales en el motor, {tune.workload?.units} moduladores).
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-lg border border-slate-700 bg-[#090e1a] px-2 py-1 text-[10px] font-semibold text-slate-300">
+                {tune.summary?.profile}
+              </span>
+              {tune.summary?.upToDate ? (
+                <span className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[10px] font-bold text-emerald-300">
+                  Ya está aplicada
+                </span>
+              ) : (
+                <button
+                  onClick={applyTune}
+                  disabled={tuneBusy}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  {tuneBusy ? 'Aplicando…' : `Aplicar ${tune.summary?.changed} ajuste(s)`}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {tune.summary?.changed ? (
+            <div className="mt-3 space-y-1.5">
+              {(tune.items || [])
+                .filter((i) => i.changed)
+                .map((i) => (
+                  <div
+                    key={i.key}
+                    className="flex flex-wrap items-baseline gap-x-2 rounded-lg border border-slate-800 bg-[#090e1a] px-2.5 py-1.5 text-[11px]"
+                  >
+                    <span className="font-semibold text-slate-200">{i.label}:</span>
+                    <span className="font-mono text-slate-500 line-through">{String(i.current)}</span>
+                    <span className="text-slate-500">→</span>
+                    <span className="font-mono font-bold text-sky-300">{String(i.recommended)}</span>
+                    <span className="w-full text-[10px] leading-snug text-slate-500">{i.why}</span>
+                  </div>
+                ))}
+            </div>
+          ) : (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-300">
+              <CheckCircle2 className="h-3.5 w-3.5" /> Todos los ajustes están en el valor recomendado para esta máquina.
+            </div>
+          )}
+
+          {(tune.warnings || []).length ? (
+            <div className="mt-3 space-y-1.5">
+              {(tune.warnings || []).map((w) => (
+                <div
+                  key={w}
+                  className="flex items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10.5px] leading-snug text-amber-100"
+                >
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <p className="mt-2 text-[10px] text-slate-500">
+            Aplicar sólo escribe valores de configuración: no cambia los argumentos de FFmpeg ni reinicia canales.
+            Usa <span className="font-mono text-slate-400">Guardar y reiniciar escalonado</span> después, o{' '}
+            <span className="font-mono text-slate-400">tvlister-admin tune</span> desde la terminal.
+          </p>
+        </div>
+      ) : null}
 
       {/* ================= Perfiles rápidos ================= */}
       <div className="rounded-2xl border border-slate-800/80 bg-[#0e1526] p-4">

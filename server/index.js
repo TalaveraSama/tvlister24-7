@@ -100,6 +100,7 @@ import {
   getSegmentMissStats,
   getPrebufferStats
 } from './iptvApi.js';
+import { computeRecommendation, applyRecommendation } from './tune.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
 import { headendRouter } from './headendManager.js';
@@ -2074,7 +2075,43 @@ app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
 });
 
 /**
- * Re-detección manual de binarios FFmpeg (las 3 versiones de XUI.one, .runtime,
+ * Configuración recomendada para ESTE servidor: hardware, carga real y la lista
+ * de ajustes con su valor actual frente al recomendado. Sólo lectura.
+ */
+app.get('/api/system/tune', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...computeRecommendation() });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo calcular la recomendación' });
+  }
+});
+
+/**
+ * Aplica la recomendación. Sólo escribe valores de `settings`: no cambia la
+ * línea de argumentos del motor ni reinicia canales.
+ */
+app.post('/api/system/tune/apply', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const only = Array.isArray(req.body?.only) && req.body.only.length ? req.body.only.map(String) : null;
+    const { applied, recommendation } = applyRecommendation({ only });
+    invalidateFfmpegEfficiencyCache();
+    res.json({
+      ok: true,
+      applied,
+      appliedCount: applied.length,
+      recommendation,
+      message: applied.length
+        ? `${applied.length} ajuste(s) aplicados. Pulsa «Guardar y reiniciar escalonado» para que lleguen a todos los canales.`
+        : only
+        ? 'Ninguno de los ajustes seleccionados necesitaba cambios.'
+        : 'La configuración ya estaba en los valores recomendados.'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo aplicar la recomendación' });
+  }
+});
+
+/** Re-detección manual de binarios FFmpeg (las 3 versiones de XUI.one, .runtime,
  * empaquetado y PATH). Útil después de instalar/actualizar XUI.one o .runtime.
  */
 app.post('/api/system/ffmpeg-binaries/scan', requireAuth, requireAdmin, (_req, res) => {
