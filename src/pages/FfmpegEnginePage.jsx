@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Cpu,
   Zap,
@@ -225,12 +225,24 @@ export default function FfmpegEnginePage() {
   const [tune, setTune] = useState(null);
   const [tuneBusy, setTuneBusy] = useState(false);
 
+  // `dirty` también en un ref: el refresco automático se registra una sola vez al
+  // montar, así que si leyera el estado se quedaría con el valor inicial (false)
+  // y borraría lo que el administrador está escribiendo. Con el ref siempre ve el
+  // valor real. `savingRef` evita pisar el formulario mientras se guarda.
+  const dirtyRef = useRef(false);
+  const savingRef = useRef(false);
+
+  const markDirty = (value) => {
+    dirtyRef.current = value;
+    setDirty(value);
+  };
+
   const load = async (silent = false) => {
     try {
       const res = await apiFetch('/api/system/ffmpeg-engine');
       setData(res);
-      // Nunca pisar lo que el administrador está editando
-      if (!dirty) setForm(res.config);
+      // Nunca pisar lo que el administrador está editando o guardando
+      if (!dirtyRef.current && !savingRef.current) setForm(res.config);
     } catch (err) {
       setErrMsg(err.message || 'No se pudo leer la configuración del motor');
     }
@@ -269,7 +281,7 @@ export default function FfmpegEnginePage() {
 
   const setField = (key, value) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-    setDirty(true);
+    markDirty(true);
   };
 
   const flash = (msg = '') => {
@@ -279,12 +291,13 @@ export default function FfmpegEnginePage() {
 
   const applyPreset = (preset) => {
     setForm((prev) => ({ ...prev, ...preset.values }));
-    setDirty(true);
+    markDirty(true);
     flash(`Perfil «${preset.label}» cargado en el formulario. Pulsa Guardar para aplicarlo.`);
   };
 
   const save = async () => {
     setBusy(true);
+    savingRef.current = true;
     setErrMsg('');
     try {
       const res = await apiFetch('/api/system/ffmpeg-engine', {
@@ -292,20 +305,30 @@ export default function FfmpegEnginePage() {
         body: JSON.stringify(form)
       });
       setForm(res.config);
-      setDirty(false);
+      markDirty(false);
       flash(`Configuración aplicada. Canales reiniciados de forma escalonada: ${res.restartedStreams || 0}.`);
       load(true);
     } catch (err) {
       setErrMsg(err.message || 'No se pudo aplicar la configuración');
     } finally {
+      savingRef.current = false;
       setBusy(false);
     }
+  };
+
+  /** Descartar lo escrito y volver a lo que está guardado en el servidor. */
+  const discard = () => {
+    if (!data?.config) return;
+    setForm({ ...data.config });
+    markDirty(false);
+    setErrMsg('');
+    flash('Cambios descartados: el formulario vuelve a lo que está guardado.');
   };
 
   const restoreDefaults = () => {
     if (!data?.defaults) return;
     setForm({ ...data.defaults });
-    setDirty(true);
+    markDirty(true);
     flash('Valores predeterminados cargados. Pulsa Guardar para aplicarlos.');
   };
 
@@ -863,6 +886,13 @@ export default function FfmpegEnginePage() {
             <RotateCw className="h-4 w-4" /> Reiniciar con lo guardado
           </button>
           <button
+            onClick={discard}
+            disabled={busy || !dirty}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+          >
+            <Undo2 className="h-4 w-4" /> Descartar cambios
+          </button>
+          <button
             onClick={restoreDefaults}
             disabled={busy}
             className="inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
@@ -881,6 +911,33 @@ export default function FfmpegEnginePage() {
           los clientes reconectan solos en el siguiente segmento.
         </div>
       </div>
+
+      {/* ============ Barra flotante: guardar sin bajar hasta el final ============ */}
+      {dirty ? (
+        <div className="sticky bottom-3 z-30 mt-1">
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-amber-500/40 bg-[#12100a]/95 px-3 py-2 shadow-2xl backdrop-blur">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-200">
+              <Info className="h-3.5 w-3.5" /> {pendingKeys.length} cambio(s) sin guardar
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={discard}
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+              >
+                <Undo2 className="h-3.5 w-3.5" /> Descartar
+              </button>
+              <button
+                onClick={save}
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-600 px-3.5 py-2 text-[11px] font-bold text-white hover:bg-amber-500 disabled:opacity-50"
+              >
+                <Save className="h-3.5 w-3.5" /> {busy ? 'Aplicando…' : 'Guardar y reiniciar escalonado'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

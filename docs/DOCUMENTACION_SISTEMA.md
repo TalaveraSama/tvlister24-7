@@ -1545,3 +1545,58 @@ todos los canales tomen el valor nuevo hay que pulsar *Guardar y reiniciar escal
 recomienda `h264_threads 1`, `log_level error` y `ram_reserve 197 MB`, y advierte que la ventana completa
 (~4.6 GB) no cabe en la RAMDisk: los canales que exceden la RAM bajan solos a disco, y la sugerencia es
 llevar `/dev/shm` a ~7 GB si se quiere todo en memoria.
+
+### 8.30. Formulario del motor que no se borra + prebuffer de estabilidad (v2.5.5)
+
+**El fallo.** Al modificar una opción y bajar hasta *Guardar*, los valores volvían a los de fábrica. La causa no
+era el guardado sino la **actualización automática**: el panel refresca *Motor FFmpeg* cada 15 s, y la función de
+refresco se registra una sola vez al abrir la página. Leía el estado `dirty` *capturado en ese primer instante*
+(`false`), así que en la siguiente pasada **sobrescribía el formulario con lo que había guardado en el servidor**
+y borraba lo que el administrador estaba escribiendo. Ocurría a los ~15 s de empezar a editar, justo cuando ya se
+está bajando a Guardar.
+
+**La solución.** El estado «hay cambios sin guardar» pasa a un `useRef` (`dirtyRef`), que siempre devuelve el
+valor real, y se añade `savingRef` para no pisar el formulario mientras se envía el guardado:
+
+```js
+if (!dirtyRef.current && !savingRef.current) setForm(res.config);
+```
+
+Además:
+
+| Cambio | Para qué |
+| --- | --- |
+| Barra flotante de guardado (`sticky`) | *N cambios sin guardar* + **Guardar y reiniciar escalonado** + **Descartar**, siempre a la vista sin bajar al final |
+| Botón **Descartar cambios** | Vuelve a lo que está guardado sin reiniciar nada |
+| El refresco sigue activo | Los contadores (canales, RAMDisk, prebuffer, segmentos faltantes) se actualizan, pero **nunca** el formulario sucio |
+
+**Prebuffer de estabilidad.** Con la prioridad puesta en que **se vea**, la configuración recomendada deja el
+prebuffer activo:
+
+| Ajuste | Antes | Ahora |
+| --- | --- | --- |
+| Segmentos de prebuffer | 0 (apagado) | **2** (4 s ya escritos) |
+| Espera máxima | 3000 ms | **6000 ms** |
+
+Qué hace exactamente: cuando un reproductor pide el manifiesto, el panel espera a que la ventana tenga 2
+segmentos antes de responder, y el tailer MPEG-TS arranca con esa misma ráfaga (`burstSegments =
+max(tailerBurst, prebufferSegments)`). El reproductor empieza con imagen y sonido en vez de con un segmento a
+medias. **La espera está topada**: si el canal no llega a 2 segmentos en 6 s, se entrega lo que haya y se marca
+`X-TVLister-Prebuffer-State: timeout`; nunca se queda colgado.
+
+Hay un perfil rápido nuevo: **«Máxima estabilidad · con prebuffer»** (segmento 2 s, lista 6, prebuffer 2,
+espera 6000 ms, `join_on_segment`).
+
+**Comprobado con un canal real servido por el panel** (origen HLS local + Copy/Copy):
+
+| Prueba | Resultado |
+| --- | --- |
+| Canal ya en marcha | `200` en 3 ms · `X-TVLister-Prebuffer: 2` · `State: ready` (sin espera) |
+| Canal recién arrancado | `200` en 2137 ms · esperó 1955 ms hasta tener 2 segmentos · `State: ready` |
+| Reproducción real (ffmpeg leyendo el manifiesto del panel, 12 s) | **275 frames de vídeo + audio**, sin errores |
+| Cliente `.ts` | 2.47 MB en 8 s, flujo continuo |
+
+No se toca la línea de argumentos de FFmpeg: el prebuffer es entrega y lectura, no codificación.
+
+**Escape por petición.** Un reproductor puede pedir `?prebuffer=0` (o la cabecera `X-XUI-Prebuffer: 0`) para
+saltarse la espera en ese canal concreto, sin cambiar la configuración global.

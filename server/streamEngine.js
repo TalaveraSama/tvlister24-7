@@ -755,6 +755,25 @@ export function getFfmpegEfficiencyConfig() {
 
 /** Presets del motor (los aplica la API; aquí sólo viven los valores). */
 export const FFMPEG_ENGINE_PRESETS = {
+  estabilidad: {
+    // Prioridad: que se VEA. El reproductor no recibe el manifiesto hasta que la
+    // ventana tiene 2 segmentos (4 s) ya escritos, y el tailer MPEG-TS arranca
+    // con la misma ráfaga. Cuesta ~4 s en el primer arranque de cada canal y no
+    // toca la línea de argumentos de FFmpeg (todo es entrega/lectura).
+    label: 'Máxima estabilidad · con prebuffer',
+    values: {
+      tsPipeMode: 'auto',
+      h264Threads: 2,
+      hlsTime: 2,
+      hlsListSize: 6,
+      logLevel: 'warning',
+      tailerIntervalMs: 160,
+      tailerBurst: 2,
+      tsJoinOnSegment: true,
+      prebufferSegments: 2,
+      prebufferWaitMs: 6000
+    }
+  },
   masivo: {
     label: '200+ canales · ahorro extremo',
     values: {

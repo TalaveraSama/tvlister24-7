@@ -170,11 +170,14 @@ export function computeRecommendation() {
       : 'Sin /dev/shm: se calcula sobre la RAM total del equipo.');
 
   // ---- Prebuffer ----------------------------------------------------------
-  // 0 = comportamiento validado. Cualquier valor >0 mete espera artificial.
-  add('prebufferSegments', 'ffmpeg_prebuffer_segments', 'Segmentos de prebuffer', cfg.prebufferSegments, 0, '',
-    '0 es el comportamiento validado. Un prebuffer mayor retrasa el arranque de cada canal.');
-  add('prebufferWaitMs', 'ffmpeg_prebuffer_wait_ms', 'Espera máxima del prebuffer', cfg.prebufferWaitMs, 3000, 'ms',
-    'Sólo aplica si el prebuffer está activo.');
+  // Prioridad del panel: que se VEA. Con 2 segmentos, el reproductor no recibe el
+  // manifiesto hasta que la ventana tiene 4 s escritos, así arranca con imagen y
+  // no con un segmento a medias. La espera está topada por waitMs: si el canal no
+  // llega, se sirve lo que haya (nunca se queda esperando).
+  add('prebufferSegments', 'ffmpeg_prebuffer_segments', 'Segmentos de prebuffer', cfg.prebufferSegments, 2, '',
+    'Arranque estable: el reproductor recibe el manifiesto con 2 segmentos (4 s) ya escritos. Cuesta ~4 s sólo la primera sintonía de cada canal.');
+  add('prebufferWaitMs', 'ffmpeg_prebuffer_wait_ms', 'Espera máxima del prebuffer', cfg.prebufferWaitMs, 6000, 'ms',
+    'Tope de la espera anterior. Si el canal tarda más, se entrega lo que haya: nunca bloquea la reproducción.');
 
   // ---- Binario ------------------------------------------------------------
   if (isFfmpegAvailable()) {
