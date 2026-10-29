@@ -715,3 +715,60 @@ a disco, y el **tailer** usa el intervalo/burst configurados para convertir HLS 
 **Verificado:** con `hlsTime=3`, `hlsListSize=5`, `logLevel=error`, `probeHttp=6000000` se comprobó en
 `/proc/<pid>/cmdline` que el worker real arranca con `-loglevel error -probesize 6000000 -analyzeduration 5000000
 -hls_time 3 -hls_list_size 5`, y la API rechaza valores fuera de rango con `400`.
+
+### 8.12. Sección UDP / CATV analógico (WK2500, canales 2–125)
+
+Módulo `server/wk2500Manager.js` + página `src/pages/Wk2500CatvPage.jsx`. Convierte los canales del panel
+(HLS/TS/M4F/MNF) en **un SPTS MPEG-TS por canal** y lo entrega por UDP al modulador IP→analógico WK2500.
+
+**Grilla y direccionamiento**
+
+- 124 slots fijos: **CH 2 al 125**, con frecuencia y audio estándar NTSC calculados por canal.
+- Dirección por defecto en multicast: `239.25.0.<canal>` puerto `5000 + canal`, TTL 16.
+- TTL, Service ID, host/puerto, perfil y NIC de salida son editables **por canal**.
+- Trailer NIT/SDT: el `service_id` del canal viaja en la SDT y en el PAT (`Program = catv_ch`), con
+  `-mpegts_pmt_start_pid 0x0100` y video en `0x101` / audio en `0x102`. Así cada canal se identifica solo en el modulador.
+
+**Dos motores de salida (eligen solos)**
+
+| Motor | Cuándo se usa | Qué hace |
+|---|---|---|
+| `direct_dgram_1316` (Node) | `direct_spts` sin `muxrate` y origen MNF/TS por HTTP | Descarga el TS y lo reempaqueta en datagramas de **1316 bytes** (7×188) con `Ts1316Packetizer`; bind a la NIC dedicada, `setMulticastTTL/Interface`, buffer de envío 1 MB |
+| `ffmpeg_spts_1316` | HLS, M4F, `muxrate`, perfiles con audio nivelado o NTSC | FFmpeg muxea a `udp://host:puerto?pkt_size=1316&ttl=..&localaddr=<NIC>` |
+
+**Perfiles de salida**
+
+- `direct_spts` — copia video y audio sin tocar nada (mínimo CPU).
+- `copy_mp2_leveled` — video copiado + audio **nivelado** a MP2 192k (lo que espera la mayoría de moduladores).
+- `copy_aac_leveled` — video copiado + audio nivelado AAC 128k.
+- `ntsc_sd_wk2500` — transcode seguro: yadif → 720×480 @ 29.97, H.264 Main L3.1 ultrafast zerolatency 1800k, MP2 192k.
+- `muxrate_kbps > 0` fuerza **CBR** (relleno de null packets) para canales de ancho fijo.
+
+**Validaciones añadidas (2026-10)**
+
+Antes el panel aceptaba cualquier cosa y el canal quedaba mudo o, peor, dos canales escribían al mismo
+`grupo:puerto` mezclando dos TS en el modulador. Ahora la API responde `400/409` con el motivo:
+
+- IPv4 destino válida y puerto entero 1–65535.
+- **Destino `host:puerto` único**: si otro canal ya lo usa → `409` indicando qué canal lo tiene.
+- `output_mode` sólo entre los cuatro perfiles soportados.
+- `local_interface_ip` debe existir en el servidor (se listan las IPs disponibles).
+- `service_id` 1–65535 y `ttl` 1–255.
+- `bulk-configure`: puerto base válido, rango sin salirse de 65535, IP de grupo para multicast (y unicast
+  rechaza grupos), sin colisiones dentro del rango ni contra otros canales.
+- `dedicated-interface`: no deja aplicar una IP que no exista en el servidor (eso rompía el bind de todos los canales).
+
+**Telemetría por canal**
+
+El motor FFmpeg se lanza con `-progress pipe:1` y el worker lee `total_size` para calcular los **Mbps y paquetes
+realmente enviados** al WK2500 (antes mostraba un valor fijo de 2600 kbps y 0 paquetes cuando el flujo iba por FFmpeg).
+El plan refresca cada 4 s: estado (`connecting`/`streaming`/`reconnecting`), motor, kbps, paquetes, uptime y último error.
+
+**Verificado en laboratorio (loopback + NIC real)**
+
+- `direct_spts` por FFmpeg: 3.2–3.5 Mbps, 100 % de paquetes alineados a 188 bytes, 0 errores de continuidad.
+- Nivelador MP2: entra AAC, sale MP2 192k (PID `0x102`), video intacto.
+- `ntsc_sd_wk2500`: 720×480 @ 29.97, 2.1 Mbps, MP2 192k — perfil aceptado por el WK2500.
+- `muxrate 4000`: salida medida **4002 kbps** constante con null packets `0x1FFF`.
+- Multicast real (`239.25.0.4/5` por `eth0`): 2.5 y 1.9 Mbps, `Program/Service_id = canal`, 100 % sync.
+- `-progress`: `3447 kbps / 5083 paquetes` en el panel, creciendo en tiempo real.

@@ -110,6 +110,42 @@ function isMulticastIp(ip = '') {
   return first >= 224 && first <= 239;
 }
 
+export const WK2500_OUTPUT_MODES = ['direct_spts', 'copy_mp2_leveled', 'copy_aac_leveled', 'ntsc_sd_wk2500'];
+
+function isValidIpv4(ip = '') {
+  const parts = String(ip).trim().split('.');
+  if (parts.length !== 4) return false;
+  return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+}
+
+// Valida el destino UDP antes de guardarlo: un host/puerto inválido o repetido deja el canal sin señal
+// en el modulador (o peor, mezcla dos TS en el mismo grupo:grupo/puerto del WK2500).
+function validateWk2500UdpTarget({ udp_host, udp_port, catv_ch = null }) {
+  const host = String(udp_host || '').trim();
+  const port = Number(udp_port);
+  if (!isValidIpv4(host)) {
+    return { error: `La IP destino UDP "${host}" no es una IPv4 válida (ejemplo multicast: 239.25.0.20).` };
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { error: `El puerto UDP ${udp_port} no es válido: debe ser un entero entre 1 y 65535.` };
+  }
+  const clash = db
+    .prepare('SELECT catv_ch FROM wk2500_channels WHERE udp_host = ? AND udp_port = ? AND catv_ch != ? LIMIT 1')
+    .get(host, port, Number(catv_ch) || 0);
+  if (clash) {
+    return {
+      error: `El destino ${host}:${port} ya lo usa el Canal CATV ${clash.catv_ch}. Dos canales en el mismo host:puerto mezclan dos TS y el modulador recibe basura; usa otro puerto.`,
+      status: 409
+    };
+  }
+  return { ok: true, host, port };
+}
+
+function validateWk2500OutputMode(mode = '') {
+  const clean = String(mode || 'direct_spts');
+  return WK2500_OUTPUT_MODES.includes(clean) ? clean : null;
+}
+
 function readSysNetAttr(ifName, attr) {
   try {
     return fs.readFileSync(`/sys/class/net/${ifName}/${attr}`, 'utf8').trim();
@@ -319,7 +355,8 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
   const isVideoCopy = mode !== 'ntsc_sd_wk2500';
   const args = [];
   if (inputSpec !== 'pipe:0') args.push('-nostdin');
-  args.push('-hide_banner', '-loglevel', 'error', '-y');
+  // -progress pipe:1 permite medir los bytes realmente entregados al socket UDP (telemetría por canal)
+  args.push('-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1', '-y');
 
   if (isPureCopy) {
     args.push('-threads', '1');
@@ -650,17 +687,43 @@ export function startWk2500ChannelWorker(catvCh) {
     const args = buildFfmpegUdpOutputArgs(freshSlot, inputForFfmpeg);
 
     const child = spawn(bin, args, {
-      stdio: [isMnf ? 'pipe' : 'ignore', 'ignore', 'pipe'],
+      stdio: [isMnf ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       detached: false,
       env
     });
     state.child = child;
-    state.status = 'streaming';
-    state.bitrateKbps = freshSlot.output_mode === 'ntsc_sd_wk2500' ? 2000 : 2600;
+    state.status = 'connecting';
 
     let stderrTail = '';
     child.stderr?.on('data', (chunk) => {
       stderrTail = (stderrTail + chunk.toString('utf8')).slice(-220);
+    });
+
+    // Telemetría real del motor FFmpeg: leemos `total_size` de -progress pipe:1.
+    // Así el panel muestra los Mbps/packet realmente enviados al WK2500 en vez de un valor fijo.
+    let progressBuf = '';
+    let lastProgressTotal = 0;
+    child.stdout?.on('error', () => {});
+    child.stdout?.on('data', (chunk) => {
+      progressBuf += chunk.toString('utf8');
+      let nl = progressBuf.indexOf('\n');
+      while (nl !== -1) {
+        const line = progressBuf.slice(0, nl).trim();
+        progressBuf = progressBuf.slice(nl + 1);
+        const m = /^total_size=(\d+)$/.exec(line);
+        if (m) {
+          const total = Number(m[1]);
+          if (Number.isFinite(total) && total > lastProgressTotal) {
+            const delta = total - lastProgressTotal;
+            lastProgressTotal = total;
+            state.bytesWindow += delta;
+            state.packetsSent += Math.ceil(delta / 1316);
+            if (state.status !== 'streaming') state.status = 'streaming';
+          }
+        }
+        nl = progressBuf.indexOf('\n');
+      }
+      if (progressBuf.length > 8192) progressBuf = progressBuf.slice(-2048);
     });
 
     if (isMnf && child.stdin) {
@@ -683,8 +746,6 @@ export function startWk2500ChannelWorker(catvCh) {
           }
           const remux = new MnfToTsRemuxer();
           remux.on('ts', (tsBuf) => {
-            state.bytesWindow += tsBuf.length;
-            state.packetsSent += Math.ceil(tsBuf.length / 1316);
             if (!child.killed && child.stdin && !child.stdin.destroyed) {
               child.stdin.write(tsBuf);
             }
@@ -946,6 +1007,18 @@ wk2500Router.post('/api/wk2500/dedicated-interface', requireAuth, requireAdmin, 
   const interfaces = listHostIpv4Interfaces();
   const matched = interfaces.find((x) => x.address === cleanIp);
   const resolvedName = String(if_name || matched?.name || '').trim();
+
+  // Nunca aplicar una IP que no exista en este servidor: el bind de los 124 workers fallaría (EADDRNOTAVAIL)
+  if (cleanIp && !matched) {
+    return res.status(400).json({
+      error: `La IP ${cleanIp} no existe en este servidor. IPs disponibles: ${interfaces
+        .map((x) => `${x.name}=${x.address}`)
+        .join(', ') || 'ninguna'}.`
+    });
+  }
+  if (if_name && !interfaces.some((x) => x.name === String(if_name).trim()) && !matched) {
+    return res.status(400).json({ error: `La interfaz ${if_name} no existe en este servidor.` });
+  }
 
   const saved = saveDedicatedWk2500NicConfig({
     if_name: resolvedName,
@@ -1343,6 +1416,61 @@ wk2500Router.post('/api/wk2500/bulk-configure', requireAuth, requireAdmin, (req,
   const fromCh = Math.max(2, Math.min(125, Number(ch_start) || 2));
   const toCh = Math.max(fromCh, Math.min(125, Number(ch_end) || 125));
 
+  const cleanBasePort = Number(base_port);
+  if (!Number.isInteger(cleanBasePort) || cleanBasePort < 1 || cleanBasePort > 65535) {
+    return res.status(400).json({ error: `El puerto base UDP ${base_port} no es válido (1–65535).` });
+  }
+  if (cleanBasePort + (toCh - fromCh) > 65535) {
+    return res.status(400).json({ error: 'El rango de puertos se sale de 65535; baja el rango de canales o el puerto base.' });
+  }
+  const cleanDestIp = String(dest_ip || '').trim();
+  if (!isValidIpv4(cleanDestIp)) {
+    return res.status(400).json({ error: `La IP destino "${cleanDestIp}" no es una IPv4 válida.` });
+  }
+  if (ip_mode === 'multicast' && !isMulticastIp(cleanDestIp)) {
+    return res.status(400).json({ error: 'El modo multicast requiere una IP de grupo (224.0.0.0 – 239.255.255.255).' });
+  }
+  if (ip_mode === 'unicast' && isMulticastIp(cleanDestIp)) {
+    return res.status(400).json({
+      error: `El modo unicast requiere la IP del WK2500, no un grupo multicast (${cleanDestIp}).`
+    });
+  }
+  if (ip_mode !== 'multicast' && ip_mode !== 'unicast') {
+    return res.status(400).json({ error: 'ip_mode debe ser "multicast" o "unicast".' });
+  }
+  const bulkMode = validateWk2500OutputMode(output_mode);
+  if (!bulkMode) {
+    return res.status(400).json({ error: `Perfil de salida "${output_mode}" no soportado.` });
+  }
+  const cleanBulkIfIp = String(local_interface_ip || '').trim();
+  if (cleanBulkIfIp) {
+    const hostIps = listHostIpv4Interfaces().map((x) => x.address);
+    if (!hostIps.includes(cleanBulkIfIp)) {
+      return res.status(400).json({
+        error: `La IP de salida ${cleanBulkIfIp} no existe en este servidor. IPs disponibles: ${hostIps.join(', ') || 'ninguna'}.`
+      });
+    }
+  }
+
+  // Detecta colisiones: si otra unidad ya usa este rango de puertos en el mismo grupo, el TS se mezcla.
+  const plannedHosts = new Set();
+  for (let ch = fromCh; ch <= toCh; ch++) {
+    const addr = computeDefaultUdpAddress(ch, ip_mode, cleanDestIp, cleanBasePort);
+    const key = `${addr.udp_host}:${addr.udp_port}`;
+    if (plannedHosts.has(key)) {
+      return res.status(409).json({ error: `Dirección UDP repetida en el rango: ${key}.` });
+    }
+    plannedHosts.add(key);
+    const clash = db
+      .prepare('SELECT catv_ch FROM wk2500_channels WHERE udp_host = ? AND udp_port = ? AND catv_ch NOT BETWEEN ? AND ? LIMIT 1')
+      .get(addr.udp_host, addr.udp_port, fromCh, toCh);
+    if (clash) {
+      return res.status(409).json({
+        error: `El destino ${key} del rango ya lo usa el Canal CATV ${clash.catv_ch}. Cambia el puerto base o el grupo multicast.`
+      });
+    }
+  }
+
   const panelStreams = auto_assign_panel_streams
     ? db.prepare('SELECT id FROM streams ORDER BY sort_order ASC, id ASC').all()
     : [];
@@ -1365,15 +1493,15 @@ wk2500Router.post('/api/wk2500/bulk-configure', requireAuth, requireAdmin, (req,
 
       let streamIdx = 0;
       for (let ch = fromCh; ch <= toCh; ch++) {
-        const addr = computeDefaultUdpAddress(ch, ip_mode, dest_ip, base_port);
+        const addr = computeDefaultUdpAddress(ch, ip_mode, cleanDestIp, cleanBasePort);
         const mappedSid =
           auto_assign_panel_streams && streamIdx < panelStreams.length ? panelStreams[streamIdx++].id : null;
         upd.run(
           addr.udp_host,
           addr.udp_port,
-          String(local_interface_ip || '').trim(),
+          cleanBulkIfIp,
           Math.max(1, Number(ttl) || 16),
-          String(output_mode || 'direct_spts'),
+          bulkMode,
           Math.max(0, Number(muxrate_kbps) || 0),
           mappedSid,
           mappedSid,
@@ -1424,14 +1552,59 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
     });
   }
 
+  const target = validateWk2500UdpTarget({ udp_host: nextHost, udp_port: nextPort, catv_ch: ch });
+  if (!target.ok) return res.status(target.status || 400).json({ error: target.error });
+
+  const cleanMode = validateWk2500OutputMode(nextMode);
+  if (!cleanMode) {
+    return res.status(400).json({
+      error: `Perfil de salida "${nextMode}" no soportado. Usa uno de: ${WK2500_OUTPUT_MODES.join(', ')}.`
+    });
+  }
+
+  const cleanIfIp = String(nextIfIp || '').trim();
+  if (cleanIfIp) {
+    const hostIps = listHostIpv4Interfaces().map((x) => x.address);
+    if (!hostIps.includes(cleanIfIp)) {
+      return res.status(400).json({
+        error: `La IP de salida ${cleanIfIp} no existe en este servidor. IPs disponibles: ${hostIps.join(', ') || 'ninguna'}.`
+      });
+    }
+  }
+
+  const nextServiceId = b.service_id !== undefined ? Number(b.service_id) : existing.service_id;
+  if (!Number.isInteger(nextServiceId) || nextServiceId < 1 || nextServiceId > 65535) {
+    return res.status(400).json({ error: 'El Service ID debe ser un entero entre 1 y 65535.' });
+  }
+
+  const nextTtl = b.ttl !== undefined ? Number(b.ttl) : existing.ttl;
+  if (!Number.isInteger(nextTtl) || nextTtl < 1 || nextTtl > 255) {
+    return res.status(400).json({ error: 'El TTL multicast debe ser un entero entre 1 y 255.' });
+  }
+
+  // El par host:puerto ya quedó validado como único, así que dos canales nunca comparten salida UDP.
   withSqliteBusyRetry(() => {
     db.prepare(
       `UPDATE wk2500_channels
        SET stream_id = ?, custom_name = ?, custom_source_url = ?,
            udp_host = ?, udp_port = ?, local_interface_ip = ?,
-           output_mode = ?, muxrate_kbps = ?, enabled = ?, updated_at = datetime('now')
+           output_mode = ?, muxrate_kbps = ?, enabled = ?,
+           service_id = ?, ttl = ?, updated_at = datetime('now')
        WHERE catv_ch = ?`
-    ).run(nextStreamId, nextCustomName, nextCustomUrl, nextHost, nextPort, nextIfIp, nextMode, nextMux, nextEnabled, ch);
+    ).run(
+      nextStreamId,
+      nextCustomName,
+      nextCustomUrl,
+      target.host,
+      target.port,
+      cleanIfIp,
+      cleanMode,
+      nextMux,
+      nextEnabled,
+      nextServiceId,
+      nextTtl,
+      ch
+    );
   });
 
   if (nextEnabled) {

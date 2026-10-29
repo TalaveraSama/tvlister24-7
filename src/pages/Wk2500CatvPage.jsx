@@ -745,19 +745,28 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                           {assigned ? (
                             <button
                               type="button"
+                              title={
+                                isLive
+                                  ? `Enviando ${(assigned.bitrate_kbps / 1000).toFixed(1)} Mbps por UDP al WK2500 (CH ${assigned.catv_ch})`
+                                  : assigned.last_error || 'Canal activado, esperando flujo del origen'
+                              }
                               onClick={() => handleSlotChange(assigned.catv_ch, { enabled: !isEnabled })}
                               className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold transition ${
                                 isEnabled
-                                  ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30'
+                                  ? isLive
+                                    ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30'
+                                    : 'bg-amber-500/15 border border-amber-500/45 text-amber-300 hover:bg-amber-500/25'
                                   : 'bg-slate-800 border border-slate-700 text-slate-400 hover:text-white'
                               }`}
                             >
                               <Power className="w-3.5 h-3.5" />
-                              {isEnabled
-                                ? isLive
-                                  ? `ACTIVO (${assigned.bitrate_kbps}k)`
-                                  : 'ACTIVADO'
-                                : 'DESACTIVADO'}
+                              {!isEnabled
+                                ? 'DESACTIVADO'
+                                : isLive
+                                  ? `ACTIVO ${(assigned.bitrate_kbps / 1000).toFixed(1)}M`
+                                  : assigned.live_status === 'reconnecting'
+                                    ? 'RECONECTANDO'
+                                    : 'CONECTANDO'}
                             </button>
                           ) : (
                             <span className="text-[11px] text-slate-500">Elige Nº primero</span>
@@ -907,19 +916,28 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                           <button
                             type="button"
                             disabled={!hasAssigned && !slot.enabled}
+                            title={
+                              isLive
+                                ? `Enviando ${(slot.bitrate_kbps / 1000).toFixed(1)} Mbps a udp://${slot.udp_host}:${slot.udp_port}`
+                                : slot.last_error || (slot.enabled ? 'Canal activado, esperando flujo del origen' : 'Canal apagado')
+                            }
                             onClick={() => handleSlotChange(slot.catv_ch, { enabled: !slot.enabled })}
                             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold transition ${
                               slot.enabled
-                                ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/35'
+                                ? isLive
+                                  ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/35'
+                                  : 'bg-amber-500/15 border border-amber-500/45 text-amber-300 hover:bg-amber-500/25'
                                 : 'bg-slate-800/90 border border-slate-700 text-slate-400 hover:text-white disabled:opacity-35'
                             }`}
                           >
                             <Power className="w-3.5 h-3.5" />
-                            {slot.enabled
-                              ? isLive
-                                ? `ACTIVO (${slot.bitrate_kbps}k)`
-                                : 'ACTIVADO'
-                              : 'DESACTIVADO'}
+                            {!slot.enabled
+                              ? 'DESACTIVADO'
+                              : isLive
+                                ? `ACTIVO ${(slot.bitrate_kbps / 1000).toFixed(1)}M`
+                                : slot.live_status === 'reconnecting'
+                                  ? 'RECONECTANDO'
+                                  : 'CONECTANDO'}
                           </button>
                         </td>
                       </tr>
