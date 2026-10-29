@@ -460,6 +460,29 @@ cmd_ffmpeg() {
   esac
 }
 
+cmd_release() {
+  # Instala/actualiza desde un release publicado (paquete .tar.gz + checksum),
+  # sin depender de la rama de git. Uso: tvlister-admin release [vX.Y.Z]
+  local tag port tmp_script url
+  tag="${1:-latest}"
+  port=$(get_current_port)
+  echo "📦 Instalando TVLister 24/7 desde release (${tag}) conservando datos y puerto ${port}..."
+  if [ "$tag" = "latest" ]; then
+    url="https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh"
+  else
+    case "$tag" in v*) : ;; *) tag="v${tag}" ;; esac
+    url="https://github.com/TalaveraSama/tvlister24-7/releases/download/${tag}/install.sh"
+  fi
+  tmp_script=$(mktemp /tmp/tvlister_release.XXXXXX.sh)
+  if ! curl -fsSL --retry 3 "$url" -o "$tmp_script"; then
+    echo "❌ No se pudo descargar el instalador del release ${tag}."
+    echo "   Revisa la lista de versiones: https://github.com/TalaveraSama/tvlister24-7/releases"
+    rm -f "$tmp_script"
+    return 1
+  fi
+  PORT="$port" exec bash "$tmp_script" --tag "$tag"
+}
+
 cmd_update() {
   local port tmp_script
   port=$(get_current_port)
@@ -609,6 +632,9 @@ case "$ACTION" in
   update)
     cmd_update
     ;;
+  release)
+    cmd_release "${2:-latest}"
+    ;;
   ffmpeg)
     cmd_ffmpeg "${2:-status}" "${3:-}"
     ;;
@@ -632,9 +658,10 @@ case "$ACTION" in
     echo " 14) Reiniciar motor TVLister 24/7 (restart)"
     echo " 15) Ver logs en vivo (logs)"
     echo " 16) Motor FFmpeg: ver, elegir o instalar binario (ffmpeg)"
+    echo " 17) Instalar/actualizar desde un release publicado (release)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-16]: " opt
+    read -r -p "Selecciona una opción [0-17]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -652,6 +679,7 @@ case "$ACTION" in
       14) systemctl restart "$SERVICE_NAME" && echo "✅ Servicio reiniciado." ;;
       15) journalctl -u "$SERVICE_NAME" -n 50 -f ;;
       16) cmd_ffmpeg "status" "" ;;
+      17) cmd_release "latest" ;;
       *) exit 0 ;;
     esac
     ;;

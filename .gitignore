@@ -11,3 +11,6 @@ streams_runtime/
 
 # Binarios del runtime aislado (Node/FFmpeg descargados por el instalador)
 .runtime/
+
+# Paquetes generados por scripts/build_release.sh
+release/

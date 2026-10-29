@@ -1113,3 +1113,43 @@ veredicto porque el panel no la está reproduciendo.
 Los tokens de las URLs se enmascaran (`token=abc1***`) para poder pegar el reporte sin filtrar credenciales.
 El error `502 UPSTREAM_ERROR` del Monitor en Vivo ahora incluye `detail{url,status,reason,tried}` y un
 `hint` que remite a este diagnóstico.
+
+### 8.21. Instalación desde releases publicados (`install.sh`)
+
+Además del instalador por rama de git, el panel se publica como **release versionado** en GitHub con
+un paquete verificado:
+
+| Artefacto | Contenido |
+| --- | --- |
+| `tvlister24-7-vX.Y.Z.tar.gz` | Código del panel (sin `node_modules`, `data` ni `.runtime`) |
+| `install.sh` | Bootstrap: resuelve la versión, descarga el paquete, comprueba **SHA256** y lanza el instalador aislado |
+| `SHA256SUMS` | Checksums de ambos archivos |
+
+```bash
+# última versión
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
+
+# versión exacta y puerto fijo
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.3.0/install.sh \
+  | sudo bash -s -- --tag v2.3.0 --port 8095
+```
+
+Opciones del bootstrap: `--tag vX.Y.Z`, `--port N`, `--dir RUTA` (por defecto `/opt/tvlister24-7`),
+`--no-verify` y `--help`. El instalador recibe el paquete vía `TVLISTER_SOURCE_DIR` y **no clona git**:
+si el release dejara de estar accesible, cae al clon de GitHub y, en último caso, reutiliza el código ya
+instalado (nunca borra `data/` ni `.runtime/`).
+
+Desde el servidor: `tvlister-admin release` (última) o `tvlister-admin release v2.3.0`.
+
+La versión se lee de `package.json` (`server/version.js`) y se expone en `GET /api/health` →
+`{"status":"ok","version":"2.3.0",…}`, útil para monitorización externa.
+
+**Publicar una versión nueva:** subir el `version` de `package.json`, crear
+`docs/RELEASE_NOTES_vX.Y.Z.md` y empujar el tag:
+
+```bash
+git tag v2.3.1 && git push origin v2.3.1      # .github/workflows/release.yml compila, empaqueta y publica
+```
+
+En local, sin CI: `bash scripts/build_release.sh v2.3.1` genera `release/` con los tres artefactos y el
+comando `gh release create` listo para ejecutar.

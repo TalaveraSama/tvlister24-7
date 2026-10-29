@@ -79,6 +79,7 @@ import {
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
 import { diagnoseStream } from './diagnostics.js';
+import { APP_VERSION } from './version.js';
 import {
   getResolutionScanStatus,
   startResolutionAutoClassifyJob,
@@ -173,7 +174,7 @@ app.get('/api/health', (_req, res) => {
     const activeConns = db.prepare('SELECT COUNT(*) as c FROM active_connections').get().c;
     res.json({
       status: 'ok',
-      version: '2.2.0',
+      version: APP_VERSION,
       env: isProd ? 'production' : 'development',
       uptimeSec: Math.floor(process.uptime()),
       db: 'wal_ok',

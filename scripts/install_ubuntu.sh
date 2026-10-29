@@ -16,9 +16,19 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 REPO_URL="https://github.com/TalaveraSama/tvlister24-7.git"
 FALLBACK_BRANCH="arena/85cc9902-tvlister24-7"
 NODE_VERSION="v22.23.4"
+# Origen del código (el bootstrap scripts/install_release.sh rellena estas variables
+# para instalar desde un release publicado en GitHub, sin clonar ramas):
+#   TVLISTER_SOURCE_DIR      -> carpeta ya extraída del paquete del release
+#   TVLISTER_TARBALL_URL     -> URL del .tar.gz del release
+#   TVLISTER_TARBALL_SHA256  -> checksum esperado del .tar.gz (opcional)
+#   TVLISTER_RELEASE         -> etiqueta del release (sólo para mostrar)
+TVLISTER_RELEASE="${TVLISTER_RELEASE:-}"
 
 echo "============================================================"
 echo "  Instalando / Actualizando TVLister 24/7 (Modo Aislado)    "
+if [ -n "$TVLISTER_RELEASE" ]; then
+  echo "  Release: ${TVLISTER_RELEASE}"
+fi
 echo "============================================================"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -187,21 +197,55 @@ fi
 
 export PATH="${RUNTIME_BIN}:${NODE_DIR}/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
-# 4. Descargar código fuente actualizado preservando .runtime y data
-#    SIEMPRE se clona desde GitHub para no reutilizar código viejo; la copia local
-#    sólo se usa como respaldo si no hay salida a internet.
-echo "[4/6] Descargando código fuente actualizado de TVLister 24/7..."
+# 4. Obtener código fuente actualizado preservando .runtime y data
+#    Orden de preferencia:
+#      1) paquete del release publicado (versionado y con checksum)
+#      2) clon de GitHub (rama de trabajo)
+#      3) código del directorio actual / ya instalado (modo sin internet)
+echo "[4/6] Preparando código fuente de TVLister 24/7..."
 INSTALL_OK=0
-TMP_CLONE=$(mktemp -d)
-if git clone --quiet --depth 1 --branch "$FALLBACK_BRANCH" "$REPO_URL" "$TMP_CLONE" 2>/dev/null \
-  || git clone --quiet --depth 1 "$REPO_URL" "$TMP_CLONE" 2>/dev/null; then
-  if [ -f "${TMP_CLONE}/package.json" ] && grep -q '"tvlister24-7"' "${TMP_CLONE}/package.json" 2>/dev/null; then
-    tar --exclude='./.git' --exclude='./data' --exclude='./.runtime' --exclude='./node_modules' -cf - -C "$TMP_CLONE" . | tar -xf - -C "$APP_DIR"
-    echo "      Código sincronizado desde GitHub (rama ${FALLBACK_BRANCH})."
-    INSTALL_OK=1
+SRC_PKG_DIR=""
+TMP_SRC=$(mktemp -d)
+
+if [ -n "${TVLISTER_SOURCE_DIR:-}" ] && [ -f "${TVLISTER_SOURCE_DIR}/package.json" ]; then
+  SRC_PKG_DIR="$TVLISTER_SOURCE_DIR"
+  echo "      Usando el paquete del release ${TVLISTER_RELEASE:-local} (ya descargado)."
+elif [ -n "${TVLISTER_TARBALL_URL:-}" ]; then
+  echo "      Descargando release: ${TVLISTER_TARBALL_URL}"
+  if curl -fL --retry 3 --connect-timeout 20 "$TVLISTER_TARBALL_URL" -o "${TMP_SRC}/release.tar.gz"; then
+    if [ -n "${TVLISTER_TARBALL_SHA256:-}" ]; then
+      if ! echo "${TVLISTER_TARBALL_SHA256}  ${TMP_SRC}/release.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+        echo "[ERROR] El checksum del paquete no coincide: descarga corrupta o alterada."
+        exit 1
+      fi
+      echo "      Checksum SHA256 verificado."
+    fi
+    tar -xzf "${TMP_SRC}/release.tar.gz" -C "$TMP_SRC"
+    SRC_PKG_DIR=$(find "$TMP_SRC" -maxdepth 3 -name package.json -not -path '*/node_modules/*' -printf '%h\n' 2>/dev/null | head -n1 || true)
+  else
+    echo "      [AVISO] No se pudo descargar el release; se intentará clonar desde GitHub."
   fi
 fi
-rm -rf "$TMP_CLONE"
+
+if [ -n "$SRC_PKG_DIR" ] && grep -q '"tvlister24-7"' "${SRC_PKG_DIR}/package.json" 2>/dev/null; then
+  tar --exclude='./.git' --exclude='./data' --exclude='./.runtime' --exclude='./node_modules' -cf - -C "$SRC_PKG_DIR" . | tar -xf - -C "$APP_DIR"
+  echo "      Código instalado desde el release ${TVLISTER_RELEASE:-local}."
+  INSTALL_OK=1
+fi
+rm -rf "$TMP_SRC"
+
+if [ "$INSTALL_OK" -ne 1 ]; then
+  TMP_CLONE=$(mktemp -d)
+  if git clone --quiet --depth 1 --branch "$FALLBACK_BRANCH" "$REPO_URL" "$TMP_CLONE" 2>/dev/null \
+    || git clone --quiet --depth 1 "$REPO_URL" "$TMP_CLONE" 2>/dev/null; then
+    if [ -f "${TMP_CLONE}/package.json" ] && grep -q '"tvlister24-7"' "${TMP_CLONE}/package.json" 2>/dev/null; then
+      tar --exclude='./.git' --exclude='./data' --exclude='./.runtime' --exclude='./node_modules' -cf - -C "$TMP_CLONE" . | tar -xf - -C "$APP_DIR"
+      echo "      Código sincronizado desde GitHub (rama ${FALLBACK_BRANCH})."
+      INSTALL_OK=1
+    fi
+  fi
+  rm -rf "$TMP_CLONE"
+fi
 
 if [ "$INSTALL_OK" -ne 1 ]; then
   SRC_REAL=$(pwd -P)

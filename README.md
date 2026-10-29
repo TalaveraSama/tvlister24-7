@@ -10,6 +10,30 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 El instalador opera en **modo aislado** (`/opt/tvlister24-7/.runtime`): no ejecuta `apt-get` sobre librerías fijadas por XUI.one, no toca MariaDB ni Nginx, y elige automáticamente un puerto libre (`8095`).
 
+### Opción recomendada: instalador de release (versión fija y verificada)
+
+Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin clonar ramas:
+
+```bash
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
+```
+
+Para fijar una versión concreta (recomendado en producción) y el puerto:
+
+```bash
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.3.0/install.sh \
+  | sudo bash -s -- --tag v2.3.0 --port 8095
+```
+
+También puedes instalarlo desde la consola del propio servidor:
+
+```bash
+tvlister-admin release            # última versión publicada
+tvlister-admin release v2.3.0     # versión exacta
+```
+
+### Opción alternativa: instalador desde el código fuente (rama de trabajo)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/arena/85cc9902-tvlister24-7/scripts/install_ubuntu.sh | sudo bash
 ```
@@ -31,6 +55,7 @@ Comandos principales:
 - `tvlister-admin setup-ssl tv.midominio.com` — Configurar proxy inverso Nginx + HTTPS Let's Encrypt.
 - `tvlister-admin set-port 8895` — Cambiar puerto TCP y abrir firewall (`UFW` + `iptables`).
 - `tvlister-admin update` — Actualizar desde GitHub sin perder base de datos ni puerto.
+- `tvlister-admin release [vX.Y.Z]` — Instalar/actualizar desde un release publicado (paquete con checksum).
 
 ---
 
