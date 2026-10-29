@@ -485,8 +485,10 @@ function runInitDbBody() {
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'xui_id', 'INTEGER');
   ensureColumn('streams', 'offline_slate_mode', "TEXT NOT NULL DEFAULT 'disabled'");
-  // 1 = el canal está emitiendo el segundo origen (cambio manual, reversible)
+  // 1 = el canal está emitiendo el segundo origen (cambio manual o automático, reversible)
   ensureColumn('streams', 'failover_active', 'INTEGER NOT NULL DEFAULT 0');
+  // 1 = si el origen activo cae, el canal pasa solo al segundo origen (que queda dormido)
+  ensureColumn('streams', 'auto_failover', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'offline_slate_url', "TEXT DEFAULT ''");
   ensureColumn('streams', 'detected_resolution', "TEXT DEFAULT ''");
   ensureColumn('streams', 'resolution_tier', "TEXT DEFAULT ''");

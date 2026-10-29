@@ -811,10 +811,13 @@ Antes, si un canal se caía, el panel reproducía una imagen o video en bucle **
 `custom_image` y un PNG subido por `/api/slates/upload` → `HTTP 200` con el manifiesto del bucle;
 `modo global/builtin` resuelve a sin respaldo; canal nuevo creado por API nace en `disabled`.
 
-### 8.14. SOURCE 2 manual (no hay failover)
+### 8.14. SOURCE 2: dormido por defecto, con conmutación automática opcional
 
-Cada canal tiene **un solo source activo**. Opcionalmente el administrador puede **agregar un segundo source**
-a ese canal concreto; se guarda y **no se usa nunca por sí solo**.
+Cada canal tiene **un source activo**. Opcionalmente el administrador puede **agregar un segundo source**
+a ese canal concreto; se guarda **dormido**: no se abre, no se sondea y no consume ancho de banda.
+
+Desde esta versión el canal puede activar **“Conmutar solo si SOURCE 1 cae”** (ver 8.19). Si no se
+activa, el comportamiento es el histórico: el source 2 sólo entra cuando el operador pulsa **⇄**.
 
 **Cómo se agrega**
 
@@ -827,7 +830,8 @@ Se guarda en `streams.backup_url` (se aplica `trim`, un valor vacío significa �
 | Situación | Comportamiento |
 |---|---|
 | El canal tiene source 2 guardado | El worker **sigue emitiendo el source original**; el 2 no se abre, no se sondea y no consume ancho de banda |
-| El source original se cae | El canal queda caído. **No** salta al source 2. NO hay reintentos hacia el source 2 |
+| El source original se cae **sin** conmutación automática | El canal queda caído. **No** salta al source 2. NO hay reintentos hacia el source 2 |
+| El source original se cae **con** conmutación automática activada | Tras ~30 s sin señal el canal pasa solo al source 2 (mismo mecanismo que ⇄); el source 2 sólo se abre en ese momento |
 | El operador quiere usar el source 2 | Pulsa **⇄** en la fila del canal: se intercambian las URL y el worker se reinicia (~120 ms). Otra pulsación lo regresa |
 
 Se eliminaron por completo: el interruptor global `failover_enabled`, el failover automático
@@ -1026,3 +1030,47 @@ vuelve a elegir el binario en cada ejecución (si XUI.one cambia de versión, si
 `Wait: 0 / ready`; canal frío con `prebufferWaitMs=3000` → `Wait: 3014 / timeout` sirviendo los
 segmentos disponibles; canal frío con `prebufferWaitMs=12000` → `Wait: 4060 / ready` con 3 segmentos;
 binario elegido inexistente → sigue emitiendo con el automático.
+
+### 8.19. Bouquets en la ficha del canal y conmutación automática a SOURCE 2
+
+**a) Bouquets / Paquetes en el modal del canal**
+
+La tabla `bouquets` guarda los canales como array de ids (`stream_ids_json`). El modal **Editar Canal**
+ahora tiene la sección **Bouquets / Paquetes**: un chip por bouquet con su conteo de canales; se marca
+o desmarca y el canal queda incluido/excluido al guardar.
+
+- `GET /api/bouquets` alimenta la lista (se recarga junto con el catálogo).
+- El formulario envía `bouquet_ids: [1,2]`; `POST /api/streams` y `PUT /api/streams/:id` llaman a
+  `applyStreamBouquets()`, que **sólo** reescribe los bouquets cuyo estado cambia (el resto ni se toca).
+- En alta, si no se envía `bouquet_ids` se mantiene el comportamiento anterior (entra al primer bouquet).
+- Una línea sin bouquet asignado sigue viendo el catálogo completo (regla existente de `isItemAllowedForLine`).
+
+**b) Conmutación automática (SOURCE 2 dormido)**
+
+Campo nuevo `streams.auto_failover` (0/1, migrado con `ensureColumn`) y toggle en el bloque *Source 2*
+del modal: **“Conmutar solo si SOURCE 1 cae”**. El resto del tiempo el respaldo está dormido.
+
+Monitor `server/autoFailover.js` (revisión cada 10 s, sólo canales con `auto_failover=1`, `status='running'`
+y `backup_url` no vacío):
+
+| Tipo de canal | Cómo se detecta la caída | Coste de red |
+|---|---|---|
+| `transcode` (worker propio) | PID ausente o manifiesto HLS congelado > 25 s | **cero** (sólo estado del motor) |
+| `direct` / proxy | Sonda HTTP mínima al origen **activo** (2 KB, `Range: bytes=0-2047`, cada 30 s) | ~2 KB por minuto |
+| Fuentes no HTTP (udp/rtmp/mnf) | No se sondean: se asumen vivas para no conmutar en falso | cero |
+
+Secuencia: 3 revisiones seguidas con caída (≈30 s) → se ejecuta **el mismo cambio que el botón ⇄**
+(intercambio de URL + `failover_active` + reinicio del worker). Entre cambios hay un **enfriamiento de
+120 s** para evitar rebotes. Si el respaldo también falla estando activo, el monitor **regresa al origen
+original** (nunca se queda atrapado en un respaldo muerto); la vuelta por recuperación del principal es
+manual. El respaldo **nunca** se sondea mientras está dormido.
+
+UI: en la columna *Fuente* aparece el badge **AUTO** con semáforo y estado (`VIGILANDO`, `CAÍDO`,
+`CONMUTADO`, `ERROR`); el chip del nombre cambia a **SOURCE 2 ACTIVO** mientras emite el respaldo.
+`GET /api/streams` expone `auto_failover` y `failover_health` (`state`, `reason`, `switchedTo`,
+`lastSwitchAt`) por canal.
+
+**Verificado de punta a punta** con dos orígenes HLS reales: el respaldo recibió 0 peticiones mientras el
+principal emitía; al matar el principal el canal conmutó en ~24 s (nuevo worker, HLS fresco); al morir el
+respaldo volvió solo al principal en ~24 s. Bouquets: asignar `[1,2]` y luego `[2]` actualizó ambos sin
+tocar el resto del catálogo.

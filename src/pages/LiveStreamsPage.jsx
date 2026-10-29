@@ -75,7 +75,10 @@ const EMPTY_FORM = {
   offline_slate_mode: 'disabled',
   offline_slate_url: '',
   audio_leveling_mode: 'global',
-  notes: ''
+  notes: '',
+  // SOURCE 2 dormido: si el origen activo cae, el canal conmuta solo
+  auto_failover: 0,
+  bouquet_ids: []
 };
 
 const EMPTY_PROF = {
@@ -221,6 +224,7 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [bouquets, setBouquets] = useState([]);
 
   const [ffmpegModal, setFfmpegModal] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -284,12 +288,14 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   };
 
   const loadAll = async () => {
-    const [st, cats, sys] = await Promise.all([
+    const [st, cats, sys, bq] = await Promise.all([
       apiFetch('/api/streams'),
       apiFetch('/api/categories'),
-      apiFetch('/api/system')
+      apiFetch('/api/system'),
+      apiFetch('/api/bouquets').catch(() => [])
     ]);
     setStreams(st);
+    setBouquets(Array.isArray(bq) ? bq : []);
     setCategories(cats.filter((c) => c.type === 'live'));
     setProfiles(sys.profiles || []);
     setServers(sys.servers || []);
@@ -597,7 +603,8 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     setEditingId(null);
     setForm({
       ...EMPTY_FORM,
-      category_id: categories[0]?.id || 1
+      category_id: categories[0]?.id || 1,
+      bouquet_ids: bouquets.length ? [bouquets[0].id] : []
     });
     setModalOpen(true);
   };
@@ -620,7 +627,9 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       offline_slate_mode: s.offline_slate_mode || 'disabled',
       offline_slate_url: s.offline_slate_url || '',
       audio_leveling_mode: s.audio_leveling_mode || 'global',
-      notes: s.notes || ''
+      notes: s.notes || '',
+      auto_failover: Number(s.auto_failover) === 1 ? 1 : 0,
+      bouquet_ids: bouquets.filter((b) => (b.stream_ids || []).includes(Number(s.id))).map((b) => b.id)
     });
     setModalOpen(true);
   };
@@ -1916,12 +1925,16 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                                   )}
                                   {hasSource2 && (
                                     <Chip
-                                      tone="sky"
-                                      title={`Tiene un segundo source guardado (manual, no entra solo)\n${String(
-                                        s.backup_url
-                                      ).trim()}`}
+                                      tone={s.failover_active ? 'amber' : 'sky'}
+                                      title={
+                                        s.failover_active
+                                          ? `Emitiendo desde el SOURCE 2\n${String(s.backup_url).trim()}`
+                                          : `Segundo source guardado y DORMIDO (no consume ancho de banda)${
+                                              s.auto_failover ? ' · conmuta solo si SOURCE 1 cae' : ''
+                                            }\n${String(s.backup_url).trim()}`
+                                      }
                                     >
-                                      SOURCE 2
+                                      {s.failover_active ? 'SOURCE 2 ACTIVO' : 'SOURCE 2'}
                                     </Chip>
                                   )}
                                 </div>
@@ -1942,6 +1955,54 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                                   {sourceHost(activeUrl)}
                                 </span>
                               </div>
+                              {s.auto_failover ? (
+                                (() => {
+                                  const health = s.failover_health || {};
+                                  const state = health.state || 'ok';
+                                  const tone =
+                                    state === 'down'
+                                      ? 'border-amber-500/40 bg-amber-500/12 text-amber-300'
+                                      : state === 'error'
+                                        ? 'border-rose-500/40 bg-rose-500/12 text-rose-300'
+                                        : state === 'switched'
+                                          ? 'border-sky-500/40 bg-sky-500/12 text-sky-300'
+                                          : 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300';
+                                  const dot =
+                                    state === 'down'
+                                      ? 'bg-amber-400'
+                                      : state === 'error'
+                                        ? 'bg-rose-400'
+                                        : state === 'switched'
+                                          ? 'bg-sky-400'
+                                          : 'bg-emerald-400';
+                                  const label =
+                                    state === 'down'
+                                      ? 'CAÍDO'
+                                      : state === 'error'
+                                        ? 'ERROR'
+                                        : state === 'switched'
+                                          ? 'CONMUTADO'
+                                          : 'VIGILANDO';
+                                  return (
+                                    <span
+                                      className={`inline-flex w-fit items-center gap-1 rounded border px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide ${tone}`}
+                                      title={[
+                                        'Conmutación automática activa: si el origen activo cae, entra el SOURCE 2 (dormido hasta entonces).',
+                                        health.reason ? `Último motivo: ${health.reason}` : '',
+                                        health.lastSwitchAt
+                                          ? `Último cambio: ${new Date(health.lastSwitchAt).toLocaleString()}`
+                                          : ''
+                                      ]
+                                        .filter(Boolean)
+                                        .join('\n')}
+                                    >
+                                      <Zap className="h-2.5 w-2.5" /> AUTO
+                                      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+                                      {label}
+                                    </span>
+                                  );
+                                })()
+                              ) : null}
                               {hasSource2 ? (
                                 <button
                                   type="button"
@@ -3075,9 +3136,51 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                       className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
                       placeholder="https://otro-proveedor.com/live/canal/index.m3u8"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, auto_failover: form.auto_failover ? 0 : 1 })}
+                      className={`flex w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left transition ${
+                        form.auto_failover
+                          ? 'border-sky-500/45 bg-sky-500/12'
+                          : 'border-slate-700 bg-[#090e1a] hover:border-slate-600'
+                      }`}
+                      title="Si el origen activo cae, el canal pasa solo al SOURCE 2"
+                    >
+                      <span className="flex items-start gap-2">
+                        <Zap
+                          className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
+                            form.auto_failover ? 'text-sky-300' : 'text-slate-500'
+                          }`}
+                        />
+                        <span className="min-w-0">
+                          <span
+                            className={`block text-[11px] font-semibold ${
+                              form.auto_failover ? 'text-sky-200' : 'text-slate-300'
+                            }`}
+                          >
+                            Conmutar solo si SOURCE 1 cae
+                          </span>
+                          <span className="block text-[9.5px] leading-snug text-slate-500">
+                            El SOURCE 2 queda dormido: no consume ancho de banda ni abre otro proceso hasta que se
+                            dispara el cambio (≈30 s sin señal).
+                          </span>
+                        </span>
+                      </span>
+                      <span
+                        className={`relative h-5 w-9 shrink-0 rounded-full transition ${
+                          form.auto_failover ? 'bg-sky-500' : 'bg-slate-700'
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                            form.auto_failover ? 'left-[18px]' : 'left-0.5'
+                          }`}
+                        />
+                      </span>
+                    </button>
                     <p className="text-[10px] text-slate-500">
-                      Se guarda sin usarse. Para emitir desde aquí, pulsa <b className="text-slate-400">⇄</b> en la fila
-                      del canal (y otra vez para regresar).
+                      También puedes cambiarlo a mano con <b className="text-slate-400">⇄</b> en la fila del canal (y
+                      otra vez para regresar al origen original).
                     </p>
                   </div>
                 ) : (
@@ -3189,6 +3292,64 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                     ))}
                   </select>
                 </div>
+              </div>
+
+              {/* Bouquets / Paquetes donde se publica el canal */}
+              <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-slate-300 font-medium text-[12px]">
+                    <Layers className="h-3.5 w-3.5 text-indigo-400" /> Bouquets / Paquetes
+                  </label>
+                  <span className="text-[10px] text-slate-500">
+                    {form.bouquet_ids?.length
+                      ? `${form.bouquet_ids.length} seleccionado(s)`
+                      : 'sin bouquet: sólo lo ven líneas con acceso total'}
+                  </span>
+                </div>
+                {bouquets.length === 0 ? (
+                  <p className="text-[10.5px] text-slate-500">
+                    No hay bouquets creados todavía. Créalos en la sección <b>Bouquets</b> y luego asígnalos aquí.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {bouquets.map((b) => {
+                      const checked = (form.bouquet_ids || []).includes(b.id);
+                      return (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() =>
+                            setForm({
+                              ...form,
+                              bouquet_ids: checked
+                                ? (form.bouquet_ids || []).filter((x) => x !== b.id)
+                                : [...(form.bouquet_ids || []), b.id]
+                            })
+                          }
+                          className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                            checked
+                              ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-100'
+                              : 'border-slate-700 bg-[#0b1120] text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                          }`}
+                          title={`${b.description || b.name} · ${(b.stream_ids || []).length} canales`}
+                        >
+                          <span
+                            className={`grid h-3.5 w-3.5 place-items-center rounded border ${
+                              checked ? 'border-indigo-400 bg-indigo-500 text-white' : 'border-slate-600'
+                            }`}
+                          >
+                            {checked ? <Check className="h-2.5 w-2.5" /> : null}
+                          </span>
+                          {b.name}
+                          <span className="font-mono text-[9px] opacity-70">{(b.stream_ids || []).length}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-[10px] text-slate-500">
+                  El canal se publica en los bouquets marcados. Al guardar se actualizan sólo los bouquets que cambian.
+                </p>
               </div>
 
               {/* Per-Stream Offline Loop Slate */}

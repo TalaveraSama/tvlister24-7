@@ -77,6 +77,7 @@ import {
   HLS_WINDOW_SECONDS
 } from './streamEngine.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
+import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
 import {
   getResolutionScanStatus,
   startResolutionAutoClassifyJob,
@@ -658,6 +659,27 @@ function buildStreamListLiveMaps(rows) {
   return { clientsByStream, epgNow, epgNext };
 }
 
+/**
+ * Asigna un canal a los bouquets indicados (la tabla guarda arrays de ids en JSON).
+ * Sólo se tocan los bouquets que cambian; el resto queda intacto.
+ */
+function applyStreamBouquets(streamId, bouquetIds) {
+  const id = Number(streamId);
+  if (!Number.isFinite(id) || id <= 0) return;
+  const wanted = new Set(
+    (Array.isArray(bouquetIds) ? bouquetIds : []).map(Number).filter((n) => Number.isFinite(n) && n > 0)
+  );
+  const rows = db.prepare('SELECT id, stream_ids_json FROM bouquets').all();
+  for (const row of rows) {
+    const current = JSON.parse(row.stream_ids_json || '[]').map(Number);
+    const has = current.includes(id);
+    const shouldHave = wanted.has(Number(row.id));
+    if (has === shouldHave) continue;
+    const next = shouldHave ? [...current, id] : current.filter((x) => x !== id);
+    db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?').run(JSON.stringify(next), row.id);
+  }
+}
+
 app.get('/api/streams', requireAuth, (req, res) => {
   pruneStaleConnections();
 
@@ -677,6 +699,7 @@ app.get('/api/streams', requireAuth, (req, res) => {
     .all();
 
   const { clientsByStream, epgNow, epgNext } = buildStreamListLiveMaps(rows);
+  const failoverHealth = getFailoverHealth();
   const nowMs = Date.now();
 
   res.json(
@@ -699,7 +722,9 @@ app.get('/api/streams', requireAuth, (req, res) => {
         epg_now_end: current ? new Date(current.end).toISOString() : '',
         epg_next: following?.title || '',
         epg_next_start: following ? new Date(following.start).toISOString() : '',
-        epg_progress: progress
+        epg_progress: progress,
+        auto_failover: Number(s.auto_failover) === 1 ? 1 : 0,
+        failover_health: failoverHealth[s.id] || null
       };
     })
   );
@@ -827,8 +852,8 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
   }
   const info = db
     .prepare(
-      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url, audio_leveling_mode, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url, audio_leveling_mode, notes, auto_failover)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       String(b.name),
@@ -847,11 +872,17 @@ app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
       String(b.offline_slate_mode || 'disabled'),
       String(b.offline_slate_url || ''),
       String(b.audio_leveling_mode || 'global'),
-      String(b.notes || '').slice(0, 2000)
+      String(b.notes || '').slice(0, 2000),
+      b.auto_failover ? 1 : 0
     );
 
   const newId = Number(info.lastInsertRowid);
-  const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
+  if (Array.isArray(b.bouquet_ids)) {
+    applyStreamBouquets(newId, b.bouquet_ids);
+  }
+  const b1 = Array.isArray(b.bouquet_ids)
+    ? null
+    : db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
   if (b1) {
     const arr = JSON.parse(b1.stream_ids_json || '[]');
     if (!arr.includes(newId)) {
@@ -892,7 +923,8 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
          name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
          epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
          status = ?, headend_mode = ?, user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
-         offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?, notes = ?
+         offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?, notes = ?,
+         auto_failover = ?
        WHERE id = ?`
     ).run(
       String(b.name || ''),
@@ -913,9 +945,12 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
       String(b.offline_slate_url || ''),
       String(b.audio_leveling_mode || 'global'),
       String(b.notes || '').slice(0, 2000),
+      b.auto_failover ? 1 : 0,
       id
     );
   });
+
+  if (Array.isArray(b.bouquet_ids)) applyStreamBouquets(id, b.bouquet_ids);
 
   // Restart or stop FFmpeg worker to apply mode/profile change immediately
   stopWorker(`stream_${id}`);
@@ -4266,6 +4301,7 @@ async function startServer() {
     }
     resumeEnabledWk2500Channels();
     startVodFolderAutoSyncScheduler();
+    startAutoFailoverMonitor({ switchSource: switchStreamSourceRow });
     startResolutionAutoPilotDaemon((sid, dbMode, nextStatus) => {
       if (dbMode === 'transcode' && nextStatus === 'running') {
         launchStreamWorkerIfNeeded(sid);
