@@ -864,3 +864,47 @@ ya no abre esa sesión por su cuenta; y con esta auditoría puedes borrar esos s
 respaldo de otro proveedor y 1 repetido): la auditoría reportó `principal:6 / respaldo:5` para cada host,
 el `dry_run` avisó `wouldClear: 5` sin escribir, “redundantes” limpió 1, el borrado por host limpió 4 y
 dejó intacto el respaldo del otro proveedor.
+
+### 8.16. Skin de la lista de canales (estructura UI tomada de XUI.one)
+
+La pantalla **Canales en Vivo** usa ahora la misma estructura de UI que el panel de XUI.one
+(`page-title-box` + card + filtros colapsables + tabla densa con menú de acciones por fila +
+selector de "entries" y paginación), adaptada a la paleta oscura de TVLister. **No cambia ninguna
+regla de emisión**: sigue sin failover y el SOURCE 2 sigue siendo manual (8.14).
+
+Componentes nuevos en `src/components/StreamsSkin.jsx` (sólo presentación, sin lógica de datos):
+
+- `StatusPill` — píldora de estado (`Online` / `On-demand` / `Detenido`) con **uptime** `up 3d 04h`
+  calculado desde `uptime_started_at`, refrescado cada 30 s.
+- `Chip` — insignias compactas (SOURCE 2, COPY/COPY, AUDIO IGUAL, PROLIANT, FHD/HD/SD, respaldo).
+- `IconAction` / `RowMenu` — botones de acción por canal y menú **⋯** (medir resolución, comando
+  FFmpeg, cambiar de source, ordenar en la parrilla, eliminar). El menú se dibuja en un **portal**
+  con posición `fixed`, así no lo recorta el scroll horizontal de la tabla.
+- `Segmented` — filtro rápido Todos / Online / Detenidos / SOURCE 2.
+- `Pager` — "Mostrar 25/50/100/250 canales" + `Página N / M`.
+- `Dropdown` — menú **Herramientas** del encabezado, donde se agruparon los 12 botones sueltos que
+  antes ocupaban dos filas (Ordenar canales, Auto-Resolución, Audio Igual, Copy/Copy masivo,
+  Edición masiva, Cambiar IP/Puerto, Fuentes, Perfiles FFmpeg, Borrar masivo, BD XUI.one, M3U).
+  Toda la funcionalidad se conserva; sólo cambió de sitio.
+
+Estructura de columnas de la tabla (equivalente a la de XUI `ID · Icon · Name · Source · Servers ·
+Clients · Uptime · Actions`):
+
+| Columna | Contenido |
+|---|---|
+| `#` | Orden de parrilla + flechas de subir/bajar, con `ID` real debajo |
+| Canal | Logo 32 px, nombre, insignia SOURCE 2 y categoría · servidor |
+| Fuente | Host del source activo (URL completa en el tooltip) y botón `Usar SOURCE 2` / `Volver a SOURCE 1` |
+| Modo & Perfil | `direct`/`ondemand`/`transcode`, COPY/COPY, AUDIO IGUAL, PROLIANT, resolución + perfil y bitrate |
+| DVR / Respaldo | Botón REC (catchup), segmentos/MB y estado del respaldo por canal |
+| Estado | Píldora de estado + uptime |
+| Acciones | Previsualizar, Iniciar/Detener, Editar y menú ⋯ |
+
+Extras de la vista:
+
+- **Vista agrupada por categoría** (equivalente a `streams_grouped` de XUI): cabecera por categoría
+  con el número de canales; al activarla se ordena por categoría (no pagina) y el pie ofrece
+  "Volver a lista paginada".
+- La paginación se reinicia a la página 1 al cambiar búsqueda, categoría, resolución, estado u orden.
+- El buscador y los filtros se aplican sobre el catálogo completo; "Seleccionar todos" sigue
+  marcando los canales filtrados (no sólo la página visible).

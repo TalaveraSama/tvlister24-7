@@ -31,9 +31,22 @@ import {
   GripVertical,
   Volume2,
   Globe,
-  ArrowLeftRight
+  ArrowLeftRight,
+  Filter,
+  Wrench
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
+import {
+  Chip,
+  Dropdown,
+  EmptyState,
+  IconAction,
+  Pager,
+  RowMenu,
+  Segmented,
+  StatusPill,
+  sourceHost
+} from '../components/StreamsSkin.jsx';
 
 const EMPTY_FORM = {
   name: '',
@@ -90,6 +103,12 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState('all');
   const [resFilter, setResFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'online' | 'idle' | 'stopped' | 'source2'
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [groupByCat, setGroupByCat] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [clockNow, setClockNow] = useState(() => Date.now());
 
   // Auto-Resolution Classifier (SD/480p/540p -> 1M, HD 720p -> 2.5M, FHD 1080p -> 3M)
   const [autoResOpen, setAutoResOpen] = useState(false);
@@ -1044,7 +1063,17 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
       const matchesRes =
         resFilter === 'all' ||
         (resFilter === 'unscanned' ? !s.resolution_tier : s.resolution_tier === resFilter);
-      return matchesSearch && matchesCat && matchesRes;
+      const matchesStatus =
+        statusFilter === 'all'
+          ? true
+          : statusFilter === 'online'
+            ? s.status === 'running'
+            : statusFilter === 'idle'
+              ? s.status === 'ondemand_idle'
+              : statusFilter === 'source2'
+                ? Boolean(String(s.backup_url || '').trim())
+                : s.status !== 'running' && s.status !== 'ondemand_idle';
+      return matchesSearch && matchesCat && matchesRes && matchesStatus;
     })
     .sort((a, b) => {
       if (viewSort === 'name_asc') {
@@ -1089,315 +1118,410 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     return selectedIds.length;
   };
 
+  // Volver a la página 1 cuando cambia cualquier filtro/orden (comportamiento de lista XUI)
+  useEffect(() => {
+    setPage(1);
+  }, [search, catFilter, resFilter, statusFilter, viewSort, groupByCat, pageSize]);
+
+  // Reloj para la columna Estado (uptime "up 3d 04h")
+  useEffect(() => {
+    const timer = setInterval(() => setClockNow(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // ---- XUI-style list header counters -------------------------------------------------
+  const onlineCount = streams.filter((s) => s.status === 'running').length;
+  const idleCount = streams.filter((s) => s.status === 'ondemand_idle').length;
+  const downCount = Math.max(0, streams.length - onlineCount - idleCount);
+  const source2Count = streams.filter((s) => Boolean(String(s.backup_url || '').trim())).length;
+  const advancedFilterCount =
+    (resFilter !== 'all' ? 1 : 0) + (groupByCat ? 1 : 0) + (statusFilter !== 'all' ? 1 : 0);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const pageStart = (safePage - 1) * pageSize;
+  // Al agrupar, los canales se ordenan por categoría para que cada grupo quede contiguo (como XUI)
+  const groupedRows = groupByCat
+    ? [...filtered].sort(
+        (a, b) =>
+          String(a.category_name || 'General').localeCompare(String(b.category_name || 'General'), 'es', {
+            numeric: true,
+            sensitivity: 'base'
+          }) || (lineupIndexMap.get(a.id) || 0) - (lineupIndexMap.get(b.id) || 0)
+      )
+    : filtered;
+  const pageRows = groupByCat ? groupedRows : filtered.slice(pageStart, pageStart + pageSize);
+  const rangeFrom = filtered.length === 0 ? 0 : groupByCat ? 1 : pageStart + 1;
+  const rangeTo = groupByCat ? filtered.length : Math.min(pageStart + pageSize, filtered.length);
+
+  // Badge "AUDIO IGUAL": modo por canal + ajuste global de nivelación
+  const audioLevelOnFor = (st) =>
+    st.audio_leveling_mode === 'on' ||
+    (st.audio_leveling_mode !== 'off' &&
+      (audioConfig.enabled || String(st.profile_name || '').toLowerCase().includes('audio nivelado')));
+
+  // Menú "Herramientas" del encabezado (misma funcionalidad que antes, sin 12 botones sueltos)
+  const toolItems = [
+    { heading: 'Parrilla y emisión' },
+    {
+      icon: ArrowUpDown,
+      label: 'Ordenar canales y categorías',
+      onClick: () => openOrderModal('streams')
+    },
+    {
+      icon: Monitor,
+      label: 'Auto-Resolución (1M / 2.5M / 3M)',
+      hint: autoResStatus?.running
+        ? `${autoResStatus.completed}/${autoResStatus.total}`
+        : autoResStatus?.pilot?.enabled
+          ? 'AUTO ON'
+          : '',
+      onClick: () => {
+        setAutoResForm((f) => ({
+          ...f,
+          scope: selectedIds.length > 0 ? 'selected' : catFilter !== 'all' ? 'category' : 'all',
+          category_id: catFilter !== 'all' ? String(catFilter) : 'all'
+        }));
+        setAutoResOpen(true);
+      }
+    },
+    {
+      icon: Volume2,
+      label: `Audio Igual en todos los canales ${audioConfig.enabled ? '· ON' : '· OFF'}`,
+      onClick: () => {
+        setAudioNotice('');
+        loadAudioLeveling();
+        setAudioModalOpen(true);
+      }
+    },
+    { heading: 'Acciones masivas' },
+    {
+      icon: Zap,
+      label: 'Copy/Copy masivo (bitrate original)',
+      onClick: () => handleQuickCopyCopy2500()
+    },
+    {
+      icon: Layers,
+      label: 'Edición masiva',
+      onClick: () => openBulkEditModal()
+    },
+    {
+      icon: Globe,
+      label: 'Cambiar IP / Puerto de origen',
+      onClick: () => {
+        setRepHostPreview(null);
+        setRepHostExtra([]);
+        setBulkNotice('');
+        setRepHostForm((prev) => ({
+          ...prev,
+          scope: selectedIds.length > 0 ? 'selected' : catFilter !== 'all' ? 'category' : 'all'
+        }));
+        setRepHostOpen(true);
+      }
+    },
+    {
+      icon: ArrowLeftRight,
+      label: 'Fuentes de los canales (auditoría)',
+      onClick: openSourceAudit
+    },
+    {
+      icon: Sliders,
+      label: 'Perfiles FFmpeg',
+      onClick: () => {
+        setProfNotice('');
+        const copyProf = findCopyCopy2500Profile();
+        if (copyProf) setBulkProfId(copyProf.id);
+        setBulkKeepBitrate(true);
+        setProfilesModalOpen(true);
+      }
+    },
+    {
+      icon: Trash2,
+      label: 'Borrar masivo',
+      danger: true,
+      onClick: () => {
+        setBulkDeleteScope(
+          selectedIds.length > 0 ? 'selected' : catFilter !== 'all' ? 'category' : 'all'
+        );
+        setBulkDeleteCatId(
+          catFilter !== 'all' ? String(catFilter) : categories[0]?.id ? String(categories[0].id) : 'all'
+        );
+        setBulkDeleteOpen(true);
+      }
+    },
+    { heading: 'Importar' },
+    ...(onOpenXuiImport
+      ? [{ icon: Database, label: 'Importar BD XUI.one', onClick: onOpenXuiImport }]
+      : []),
+    { icon: Upload, label: 'Importar lista M3U', onClick: () => setImportOpen(true) }
+  ];
+
   return (
     <div className="space-y-4">
-      {/* Main Toolbar */}
-      <div className="flex flex-col gap-3 bg-[#0e1526] p-4 rounded-2xl border border-slate-800/80">
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-          <div className="flex flex-1 flex-wrap items-center gap-2.5">
-            <div className="relative flex-1 min-w-[200px] max-w-sm">
-              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar canal o fuente HLS/TS/RTMP..."
-                className="w-full pl-9 pr-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700/80 text-xs text-white focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-
-            <select
-              value={catFilter}
-              onChange={(e) => setCatFilter(e.target.value)}
-              className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700/80 text-xs text-slate-200"
-            >
-              <option value="all">Todas las categorías ({streams.length})</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={resFilter}
-              onChange={(e) => setResFilter(e.target.value)}
-              className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700/80 text-xs text-slate-200"
-            >
-              <option value="all">Todas las resoluciones</option>
-              <option value="sd">SD / 480p / 540p (1.0 Mbps)</option>
-              <option value="hd">HD 720p (2.5 Mbps)</option>
-              <option value="fhd">FHD 1080p (3.0 Mbps)</option>
-              <option value="unscanned">Sin clasificar aún</option>
-            </select>
-
-            <select
-              value={viewSort}
-              onChange={(e) => setViewSort(e.target.value)}
-              className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700/80 text-xs text-slate-200"
-              title="Cambiar vista en esta tabla"
-            >
-              <option value="lineup">Vista: Orden de Parrilla (Clientes)</option>
-              <option value="name_asc">Vista: Nombre A → Z</option>
-              <option value="bitrate_desc">Vista: Mayor Bitrate</option>
-              <option value="id_desc">Vista: ID más reciente</option>
-            </select>
-
-            {streams.length > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  selectedIds.length === streams.length ? setSelectedIds([]) : selectAllEntireCatalog()
-                }
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#090e1a] hover:bg-slate-800 border border-slate-700/80 text-xs text-slate-200 font-medium transition"
-              >
-                <CheckSquare className="w-3.5 h-3.5 text-indigo-400" />
-                {selectedIds.length === streams.length
-                  ? 'Deseleccionar todos'
-                  : `Seleccionar todos (${streams.length})`}
-              </button>
-            )}
+      {/* ===== Encabezado de página (page-title-box estilo XUI) ===== */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[9.5px] font-bold uppercase tracking-[0.22em] text-slate-500">
+            Panel TVLister · Emisión 24/7
           </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Order Channels & Categories Button */}
-            <button
-              onClick={() => openOrderModal('streams')}
-              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-400/40 text-xs font-bold transition shadow-sm"
-              title="Ordenar cómo se muestran los canales y categorías en apps IPTV, M3U, Stalker y WebTV"
-            >
-              <ArrowUpDown className="w-4 h-4 text-sky-300" />
-              Ordenar Canales
-            </button>
-
-            {/* Auto-Resolution Classifier (SD/480p/540p -> 1M, HD 720p -> 2.5M, FHD 1080p -> 3M) */}
-            <button
-              onClick={() => {
-                setAutoResForm((f) => ({
-                  ...f,
-                  scope: selectedIds.length > 0 ? 'selected' : catFilter !== 'all' ? 'category' : 'all',
-                  category_id: catFilter !== 'all' ? String(catFilter) : 'all'
-                }));
-                setAutoResOpen(true);
-              }}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/35 text-xs font-semibold transition"
-              title="Detectar resolución SD/480p/540p (1M), HD 720p (2.5M) y FHD 1080p (3M) automáticamente"
-            >
-              <Monitor className="w-4 h-4" />
-              Auto-Resolución (1M / 2.5M / 3M)
-              {autoResStatus?.pilot?.enabled && !autoResStatus?.running && (
-                <span className="ml-1 px-1.5 py-0.5 rounded bg-emerald-500/30 text-emerald-200 font-mono text-[9px] font-bold">
-                  AUTO ON
-                </span>
-              )}
-              {autoResStatus?.running && (
-                <span className="ml-1 px-1.5 py-0.5 rounded bg-emerald-500 text-slate-950 font-mono text-[10px] font-bold animate-pulse">
-                  {autoResStatus.completed}/{autoResStatus.total}
-                </span>
-              )}
-            </button>
-
-            {/* Uniform Audio Leveling Button */}
-            <button
-              onClick={() => {
-                setAudioNotice('');
-                loadAudioLeveling();
-                setAudioModalOpen(true);
-              }}
-              className={`inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition ${
-                audioConfig.enabled
-                  ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/45 shadow-sm'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
-              }`}
-              title="Igualar volumen de audio en todos los canales (normalización dinámica en vivo)"
-            >
-              <Volume2 className="w-4 h-4 text-amber-300" />
-              Audio Igual {audioConfig.enabled ? '• ON' : '• OFF'}
-            </button>
-
-            {/* 1-Click Bulk Copy/Copy (Source Bitrate Untouched) */}
-            {streams.length > 0 && (
-              <button
-                disabled={bulkBusy}
-                onClick={() => handleQuickCopyCopy2500()}
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/45 text-xs font-bold transition shadow-sm"
-                title="Pasar en masa a Copy / Copy manteniendo intacto el bitrate original que trae cada stream"
-              >
-                <Zap className="w-4 h-4 text-amber-300" />
-                Copy/Copy Masivo (Bitrate Original)
-              </button>
+          <div className="mt-1 flex items-center gap-2">
+            <h2 className="text-xl font-bold tracking-tight text-white">Canales en Vivo</h2>
+            <span className="rounded-md border border-slate-700/70 bg-slate-800/70 px-1.5 py-[1px] font-mono text-[10px] font-bold text-slate-300">
+              {streams.length}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-slate-400">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              {onlineCount} en emisión
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
+              {downCount} detenidos
+            </span>
+            {idleCount > 0 && (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                {idleCount} on-demand
+              </span>
             )}
-
-            {/* Auditoría de fuentes: qué host usa cada canal y limpieza de respaldos */}
-            <button
-              onClick={openSourceAudit}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition"
-              title="Ver de qué host jala cada canal y borrar respaldos que ya no quieres"
-            >
-              <Globe className="w-4 h-4 text-sky-300" />
-              Fuentes
-            </button>
-
-            {/* Bulk Edit Button */}
-            <button
-              onClick={() => openBulkEditModal()}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/35 text-xs font-semibold transition"
-            >
-              <Layers className="w-4 h-4" />
-              Edición Masiva
-            </button>
-
-            {/* Bulk Delete Button */}
-            <button
-              onClick={() => {
-                setBulkDeleteScope(selectedIds.length > 0 ? 'selected' : catFilter !== 'all' ? 'category' : 'all');
-                setBulkDeleteCatId(catFilter !== 'all' ? String(catFilter) : categories[0]?.id ? String(categories[0].id) : 'all');
-                setBulkDeleteOpen(true);
-              }}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/35 text-xs font-semibold transition"
-            >
-              <Trash2 className="w-4 h-4" />
-              Borrar Masivo
-            </button>
-
-            <button
-              onClick={() => {
-                setRepHostPreview(null);
-                setRepHostExtra([]);
-                setBulkNotice('');
-                setRepHostForm((prev) => ({
-                  ...prev,
-                  scope: selectedIds.length > 0 ? 'selected' : catFilter !== 'all' ? 'category' : 'all'
-                }));
-                setRepHostOpen(true);
-              }}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/35 text-xs font-semibold transition"
-              title="Cambiar la IP y/o el puerto de origen de muchos canales sin tocar el resto de la URL"
-            >
-              <Globe className="w-4 h-4" />
-              Cambiar IP / Puerto
-            </button>
-
-            <button
-              onClick={() => {
-                setProfNotice('');
-                const copyProf = findCopyCopy2500Profile();
-                if (copyProf) setBulkProfId(copyProf.id);
-                setBulkKeepBitrate(true);
-                setProfilesModalOpen(true);
-              }}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-semibold transition"
-            >
-              <Sliders className="w-4 h-4" />
-              Perfiles FFmpeg
-            </button>
-
-            {onOpenXuiImport && (
-              <button
-                onClick={onOpenXuiImport}
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold transition"
-              >
-                <Database className="w-3.5 h-3.5" />
-                BD XUI.one
-              </button>
+            {source2Count > 0 && (
+              <span className="inline-flex items-center gap-1.5 text-sky-300">
+                <ArrowLeftRight className="h-3 w-3" />
+                {source2Count} con SOURCE 2 manual
+              </span>
             )}
-
-            <button
-              onClick={() => setImportOpen(true)}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold transition"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              M3U
-            </button>
-
-            <button
-              onClick={openCreate}
-              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-lg shadow-indigo-600/20 transition"
-            >
-              <Plus className="w-4 h-4" />
-              Nuevo Canal
-            </button>
           </div>
         </div>
 
-        {/* Instant 1-Click Preset & Bulk Notice Banner */}
+        <div className="flex items-center gap-2">
+          <Dropdown label="Herramientas" icon={Wrench} items={toolItems} width={304} title="Herramientas del catálogo de canales" />
+          <button
+            onClick={openCreate}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-indigo-500/60 bg-indigo-600 px-3 text-[11.5px] font-bold text-white shadow-lg shadow-indigo-600/20 transition hover:bg-indigo-500"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Nuevo Canal
+          </button>
+        </div>
+      </div>
+
+      {/* ===== Barra de herramientas y filtros (card + collapse_filters estilo XUI) ===== */}
+      <div className="rounded-xl border border-slate-800/80 bg-[#0e1526]">
+        <div className="flex flex-wrap items-center gap-2 p-3">
+          <div className="relative min-w-[210px] flex-1">
+            <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-500" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar canal, fuente HLS/TS/RTMP..."
+              className="h-8 w-full rounded-lg border border-slate-700/80 bg-[#090e1a] pl-8 pr-3 text-[11.5px] text-white focus:border-indigo-500 focus:outline-none"
+            />
+          </div>
+
+          <Segmented
+            value={statusFilter}
+            onChange={setStatusFilter}
+            options={[
+              { value: 'all', label: 'Todos', count: streams.length },
+              { value: 'online', label: 'Online', count: onlineCount, dot: 'bg-emerald-400' },
+              { value: 'stopped', label: 'Detenidos', count: downCount, dot: 'bg-rose-400' },
+              { value: 'source2', label: 'SOURCE 2', count: source2Count }
+            ]}
+          />
+
+          <button
+            type="button"
+            onClick={() => setFiltersOpen((v) => !v)}
+            className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11.5px] font-semibold transition ${
+              filtersOpen || advancedFilterCount > 0
+                ? 'border-indigo-500/45 bg-indigo-500/12 text-indigo-200'
+                : 'border-slate-700/80 bg-slate-800/60 text-slate-300 hover:text-white'
+            }`}
+            title="Mostrar u ocultar los filtros avanzados"
+          >
+            <Filter className="h-3.5 w-3.5" />
+            Filtros
+            {advancedFilterCount > 0 && (
+              <span className="rounded bg-indigo-600 px-1 font-mono text-[9px] font-bold text-white">
+                {advancedFilterCount}
+              </span>
+            )}
+          </button>
+
+          {streams.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                selectedIds.length === streams.length ? setSelectedIds([]) : selectAllEntireCatalog()
+              }
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-800/60 px-2.5 text-[11.5px] font-semibold text-slate-300 transition hover:text-white"
+            >
+              <CheckSquare className="h-3.5 w-3.5 text-indigo-400" />
+              {selectedIds.length === streams.length ? 'Deseleccionar' : `Seleccionar ${streams.length}`}
+            </button>
+          )}
+        </div>
+
+        {filtersOpen && (
+          <div className="grid gap-2 border-t border-slate-800/70 bg-[#0b1220]/40 p-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="flex flex-col gap-1">
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-slate-500">Categoría</span>
+              <select
+                value={catFilter}
+                onChange={(e) => setCatFilter(e.target.value)}
+                className="h-8 rounded-lg border border-slate-700/80 bg-[#090e1a] px-2 text-[11.5px] text-slate-200 focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="all">Todas las categorías ({streams.length})</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-slate-500">Resolución</span>
+              <select
+                value={resFilter}
+                onChange={(e) => setResFilter(e.target.value)}
+                className="h-8 rounded-lg border border-slate-700/80 bg-[#090e1a] px-2 text-[11.5px] text-slate-200 focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="all">Todas las resoluciones</option>
+                <option value="sd">SD / 480p / 540p (1.0 Mbps)</option>
+                <option value="hd">HD 720p (2.5 Mbps)</option>
+                <option value="fhd">FHD 1080p (3.0 Mbps)</option>
+                <option value="unscanned">Sin clasificar aún</option>
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-slate-500">
+                Vista / Orden
+              </span>
+              <select
+                value={viewSort}
+                onChange={(e) => setViewSort(e.target.value)}
+                className="h-8 rounded-lg border border-slate-700/80 bg-[#090e1a] px-2 text-[11.5px] text-slate-200 focus:border-indigo-500 focus:outline-none"
+                title="Cambiar el orden de esta tabla"
+              >
+                <option value="lineup">Orden de Parrilla (Clientes)</option>
+                <option value="name_asc">Nombre A → Z</option>
+                <option value="bitrate_desc">Mayor Bitrate</option>
+                <option value="id_desc">ID más reciente</option>
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-slate-500">Agrupar</span>
+              <button
+                type="button"
+                onClick={() => setGroupByCat((v) => !v)}
+                className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border px-2 text-[11.5px] font-semibold transition ${
+                  groupByCat
+                    ? 'border-indigo-500/45 bg-indigo-500/15 text-indigo-200'
+                    : 'border-slate-700/80 bg-[#090e1a] text-slate-300 hover:text-white'
+                }`}
+              >
+                <Layers className="h-3.5 w-3.5" />
+                {groupByCat ? 'Agrupado por categoría' : 'Agrupar por categoría'}
+              </button>
+            </label>
+
+            {advancedFilterCount > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setResFilter('all');
+                  setStatusFilter('all');
+                  setGroupByCat(false);
+                  setCatFilter('all');
+                }}
+                className="self-end justify-self-start text-[11px] font-semibold text-slate-400 underline-offset-2 hover:text-white hover:underline"
+              >
+                Limpiar filtros
+              </button>
+            )}
+          </div>
+        )}
+
         {bulkNotice && (
-          <div className="px-3.5 py-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-medium flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2 border-t border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11.5px] font-medium text-emerald-300">
             <span>{bulkNotice}</span>
             <button onClick={() => setBulkNotice('')} className="text-emerald-200 hover:text-white">
-              <X className="w-4 h-4" />
+              <X className="h-3.5 w-3.5" />
             </button>
           </div>
         )}
       </div>
 
-      {/* Contextual Multi-Select Action Bar */}
+      {/* ===== Barra de acciones sobre la selección (with-selected estilo XUI) ===== */}
       {selectedIds.length > 0 && (
-        <div className="sticky top-2 z-30 p-3.5 rounded-2xl bg-[#131c31]/95 backdrop-blur border border-indigo-500/50 shadow-xl flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <span className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-bold">
+        <div className="sticky top-2 z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-indigo-500/40 bg-[#111a2c]/95 px-3 py-2 shadow-xl shadow-black/40 backdrop-blur">
+          <div className="flex flex-wrap items-center gap-2.5 text-[11px]">
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-2 py-[3px] font-bold text-white">
+              <CheckSquare className="h-3 w-3" />
               {selectedIds.length} seleccionado(s)
             </span>
             {selectedIds.length < streams.length && (
               <button
                 onClick={selectAllEntireCatalog}
-                className="text-indigo-300 hover:text-white underline font-medium"
+                className="font-medium text-indigo-300 underline-offset-2 hover:text-white hover:underline"
               >
                 Seleccionar los {streams.length} canales completos
               </button>
             )}
-            <button
-              onClick={() => setSelectedIds([])}
-              className="text-slate-400 hover:text-white"
-            >
+            <button onClick={() => setSelectedIds([])} className="text-slate-400 hover:text-white">
               Limpiar selección
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
             <button
               disabled={bulkBusy}
               onClick={() => handleQuickCopyCopy2500('selected')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-semibold transition"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/15 px-2 font-semibold text-amber-200 transition hover:bg-amber-500/25 disabled:opacity-50"
               title="Pasar seleccionados a Copy Video + Copy Audio manteniendo el bitrate original del stream"
             >
-              <Zap className="w-3.5 h-3.5 text-amber-400" />
-              Pasar a Copy/Copy (Bitrate Original)
+              <Zap className="h-3 w-3 text-amber-400" />
+              Copy/Copy
             </button>
 
             <button
               disabled={bulkBusy}
               onClick={() => openBulkEditModal('selected')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold transition"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/15 px-2 font-semibold text-cyan-200 transition hover:bg-cyan-500/25 disabled:opacity-50"
             >
-              <Edit3 className="w-3.5 h-3.5" />
+              <Edit3 className="h-3 w-3" />
               Editar ({selectedIds.length})
             </button>
 
             <button
               disabled={bulkBusy}
               onClick={() => handleBulkStreamAction('start', 'selected')}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 font-semibold"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2 font-semibold text-emerald-300 transition hover:bg-emerald-500/25 disabled:opacity-50"
             >
-              <Play className="w-3.5 h-3.5" />
+              <Play className="h-3 w-3" />
               Iniciar
             </button>
 
             <button
               disabled={bulkBusy}
               onClick={() => handleBulkStreamAction('restart', 'selected')}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 font-semibold"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-2 font-semibold text-indigo-300 transition hover:bg-indigo-500/25 disabled:opacity-50"
             >
-              <RotateCw className="w-3.5 h-3.5" />
+              <RotateCw className="h-3 w-3" />
               Reiniciar
             </button>
 
             <button
               disabled={bulkBusy}
               onClick={() => handleBulkStreamAction('stop', 'selected')}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-semibold"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-800/70 px-2 font-semibold text-amber-300 transition hover:bg-slate-700 disabled:opacity-50"
             >
-              <Square className="w-3.5 h-3.5" />
+              <Square className="h-3 w-3" />
               Detener
             </button>
 
@@ -1407,351 +1531,430 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 setBulkDeleteScope('selected');
                 setBulkDeleteOpen(true);
               }}
-              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold transition"
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-rose-500/50 bg-rose-600 px-2.5 font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="h-3 w-3" />
               Eliminar ({selectedIds.length})
             </button>
           </div>
         </div>
       )}
 
-      {/* Streams Table */}
-      <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 overflow-hidden">
+      {/* ===== Lista de canales (skin XUI: card + tabla densa + paginación) ===== */}
+      <div className="overflow-hidden rounded-xl border border-slate-800/80 bg-[#0e1526]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/70 px-4 py-2.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+            <Radio className="w-3.5 h-3.5 text-indigo-400" />
+            Lista de canales
+            <span className="rounded border border-slate-700/70 bg-slate-800/70 px-1.5 py-[1px] font-mono text-[10px] text-slate-400">
+              {filtered.length}
+            </span>
+            {groupByCat ? <Chip tone="indigo">Agrupado por categoría</Chip> : null}
+          </div>
+          <div className="text-[10.5px] text-slate-500">
+            {filtered.length === 0 ? 'Sin resultados' : `Mostrando ${rangeFrom}–${rangeTo} de ${filtered.length}`}
+          </div>
+        </div>
+
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-[#090e1a] text-slate-400 uppercase tracking-wider">
+          <table className="w-full min-w-[1060px] text-left text-xs">
+            <thead className="bg-[#080d18] text-[9.5px] uppercase tracking-[0.12em] text-slate-500">
               <tr>
-                <th className="px-3 py-3 w-10">
+                <th className="w-9 px-3 py-2">
                   <input
                     type="checkbox"
                     checked={allFilteredSelected}
                     onChange={toggleSelectAllFiltered}
-                    className="rounded accent-indigo-500 cursor-pointer"
+                    className="h-3.5 w-3.5 cursor-pointer rounded accent-indigo-500"
                     title="Seleccionar todos los filtrados"
                   />
                 </th>
-                <th className="px-3 py-3"># Orden</th>
-                <th className="px-4 py-3">Canal</th>
-                <th className="px-4 py-3">Categoría</th>
-                <th className="px-4 py-3">Modo & Perfil</th>
-                <th className="px-4 py-3">Respaldo Bucle</th>
-                <th className="px-4 py-3">Catchup DVR</th>
-                <th className="px-4 py-3">Estado</th>
-                <th className="px-4 py-3 text-right">Controles</th>
+                <th className="w-[88px] px-2 py-2 font-bold">#</th>
+                <th className="px-2 py-2 font-bold">Canal</th>
+                <th className="px-2 py-2 font-bold">Fuente</th>
+                <th className="px-2 py-2 font-bold">Modo &amp; Perfil</th>
+                <th className="w-[132px] px-2 py-2 font-bold">DVR / Respaldo</th>
+                <th className="w-[112px] px-2 py-2 font-bold">Estado</th>
+                <th className="px-3 py-2 text-right font-bold">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-slate-500">
-                    No hay canales en vivo en esta vista.
-                  </td>
-                </tr>
+                <EmptyState
+                  colSpan={8}
+                  title="No hay canales en esta vista"
+                  hint="Ajusta la búsqueda, la categoría o los filtros de estado."
+                />
               ) : (
-                filtered.map((s) => {
-                  const isChecked = selectedIds.includes(s.id);
-                  const slateMode = s.offline_slate_mode || 'disabled';
-                  return (
-                    <tr
-                      key={s.id}
-                      className={`transition ${
-                        isChecked ? 'bg-indigo-950/25 hover:bg-indigo-950/35' : 'hover:bg-slate-800/30'
-                      }`}
-                    >
-                      <td className="px-3 py-3">
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => toggleSelectStream(s.id)}
-                          className="rounded accent-indigo-500 cursor-pointer"
-                        />
-                      </td>
-                      <td className="px-3 py-3">
-                        <div className="flex items-center gap-1.5">
-                          {viewSort === 'lineup' && !search && resFilter === 'all' && (
-                            <div className="flex flex-col gap-0.5">
-                              <button
-                                type="button"
-                                onClick={() => handleInlineNudgeStream(s.id, -1)}
-                                title="Subir 1 puesto en la parrilla"
-                                className="p-0.5 rounded bg-slate-800/80 hover:bg-sky-600/40 text-slate-400 hover:text-sky-200 transition"
-                              >
-                                <ArrowUp className="w-2.5 h-2.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleInlineNudgeStream(s.id, 1)}
-                                title="Bajar 1 puesto en la parrilla"
-                                className="p-0.5 rounded bg-slate-800/80 hover:bg-sky-600/40 text-slate-400 hover:text-sky-200 transition"
-                              >
-                                <ArrowDown className="w-2.5 h-2.5" />
-                              </button>
-                            </div>
-                          )}
-                          <div>
-                            <div className="font-mono font-bold text-sky-300 text-xs">
-                              #{lineupIndexMap.get(s.id) || s.sort_order || s.id}
-                            </div>
-                            <div className="font-mono text-[9px] text-slate-500">ID {s.id}</div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-9 h-9 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
-                            {s.logo_url ? (
-                              <img src={s.logo_url} alt={s.name} className="w-full h-full object-cover" />
-                            ) : (
-                              <Radio className="w-4 h-4 text-indigo-400" />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="font-semibold text-white truncate flex items-center gap-1.5">
-                              <span className="truncate">{s.name}</span>
-                              {Boolean(String(s.backup_url || '').trim()) && (
-                                <span
-                                  className="shrink-0 px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/35 text-sky-300 text-[9px] font-bold"
-                                  title={`Tiene un segundo source guardado (manual, no entra solo)\n${String(
-                                    s.backup_url
-                                  ).trim()}`}
-                                >
-                                  SOURCE 2
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-slate-500 font-mono truncate max-w-[240px]">
-                              {s.source_url}
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-slate-300">{s.category_name || 'General'}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 uppercase text-[10px] font-bold">
-                            {s.stream_mode}
-                          </span>
-                          {s.profile_video_codec === 'copy' && s.stream_mode !== 'direct' && (
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono text-[9px] font-bold">
-                              {(s.audio_leveling_mode === 'on' ||
-                                (s.audio_leveling_mode !== 'off' &&
-                                  (audioConfig.enabled ||
-                                    String(s.profile_name || '').toLowerCase().includes('audio nivelado'))))
-                                ? 'COPY VIDEO'
-                                : 'COPY/COPY'}
-                            </span>
-                          )}
-                          {s.stream_mode !== 'direct' &&
-                            (s.audio_leveling_mode === 'on' ||
-                              (s.audio_leveling_mode !== 'off' &&
-                                (audioConfig.enabled ||
-                                  String(s.profile_name || '').toLowerCase().includes('audio nivelado')))) && (
-                              <span
-                                title="Audio nivelado dinámicamente a 48 kHz Estéreo (mismo volumen en todos los canales)"
-                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-200 border border-amber-400/35 font-mono text-[9px] font-bold"
-                              >
-                                <Volume2 className="w-2.5 h-2.5 text-amber-300" />
-                                AUDIO IGUAL
+                (() => {
+                  let lastCategory = null;
+                  return pageRows.map((s) => {
+                    const isChecked = selectedIds.includes(s.id);
+                    const slateMode = s.offline_slate_mode || 'disabled';
+                    const hasSource2 = Boolean(String(s.backup_url || '').trim());
+                    const activeUrl =
+                      s.failover_active && hasSource2 ? String(s.backup_url).trim() : s.source_url;
+                    const audioLevelOn = audioLevelOnFor(s);
+                    const category = s.category_name || 'General';
+
+                    const categoryRow =
+                      groupByCat && category !== lastCategory ? (
+                        <tr key={`cat-${category}`} className="bg-[#0b1220]">
+                          <td colSpan={8} className="px-3 py-1.5">
+                            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
+                              <Layers className="h-3 w-3 text-indigo-400" />
+                              {category}
+                              <span className="font-mono text-[9px] font-medium normal-case tracking-normal text-slate-500">
+                                {filtered.filter((x) => (x.category_name || 'General') === category).length} canales
                               </span>
-                            )}
-                          {s.headend_node_id && (
-                            <span
-                              title={`Procesado y nivelado localmente en Nodo Cabecera (${s.headend_node_name || 'ProLiant'}) — La Nube solo hace Copy/Copy (0% CPU)`}
-                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 font-mono text-[9px] font-bold"
-                            >
-                              🖥️ PROLIANT {s.headend_mode === 'vip_247' ? 'VIP 24/7' : 'ON-DEMAND'}
-                            </span>
-                          )}
-                          {s.resolution_tier && (
-                            <span
-                              title={
-                                s.resolution_source === 'probed'
-                                  ? `Medido en vivo con FFmpeg (${s.detected_resolution})`
-                                  : s.resolution_source === 'hls_manifest'
-                                  ? `Leído del manifiesto HLS (${s.detected_resolution})`
-                                  : `Clasificado por nombre del canal (${s.detected_resolution})`
-                              }
-                              className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold border ${
-                                s.resolution_tier === 'fhd'
-                                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
-                                  : s.resolution_tier === 'sd'
-                                  ? 'bg-teal-500/15 text-teal-300 border-teal-500/35'
-                                  : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/35'
-                              }`}
-                            >
-                              {s.resolution_tier === 'fhd'
-                                ? 'FHD'
-                                : s.resolution_tier === 'sd'
-                                ? 'SD/540p'
-                                : 'HD 720p'}{' '}
-                              {s.detected_resolution ? `• ${s.detected_resolution}` : ''}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-slate-400 mt-0.5">
-                          {s.profile_name || 'Direct Stream'} •{' '}
-                          {s.stream_mode === 'direct' ||
-                          s.profile_video_codec === 'copy' ||
-                          !s.profile_video_bitrate ||
-                          s.profile_video_bitrate === 'source'
-                            ? s.bitrate_kbps && s.bitrate_kbps !== 2500
-                              ? `Bitrate Original (${s.bitrate_kbps} kbps)`
-                              : 'Bitrate Original (Source)'
-                            : s.profile_video_bitrate}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        {slateMode === 'disabled' ? (
-                          <span className="text-[10px] text-slate-500">Desactivado</span>
-                        ) : slateMode === 'custom_image' || slateMode === 'custom_video' ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px] font-semibold">
-                            {slateMode === 'custom_image' ? (
-                              <ImageIcon className="w-3 h-3" />
-                            ) : (
-                              <Film className="w-3 h-3" />
-                            )}
-                            Propio
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-slate-600" title="Este canal no tiene señal de respaldo: si se cae el origen, el reproductor recibe el error del canal.">
-                            Sin respaldo
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <button
-                          onClick={() => toggleArchive(s)}
-                          title="Activar/Desactivar Grabación Catchup DVR en disco"
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition ${
-                            s.archive_enabled
-                              ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                              : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-white'
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null;
+                    lastCategory = category;
+
+                    return (
+                      <React.Fragment key={s.id}>
+                        {categoryRow}
+                        <tr
+                          className={`group transition-colors ${
+                            isChecked ? 'bg-indigo-500/[0.07]' : 'hover:bg-white/[0.025]'
                           }`}
                         >
-                          <span
-                            className={`w-1.5 h-1.5 rounded-full ${
-                              s.archive_enabled ? 'bg-rose-400 animate-ping' : 'bg-slate-500'
-                            }`}
-                          />
-                          {s.archive_enabled ? `REC ${s.tv_archive_days || 3}d` : 'DVR OFF'}
-                        </button>
-                        {s.archive_enabled ? (
-                          <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                            {s.archiveStats?.segmentCount || 0} segs • {s.archiveStats?.sizeMb || 0} MB
-                          </div>
-                        ) : null}
-                      </td>
-                      <td className="px-4 py-3">
-                        {s.status === 'running' ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold text-[11px]">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                            ONLINE
-                          </span>
-                        ) : s.status === 'ondemand_idle' ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold text-[11px]">
-                            ON-DEMAND
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30 font-semibold text-[11px]">
-                            DETENIDO
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleProbeSingleStream(s)}
-                            disabled={probingSingleId === s.id}
-                            title="Medir resolución real de este canal (FFmpeg/HLS)"
-                            className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 transition"
-                          >
-                            <Monitor className={`w-3.5 h-3.5 ${probingSingleId === s.id ? 'animate-spin' : ''}`} />
-                          </button>
+                          <td className="px-3 py-2 align-middle">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleSelectStream(s.id)}
+                              className="h-3.5 w-3.5 cursor-pointer rounded accent-indigo-500"
+                            />
+                          </td>
 
-                          <button
-                            onClick={() =>
-                              onPreview({
-                                id: s.id,
-                                kind: 'live',
-                                title: s.name,
-                                url: s.source_url
-                              })
-                            }
-                            title="Previsualizar Stream (o Bucle Offline si está sin señal)"
-                            className="p-1.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600 text-indigo-300 hover:text-white transition"
-                          >
-                            <Play className="w-3.5 h-3.5" />
-                          </button>
+                          <td className="px-2 py-2 align-middle">
+                            <div className="flex items-center gap-1.5">
+                              {viewSort === 'lineup' && !search && resFilter === 'all' && (
+                                <div className="flex flex-col gap-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleInlineNudgeStream(s.id, -1)}
+                                    title="Subir 1 puesto en la parrilla"
+                                    className="flex h-3 w-3.5 items-center justify-center rounded-sm text-slate-500 transition hover:bg-sky-500/20 hover:text-sky-300"
+                                  >
+                                    <ArrowUp className="h-2.5 w-2.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleInlineNudgeStream(s.id, 1)}
+                                    title="Bajar 1 puesto en la parrilla"
+                                    className="flex h-3 w-3.5 items-center justify-center rounded-sm text-slate-500 transition hover:bg-sky-500/20 hover:text-sky-300"
+                                  >
+                                    <ArrowDown className="h-2.5 w-2.5" />
+                                  </button>
+                                </div>
+                              )}
+                              <div className="leading-tight">
+                                <div className="font-mono text-[11px] font-bold text-sky-300">
+                                  #{lineupIndexMap.get(s.id) || s.sort_order || s.id}
+                                </div>
+                                <div className="font-mono text-[9px] text-slate-600">ID {s.id}</div>
+                              </div>
+                            </div>
+                          </td>
 
-                          {s.status === 'running' ? (
-                            <button
-                              onClick={() => handleAction(s.id, 'stop')}
-                              title="Detener"
-                              className="p-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/30 text-amber-300 transition"
-                            >
-                              <Square className="w-3.5 h-3.5" />
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => handleAction(s.id, 'start')}
-                              title="Iniciar"
-                              className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 transition"
-                            >
-                              <RotateCw className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          <td className="px-2 py-2 align-middle">
+                            <div className="flex items-center gap-2.5">
+                              <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md border border-slate-700/80 bg-slate-800">
+                                {s.logo_url ? (
+                                  <img
+                                    src={s.logo_url}
+                                    alt={s.name}
+                                    loading="lazy"
+                                    className="h-full w-full object-cover"
+                                  />
+                                ) : (
+                                  <Radio className="h-3.5 w-3.5 text-indigo-400" />
+                                )}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="truncate text-[12.5px] font-semibold text-slate-100 group-hover:text-white">
+                                    {s.name}
+                                  </span>
+                                  {hasSource2 && (
+                                    <Chip
+                                      tone="sky"
+                                      title={`Tiene un segundo source guardado (manual, no entra solo)\n${String(
+                                        s.backup_url
+                                      ).trim()}`}
+                                    >
+                                      SOURCE 2
+                                    </Chip>
+                                  )}
+                                </div>
+                                <div className="mt-[1px] flex items-center gap-1.5 text-[9.5px] text-slate-500">
+                                  <span className="max-w-[150px] truncate">{category}</span>
+                                  <span className="text-slate-700">·</span>
+                                  <span className="truncate">{s.server_name || 'Servidor 1'}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
 
-                          <button
-                            onClick={() => showFfmpeg(s)}
-                            title="Ver Comando FFmpeg"
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
-                          >
-                            <Terminal className="w-3.5 h-3.5" />
-                          </button>
+                          <td className="px-2 py-2 align-middle">
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-1.5" title={activeUrl}>
+                                <Globe className="h-3 w-3 shrink-0 text-slate-500" />
+                                <span className="max-w-[150px] truncate font-mono text-[10px] text-slate-400">
+                                  {sourceHost(activeUrl)}
+                                </span>
+                              </div>
+                              {hasSource2 ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSwitchSource(s, s.failover_active ? 'primary' : 'backup')
+                                  }
+                                  title={
+                                    s.failover_active
+                                      ? `Este canal está emitiendo su SOURCE 2\n${s.backup_url}\nClic para volver al source original`
+                                      : `Emitir desde el SOURCE 2 de este canal (manual)\n${s.backup_url}\nClic para cambiar`
+                                  }
+                                  className={`inline-flex w-fit items-center gap-1 rounded border px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide transition ${
+                                    s.failover_active
+                                      ? 'border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'
+                                      : 'border-slate-700/70 bg-slate-800/60 text-slate-400 hover:text-sky-300'
+                                  }`}
+                                >
+                                  <ArrowLeftRight className="h-2.5 w-2.5" />
+                                  {s.failover_active ? 'Volver a SOURCE 1' : 'Usar SOURCE 2'}
+                                </button>
+                              ) : (
+                                <span className="font-mono text-[9px] text-slate-600">sin source 2</span>
+                              )}
+                            </div>
+                          </td>
 
-                          {Boolean(String(s.backup_url || '').trim()) && (
-                            <button
-                              onClick={() => handleSwitchSource(s, s.failover_active ? 'primary' : 'backup')}
-                              title={
-                                s.failover_active
-                                  ? `Este canal está emitiendo su SOURCE 2\n${s.backup_url}\nClic para volver al source original`
-                                  : `Emitir desde el SOURCE 2 de este canal (manual)\n${s.backup_url}\nClic para cambiar`
-                              }
-                              className={`p-1.5 rounded-lg transition ${
-                                s.failover_active
-                                  ? 'bg-amber-500/20 hover:bg-amber-500/35 text-amber-300'
-                                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-                              }`}
-                            >
-                              <ArrowLeftRight className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          <td className="px-2 py-2 align-middle">
+                            <div className="flex max-w-[300px] flex-wrap items-center gap-1">
+                              <Chip tone="indigo">{s.stream_mode}</Chip>
+                              {s.profile_video_codec === 'copy' && s.stream_mode !== 'direct' && (
+                                <Chip tone="emerald">{audioLevelOn ? 'COPY VIDEO' : 'COPY/COPY'}</Chip>
+                              )}
+                              {s.stream_mode !== 'direct' && audioLevelOn && (
+                                <Chip
+                                  tone="amber"
+                                  icon={Volume2}
+                                  title="Audio nivelado dinámicamente a 48 kHz Estéreo (mismo volumen en todos los canales)"
+                                >
+                                  AUDIO IGUAL
+                                </Chip>
+                              )}
+                              {s.headend_node_id && (
+                                <Chip
+                                  tone="cyan"
+                                  title={`Procesado y nivelado localmente en Nodo Cabecera (${
+                                    s.headend_node_name || 'ProLiant'
+                                  }) — La Nube solo hace Copy/Copy (0% CPU)`}
+                                >
+                                  {s.headend_mode === 'vip_247' ? 'PROLIANT VIP' : 'PROLIANT ONDEMAND'}
+                                </Chip>
+                              )}
+                              {s.resolution_tier && (
+                                <Chip
+                                  tone={
+                                    s.resolution_tier === 'fhd'
+                                      ? 'amber'
+                                      : s.resolution_tier === 'sd'
+                                        ? 'emerald'
+                                        : 'cyan'
+                                  }
+                                  title={
+                                    s.resolution_source === 'probed'
+                                      ? `Medido en vivo con FFmpeg (${s.detected_resolution})`
+                                      : s.resolution_source === 'hls_manifest'
+                                        ? `Leído del manifiesto HLS (${s.detected_resolution})`
+                                        : `Clasificado por nombre del canal (${s.detected_resolution})`
+                                  }
+                                >
+                                  {s.resolution_tier === 'fhd'
+                                    ? 'FHD'
+                                    : s.resolution_tier === 'sd'
+                                      ? 'SD/540p'
+                                      : 'HD 720p'}
+                                  {s.detected_resolution ? ` • ${s.detected_resolution}` : ''}
+                                </Chip>
+                              )}
+                            </div>
+                            <div className="mt-[3px] truncate text-[9.5px] text-slate-500">
+                              {s.profile_name || 'Direct Stream'} •{' '}
+                              {s.stream_mode === 'direct' ||
+                              s.profile_video_codec === 'copy' ||
+                              !s.profile_video_bitrate ||
+                              s.profile_video_bitrate === 'source'
+                                ? s.bitrate_kbps && s.bitrate_kbps !== 2500
+                                  ? `Bitrate Original (${s.bitrate_kbps} kbps)`
+                                  : 'Bitrate Original (Source)'
+                                : s.profile_video_bitrate}
+                            </div>
+                          </td>
 
-                          <button
-                            onClick={() => openEdit(s)}
-                            title="Editar"
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
+                          <td className="px-2 py-2 align-middle">
+                            <div className="flex flex-col items-start gap-1">
+                              <button
+                                onClick={() => toggleArchive(s)}
+                                title="Activar/Desactivar Grabación Catchup DVR en disco"
+                                className={`inline-flex items-center gap-1 rounded border px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide transition ${
+                                  s.archive_enabled
+                                    ? 'border-rose-500/40 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
+                                    : 'border-slate-700/70 bg-slate-800/60 text-slate-400 hover:text-white'
+                                }`}
+                              >
+                                <span
+                                  className={`h-1.5 w-1.5 rounded-full ${
+                                    s.archive_enabled ? 'animate-ping bg-rose-400' : 'bg-slate-500'
+                                  }`}
+                                />
+                                {s.archive_enabled ? `REC ${s.tv_archive_days || 3}d` : 'DVR OFF'}
+                              </button>
+                              {slateMode === 'disabled' ? (
+                                <span
+                                  className="text-[9px] text-slate-600"
+                                  title="Este canal no tiene señal de respaldo: si se cae el origen, el reproductor recibe el error del canal."
+                                >
+                                  respaldo: off
+                                </span>
+                              ) : slateMode === 'custom_image' || slateMode === 'custom_video' ? (
+                                <Chip
+                                  tone="violet"
+                                  icon={slateMode === 'custom_image' ? ImageIcon : Film}
+                                  title="Respaldo propio (imagen o video) cuando el canal se queda sin señal"
+                                >
+                                  propio
+                                </Chip>
+                              ) : (
+                                <span className="text-[9px] text-slate-600">sin respaldo</span>
+                              )}
+                              {s.archive_enabled && s.archiveStats ? (
+                                <span className="font-mono text-[9px] text-slate-500">
+                                  {s.archiveStats.segmentCount || 0} segs · {s.archiveStats.sizeMb || 0} MB
+                                </span>
+                              ) : null}
+                            </div>
+                          </td>
 
-                          <button
-                            onClick={() => handleDelete(s.id)}
-                            title="Eliminar"
-                            className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 transition"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
+                          <td className="px-2 py-2 align-middle">
+                            <StatusPill
+                              status={s.status}
+                              uptimeStartedAt={s.uptime_started_at}
+                              now={clockNow}
+                            />
+                          </td>
+
+                          <td className="px-3 py-2 align-middle">
+                            <div className="flex items-center justify-end gap-1">
+                              <IconAction
+                                icon={Play}
+                                tone="indigo"
+                                label="Previsualizar Stream (o Bucle Offline si está sin señal)"
+                                onClick={() =>
+                                  onPreview({
+                                    id: s.id,
+                                    kind: 'live',
+                                    title: s.name,
+                                    url: s.source_url
+                                  })
+                                }
+                              />
+                              {s.status === 'running' ? (
+                                <IconAction
+                                  icon={Square}
+                                  tone="amber"
+                                  label="Detener"
+                                  onClick={() => handleAction(s.id, 'stop')}
+                                />
+                              ) : (
+                                <IconAction
+                                  icon={RotateCw}
+                                  tone="emerald"
+                                  label="Iniciar"
+                                  onClick={() => handleAction(s.id, 'start')}
+                                />
+                              )}
+                              <IconAction icon={Edit3} label="Editar canal" onClick={() => openEdit(s)} />
+                              <RowMenu
+                                items={[
+                                  {
+                                    icon: Monitor,
+                                    label:
+                                      probingSingleId === s.id ? 'Midiendo resolución...' : 'Medir resolución real',
+                                    disabled: probingSingleId === s.id,
+                                    onClick: () => handleProbeSingleStream(s)
+                                  },
+                                  {
+                                    icon: Terminal,
+                                    label: 'Ver comando FFmpeg',
+                                    onClick: () => showFfmpeg(s)
+                                  },
+                                  hasSource2
+                                    ? {
+                                        icon: ArrowLeftRight,
+                                        label: s.failover_active
+                                          ? 'Volver al SOURCE 1'
+                                          : 'Emitir desde SOURCE 2',
+                                        onClick: () =>
+                                          handleSwitchSource(s, s.failover_active ? 'primary' : 'backup')
+                                      }
+                                    : null,
+                                  {
+                                    icon: Layers,
+                                    label: `Ordenar en la parrilla (#${
+                                      lineupIndexMap.get(s.id) || s.sort_order || s.id
+                                    })`,
+                                    onClick: () => openOrderModal('streams')
+                                  },
+                                  { separator: true },
+                                  {
+                                    icon: Trash2,
+                                    label: 'Eliminar canal',
+                                    danger: true,
+                                    onClick: () => handleDelete(s.id)
+                                  }
+                                ]}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                      </React.Fragment>
+                    );
+                  });
+                })()
               )}
             </tbody>
           </table>
         </div>
+
+        {groupByCat ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/70 bg-[#0b1220]/60 px-4 py-2 text-[11px] text-slate-400">
+            <span>
+              Vista agrupada · {filtered.length} canales en pantalla (sin paginar)
+            </span>
+            <button
+              type="button"
+              onClick={() => setGroupByCat(false)}
+              className="font-semibold text-indigo-300 hover:text-white"
+            >
+              Volver a lista paginada
+            </button>
+          </div>
+        ) : (
+          <Pager
+            page={safePage}
+            pageSize={pageSize}
+            total={filtered.length}
+            onPage={setPage}
+            onPageSize={setPageSize}
+          />
+        )}
       </div>
 
       {/* ==================== MODAL: AUDITORÍA DE FUENTES ==================== */}
