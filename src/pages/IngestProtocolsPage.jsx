@@ -554,8 +554,8 @@ export default function IngestProtocolsPage() {
           <div className="bg-[#0d1322] border border-slate-800 rounded-2xl p-5 space-y-4">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
-                <div className="flex items-center gap-2.5">
-                  <h2 className="text-base font-bold text-white">Motor Servidor RTMP / SRT / RTSP (MediaMTX Isolado)</h2>
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <h2 className="text-base font-bold text-white">Motor Servidor RTMP / SRT / RTSP</h2>
                   <span
                     className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
                       ingestStatus?.running
@@ -569,9 +569,39 @@ export default function IngestProtocolsPage() {
                       ? 'DETENIDO'
                       : 'BINARIO PENDIENTE DE DESCARGA'}
                   </span>
+                  {/* Qué motor está recibiendo realmente la señal */}
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                      ingestStatus?.engineType === 'mediamtx'
+                        ? 'bg-sky-500/20 text-sky-300 border-sky-500/30'
+                        : ingestStatus?.engineType === 'native_node'
+                        ? 'bg-violet-500/20 text-violet-300 border-violet-500/30'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                    title={
+                      ingestStatus?.engineType === 'mediamtx'
+                        ? 'Binario externo MediaMTX (aislado en /opt/tvlister24-7/.runtime/bin, sin apt)'
+                        : ingestStatus?.engineType === 'native_node'
+                        ? 'Motor propio de TVLister escrito en Node (RTMP + RTSP + socket UDP para SRT)'
+                        : 'Motor detenido'
+                    }
+                  >
+                    {ingestStatus?.engineType === 'mediamtx'
+                      ? `MOTOR: ${ingestStatus?.version || 'MediaMTX'}`
+                      : ingestStatus?.engineType === 'native_node'
+                      ? 'MOTOR: PROPIO (Node)'
+                      : 'MOTOR: DETENIDO'}
+                  </span>
                 </div>
                 <p className="text-xs text-slate-400 mt-1">
                   Recibe señales en vivo desde OBS Studio, vMix, Larix Broadcaster, encoders Haivision/Kiloview o cámaras IP sin tocar paquetes del sistema Ubuntu (<code className="text-cyan-300">Zero-Apt</code>, 100% seguro junto a XUI.one).
+                </p>
+                <p className="text-[11px] text-slate-500 mt-1.5">
+                  Esto es la <b className="text-slate-300">entrada</b> (quien te manda señal). Cuando el panel
+                  <b className="text-slate-300"> jala</b> de un proveedor lo hace con User-Agent
+                  <code className="text-cyan-300"> TVLister/2.3</code>, y el transporte propio entre paneles es
+                  <code className="text-cyan-300"> MNF v1</code>. La sesión <code className="text-slate-300">Streamer 23.12</code>
+                  que ves en Astra es de Flussonic, no de este motor.
                 </p>
               </div>
 
