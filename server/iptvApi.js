@@ -10,6 +10,7 @@ import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import { resolveIpGeoSync } from './geoIspResolver.js';
 import { ensureSlateManifestForStream, pipeSlateContinuousMpegTs } from './offlineSlateEngine.js';
+import { buildPlayerPlaylist, prewarmNeighbours } from './zapFast.js';
 import { resolvePublicPosterUrl, normalizeXuiOrTmdbImageUrl, verifyLocalPosterPath } from './vodSyncTmdb.js';
 import {
   computeChannel247LiveState,
@@ -556,6 +557,65 @@ function wakeOnDemandTranscodeIfNeeded(stream) {
     }
   );
   return Boolean(getWorkerPid(workerKey));
+}
+
+/**
+ * Orden en el que el abonado zapea (misma categoría primero, luego el resto).
+ * Se usa sólo para precargar los canales de al lado.
+ */
+function zapOrderFor(stream) {
+  const rows = db
+    .prepare(
+      `SELECT id FROM streams
+        WHERE status IN ('running','ondemand_idle')
+        ORDER BY CASE WHEN category_id = ? THEN 0 ELSE 1 END, sort_order ASC, id ASC`
+    )
+    .all(Number(stream.category_id) || -1);
+  return rows.map((r) => Number(r.id));
+}
+
+/** Arranca en segundo plano los canales N±1 para que el siguiente zapeo sea instantáneo. */
+function scheduleZapPrewarm(stream) {
+  try {
+    const cfg = getFfmpegEngineConfig();
+    if (!cfg.zapPrewarm || !cfg.zapPrewarmCount) return;
+    if (String(stream.stream_mode || '') === 'direct') return;
+    if (!isFfmpegAvailable()) return;
+
+    // Se hace fuera del ciclo de respuesta: el abonado no espera nada por esto.
+    setTimeout(() => {
+      try {
+        prewarmNeighbours(stream.id, {
+          count: cfg.zapPrewarmCount,
+          maxExtra: Math.max(2, cfg.zapPrewarmCount * 2),
+          cooldownMs: 3_000,
+          maxRunningWorkers: 400,
+          isRunningCount: () => {
+            try {
+              return db.prepare("SELECT COUNT(*) AS c FROM streams WHERE pid IS NOT NULL AND pid > 0").get()?.c || 0;
+            } catch {
+              return 0;
+            }
+          },
+          listOrder: () => zapOrderFor(stream),
+          isRunning: (id) => Boolean(getWorkerPid(`stream_${id}`)),
+          start: (id) => {
+            const row = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+            if (!row || row.status === 'stopped') return;
+            if (row.status === 'ondemand_idle') {
+              db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(id);
+              row.status = 'running';
+            }
+            wakeOnDemandTranscodeIfNeeded(row);
+          }
+        });
+      } catch {
+        // la precarga es oportunista: nunca rompe la reproducción
+      }
+    }, 350).unref?.();
+  } catch {
+    // configuración no disponible
+  }
 }
 
 async function waitForFreshWorkerManifest(workerKey, maxWaitMs = 4200) {
@@ -1206,9 +1266,27 @@ async function serveLocalHlsManifest(req, res, manifestPath, { username, passwor
     return true;
   }
   const baseSegUrl = `/hls_out/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${workerKey}/`;
-  const rewritten = text.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
+  const cfg = getFfmpegEngineConfig();
+
+  // Zapping rápido: el reproductor sólo recibe los últimos N segmentos + EXT-X-START.
+  // El manifiesto interno del FFmpeg sigue igual (hlsListSize); lo que cambia es lo que
+  // se le entrega al player, que así arranca en el borde del directo y no 6-12 s atrás.
+  const windowFromQuery = Number(req.query?.window);
+  const windowSegments = Number.isFinite(windowFromQuery) && windowFromQuery > 0
+    ? Math.max(1, Math.min(12, windowFromQuery))
+    : cfg.playerWindowSegments;
+  const play = buildPlayerPlaylist(text, {
+    windowSegments,
+    hlsTime: cfg.hlsTime,
+    rewriteUri: (uri) => `${baseSegUrl}${path.basename(uri.trim())}`
+  });
+  const rewritten = play.segments > 0
+    ? play.text
+    : text.replace(/^(?!#)([^\r\n]+)$/gm, (m) => `${baseSegUrl}${path.basename(m.trim())}`);
+
   res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-TVLister-Zap-Window', String(play.segments || 0));
   if (pre.segments > 0) {
     res.setHeader('X-TVLister-Prebuffer', String(pre.segments));
     res.setHeader('X-TVLister-Prebuffer-Wait', String(waitedMs));
@@ -1441,6 +1519,7 @@ async function serveLiveStreamRequest(req, res) {
   }
 
   const hasActiveWorker = wakeOnDemandTranscodeIfNeeded(stream);
+  scheduleZapPrewarm(stream);
 
   const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, protocol);
   if (!conn.allowed) return res.status(429).send(conn.error);
@@ -1463,7 +1542,11 @@ async function serveLiveStreamRequest(req, res) {
     }
   }
 
-  const coldWaitMs = stream.headend_node_id ? 10500 : 4200;
+  // Un arranque en frío de FFmpeg tarda ~2 s de segmento + la sonda (analyze/probe).
+  // Antes se esperaba 4.2 s y el manifiesto llegaba tarde: el reproductor recibía un
+  // 404 y volvía a pedir (= "queda cargando"). Ahora se espera lo suficiente para
+  // entregar el manifiesto en el PRIMER intento.
+  const coldWaitMs = stream.headend_node_id ? 10500 : 7000;
   const localManifest = hasActiveWorker
     ? await waitForFreshWorkerManifest(workerKey, coldWaitMs)
     : getFreshLocalHlsManifestPath(workerKey, 18);

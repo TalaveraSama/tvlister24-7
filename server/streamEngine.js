@@ -213,14 +213,24 @@ function ffmpegChoiceById(id) {
 
 /** Variables de entorno que necesitan los binarios de XUI.one (libs propias). */
 export function ffmpegEnvFor(bin = '') {
-  if (!String(bin).startsWith('/home/xui/')) return process.env;
-  const libDirs = ['/home/xui/bin/ffmpeg', '/home/xui/lib'];
-  const versionDir = path.dirname(String(bin));
-  if (versionDir.startsWith('/home/xui/')) libDirs.unshift(versionDir);
-  return {
-    ...process.env,
-    LD_LIBRARY_PATH: `${libDirs.join(':')}:${process.env.LD_LIBRARY_PATH || ''}`
-  };
+  const runtimeLib = path.join(process.env.APP_DIR || '/opt/tvlister24-7', '.runtime/lib');
+  if (String(bin).startsWith('/home/xui/')) {
+    const libDirs = ['/home/xui/bin/ffmpeg', '/home/xui/lib'];
+    const versionDir = path.dirname(String(bin));
+    if (versionDir.startsWith('/home/xui/')) libDirs.unshift(versionDir);
+    return {
+      ...process.env,
+      LD_LIBRARY_PATH: `${libDirs.join(':')}:${runtimeLib}:${process.env.LD_LIBRARY_PATH || ''}`
+    };
+  }
+  // Binario copiado dentro del panel (.runtime/bin): sus librerías viven en .runtime/lib
+  if (String(bin).includes(`${path.sep}.runtime${path.sep}`) && fs.existsSync(runtimeLib)) {
+    return {
+      ...process.env,
+      LD_LIBRARY_PATH: `${runtimeLib}:${process.env.LD_LIBRARY_PATH || ''}`
+    };
+  }
+  return process.env;
 }
 
 /** Ejecuta `<bin> -version` y devuelve versión + build (o el motivo del fallo). */
@@ -639,7 +649,20 @@ export const FFMPEG_ENGINE_DEFAULTS = {
   prebufferSegments: 0,
   prebufferWaitMs: 3000,
   // Binario FFmpeg elegido ('auto' = orden histórico del motor)
-  binPreference: 'auto'
+  binPreference: 'auto',
+  // ---- Zapping rápido ----
+  // Segmentos que ve el REPRODUCTOR (el manifiesto interno sigue teniendo hlsListSize).
+  // Con 2 el reproductor arranca en el borde del directo en vez de precargar 6-12 s.
+  playerWindowSegments: 2,
+  // Precarga de canales vecinos (zapeo N±1) para que el siguiente canal abra al instante.
+  zapPrewarm: true,
+  zapPrewarmCount: 1,
+  // FFmpeg escribe el segmento en .tmp y lo renombra al terminar: el reproductor nunca
+  // lee un segmento a medio escribir (eso era "audio sí / video congelado").
+  hlsTempFile: true,
+  // Al re-codificar vídeo, fuerza un keyframe en cada frontera de segmento.
+  // Sin efecto en perfiles Copy/Copy (el vídeo no se toca).
+  keyframeAlign: true
 };
 
 export const FFMPEG_ENGINE_LIMITS = {
@@ -654,7 +677,9 @@ export const FFMPEG_ENGINE_LIMITS = {
   tailerIntervalMs: [80, 500],
   tailerBurst: [1, 4],
   prebufferSegments: [0, 6],
-  prebufferWaitMs: [500, 15000]
+  prebufferWaitMs: [500, 15000],
+  playerWindowSegments: [1, 12],
+  zapPrewarmCount: [0, 3]
 };
 
 function clampInt(value, min, max, fallback) {
@@ -683,7 +708,8 @@ export function getFfmpegEngineConfig() {
            'ffmpeg_probe_local','ffmpeg_analyze_local','ffmpeg_hls_time','ffmpeg_hls_list_size',
            'ffmpeg_log_level','ffmpeg_ram_reserve_mb','ffmpeg_tailer_interval_ms','ffmpeg_tailer_burst',
            'ffmpeg_ts_join_segment','ffmpeg_prebuffer_segments','ffmpeg_prebuffer_wait_ms',
-           'ffmpeg_bin_preference'
+           'ffmpeg_bin_preference','ffmpeg_player_window_segments','ffmpeg_zap_prewarm',
+           'ffmpeg_zap_prewarm_count','ffmpeg_hls_temp_file','ffmpeg_keyframe_align'
          )`
       )
       .all();
@@ -730,7 +756,32 @@ export function getFfmpegEngineConfig() {
     ),
     binPreference: isValidFfmpegPreference(map.ffmpeg_bin_preference)
       ? String(map.ffmpeg_bin_preference)
-      : d.binPreference
+      : d.binPreference,
+    // ---- Zapping rápido ----
+    playerWindowSegments: clampInt(
+      map.ffmpeg_player_window_segments,
+      L.playerWindowSegments[0],
+      L.playerWindowSegments[1],
+      d.playerWindowSegments
+    ),
+    zapPrewarm:
+      map.ffmpeg_zap_prewarm === undefined || map.ffmpeg_zap_prewarm === ''
+        ? d.zapPrewarm
+        : String(map.ffmpeg_zap_prewarm) === 'true',
+    zapPrewarmCount: clampInt(
+      map.ffmpeg_zap_prewarm_count,
+      L.zapPrewarmCount[0],
+      L.zapPrewarmCount[1],
+      d.zapPrewarmCount
+    ),
+    hlsTempFile:
+      map.ffmpeg_hls_temp_file === undefined || map.ffmpeg_hls_temp_file === ''
+        ? d.hlsTempFile
+        : String(map.ffmpeg_hls_temp_file) === 'true',
+    keyframeAlign:
+      map.ffmpeg_keyframe_align === undefined || map.ffmpeg_keyframe_align === ''
+        ? d.keyframeAlign
+        : String(map.ffmpeg_keyframe_align) === 'true'
   };
 
   efficiencyCache = { value: cfg, expiresAt: now + 3000 };
@@ -972,6 +1023,13 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
       args.push('-s', profile.resolution, '-sws_flags', 'fast_bilinear');
     }
     args.push('-g', isZeroLatency ? '30' : '48', '-sc_threshold', '0');
+    // Keyframe forzado en cada frontera de segmento: el reproductor puede empezar a
+    // decodificar en cualquier segmento (zapping instantáneo, sin "audio primero y
+    // vídeo congelado"). Sólo aplica cuando TVLister re-codifica el vídeo.
+    if (efficiency.keyframeAlign !== false && !/-force_key_frames\b/.test(extraStr)) {
+      const kf = String(isZeroLatency ? efficiency.hlsTime : Math.max(4, efficiency.hlsTime));
+      args.push('-force_key_frames', `expr:gte(t,n_forced*${kf})`);
+    }
     args.push(...splitExtraFlags(extraStr));
   } else {
     // Copy puro: descarta duplicados de -fflags/-flags/-probesize/-analyzeduration/-max_muxing_queue_size
@@ -1026,9 +1084,16 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   }
 
   const hlsTime = String(isZeroLatency ? efficiency.hlsTime : Math.max(4, efficiency.hlsTime));
-  const hlsFlags = isZeroLatency
-    ? 'delete_segments+independent_segments+omit_endlist'
-    : 'delete_segments+append_list+omit_endlist';
+  // +temp_file: FFmpeg escribe el segmento en un .tmp y lo renombra al completarlo.
+  // Sin esto el reproductor puede pedir un segmento a medio escribir justo al zapear
+  // (= audio sí, vídeo congelado hasta el siguiente keyframe).
+  const hlsExtraFlags = [];
+  if (efficiency.hlsTempFile !== false) hlsExtraFlags.push('temp_file');
+  const hlsFlags = [
+    ...(isZeroLatency ? ['delete_segments', 'independent_segments'] : ['delete_segments', 'append_list']),
+    ...hlsExtraFlags,
+    'omit_endlist'
+  ].join('+');
   const outM3u8 = path.join(outDir, 'index.m3u8');
 
   if (dualTeeTsPipe) {

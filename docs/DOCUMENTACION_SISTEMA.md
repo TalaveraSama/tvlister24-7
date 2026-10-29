@@ -1359,3 +1359,44 @@ La lista cambia **dónde se sienta** cada canal dentro del equipo, no su frecuen
 
 **Aviso de campo:** los canales 95–99 (91.25–115.25 MHz) caen en la banda de FM y los 14–22 en la aeronáutica.
 Si aparece ruido en esos canales, se ajusta en el equipo (`Aeronautical Radio Offset`), no en el panel.
+
+### 8.26. Zapping rápido (cambio de canal) y binario FFmpeg dentro del panel
+
+**Por qué el zapeo se sentía lento.** El motor escribe 6 segmentos de 2 s en el manifiesto interno. El panel
+entregaba ese mismo manifiesto al reproductor, y los reproductores (hls.js, ExoPlayer/TiviMate, VLC) precargan
+unos 3 segmentos antes de mostrar imagen: **6 a 12 s de espera por canal**, con audio primero y vídeo apareciendo
+después. En canales `ondemand` se sumaba el arranque en frío de FFmpeg (sonda + primer segmento).
+
+**Lo que se cambió (sin tocar la línea estable de argumentos salvo lo indicado)**
+
+| Palanca | Qué hace | Ajuste |
+| --- | --- | --- |
+| Ventana al reproductor | Sirve sólo los últimos N segmentos + `#EXT-X-START:TIME-OFFSET=-1` | `playerWindowSegments` (por defecto **2**) |
+| Precarga de vecinos | Al abrir el canal N arranca N-1 y N+1 en segundo plano | `zapPrewarm` + `zapPrewarmCount` (1) |
+| Segmento completo | `+temp_file` en `-hls_flags`: se escribe en `.tmp` y se renombra | `hlsTempFile` (activado) |
+| Keyframe por segmento | `-force_key_frames expr:gte(t,n_forced*2)` sólo si TVLister re-codifica | `keyframeAlign` (activado) |
+
+`-force_key_frames` **no** se añade en perfiles Copy/Copy (el vídeo no se toca). El resto de la línea de
+argumentos es idéntico.
+
+Además, la espera del primer manifiesto en frío pasó de 4.2 s a 7 s: antes expiraba y el reproductor recibía un
+404 y volvía a pedir (**"queda cargando"**); ahora entrega el manifiesto en el primer intento.
+
+**Medición real (canal HLS de prueba, panel local)**
+
+| Ventana entregada | Datos antes de la primera imagen | Medios descargados |
+| --- | --- | --- |
+| 6 (antes) | 2.53 MB | 10 s |
+| 3 | 1.51 MB | 6 s |
+| **2 (nuevo)** | **1.00 MB** | **4 s** |
+
+La precarga se verificó con un canal `ondemand_idle` sin worker: al abrir su vecino, el canal apareció con
+proceso FFmpeg propio en menos de 6 s, de modo que el siguiente zapeo no paga arranque.
+
+**Binario FFmpeg dentro de la carpeta del panel**
+
+`tvlister-admin ffmpeg import-xui` copia el FFmpeg de XUI.one a `/opt/tvlister24-7/.runtime/bin/ffmpeg`
+(probando 4.4 → 4.3 → 4.0 → rutas antiguas), copia a `.runtime/lib` las librerías que falten, verifica que
+ejecute `-version` y fija la preferencia en `runtime`. El instalador hace lo mismo automáticamente si detecta
+XUI.one y todavía no hay binario en el panel. El motor añade `.runtime/lib` a `LD_LIBRARY_PATH` cuando usa el
+binario copiado, así que **el panel ya no depende de que /home/xui exista**.

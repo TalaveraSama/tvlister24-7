@@ -113,6 +113,66 @@ const FIELDS = [
     hint: 'auto es lo recomendado: los demás canales van por HLS en RAMDisk.'
   },
 
+  // ---------- zapping ----------
+  {
+    key: 'playerWindowSegments',
+    group: 'zap',
+    label: 'Segmentos entregados al reproductor',
+    type: 'select',
+    options: [
+      { value: 1, label: '1 — mínimo (2 s de ventana)' },
+      { value: 2, label: '2 — recomendado (zapping rápido)' },
+      { value: 3, label: '3 — algo más de margen' },
+      { value: 4, label: '4' },
+      { value: 6, label: '6 — igual que el manifiesto interno' }
+    ],
+    fmt: (v) => `${v} segmento(s)`,
+    hint:
+      'Cuántos segmentos ve el reproductor. Con 2 arranca en el borde del directo; con 6 los players ' +
+      'precargan 6-12 s y el zapeo se siente lento. El manifiesto interno no cambia.'
+  },
+  {
+    key: 'zapPrewarm',
+    group: 'zap',
+    label: 'Precargar canales vecinos',
+    type: 'bool',
+    fmt: (v) => (v ? 'activado' : 'desactivado'),
+    hint:
+      'Al abrir un canal se arranca en segundo plano el anterior y el siguiente: al zapear, el canal ya ' +
+      'está escribiendo su manifiesto en RAMDisk.'
+  },
+  {
+    key: 'zapPrewarmCount',
+    group: 'zap',
+    label: 'Vecinos a precargar por lado',
+    type: 'number',
+    min: 0,
+    max: 3,
+    step: 1,
+    fmt: (v) => (Number(v) === 0 ? 'ninguno' : `${v}`),
+    hint: 'Con 1 se precargan N-1 y N+1 (lo normal). Súbelo sólo si tienes CPU y RAM de sobra.'
+  },
+  {
+    key: 'hlsTempFile',
+    group: 'zap',
+    label: 'Segmento completo antes de publicarlo',
+    type: 'bool',
+    fmt: (v) => (v ? 'activado' : 'desactivado'),
+    hint:
+      'FFmpeg escribe el segmento en .tmp y lo renombra al terminar. Evita que el reproductor lea un ' +
+      'segmento a medio escribir (audio sí, vídeo congelado).'
+  },
+  {
+    key: 'keyframeAlign',
+    group: 'zap',
+    label: 'Keyframe en cada frontera de segmento',
+    type: 'bool',
+    fmt: (v) => (v ? 'activado' : 'desactivado'),
+    hint:
+      'Sólo cuando TVLister re-codifica el vídeo: garantiza imagen inmediata al entrar a un canal. ' +
+      'En perfiles Copy/Copy no cambia nada (el vídeo no se toca).'
+  },
+
   // ---------- avanzados ----------
   {
     key: 'probeHttp',
@@ -465,6 +525,7 @@ export default function FfmpegEnginePage() {
 
   const basicFields = FIELDS.filter((f) => f.group === 'basic');
   const advFields = FIELDS.filter((f) => f.group === 'adv');
+  const zapFields = FIELDS.filter((f) => f.group === 'zap');
 
   return (
     <div className="space-y-4">
@@ -660,6 +721,29 @@ export default function FfmpegEnginePage() {
             </div>
           </>
         ) : null}
+      </div>
+
+      {/* ================= Zapping ================= */}
+      <div className="rounded-2xl border border-slate-800/80 bg-[#0e1526] p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-bold text-white">
+            <Zap className="h-4 w-4 text-emerald-400" /> Zapping (cambio de canal)
+          </h3>
+          <span className="text-[10px] text-slate-500">
+            {data?.zapPrewarm?.started ? `precargas hechas: ${data.zapPrewarm.started}` : 'precarga de vecinos'}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+          {zapFields.map((field) => (
+            <OptionCard key={field.key} field={field} />
+          ))}
+        </div>
+        <p className="mt-2 text-[10.5px] leading-snug text-slate-500">
+          El manifiesto interno del motor no se toca: el reproductor recibe una ventana corta y
+          <span className="text-slate-300"> EXT-X-START</span> para abrir imagen de inmediato. Los canales
+          <span className="text-slate-300"> ondemand</span> se apagan solos a los 3 minutos sin espectadores, por eso la
+          precarga es la que hace que el zapeo se sienta instantáneo.
+        </p>
       </div>
 
       {/* ================= Binario (compacto) ================= */}

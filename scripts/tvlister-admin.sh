@@ -321,6 +321,7 @@ cmd_ffmpeg() {
         console.log("");
         console.log("  Elegir otro:   tvlister-admin ffmpeg use <id|auto|xui>");
         console.log("  Descargar uno: tvlister-admin ffmpeg install");
+        console.log("  Copiar el de XUI.one a la carpeta del panel: tvlister-admin ffmpeg import-xui");
         console.log("============================================================");
       '
       ;;
@@ -453,10 +454,92 @@ cmd_ffmpeg() {
         console.log("  Aplica el cambio con: tvlister-admin restart");
       '
       ;;
-    *)
-      echo "Uso: tvlister-admin ffmpeg [status|use <id>|install]"
-      return 1
+    import-xui)
+      # Copia el FFmpeg de XUI.one DENTRO de la carpeta del panel (.runtime/bin) para
+      # que el motor no dependa de /home/xui ni de que XUI.one esté instalado.
+      local src="" cand xui_dir
+      xui_dir="${XUI_DIR:-/home/xui}"
+      mkdir -p "$APP_DIR/.runtime/bin" "$APP_DIR/.runtime/lib"
+      for cand in \
+        "$xui_dir/bin/ffmpeg_bin/4.4/ffmpeg" \
+        "$xui_dir/bin/ffmpeg_bin/4.3/ffmpeg" \
+        "$xui_dir/bin/ffmpeg_bin/4.0/ffmpeg" \
+        "$xui_dir/bin/ffmpeg_bin/4.4/ffmpeg_bin" \
+        "$xui_dir/bin/ffmpeg_bin/4.3/ffmpeg_bin" \
+        "$xui_dir/bin/ffmpeg_bin/4.0/ffmpeg_bin" \
+        "$xui_dir/bin/ffmpeg/ffmpeg" \
+        "$xui_dir/bin/ffmpeg_bin" \
+        "$xui_dir/bin/ffmpeg"; do
+        if [ -f "$cand" ] && [ -x "$cand" ] && "$cand" -version >/dev/null 2>&1; then
+          src="$cand"
+          break
+        fi
+      done
+
+      if [ -z "$src" ]; then
+        echo "  [AVISO] No hay ningún FFmpeg ejecutable de XUI.one en ${xui_dir}."
+        echo "          El panel sigue usando el binario de .runtime o el empaquetado."
+        echo "          Instala uno propio con: tvlister-admin ffmpeg install"
+        return 1
+      fi
+
+      echo "  Origen: $src"
+      if [ -f "$APP_DIR/.runtime/bin/ffmpeg" ]; then
+        cp -f "$APP_DIR/.runtime/bin/ffmpeg" "$APP_DIR/.runtime/bin/ffmpeg.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+      fi
+      cp -f "$src" "$APP_DIR/.runtime/bin/ffmpeg"
+      chmod +x "$APP_DIR/.runtime/bin/ffmpeg"
+
+      # Algunas compilaciones de XUI.one enlazan libs de /home/xui/lib: se copian
+      # junto al binario del panel y el motor las busca en .runtime/lib.
+      local missing
+      # ldd sale con 1 en binarios estáticos ("not a dynamic executable"): no debe
+      # tumbar el script por set -e.
+      missing=$(ldd "$APP_DIR/.runtime/bin/ffmpeg" 2>/dev/null | awk '/not found/{print $1}' | sort -u || true)
+      if [ -n "$missing" ]; then
+        echo "  Copiando librerías que faltan: $(echo "$missing" | tr '\n' ' ')"
+        local lib found
+        for lib in $missing; do
+          found=$(find "$xui_dir" -name "$lib" -type f 2>/dev/null | head -n1)
+          if [ -n "$found" ]; then
+            cp -f "$found" "$APP_DIR/.runtime/lib/$lib"
+          else
+            echo "  [AVISO] No se encontró $lib en /home/xui"
+          fi
+        done
+        if LD_LIBRARY_PATH="$APP_DIR/.runtime/lib" ldd "$APP_DIR/.runtime/bin/ffmpeg" 2>/dev/null | grep -q 'not found'; then
+          echo "  [AVISO] Quedan librerías sin resolver; el motor probará el binario y, si falla, usará otro."
+        fi
+      fi
+
+      if ! "$APP_DIR/.runtime/bin/ffmpeg" -version >/dev/null 2>&1; then
+        if TG_LIB="$APP_DIR/.runtime/lib" LD_LIBRARY_PATH="$APP_DIR/.runtime/lib:${LD_LIBRARY_PATH:-}" "$APP_DIR/.runtime/bin/ffmpeg" -version >/dev/null 2>&1; then
+          echo "  [OK] Copiado, pero necesita LD_LIBRARY_PATH=$APP_DIR/.runtime/lib (ya está en el servicio)."
+        else
+          echo "  [ERROR] El binario copiado no ejecuta. Se conserva el anterior."
+          local prev
+          prev=$(ls -1t "$APP_DIR"/.runtime/bin/ffmpeg.bak.* 2>/dev/null | head -n1 || true)
+          if [ -n "$prev" ]; then cp -f "$prev" "$APP_DIR/.runtime/bin/ffmpeg"; fi
+          return 1
+        fi
+      fi
+
+      echo "  [OK] Binario de XUI.one instalado en $APP_DIR/.runtime/bin/ffmpeg"
+      "$APP_DIR/.runtime/bin/ffmpeg" -version 2>/dev/null | head -n1 | sed 's/^/       /'
+
+      FF_TARGET=runtime "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { db, initDb } from "./server/db.js";
+        import { invalidateFfmpegBinCache, getFfmpegBinInfo } from "./server/streamEngine.js";
+        initDb();
+        db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+          .run("ffmpeg_bin_preference", "runtime");
+        invalidateFfmpegBinCache(true);
+        const info = getFfmpegBinInfo();
+        console.log("  Preferencia: runtime → " + info.bin + (info.version ? " (" + info.version + ")" : ""));
+        console.log("  Aplica el cambio con: tvlister-admin restart");
+      '
       ;;
+    *)
   esac
 }
 
@@ -657,7 +740,7 @@ case "$ACTION" in
     echo " 13) Actualizar panel desde GitHub sin perder datos (update)"
     echo " 14) Reiniciar motor TVLister 24/7 (restart)"
     echo " 15) Ver logs en vivo (logs)"
-    echo " 16) Motor FFmpeg: ver, elegir o instalar binario (ffmpeg)"
+    echo " 16) Motor FFmpeg: ver, elegir, instalar o copiar el de XUI.one (ffmpeg)"
     echo " 17) Instalar/actualizar desde un release publicado (release)"
     echo "  0) Salir"
     echo "============================================================"

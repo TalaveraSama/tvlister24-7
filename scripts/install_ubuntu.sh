@@ -273,7 +273,29 @@ echo "[5/6] Instalando dependencias NPM y compilando panel de producción..."
 "${NODE_DIR}/bin/npm" install --include=dev --no-audit --no-fund
 "${NODE_DIR}/bin/npm" run build
 
-mkdir -p /var/lib/tvlister24-7/hls /var/lib/tvlister24-7/playlists "$APP_DIR/data"
+mkdir -p /var/lib/tvlister24-7/hls /var/lib/tvlister24-7/playlists "$APP_DIR/data" "$APP_DIR/.runtime/bin" "$APP_DIR/.runtime/lib"
+
+# FFmpeg dentro de la carpeta del panel: si convive con XUI.one se copia su binario
+# (zero-apt, nada que descargar) para que el motor NO dependa de /home/xui.
+if [ ! -x "$APP_DIR/.runtime/bin/ffmpeg" ]; then
+  XUI_FF=""
+  for CAND in /home/xui/bin/ffmpeg_bin/4.4/ffmpeg /home/xui/bin/ffmpeg_bin/4.3/ffmpeg \
+              /home/xui/bin/ffmpeg_bin/4.0/ffmpeg /home/xui/bin/ffmpeg/ffmpeg /home/xui/bin/ffmpeg_bin; do
+    if [ -f "$CAND" ] && [ -x "$CAND" ] && "$CAND" -version >/dev/null 2>&1; then XUI_FF="$CAND"; break; fi
+  done
+  if [ -n "$XUI_FF" ]; then
+    if cp -f "$XUI_FF" "$APP_DIR/.runtime/bin/ffmpeg" 2>/dev/null && chmod +x "$APP_DIR/.runtime/bin/ffmpeg" \
+       && "$APP_DIR/.runtime/bin/ffmpeg" -version >/dev/null 2>&1; then
+      echo "      FFmpeg de XUI.one copiado a $APP_DIR/.runtime/bin/ffmpeg"
+    else
+      for LIB in $(ldd "$APP_DIR/.runtime/bin/ffmpeg" 2>/dev/null | awk '/not found/{print $1}' | sort -u); do
+        FOUND=$(find /home/xui -name "$LIB" -type f 2>/dev/null | head -n1)
+        [ -n "$FOUND" ] && cp -f "$FOUND" "$APP_DIR/.runtime/lib/$LIB" 2>/dev/null || true
+      done
+      echo "      FFmpeg de XUI.one copiado (librerías en .runtime/lib)"
+    fi
+  fi
+fi
 
 # 6. Selección automática de puerto libre (conservando puerto previo si ya existía) + systemd
 echo "[6/6] Configurando puerto libre y servicio systemd..."
