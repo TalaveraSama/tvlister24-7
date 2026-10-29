@@ -27,6 +27,7 @@ import {
   HLS_ROOT,
   DISK_HLS_ROOT,
   resolveHlsDirForKey,
+  resolveBackupSource,
   ARCHIVE_ROOT
 } from './streamEngine.js';
 
@@ -130,7 +131,9 @@ export function isItemAllowedForLine(line, kind, itemId) {
 }
 
 export function expandStreamUpstreamUrls(stream) {
-  const rawList = [stream?.source_url, stream?.backup_url].filter(Boolean);
+  // Failover apagado por defecto: sólo se reproduce el origen principal del canal.
+  // El segundo origen queda guardado para el cambio manual ("Cambiar a respaldo").
+  const rawList = [stream?.source_url, resolveBackupSource(stream)].filter(Boolean);
   const expanded = [];
   for (const raw of rawList) {
     const trimmed = String(raw).trim();

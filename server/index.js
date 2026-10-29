@@ -66,6 +66,7 @@ import {
   FFMPEG_ENGINE_LIMITS,
   FFMPEG_ENGINE_DEFAULTS,
   invalidateFfmpegEfficiencyCache,
+  invalidateFailoverCache,
   getWorkerDiagnostics,
   getHlsFreeBytes,
   estimateHlsFootprintBytes,
@@ -822,6 +823,90 @@ app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
     withSqliteBusyRetry(() => db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(id));
   }
   res.json({ ok: true });
+});
+
+// ==================== CAMBIO MANUAL DE ORIGEN (sin failover automático) ====================
+// El segundo origen guardado (backup_url) NO se usa solo: el administrador decide cuándo
+// emitir desde él. Al cambiar se intercambian las URL y se marca failover_active para poder volver.
+function switchStreamSourceRow(row, target) {
+  const primary = String(row.source_url || '').trim();
+  const secondary = String(row.backup_url || '').trim();
+  if (!secondary) {
+    return { ok: false, error: `El canal "${row.name}" no tiene segundo origen guardado.` };
+  }
+  const currentlyOnBackup = Number(row.failover_active) === 1;
+  if (target === 'backup' && currentlyOnBackup) {
+    return { ok: false, error: `El canal "${row.name}" ya está emitiendo su segundo origen.` };
+  }
+  if (target === 'primary' && !currentlyOnBackup) {
+    return { ok: false, error: `El canal "${row.name}" ya está emitiendo su origen principal.` };
+  }
+
+  withSqliteBusyRetry(() =>
+    db
+      .prepare('UPDATE streams SET source_url = ?, backup_url = ?, failover_active = ? WHERE id = ?')
+      .run(secondary, primary, target === 'backup' ? 1 : 0, row.id)
+  );
+
+  // Reinicia el worker para que tome la nueva URL de inmediato
+  if (row.stream_mode === 'transcode' && row.status === 'running') {
+    stopWorker(`stream_${row.id}`);
+    setTimeout(() => {
+      try {
+        launchStreamWorkerIfNeeded(row.id);
+      } catch {
+        // ignore
+      }
+    }, 120).unref?.();
+  }
+
+  return { ok: true, id: row.id, name: row.name, nowOn: target === 'backup' ? 'respaldo' : 'principal' };
+}
+
+app.post('/api/streams/:id/switch-source', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const target = req.body?.target === 'primary' ? 'primary' : 'backup';
+  const row = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Canal no encontrado.' });
+  const result = switchStreamSourceRow(row, target);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.post('/api/streams/switch-source-bulk', requireAuth, requireAdmin, (req, res) => {
+  const { scope = 'selected', ids = [], category_id = null, target = 'backup' } = req.body || {};
+  const wantTarget = target === 'primary' ? 'primary' : 'backup';
+
+  let rows = [];
+  if (scope === 'all') {
+    rows = db.prepare('SELECT * FROM streams ORDER BY sort_order ASC, id ASC').all();
+  } else if (scope === 'category' && category_id) {
+    rows = db.prepare('SELECT * FROM streams WHERE category_id = ? ORDER BY sort_order ASC, id ASC').all(Number(category_id));
+  } else {
+    const cleanIds = (Array.isArray(ids) ? ids : []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    if (cleanIds.length === 0) {
+      return res.status(400).json({ error: 'Selecciona al menos un canal.' });
+    }
+    const ph = cleanIds.map(() => '?').join(',');
+    rows = db.prepare(`SELECT * FROM streams WHERE id IN (${ph}) ORDER BY sort_order ASC, id ASC`).all(...cleanIds);
+  }
+
+  const changed = [];
+  const skipped = [];
+  for (const row of rows) {
+    const result = switchStreamSourceRow(row, wantTarget);
+    if (result.ok) changed.push(result.name);
+    else skipped.push(result.error);
+  }
+
+  res.json({
+    ok: true,
+    switched: changed.length,
+    skipped: skipped.length,
+    target: wantTarget,
+    sample: changed.slice(0, 5),
+    firstSkip: skipped[0] || ''
+  });
 });
 
 app.post('/api/streams/bulk-profile', requireAuth, requireAdmin, (req, res) => {
@@ -3263,6 +3348,7 @@ app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
   }
   invalidateFirewallCache();
   invalidateAudioLevelingCache();
+  invalidateFailoverCache();
   res.json({ ok: true });
 });
 

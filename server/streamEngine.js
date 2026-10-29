@@ -6,6 +6,39 @@ import { fileURLToPath } from 'node:url';
 import { db, withSqliteBusyRetry } from './db.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 
+// ============================================================================
+// FAILOVER DE ORIGEN (segundo source) — desactivado por defecto
+// ----------------------------------------------------------------------------
+// Cuando está apagado (valor por defecto) el panel NUNCA toca el segundo origen
+// del canal: cada worker usa sólo source_url. Así no se abren conexiones
+// duplicadas hacia el proveedor (eso era lo que subía el ancho de banda).
+// El segundo origen queda guardado y se cambia a mano desde "Cambiar a respaldo".
+// ============================================================================
+let failoverCache = { at: 0, enabled: false };
+
+export function isFailoverEnabled() {
+  if (Date.now() - failoverCache.at < 3000) return failoverCache.enabled;
+  let enabled = false;
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'failover_enabled'").get();
+    enabled = row?.value === 'true';
+  } catch {
+    enabled = false;
+  }
+  failoverCache = { at: Date.now(), enabled };
+  return enabled;
+}
+
+export function invalidateFailoverCache() {
+  failoverCache = { at: 0, enabled: false };
+}
+
+/** Segundo origen efectivo: vacío cuando el failover automático está apagado. */
+export function resolveBackupSource(stream) {
+  if (!isFailoverEnabled()) return '';
+  return String(stream?.backup_url || '').trim();
+}
+
 export function resolveFfmpegCompatibleCandidates(rawUrl = '', backupUrl = '') {
   const out = [];
   const pushClean = (u) => {
@@ -581,7 +614,7 @@ export function isStreamAudioLeveled(stream, profile) {
 }
 
 export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
-  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, stream.backup_url);
+  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, resolveBackupSource(stream));
   const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
 
   const globalAudio = getGlobalAudioLevelingConfig();
@@ -1553,7 +1586,7 @@ export function buildFfmpegArgsForArchive(stream, attemptIndex = 0) {
   const outDir = path.join(ARCHIVE_ROOT, `stream_${stream.id}`);
   fs.mkdirSync(outDir, { recursive: true });
 
-  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, stream.backup_url);
+  const candidates = resolveFfmpegCompatibleCandidates(stream.source_url, resolveBackupSource(stream));
   const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
 
   const args = ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-threads', '1'];

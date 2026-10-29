@@ -30,7 +30,8 @@ import {
   ChevronsDown,
   GripVertical,
   Volume2,
-  Globe
+  Globe,
+  ArrowLeftRight
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
@@ -937,6 +938,44 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
     loadAll();
   };
 
+  // ==================== CAMBIO MANUAL DE ORIGEN (sin failover automático) ====================
+  const handleSwitchSource = async (s, target) => {
+    const label = target === 'backup' ? 'el segundo origen' : 'el origen principal';
+    if (!window.confirm(`¿Pasar "${s.name}" a ${label}? El canal se reinicia para tomar la nueva URL.`)) return;
+    try {
+      await apiFetch(`/api/streams/${s.id}/switch-source`, {
+        method: 'POST',
+        body: JSON.stringify({ target })
+      });
+      setBulkNotice(`✅ "${s.name}" ahora emite desde ${label}.`);
+      setTimeout(() => setBulkNotice(''), 5000);
+      await loadAll();
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
+  const handleBulkSwitchSource = async (target) => {
+    const scope = selectedIds.length > 0 ? 'selected' : 'all';
+    const label = target === 'backup' ? 'su segundo origen' : 'su origen principal';
+    const countLabel = scope === 'all' ? `TODOS los ${streams.length} canales` : `${selectedIds.length} canales seleccionados`;
+    if (!window.confirm(`¿Pasar ${countLabel} a ${label}? Los canales se reinician para tomar la nueva URL.`)) return;
+    try {
+      const res = await apiFetch('/api/streams/switch-source-bulk', {
+        method: 'POST',
+        body: JSON.stringify({ scope, ids: selectedIds, target })
+      });
+      setBulkNotice(
+        `✅ ${res.switched} canales pasados a ${label}.` +
+          (res.skipped ? ` (${res.skipped} sin segundo origen o ya estaban ahí)` : '')
+      );
+      setTimeout(() => setBulkNotice(''), 7000);
+      await loadAll();
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
   const handleDelete = async (id) => {
     if (!window.confirm('¿Eliminar este canal en vivo?')) return;
     await apiFetch(`/api/streams/${id}`, { method: 'DELETE' });
@@ -1167,6 +1206,28 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                 <Zap className="w-4 h-4 text-amber-300" />
                 Copy/Copy Masivo (Bitrate Original)
               </button>
+            )}
+
+            {/* Cambio manual de origen en masa (sin failover automático) */}
+            {streams.length > 0 && (
+              <div className="inline-flex items-center rounded-xl border border-sky-500/35 bg-sky-500/10 overflow-hidden">
+                <button
+                  onClick={() => handleBulkSwitchSource('backup')}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sky-200 hover:bg-sky-500/20 text-xs font-semibold transition"
+                  title="Pasar los canales seleccionados (o todos) a su segundo origen guardado"
+                >
+                  <ArrowLeftRight className="w-4 h-4" />
+                  A respaldo
+                </button>
+                <span className="w-px self-stretch bg-sky-500/30" />
+                <button
+                  onClick={() => handleBulkSwitchSource('primary')}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sky-200 hover:bg-sky-500/20 text-xs font-semibold transition"
+                  title="Regresar los canales seleccionados (o todos) a su origen principal"
+                >
+                  Al principal
+                </button>
+              </div>
             )}
 
             {/* Bulk Edit Button */}
@@ -1628,6 +1689,24 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
                           >
                             <Terminal className="w-3.5 h-3.5" />
                           </button>
+
+                          {Boolean(String(s.backup_url || '').trim()) && (
+                            <button
+                              onClick={() => handleSwitchSource(s, s.failover_active ? 'primary' : 'backup')}
+                              title={
+                                s.failover_active
+                                  ? `Está emitiendo el segundo origen\n${s.backup_url}\nClic para volver al principal`
+                                  : `Cambiar a respaldo manualmente\n${s.backup_url}`
+                              }
+                              className={`p-1.5 rounded-lg transition ${
+                                s.failover_active
+                                  ? 'bg-amber-500/20 hover:bg-amber-500/35 text-amber-300'
+                                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                              }`}
+                            >
+                              <ArrowLeftRight className="w-3.5 h-3.5" />
+                            </button>
+                          )}
 
                           <button
                             onClick={() => openEdit(s)}
@@ -2305,14 +2384,18 @@ export default function LiveStreamsPage({ onPreview, onOpenXuiImport }) {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-slate-300 mb-1 font-medium">URL Fuente Respaldo (Failover)</label>
+                  <label className="block text-slate-300 mb-1 font-medium">Segundo Origen (cambio manual)</label>
                   <input
                     type="text"
                     value={form.backup_url}
                     onChange={(e) => setForm({ ...form, backup_url: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-                    placeholder="Opcional"
+                    placeholder="Opcional · no se usa solo"
                   />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Se guarda, pero <b className="text-slate-400">no se reproduce automáticamente</b>. Para usarlo, pulsa
+                    “Cambiar a respaldo” en la fila del canal (y “Volver al principal” para regresar).
+                  </p>
                 </div>
                 <div>
                   <label className="block text-slate-300 mb-1 font-medium">URL Logo / Icono PNG</label>

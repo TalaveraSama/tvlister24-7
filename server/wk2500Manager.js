@@ -10,7 +10,8 @@ import {
   getFfmpegBin,
   isFfmpegAvailable,
   buildAudioLevelingFilter,
-  getFreshLocalHlsManifestPath
+  getFreshLocalHlsManifestPath,
+  resolveBackupSource
 } from './streamEngine.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 
@@ -296,7 +297,8 @@ function resolveSlotUpstream(slotRow) {
     streamRow = db.prepare('SELECT * FROM streams WHERE id = ?').get(Number(slotRow.stream_id));
   }
   const rawPrimary = String(slotRow.custom_source_url || streamRow?.source_url || '').trim();
-  const rawBackup = String(streamRow?.backup_url || '').trim();
+  // El modulador tampoco salta al segundo origen salvo que el failover esté activado a mano.
+  const rawBackup = resolveBackupSource(streamRow);
   const channelTitle = String(slotRow.custom_name || streamRow?.name || `CATV CH ${slotRow.catv_ch}`).trim();
 
   // Check if local 24/7 RAMDisk HLS manifest is already running for this stream

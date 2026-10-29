@@ -801,3 +801,40 @@ Antes, si un canal se caía, el panel reproducía una imagen o video en bucle **
 **Verificado:** canal con origen roto y modo `disabled` → `HTTP 503` sin bucle; el mismo canal con
 `custom_image` y un PNG subido por `/api/slates/upload` → `HTTP 200` con el manifiesto del bucle;
 `modo global/builtin` resuelve a sin respaldo; canal nuevo creado por API nace en `disabled`.
+
+### 8.14. Failover de origen: manual por defecto (sin doble conexión al proveedor)
+
+El segundo origen (`backup_url`) ya **no se usa automáticamente**. Antes, cada worker de FFmpeg y el proxy de
+suscriptores generaban una lista de candidatos con la URL principal **y** la de respaldo, y al primer fallo o
+reintento saltaban a la otra. Con 145 canales eso significaba abrir conexiones hacia dos proveedores distintos:
+el consumo de ancho de banda se duplicaba sin que el panel lo mostrara.
+
+**Cómo funciona ahora**
+
+| Ajuste | Efecto |
+|---|---|
+| `failover_enabled = false` *(por defecto)* | Cada canal usa **sólo** `source_url`. El segundo origen se guarda y se cambia a mano |
+| `failover_enabled = true` | Comportamiento antiguo: si el principal falla, salta al segundo origen |
+
+Se cambia en **Servidores & Seguridad → Ajustes Globales → “Failover de Origen (segundo source)”**.
+
+**Cambio manual de origen**
+
+- Botón **⇄** en la fila del canal (Canales en Vivo): *“Cambiar a respaldo”* / *“Volver al principal”*.
+  La URL se intercambia, se marca `failover_active = 1` y el worker se reinicia en ~120 ms para tomar la nueva.
+- Botones **“A respaldo”** y **“Al principal”** en la barra superior: aplican al lote seleccionado, o a todos
+  si no hay ninguno seleccionado.
+- API: `POST /api/streams/:id/switch-source` `{ target: "backup" | "primary" }` y
+  `POST /api/streams/switch-source-bulk` `{ scope: "selected" | "all" | "category", ids, category_id, target }`.
+  Rechazan con `400` un canal sin segundo origen o que ya está emitiendo el origen pedido.
+
+El campo del formulario pasó de “URL Fuente Respaldo (Failover)” a **“Segundo Origen (cambio manual)”**.
+
+**Verificado**
+
+- `failover_enabled=false`: `resolveFfmpegCompatibleCandidates` devuelve **1** candidato y los intentos 0 y 1 del
+  worker usan la misma URL principal; el proxy de suscriptores también entrega 1 solo candidato.
+- `failover_enabled=true`: vuelve a listar los 2 y el intento 1 usa el respaldo.
+- Proxy en vivo con principal roto: `false` → `503` (no toca el respaldo); `true` → `200` sirviendo el respaldo.
+- Cambio manual ida y vuelta por API: `A respaldo` → `failover_active=1` y URL intercambiada; repetirlo da `400`;
+  `Al principal` → vuelve al estado original. En masa: `switched: 1, skipped: 1` (el canal sin respaldo se omite).
