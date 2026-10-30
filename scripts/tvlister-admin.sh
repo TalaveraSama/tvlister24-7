@@ -852,7 +852,8 @@ cmd_catv() {
         console.log("============================================================");
         console.log("");
         console.log("  " + pad("CANAL", 7) + pad("EQUIPO", 17) + pad("DESTINO UDP", 24) +
-          padl("MEDIDO", 11) + padl("PKT/S", 8) + padl("DECLARADO", 12) + "  PIDs");
+          padl("MEDIDO", 11) + padl("PICO", 10) + padl("PKT/S", 8) + padl("DECLARADO", 12));
+        console.log("  " + pad("", 7) + pad("NOMBRE DVB (lo que ve el modulador)", 58) + "PIDs");
 
         const measured = [];
         for (const row of r.results) {
@@ -866,10 +867,19 @@ cmd_catv() {
             pad(unitLabel, 17) +
             pad(dest, 24) +
             padl(mbps(m.kbps) + " Mbps", 11) +
+            padl(mbps(m.peakKbps) + " Mbps", 10) +
             padl(m.pps || 0, 8) +
-            padl(mbps(row.declared_kbps) + " Mbps", 12) +
-            "  " + (pids || "-")
+            padl(mbps(row.declared_kbps) + " Mbps", 12)
           );
+          const q = String.fromCharCode(34);
+          const sdt = m.sdt;
+          const sdtText = sdt
+            ? q + (sdt.name || "?") + q + " · proveedor " + q + (sdt.provider || "?") + q +
+              " · service_id " + sdt.service_id
+            : "sin SDT";
+          console.log("        DVB: " + sdtText);
+          console.log("        PIDs: " + (pids || "-") +
+            " · ráfagas " + m.burstRatio + "× · oscilación " + m.jitterPct + "%");
           if (m.kbps > 0) measured.push(m.kbps);
           for (const f of row.flags) {
             const tag = f.level === "error" ? "[!!]" : "[!] ";
@@ -919,6 +929,10 @@ cmd_catv() {
         console.log("     (Flussonic, otro TVLister o dos equipos con la misma dirección).");
         console.log("   - NO LLEGA NADA                    -> el grupo no entra por esta NIC;");
         console.log("     repite con --ip <IP de la NIC de los moduladores>.");
+        console.log("   - RÁFAGAS / oscilación alta        -> el flujo sale a saltos: el modulador");
+        console.log("     ve picos. Se corrige con el motor FFmpeg y -re (v2.5.11, activo por defecto).");
+        console.log("   - DVB \"Service01\" / \"FFmpeg\"       -> la salida se montó sin nombre de servicio;");
+        console.log("     el modulador enseñará Service01 aunque el CSV diga otra cosa.");
         console.log("============================================================");
       '
       ;;

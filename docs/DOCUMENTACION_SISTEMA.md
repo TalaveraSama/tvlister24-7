@@ -1860,3 +1860,76 @@ ráfagas al reconectar). Si el panel mide menos de lo que el modulador recibe, h
 retrasa y luego se recupera, el modulador ve picos de decenas de Mbps. Poner un `muxrate (CBR)` por portadora
 obliga a un flujo constante y es lo que se recomienda cuando `catv watch` marca EXCESO con duplicados a 0.
 
+### 8.36. Nombre DVB del canal y salida sin ráfagas (v2.5.11)
+
+Dos defectos de campo con la misma pantalla de fondo —la página *IP Input* del modulador— y una sola causa cada uno.
+
+#### a) El modulador muestra «Service01» aunque el CSV lleve el nombre
+
+La página *IP Input* del modulador **no lee el nombre del CSV**: lo saca de la **SDT** del TS que recibe. FFmpeg,
+si no se le dice otra cosa, escribe en la SDT:
+
+```
+service_provider = "FFmpeg"      service_name = "Service01"
+```
+
+Eso es exactamente lo que aparecía en la línea del programa: `1: [2] Service01`. El nombre del CSV sólo afecta a la
+página *Canales* del equipo (la del lado derecho), no a la de entrada.
+
+La salida UDP del panel ahora monta la SDT con el nombre real del canal:
+
+```
+-metadata service_provider=TVLister -metadata service_name=<nombre del canal>
+```
+
+- Es **metadato del muxer**, no un filtro: el vídeo y el audio siguen en `-c copy`, sin re-codificar.
+- El nombre sale de `custom_name` y, si está vacío, del nombre del stream (`CANAL 2 NACIONAL`, `CH 45`, …).
+- Se limpian caracteres de control y se recorta a 40 caracteres (límite práctico de la SDT en estos equipos).
+- Funciona con cualquier FFmpeg desde 2011 (es `-metadata`, no una opción nueva del muxer).
+
+Tras reiniciar el canal hay que **volver a seleccionar el programa** en la página de entrada del modulador
+(*Refresh Input*), porque el equipo cachea el nombre que leyó al enganchar el flujo.
+
+#### b) El UDP «sube demasiados megas» y no está balanceado
+
+Con `-c copy` y sin límite de ritmo, FFmpeg **escribe tan rápido como lee**. Si el origen entrega a trozos —un
+segmento HLS de 2 s que aparece de golpe, o una reconexión que recupera lo perdido— esos 2 s salen en milisegundos:
+el modulador ve un pico de decenas de Mbps en una portadora que en media lleva 2–3. No es que el canal ocupe más:
+es que llega a saltos, y la lectura de bitrate del equipo usa una ventana corta.
+
+Medido con `catv watch` (5 s, mismo TS de 2,9 Mbps, fuente a trozos de 2 s):
+
+| Salida | Media | Pico | Ráfagas | Oscilación |
+| --- | --- | --- | --- | --- |
+| sin `-re` (v2.5.10 y anteriores) | 4,87 Mbps | **58,42 Mbps** | **12×** | 331,7 % |
+| con `-re` (v2.5.11) | 3,05 Mbps | 5,06 Mbps | 1,66× | 20,9 % |
+
+La corrección es `-re` (leer la entrada a ritmo nativo) delante de `-i`, sólo en la salida hacia el modulador:
+
+- No se aplica a `pipe:0` (MNF) ni cuando la portadora ya tiene `muxrate` (un CBR ya marca el ritmo).
+- Se puede desactivar por si un origen concreto se atasca:
+  `TVLISTER_CATV_PACING=0` en el servicio (`systemctl edit tvlister24-7`) y `tvlister-admin restart`.
+- No altera la línea del motor HLS que sirve a los clientes: es otra ruta de código (`buildFfmpegUdpOutputArgs`).
+
+#### c) Comprobarlo sin adivinar
+
+`tvlister-admin catv watch` ahora muestra, por canal, el nombre DVB real del TS y el perfil de ráfagas:
+
+```
+  CH2    CSP-2500C 1      239.9.9.1:7111            2.93 Mbps 3.54 Mbps     296   2.90 Mbps
+        DVB: "CANAL 2 NACIONAL" · proveedor "TVLister" · service_id 2
+        PIDs: 0x0100 0x0101 0x0000 · ráfagas 1.21× · oscilación 9.2%
+```
+
+| Mensaje | Significado |
+| --- | --- |
+| `el TS lleva el nombre genérico "Service01"` | la salida se montó sin `-metadata service_name` (canal no reiniciado tras actualizar) |
+| `nombre DVB "X" distinto del canal "Y"` | el nombre del panel y el de la SDT no coinciden |
+| `el TS no trae SDT` | el muxer no emite tabla de servicios: el modulador no podrá mostrar nombre |
+| `RÁFAGAS: pico N Mbps = X× la media` | el flujo sale a saltos (≥ 2,5× la media) |
+| `flujo inestable: oscilación N%` | variación tramo a tramo alta sin llegar a ráfaga |
+| `N tramo(s) de 500 ms sin datos` | cortes: el flujo se queda a cero a ratos |
+
+Las medidas de ráfaga usan tramas de **500 ms** porque el kernel entrega los datagramas a Node por lotes: con
+tramas de 100 ms se mediría el lote de lectura, no la red.
+

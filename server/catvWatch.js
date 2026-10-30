@@ -40,6 +40,76 @@ function isUnicast(ip = '') {
 const hexPid = (pid) => `0x${Number(pid).toString(16).padStart(4, '0')}`;
 
 /**
+ * Lee el nombre de servicio de la SDT de un paquete TS.
+ * Estructura (EN 300 468): 0x42 | section_length | tsid | version | sec | last |
+ * onid | reserved | [ service_id | flags | running+len | descriptores ] | CRC32
+ * Descriptor 0x48 (service_descriptor): service_type | len_prov | proveedor |
+ * len_nombre | nombre.
+ */
+function parseSdtName(buf, packetStart) {
+  try {
+    const ptr = buf[packetStart + 4];
+    const off = packetStart + 5 + ptr;
+    if (off + 12 > buf.length) return null;
+    if (buf[off] !== 0x42 && buf[off] !== 0x46) return null;
+
+    const sectionLen = ((buf[off + 1] & 0x0f) << 8) | buf[off + 2];
+    const sectionEnd = Math.min(off + 3 + sectionLen - 4, buf.length); // sin CRC
+    let p = off + 11;
+
+    while (p + 5 <= sectionEnd) {
+      const serviceId = (buf[p] << 8) | buf[p + 1];
+      const loopLen = ((buf[p + 3] & 0x0f) << 8) | buf[p + 4];
+      let d = p + 5;
+      const dEnd = Math.min(d + loopLen, sectionEnd);
+      while (d + 2 <= dEnd) {
+        const tag = buf[d];
+        const len = buf[d + 1];
+        if (tag === 0x48 && len >= 3) {
+          let t = d + 3; // +2 cabecera del descriptor +1 service_type
+          if (t >= dEnd) break;
+          const provLen = buf[t];
+          const provider = buf.toString('utf8', t + 1, Math.min(t + 1 + provLen, dEnd));
+          const nameLenAt = t + 1 + provLen;
+          if (nameLenAt >= dEnd) break;
+          const nameLen = buf[nameLenAt];
+          const name = buf.toString('utf8', nameLenAt + 1, Math.min(nameLenAt + 1 + nameLen, dEnd));
+          return {
+            service_id: serviceId,
+            provider: cleanDvbText(provider),
+            name: cleanDvbText(name),
+            raw_provider: provider
+          };
+        }
+        d += 2 + len;
+      }
+      p += 5 + loopLen;
+    }
+  } catch {
+    // sección corrupta o partida: se ignora
+  }
+  return null;
+}
+
+/** Compara nombres sin acentos, mayúsculas ni espacios de más. */
+function normalizeName(text = '') {
+  return String(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+}
+
+/** Quita relleno y caracteres de control que algunos muxers dejan en la SDT. */
+function cleanDvbText(text = '') {
+  return String(text)
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Mide un grupo/IP:puerto UDP durante `seconds` segundos.
  *
  * @param {{host:string, port:number, seconds?:number, bindIp?:string}} opts
@@ -62,6 +132,12 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
       seconds: secs,
       mbps: 0,
       kbps: 0,
+      peakKbps: 0,
+      p95Kbps: 0,
+      burstRatio: 0,
+      jitterPct: 0,
+      idleBuckets: 0,
+      bucketMs: 500,
       datagrams: 0,
       pps: 0,
       bytes: 0,
@@ -71,7 +147,8 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
       lost: 0,
       lossPct: 0,
       tei: 0,
-      payloadBytes: 0
+      payloadBytes: 0,
+      sdt: null
     });
   }
 
@@ -99,11 +176,25 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
     /** @type {Map<number, {pid:number, bytes:number, packets:number, lastCc:number}>} */
     const perPid = new Map();
     const lastCc = new Map();
+    // SDT (PID 0x11): es el nombre que el modulador muestra en su página de
+    // entrada. Sin -metadata service_name, FFmpeg escribe "Service01"/"FFmpeg".
+    let sdt = null;
+    // Perfil temporal en tramas de 500 ms: es la única forma de ver que el
+    // flujo llega "a saltos" aunque la media salga correcta. 500 ms es el
+    // tamaño mínimo fiable: el kernel entrega los datagramas a Node por lotes
+    // y con tramas de 100 ms se mediría el lote, no la red.
+    const BUCKET_MS = 500;
+    const startedAt = Date.now();
+    /** @type {Map<number, number>} bytes por trama de 500 ms */
+    const buckets = new Map();
     let finished = false;
 
     const onPacket = (buf) => {
       stats.bytes += buf.length;
       stats.datagrams += 1;
+
+      const idx = Math.floor((Date.now() - startedAt) / BUCKET_MS);
+      buckets.set(idx, (buckets.get(idx) || 0) + buf.length);
 
       // Un datagrama puede traer 1, 7 (1316) o 4 (752) paquetes TS, o llevar
       // FEC (204/208). Se recorre siempre a paso 188 buscando el byte 0x47.
@@ -135,7 +226,12 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
 
         // Sólo tiene sentido comparar continuity_counter en paquetes con
         // payload (afc 1 ó 3); en los de sólo adaptación el CC se repite.
-        if (afc === 1 || afc === 3) {
+        // El PID nulo (0x1FFF) se excluye: en un mux CBR rellena con el mismo
+        // contador y daría miles de falsos duplicados.
+        if (!sdt && pid === 0x11 && (b1 & 0x40)) {
+          sdt = parseSdtName(buf, pos) || null;
+        }
+        if (pid !== 0x1fff && (afc === 1 || afc === 3)) {
           stats.ccPackets += 1;
           const prev = lastCc.get(pid);
           if (prev !== undefined) {
@@ -164,6 +260,25 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
         // ignore
       }
 
+      // Perfil completo de la ventana medida, con ceros donde no llegó nada
+      // (si no se rellena, un flujo que se corta a mitad parece "estable").
+      const sliceCount = Math.max(1, Math.round((secs * 1000) / BUCKET_MS));
+      const used = Array.from({ length: sliceCount }, (_, i) => buckets.get(i) || 0);
+      const perBucketKbps = used.map((b) => Math.round((b * 8) / BUCKET_MS));
+      const avgBucket = perBucketKbps.length
+        ? perBucketKbps.reduce((a, b) => a + b, 0) / perBucketKbps.length
+        : 0;
+      const sortedB = [...perBucketKbps].sort((a, b) => a - b);
+      const peak = sortedB.length ? sortedB[sortedB.length - 1] : 0;
+      const p95 = sortedB.length ? sortedB[Math.min(sortedB.length - 1, Math.floor(sortedB.length * 0.95))] : 0;
+      const idle = perBucketKbps.filter((v) => v === 0).length;
+      const burst = avgBucket > 0 ? Number((peak / avgBucket).toFixed(2)) : 0;
+      // Coeficiente de variación: cuánto oscila el flujo tramo a tramo.
+      const variance = perBucketKbps.length
+        ? perBucketKbps.reduce((acc, v) => acc + (v - avgBucket) ** 2, 0) / perBucketKbps.length
+        : 0;
+      const jitterPct = avgBucket > 0 ? Number(((Math.sqrt(variance) / avgBucket) * 100).toFixed(1)) : 0;
+
       const totalKbps = Math.round((stats.bytes * 8) / 1000 / secs);
       const pids = Array.from(perPid.values())
         .sort((a, b) => b.bytes - a.bytes)
@@ -185,6 +300,12 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
         pps: Math.round(stats.datagrams / secs),
         kbps: totalKbps,
         mbps: Number((totalKbps / 1000).toFixed(2)),
+        peakKbps: peak,
+        p95Kbps: p95,
+        burstRatio: burst,
+        jitterPct,
+        idleBuckets: idle,
+        bucketMs: BUCKET_MS,
         pids,
         duplicates: stats.duplicates,
         lost: stats.lost,
@@ -195,7 +316,8 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
           : 0,
         tei: stats.tei,
         payloadBytes: stats.payloadBytes,
-        resyncs: stats.resyncs
+        resyncs: stats.resyncs,
+        sdt
       });
     };
 
@@ -339,10 +461,38 @@ export async function watchCatvOutput({ unitId = null, channels = null, seconds 
     if (m.ok && m.duplicatePct >= 1) {
       flags.push({ level: 'error', text: `${m.duplicatePct.toFixed(1)}% PAQUETES DUPLICADOS` });
     }
+    // El modulador enseña el nombre de la SDT, no el del CSV. Si sigue siendo
+    // el genérico de FFmpeg ("Service01"/"FFmpeg") es que la salida se montó
+    // sin -metadata service_name.
+    const expectedName = String(row.name || `CANAL ${row.catv_ch}`).trim();
+    if (m.ok && m.sdt) {
+      const got = String(m.sdt.name || '').trim();
+      if (!got || /^service\s*\d*$/i.test(got)) {
+        flags.push({
+          level: 'error',
+          text: `el TS lleva el nombre genérico "${got || '(vacío)'}" en vez de "${expectedName}"`
+        });
+      } else if (normalizeName(got) !== normalizeName(expectedName)) {
+        flags.push({ level: 'warn', text: `nombre DVB "${got}" distinto del canal "${expectedName}"` });
+      }
+    } else if (m.ok && m.kbps > 0 && !m.sdt) {
+      flags.push({ level: 'warn', text: 'el TS no trae SDT: el modulador no podrá mostrar nombre' });
+    }
     if (row.shared_with.length) {
       flags.push({ level: 'error', text: `mismo destino que CH ${row.shared_with.join(', ')}` });
     }
     if (m.ok && m.tei > 0) flags.push({ level: 'warn', text: `${m.tei} paquetes con error` });
+    if (m.ok && m.kbps > 0 && m.burstRatio >= 2.5) {
+      flags.push({
+        level: 'error',
+        text: `RÁFAGAS: pico ${(m.peakKbps / 1000).toFixed(2)} Mbps = ${m.burstRatio}× la media`
+      });
+    } else if (m.ok && m.kbps > 0 && m.jitterPct >= 90) {
+      flags.push({ level: 'warn', text: `flujo inestable: oscilación ${m.jitterPct}%` });
+    }
+    if (m.ok && m.kbps > 0 && m.idleBuckets > 0) {
+      flags.push({ level: 'warn', text: `${m.idleBuckets} tramo(s) de ${m.bucketMs} ms sin datos` });
+    }
     if (m.ok && m.lossPct >= 2) {
       flags.push({ level: 'warn', text: `captura incompleta (${m.lossPct}%): el valor real es algo mayor` });
     }

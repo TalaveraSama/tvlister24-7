@@ -596,12 +596,45 @@ function buildUdpTargetFfmpegUrl(slotRow, transport = null) {
   return `${proto}://${slotRow.udp_host}:${slotRow.udp_port}?${params.join('&')}`;
 }
 
-function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
+/** Rótulo DVB del canal: lo que el modulador enseña como nombre del programa. */
+function sanitizeServiceText(value, fallback, maxLen = 40) {
+  const clean = String(value || '')
+    .replace(/[\u0000-\u001f<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (clean || fallback).slice(0, maxLen);
+}
+
+/**
+ * ¿Se puede limitar el ritmo de lectura con -re? Sin él, con -c copy el flujo
+ * sale a ráfagas (un segmento HLS de 2 s se envía en 30 ms) y el modulador ve
+ * picos de 2–3× el bitrate real. Con -re se entrega al ritmo de los timestamps.
+ * No se aplica si ya hay muxrate (CBR ya marca el ritmo) ni en pipe:0.
+ */
+function catvPacingEnabled() {
+  const v = String(process.env.TVLISTER_CATV_PACING ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+export function buildFfmpegUdpOutputArgs(slotRow, inputSpec, opts = {}) {
   const mode = slotRow.output_mode || 'direct_spts';
   const serviceId = Math.max(1, Number(slotRow.service_id) || Number(slotRow.catv_ch) || 1);
   const muxrate = Number(slotRow.muxrate_kbps) > 0 ? Number(slotRow.muxrate_kbps) * 1000 : 0;
   const transport = resolveEffectiveTransport(slotRow, unitForSlot(slotRow));
   const udpUrl = buildUdpTargetFfmpegUrl(slotRow, transport);
+
+  // Nombre DVB (SDT). Sin esto FFmpeg pone "Service01"/"FFmpeg" y el modulador
+  // muestra eso mismo en su página de entrada, ignorando el nombre del CSV.
+  const serviceName = sanitizeServiceText(
+    opts.channelTitle || slotRow.custom_name || '',
+    `CANAL ${slotRow.catv_ch}`
+  );
+  const serviceProvider = sanitizeServiceText(opts.serviceProvider || 'TVLister', 'TVLister');
+
+  // -re (leer al ritmo nativo) suaviza las ráfagas del origen. Sólo tiene
+  // sentido en fuentes reales, nunca en pipe:0 ni cuando ya hay CBR.
+  const pacing = opts.pacing !== undefined ? Boolean(opts.pacing) : catvPacingEnabled();
+  const usePacing = pacing && inputSpec !== 'pipe:0' && muxrate === 0;
 
   const isPureCopy = mode === 'direct_spts';
   const isVideoCopy = mode !== 'ntsc_sd_wk2500';
@@ -649,6 +682,7 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
         '4'
       );
     }
+    if (usePacing) args.push('-re');
     args.push(
       '-probesize',
       probeSize,
@@ -746,6 +780,10 @@ function buildFfmpegUdpOutputArgs(slotRow, inputSpec) {
     '0x0100',
     '-mpegts_start_pid',
     '0x0101',
+    '-metadata',
+    `service_provider=${serviceProvider}`,
+    '-metadata',
+    `service_name=${serviceName}`,
     '-max_muxing_queue_size',
     '1024',
     '-flush_packets',
@@ -936,7 +974,7 @@ export function startWk2500ChannelWorker(catvCh) {
     }
   };
 
-  const runFfmpegUdpCycle = async (freshSlot, candidateUrl, localHlsPath) => {
+  const runFfmpegUdpCycle = async (freshSlot, candidateUrl, localHlsPath, channelTitle = '') => {
     if (!isFfmpegAvailable()) {
       throw new Error('FFmpeg no instalado para este perfil de salida UDP');
     }
@@ -949,7 +987,7 @@ export function startWk2500ChannelWorker(catvCh) {
       : process.env;
 
     const inputForFfmpeg = localHlsPath || (isMnf ? 'pipe:0' : candidateUrl);
-    const args = buildFfmpegUdpOutputArgs(freshSlot, inputForFfmpeg);
+    const args = buildFfmpegUdpOutputArgs(freshSlot, inputForFfmpeg, { channelTitle, pacing: freshSlot.pacing });
 
     const child = spawn(bin, args, {
       stdio: [isMnf ? 'pipe' : 'ignore', 'pipe', 'pipe'],
@@ -1078,7 +1116,7 @@ export function startWk2500ChannelWorker(catvCh) {
       if (shouldUseDirectNodeUdpEngine(freshSlot, chosenUrl, freshUp.localHls)) {
         await runDirectNodeUdpCycle(freshSlot, chosenUrl);
       } else {
-        await runFfmpegUdpCycle(freshSlot, chosenUrl, freshUp.localHls);
+        await runFfmpegUdpCycle(freshSlot, chosenUrl, freshUp.localHls, freshUp.channelTitle);
       }
       if (!state.stopped) scheduleRetry('Flujo finalizado, reconectando...');
     } catch (err) {
