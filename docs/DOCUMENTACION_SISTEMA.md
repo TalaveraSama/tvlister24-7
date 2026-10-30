@@ -1933,3 +1933,53 @@ La corrección es `-re` (leer la entrada a ritmo nativo) delante de `-i`, sólo 
 Las medidas de ráfaga usan tramas de **500 ms** porque el kernel entrega los datagramas a Node por lotes: con
 tramas de 100 ms se mediría el lote de lectura, no la red.
 
+### 8.37. «Veo 6, 10, 2 y después 0»: el perfil del flujo (v2.5.12)
+
+Esa lectura que salta —6 Mbps, luego 10, luego 2 y de repente 0— en un canal de 2–3 Mbps **casi nunca es que el
+canal gaste más**. Es la forma en que llega el flujo: **a trozos**. El modulador (y el panel) miden en una ventana
+corta, y según cuándo caiga la lectura, ven el pico de la entrega o el silencio entre entregas.
+
+`catv watch` ahora imprime el perfil real del flujo, con un símbolo por cada 500 ms:
+
+```
+  CH2    CSP-2500C 1      239.9.9.1:7111            1.42 Mbps 9.50 Mbps     135   2.90 Mbps
+        PIDs: 0x0100 0x0101 · ráfagas 6.67× · oscilación 199.7%
+        perfil:  ▃   ▅   ▇   █   ▂    (500 ms cada símbolo)
+        por segundo (Mbps): 1.5 0.0 3.0 0.0 3.9 0.0 4.7 0.0 1.0 0.0
+        forma : a trozos: 5 entrega(s) corta(s), pico 6.67× la media
+        → El flujo llega por segmentos: entra de golpe (ese es el 6–10 que ves) y luego
+          silencio (el 2 y el 0). La media es la correcta; lo que baila es la lectura
+          instantánea. Se aplana con -re en la salida; si sigue, el origen entrega tarde.
+```
+
+Frente a un flujo sano:
+
+```
+        perfil: █▇▆▇▇▇█▇▇▇▇▇█▇▇▇  (500 ms cada símbolo)
+        por segundo (Mbps): 3.0 2.7 2.9 3.1 2.8 2.9 3.0 2.9
+        forma : constante
+```
+
+#### Las cuatro formas que distingue
+
+| Forma | Perfil típico | Qué significa | Qué hacer |
+| --- | --- | --- | --- |
+| `constante` | barra llena y plana | todo bien | nada |
+| `a trozos: N entrega(s) corta(s)` | `▃ ▅ ▇ █ ▂` con ceros intercalados | el origen entrega por segmentos (HLS de 2 s); los picos son la entrega completa de golpe | `-re` (activo desde v2.5.11); si sigue, el origen entrega tarde |
+| `cortes: N% del tiempo en 0` | ráfagas largas y huecos largos, o el flujo se para | el origen se cae, el canal se reinicia o el enlace no da el ancho | mirar el origen y `last_error` del canal |
+| `no llega nada` | todo ceros | el grupo no entra por esa NIC o el canal no emite | `--ip <NIC correcta>`, revisar el canal |
+
+**Cómo se distingue «a trozos» de «cortes»**: por la forma de los huecos, no por la media. Si hay **varias
+entregas cortas (≤ 1 s) repetidas** con huecos de tamaño parecido, es «a trozos» (el flujo está completo, sólo
+llega por segmentos). Si hay un hueco largo o el flujo no vuelve, son cortes de verdad.
+
+#### Por qué los números no cuadran con la media
+
+Un segmento de 2 s de un canal de 2,9 Mbps son ≈ 725 KB. Si el origen lo entrega en 0,2 s, en ese instante el
+flujo va a ≈ 29 Mbps y durante los 1,8 s siguientes a 0. La media sigue siendo 2,9 Mbps, pero cualquier lectura
+instantánea —la del modulador o la del panel— da 30, o 6, o 0, según el momento.
+
+**Regla práctica**: mira la **media** (lo que ocupa de verdad, y lo que debe caber en el enlace) y la **forma**
+(si llega a trozos). Los picos instantáneos no se suman; los huecos sí se notan en la imagen (congelados de
+fracción de segundo).
+

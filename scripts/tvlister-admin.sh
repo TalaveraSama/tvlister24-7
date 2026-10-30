@@ -880,6 +880,26 @@ cmd_catv() {
           console.log("        DVB: " + sdtText);
           console.log("        PIDs: " + (pids || "-") +
             " · ráfagas " + m.burstRatio + "× · oscilación " + m.jitterPct + "%");
+          // Perfil real del flujo: cada símbolo es una trama de 500 ms.
+          // Esto es lo que explica las lecturas que saltan entre 6, 10, 2 y 0.
+          const bars = " ▁▂▃▄▅▆▇█";
+          const prof = Array.isArray(m.profileKbps) ? m.profileKbps : [];
+          if (prof.length) {
+            const maxP = Math.max(1, ...prof);
+            const art = prof
+              .map((v) => bars[Math.min(8, Math.max(0, Math.round((v / maxP) * 8)))])
+              .join("");
+            const perSec = [];
+            for (let i = 0; i < prof.length; i += 2) {
+              perSec.push(((prof[i] + (prof[i + 1] || 0)) / 2000).toFixed(1));
+            }
+            console.log("        perfil: " + art + "  (" + m.bucketMs + " ms cada símbolo)");
+            console.log("        por segundo (Mbps): " + perSec.join(" "));
+            if (m.pattern) console.log("        forma : " + m.pattern.label);
+            if (m.pattern && (m.pattern.id === "chunky" || m.pattern.id === "gaps" || m.pattern.id === "none")) {
+              console.log("        → " + m.pattern.meaning);
+            }
+          }
           if (m.kbps > 0) measured.push(m.kbps);
           for (const f of row.flags) {
             const tag = f.level === "error" ? "[!!]" : "[!] ";

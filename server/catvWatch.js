@@ -40,6 +40,77 @@ function isUnicast(ip = '') {
 const hexPid = (pid) => `0x${Number(pid).toString(16).padStart(4, '0')}`;
 
 /**
+ * Clasifica la forma del flujo a partir del perfil de 500 ms.
+ *
+ * Es la pieza que traduce a lenguaje claro lo que el operador ve en la web del
+ * modulador ("6, 10, 2 y de golpe 0"): casi nunca es que el canal gaste más o
+ * menos, es que el flujo llega a trozos y la lectura instantánea depende de
+ * cuándo se mire.
+ */
+function classifyPattern({ perBucketKbps = [], peak = 0, avgBucket = 0, idle = 0, burst = 0 }) {
+  const n = perBucketKbps.length;
+  if (!n || peak === 0) {
+    return {
+      id: 'none',
+      label: 'no llega nada',
+      meaning: 'El grupo no entra por esta interfaz o el canal no está emitiendo.'
+    };
+  }
+  const idlePct = Math.round((idle / n) * 100);
+
+  // ¿Llega "a trozos" o "se corta"? Se distinguen por la FORMA de los huecos:
+  //   a trozos  -> ráfagas cortas (<= 1 s) y huecos de tamaño parecido, repetidos
+  //   cortes    -> un hueco largo, o el flujo se para y no vuelve
+  let run = 0;
+  let longestRun = 0;
+  let bursts = 0;
+  let wasActive = false;
+  for (const v of perBucketKbps) {
+    if (v > 0) {
+      run += 1;
+      longestRun = Math.max(longestRun, run);
+      if (!wasActive) bursts += 1;
+      wasActive = true;
+    } else {
+      run = 0;
+      wasActive = false;
+    }
+  }
+  const shortBursts = longestRun <= 2;           // 2 tramos de 500 ms = 1 s
+  const repeated = bursts >= 2;
+
+  if (idlePct >= 40 && !(shortBursts && repeated)) {
+    return {
+      id: 'gaps',
+      label: `cortes: ${idlePct}% del tiempo en 0`,
+      meaning:
+        'El flujo se queda sin datos a ratos largos. No es que llegue a trozos: el origen ' +
+        'se corta, el canal se reinicia o el enlace no da el ancho de banda.'
+    };
+  }
+  if (burst >= 2.5 || idlePct > 0) {
+    return {
+      id: 'chunky',
+      label: `a trozos: ${bursts} entrega(s) corta(s), pico ${burst}× la media`,
+      meaning:
+        'El flujo llega por segmentos: entra de golpe (ese es el 6–10 que ves) y luego ' +
+        'silencio (el 2 y el 0). La media es la correcta; lo que baila es la lectura ' +
+        'instantánea. Se aplana con -re en la salida; si sigue, el origen entrega tarde.'
+    };
+  }
+  if ((peak - avgBucket) / Math.max(1, avgBucket) <= 0.5) {
+    return { id: 'steady', label: 'constante', meaning: 'Flujo estable: la lectura no debería bailar.' };
+  }
+  return {
+    id: 'uneven',
+    label: `irregular (pico ${burst}× la media)`,
+    meaning: 'Varía sin llegar a cortarse: suele ser un GOP largo o el propio origen.'
+  };
+}
+
+
+
+/**
  * Lee el nombre de servicio de la SDT de un paquete TS.
  * Estructura (EN 300 468): 0x42 | section_length | tsid | version | sec | last |
  * onid | reserved | [ service_id | flags | running+len | descriptores ] | CRC32
@@ -138,6 +209,8 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
       jitterPct: 0,
       idleBuckets: 0,
       bucketMs: 500,
+      profileKbps: [],
+      pattern: { id: 'unknown', label: 'sin medición', meaning: '' },
       datagrams: 0,
       pps: 0,
       bytes: 0,
@@ -306,6 +379,10 @@ export function measureUdpStream({ host, port, seconds = 5, bindIp = '' }) {
         jitterPct,
         idleBuckets: idle,
         bucketMs: BUCKET_MS,
+        // Perfil completo (kbps por trama de 500 ms): es lo que explica las
+        // lecturas que saltan entre 6, 10, 2 y 0 en la web del equipo.
+        profileKbps: perBucketKbps,
+        pattern: classifyPattern({ perBucketKbps, peak, avgBucket, idle, burst }),
         pids,
         duplicates: stats.duplicates,
         lost: stats.lost,
