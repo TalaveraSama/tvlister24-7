@@ -21,7 +21,8 @@ import {
   getCatvStdChannelInfo,
   unitChannelList,
   resolveEffectiveBindIp,
-  listHostIpv4Interfaces
+  listHostIpv4Interfaces,
+  computeDefaultUdpAddress
 } from './wk2500Manager.js';
 import { templateSummary } from './catvCsvTemplate.js';
 
@@ -226,6 +227,32 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
         ? `${badOffset.length} portadoras con separación audio/vídeo distinta de 4.5 MHz.`
         : `Portadora 1 = CH${carriers[0]?.catv_ch} a ${carriers[0]?.freq_mhz} MHz · audio +4.5 MHz.`
     );
+
+    // Destinos que no coinciden con la base de su modulador (plan a medio
+    // aplicar: quedaron con la dirección de fábrica 239.25.0.x).
+    const mismatched = carriers.filter((c) => {
+      const unitRow = units.find((u) => Number(u.id) === Number(unit.id));
+      if (!unitRow) return false;
+      const expected = computeDefaultUdpAddress(
+        c.catv_ch,
+        unitRow.ip_mode,
+        unitRow.dest_ip,
+        unitRow.base_port
+      );
+      return c.udp_host !== expected.udp_host || Number(c.udp_port) !== Number(expected.udp_port);
+    });
+    if (mismatched.length) {
+      add(
+        'udp-mismatch',
+        'error',
+        false,
+        `${mismatched.length} portadora(s) apuntan a un destino que no es el de este equipo`,
+        `Ej.: CH${mismatched[0].catv_ch} → ${mismatched[0].udp_host}:${mismatched[0].udp_port}; según la base del equipo debería ser ` +
+          `${computeDefaultUdpAddress(mismatched[0].catv_ch, unit.ip_mode, unit.dest_ip, unit.base_port).udp_host}:` +
+          `${computeDefaultUdpAddress(mismatched[0].catv_ch, unit.ip_mode, unit.dest_ip, unit.base_port).udp_port}. ` +
+          'Arréglalo con «tvlister-admin catv fill --apply» o reaplicando el equipo en el panel.'
+      );
+    }
 
     // ---- 3. Emisión real --------------------------------------------------
     // Se cuenta como entrega real si salieron paquetes en la muestra (aunque el

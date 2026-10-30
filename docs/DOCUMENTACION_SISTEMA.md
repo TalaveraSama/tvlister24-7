@@ -1761,3 +1761,54 @@ Los cuatro equipos comparten la base y **eso es correcto**; lo que cambia es qu�
 **Si el modulador espera unicast.** Muchos 2500C vienen configurados para recibir en una IP propia
 (`192.168.200.x`). En ese caso hay que poner cada equipo en modo **unicast** con **su** IP: el panel lo marca como
 error si dos equipos comparten IP en unicast, porque el switch entregaría el flujo al primero.
+
+### 8.34. Llenar el plan y detectar destinos cruzados (v2.5.9)
+
+Después del diagnóstico quedan dos tareas de operación: **asignar canales a las portadoras** y **detectar
+portadoras que apuntan a un destino que no es el de su modulador**.
+
+**`tvlister-admin catv fill`** (menú opción 20) — asigna los canales del panel a las portadoras libres, en orden,
+sin repetir ninguno. **Por defecto sólo muestra la vista previa.**
+
+```bash
+tvlister-admin catv fill              # vista previa
+tvlister-admin catv fill --apply      # asigna y marca para emitir
+tvlister-admin catv fill --apply --force   # reasigna también las ocupadas
+tvlister-admin catv fill 2 64         # limitar el rango de canales CATV
+```
+
+| Regla | Comportamiento |
+| --- | --- |
+| Sólo portadoras cubiertas por un equipo | lo demás se ignora |
+| No repite canales | usa la lista de libres y continúa donde se quedó |
+| No toca lo ya asignado | salvo `--force` |
+| Corrige el destino UDP | recalcula `host:puerto` con la base de **su** modulador |
+| Las portadoras sin canal quedan vacías | no se inventan rellenos |
+
+También repara el destino de portadoras **sin** canal cuando quedaron con la dirección de fábrica
+(`239.25.0.x`), que es el estado típico tras crear un equipo sin reaplicarlo.
+
+**Detección de destinos cruzados (`catv check` y `Comprobar`)**
+
+Nueva comprobación `udp-mismatch`: compara cada portadora con la dirección que le corresponde según
+`ip_mode`, `dest_ip` y `base_port` de su equipo. Si no coincide, sale como **error**:
+
+```
+[!!] 1 portadora(s) apuntan a un destino que no es el de este equipo
+     Ej.: CH10 → 239.25.0.10:5010; según la base del equipo debería ser 239.1.1.10:1010.
+```
+
+Sin esto, un plan a medio aplicar se veía "todo OK" aunque 56 portadoras apuntaran a `239.25.0.x`, donde no hay
+ningún modulador escuchando.
+
+**Prueba realizada** (plan sintético de 2 × 32 en multicast `239.1.1.0:1000`, 8 canales en el panel):
+
+| Caso | Resultado |
+| --- | --- |
+| `fill` sin canales libres | «No queda nada por asignar» y no escribe |
+| `fill` primera vez | 8 asignadas, 8 destinos calculados con la base del equipo |
+| `fill` segunda vez | idempotente: 0 cambios |
+| `fill --force` | reasigna las 8 y sale el aviso de portadoras que quedarían vacías |
+| `fill --apply` con 56 portadoras sin canal | corrige las 56 direcciones de fábrica |
+| `catv check` tras el fill | «Todos distintos, del 239.1.1.2:1002 al 239.1.1.33:1033» |
+| Puerto/URL mal escrito a mano | `udp-mismatch` lo marca como error con el valor correcto |

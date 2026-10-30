@@ -615,8 +615,180 @@ cmd_catv() {
         console.log("============================================================");
       '
       ;;
+    fill)
+      # Llena las portadoras del plan con los canales del panel, en orden.
+      # Por defecto sólo MUESTRA lo que haría; escribe con --apply.
+      local apply="0" force="0" from="" to=""
+      for a in "${@:2}"; do
+        case "$a" in
+          --apply) apply="1" ;;
+          --force) force="1" ;;
+          ""|--*) ;;
+          *)
+            if [ -z "$from" ]; then from="$a"; else to="$a"; fi
+            ;;
+        esac
+      done
+      from="${from:-2}"
+      to="${to:-125}"
+      CATV_APPLY="$apply" CATV_FORCE="$force" CATV_FROM="$from" CATV_TO="$to" \
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb, db } from "./server/db.js";
+        import { ensureCatvSlotsInitialized, unitChannelList, computeDefaultUdpAddress } from "./server/wk2500Manager.js";
+        initDb();
+        ensureCatvSlotsInitialized();
+        const apply = process.env.CATV_APPLY === "1";
+        const force = process.env.CATV_FORCE === "1";
+        const from = Math.max(2, Number(process.env.CATV_FROM) || 2);
+        const to = Math.min(125, Number(process.env.CATV_TO) || 125);
+
+        const units = db.prepare("SELECT * FROM wk2500_units WHERE enabled = 1 ORDER BY id ASC").all();
+        if (!units.length) {
+          console.log("  No hay moduladores dados de alta. Crea los equipos primero.");
+          process.exit(1);
+        }
+        const covered = new Set();
+        const unitOf = new Map();
+        for (const u of units) {
+          for (const ch of unitChannelList(u)) {
+            covered.add(Number(ch));
+            unitOf.set(Number(ch), u);
+          }
+        }
+
+        const slots = db.prepare("SELECT catv_ch, stream_id, enabled, udp_host, udp_port FROM wk2500_channels ORDER BY catv_ch ASC").all();
+
+        // Reparar el destino de TODAS las portadoras del plan (con o sin canal):
+        // si el equipo se creó antes de aplicar su base, quedaron en 239.25.0.x.
+        let addrPlanFixed = 0;
+        if (apply) {
+          const fixAddr = db.prepare(
+            "UPDATE wk2500_channels SET udp_host = ?, udp_port = ?, updated_at = CURRENT_TIMESTAMP WHERE catv_ch = ?"
+          );
+          db.exec("BEGIN IMMEDIATE;");
+          try {
+            for (const slot of slots) {
+              const ch = Number(slot.catv_ch);
+              if (ch < from || ch > to || !covered.has(ch)) continue;
+              const u = unitOf.get(ch);
+              const a = computeDefaultUdpAddress(ch, u.ip_mode, u.dest_ip, u.base_port);
+              if (slot.udp_host !== a.udp_host || Number(slot.udp_port) !== Number(a.udp_port)) {
+                fixAddr.run(a.udp_host, a.udp_port, ch);
+                addrPlanFixed += 1;
+              }
+            }
+            db.exec("COMMIT;");
+          } catch (e) {
+            db.exec("ROLLBACK;");
+            throw e;
+          }
+        }
+        const streams = db.prepare("SELECT id, name FROM streams ORDER BY sort_order ASC, id ASC").all();
+        const already = slots.filter((s) => s.stream_id).length;
+
+        // Los canales que ya están en otra portadora no se repiten: se usa la
+        // lista de libres para que el fill continúe donde se quedó.
+        const usedIds = new Set(slots.filter((s) => s.stream_id).map((s) => Number(s.stream_id)));
+        const free = force ? streams.slice() : streams.filter((st) => !usedIds.has(Number(st.id)));
+        const pending = [];
+        let si = 0;
+        for (const slot of slots) {
+          const ch = Number(slot.catv_ch);
+          if (ch < from || ch > to) continue;
+          if (!covered.has(ch)) continue;
+          if (slot.stream_id && !force) continue;
+          if (si >= free.length) break;
+          pending.push({ catv_ch: ch, stream: free[si], slot });
+          si += 1;
+        }
+
+        console.log("");
+        console.log("============================================================");
+        console.log("  Asignar canales del panel a las portadoras del plan");
+        console.log("============================================================");
+        console.log("  Moduladores        : " + units.length + " (" + covered.size + " portadoras)");
+        console.log("  Canales en el panel: " + streams.length);
+        console.log("  Ya asignados       : " + already);
+        console.log("  Rango              : CH " + from + " al " + to);
+        console.log("  Canales libres     : " + free.length);
+        console.log("  A asignar ahora    : " + pending.length + (force ? "  (--force: reemplaza los existentes)" : ""));
+        const inRange = slots.filter(
+          (x) => covered.has(Number(x.catv_ch)) && Number(x.catv_ch) >= from && Number(x.catv_ch) <= to
+        ).length;
+        if (pending.length && pending.length < inRange) {
+          console.log("  (" + (inRange - pending.length) + " portadora(s) quedarían sin canal del panel)");
+        }
+        console.log("");
+
+        if (!pending.length) {
+          if (!streams.length) console.log("  [AVISO] El panel no tiene canales todavía. Impórtalos o créalos primero.");
+          else console.log("  [OK] No queda nada por asignar en ese rango.");
+          if (addrPlanFixed) {
+            console.log("  [OK] " + addrPlanFixed + " destino(s) UDP corregidos con la base de cada modulador.");
+          }
+          console.log("============================================================");
+          process.exit(0);
+        }
+
+        console.log("  Portadora  Canal  Canal del panel");
+        for (const p of pending.slice(0, 12)) {
+          console.log("   CH" + String(p.catv_ch).padEnd(6) + "  " + String(p.stream.id).padStart(4) + "   " + p.stream.name);
+        }
+        if (pending.length > 12) console.log("   ... (" + (pending.length - 12) + " más)");
+        console.log("");
+
+        if (!apply) {
+          console.log("  Esto es sólo una vista previa. Para aplicarlo:");
+          console.log("    tvlister-admin catv fill --apply      # asigna y marca para emitir");
+          console.log("============================================================");
+          process.exit(0);
+        }
+
+        const upd = db.prepare(
+          "UPDATE wk2500_channels SET stream_id = ?, enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE catv_ch = ?"
+        );
+        // Si la portadora no tenía destino UDP (equipo creado sin aplicar), se
+        // calcula con la IP/puerto base de su modulador.
+        const updAddr = db.prepare(
+          "UPDATE wk2500_channels SET stream_id = ?, enabled = 1, udp_host = ?, udp_port = ?, updated_at = CURRENT_TIMESTAMP WHERE catv_ch = ?"
+        );
+        let addrFixed = 0;
+        db.exec("BEGIN IMMEDIATE;");
+        try {
+          for (const p of pending) {
+            // El destino se recalcula con la base del modulador que sirve el
+            // canal: si quedó con la dirección de fábrica (239.25.0.x) es un
+            // plan a medio aplicar y aquí se corrige.
+            const u = unitOf.get(Number(p.catv_ch));
+            const a = computeDefaultUdpAddress(p.catv_ch, u.ip_mode, u.dest_ip, u.base_port);
+            if (p.slot.udp_host !== a.udp_host || Number(p.slot.udp_port) !== Number(a.udp_port)) {
+              updAddr.run(p.stream.id, a.udp_host, a.udp_port, p.catv_ch);
+              addrFixed += 1;
+            } else {
+              upd.run(p.stream.id, p.catv_ch);
+            }
+          }
+          db.exec("COMMIT;");
+        } catch (e) {
+          db.exec("ROLLBACK;");
+          throw e;
+        }
+        const on = db.prepare("SELECT COUNT(*) c FROM wk2500_channels WHERE enabled = 1 AND stream_id IS NOT NULL").get().c;
+        console.log("  [OK] Asignadas " + pending.length + " portadoras. Ahora hay " + on + " listas para emitir.");
+        if (addrFixed + addrPlanFixed) {
+          console.log(
+            "       (" + (addrFixed + addrPlanFixed) +
+              " destino(s) UDP del plan corregidos con la base de cada modulador)"
+          );
+        }
+        console.log("");
+        console.log("  Enciéndelas con:  tvlister-admin restart   (o el botón \"Iniciar todo\" en UDP / CATV)");
+        console.log("  Comprueba con:    tvlister-admin catv check");
+        console.log("============================================================");
+      '
+      ;;
     *)
-      echo "Uso: tvlister-admin catv [check] [id_equipo]"
+      echo "Uso: tvlister-admin catv [check|fill] [id_equipo] [--apply]"
       return 1
       ;;
   esac
@@ -871,7 +1043,8 @@ case "$ACTION" in
     '
     ;;
   catv)
-    cmd_catv "${2:-check}" "${3:-}"
+    shift
+    cmd_catv "${1:-check}" "${2:-}" "${3:-}" "${4:-}" "${5:-}"
     ;;  update)
     cmd_update
     ;;
@@ -907,9 +1080,10 @@ case "$ACTION" in
     echo " 17) Instalar/actualizar desde un release publicado (release)"
     echo " 18) Configuracion recomendada segun el hardware (tune)"
     echo " 19) Comprobar salida UDP/CATV hacia los moduladores (catv check)"
+    echo " 20) Asignar canales del panel a las portadoras CATV (catv fill)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-19]: " opt
+    read -r -p "Selecciona una opción [0-20]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -930,6 +1104,7 @@ case "$ACTION" in
       17) cmd_release "latest" ;;
       18) cmd_tune "show" ;;
       19) cmd_catv "check" "" ;;
+      20) cmd_catv "fill" "" ;;
       *) exit 0 ;;
     esac
     ;;
