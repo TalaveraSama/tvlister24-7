@@ -1812,3 +1812,51 @@ ningún modulador escuchando.
 | `fill --apply` con 56 portadoras sin canal | corrige las 56 direcciones de fábrica |
 | `catv check` tras el fill | «Todos distintos, del 239.1.1.2:1002 al 239.1.1.33:1033» |
 | Puerto/URL mal escrito a mano | `udp-mismatch` lo marca como error con el valor correcto |
+
+### 8.35. Medir el UDP real que llega al modulador (v2.5.10)
+
+El síntoma de campo es siempre el mismo: **en el modulador entra más bitrate del que debería** (p. ej. 30 Mbps en
+una portadora de un canal de 2–3 Mbps) y las portadoras no quedan parejas. Antes de tocar nada hay que saber
+**quién** está metiendo esos megas, y eso no se adivina: se mide.
+
+```bash
+tvlister-admin catv watch                      # canales habilitados con origen
+tvlister-admin catv watch --secs 8             # 8 s por canal (más estable)
+tvlister-admin catv watch --ch 2,3,45          # sólo esos canales
+tvlister-admin catv watch --ip 192.168.200.8   # NIC de los moduladores
+tvlister-admin catv watch 2                    # sólo el equipo 2
+```
+
+`catv watch` (menú 21) **se une al grupo multicast igual que el modulador** y durante N segundos cuenta bytes,
+paquetes y PIDs, de modo que la cifra medida es la misma que él recibe. No usa el contador del panel: eso es lo
+que se quiere comparar.
+
+```
+  CANAL  EQUIPO           DESTINO UDP                  MEDIDO   PKT/S   DECLARADO  PIDs
+  CH2    CSP-2500C 1     239.1.1.2:1002            2.61 Mbps     248   2.50 Mbps  0x0065 0x0066
+  CH3    CSP-2500C 1     239.1.1.3:1003           29.61 Mbps    2812   2.50 Mbps  0x0065 0x0066
+        [!!] EXCESO 11.8× lo declarado
+        origen: http://…
+        motor : direct_spts · muxrate (CBR): 0 kbps  <- sin límite: la salida va al ritmo del origen
+```
+
+| Señal | Qué significa | Qué se hace |
+| --- | --- | --- |
+| `EXCESO N×` | lo medido supera 2× el bitrate declarado del canal | la fuente es más gorda de lo que se cree, o la salida va en ráfagas |
+| `% PAQUETES DUPLICADOS` | el mismo `continuity_counter` llega repetido: **hay otro emisor** en ese grupo | Flussonic, otro TVLister o dos portadoras con la misma dirección |
+| `mismo destino que CH n` | dos canales apuntan al mismo `IP:puerto`; el modulador **suma** los dos flujos | corregir con `catv fill --apply` o a mano |
+| `NO LLEGA NADA` | el grupo no entra por esa NIC | repetir con `--ip <IP de la NIC correcta>` |
+| `captura incompleta` | el kernel perdió paquetes al medir: el valor real es algo mayor | subir `net.core.rmem_max` o no medir con el equipo saturado |
+| `Puerto N privilegiado` | los puertos < 1024 exigen root | ejecutar con `sudo` |
+
+Además calcula la **mediana del conjunto** y marca los canales desbalanceados (fuera de ±2×), que es la forma
+directa de comprobar el «el UDP no está balanceado».
+
+**Regla de oro:** si el panel mide lo mismo que el modulador, el problema está en el origen (fuente más gorda o
+ráfagas al reconectar). Si el panel mide menos de lo que el modulador recibe, hay **otro emisor** en el grupo y
+`catv watch` lo delata con el porcentaje de paquetes duplicados.
+
+**Ráfagas**: con `output_mode = direct_spts` y `muxrate = 0` la salida va al ritmo del origen; si el origen se
+retrasa y luego se recupera, el modulador ve picos de decenas de Mbps. Poner un `muxrate (CBR)` por portadora
+obliga a un flujo constante y es lo que se recomienda cuando `catv watch` marca EXCESO con duplicados a 0.
+

@@ -787,8 +787,144 @@ cmd_catv() {
         console.log("============================================================");
       '
       ;;
+    watch)
+      # Mide de verdad lo que llega al grupo de cada modulador: se une al
+      # multicast, cuenta bytes y paquetes durante N segundos y los desglosa
+      # por PID. Detecta exceso de Mbps, desbalance entre canales y paquetes
+      # duplicados (dos emisores al mismo grupo).
+      # Uso: tvlister-admin catv watch [--secs N] [--ch 2,3,5] [--ip 192.168.200.8] [id_equipo]
+      local secs="5" chans="" bind="" prev="" arg
+      local -a posargs=()
+      for arg in "${@:2}"; do
+        case "$arg" in
+          --secs=*) secs="${arg#*=}" ; prev="" ;;
+          --ch=*) chans="${arg#*=}" ; prev="" ;;
+          --ip=*) bind="${arg#*=}" ; prev="" ;;
+          --secs | --ch | --ip) prev="$arg" ;;
+          "")
+            prev=""
+            ;;
+          *)
+            case "$prev" in
+              --secs) secs="$arg" ; prev="" ;;
+              --ch) chans="$arg" ; prev="" ;;
+              --ip) bind="$arg" ; prev="" ;;
+              *) posargs+=("$arg") ; prev="" ;;
+            esac
+            ;;
+        esac
+      done
+      # Un argumento suelto (sin --flag) se interpreta como id de equipo.
+      if [ "${#posargs[@]}" -gt 0 ] && [ -z "$unit_id" ]; then
+        unit_id="${posargs[0]}"
+      fi
+      CATV_SECS="$secs" CATV_CHANNELS="$chans" CATV_IP="$bind" CATV_UNIT_ID="$unit_id" \
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { watchCatvOutput } from "./server/catvWatch.js";
+        initDb();
+
+        const secs = Math.max(1, Number(process.env.CATV_SECS) || 5);
+        const rawCh = String(process.env.CATV_CHANNELS || "").trim();
+        const channels = rawCh
+          ? rawCh.split(",").map((x) => Number(String(x).trim())).filter((n) => Number.isFinite(n) && n > 0)
+          : null;
+        const unitId = process.env.CATV_UNIT_ID ? Number(process.env.CATV_UNIT_ID) : null;
+        const bindIp = String(process.env.CATV_IP || "").trim();
+
+        const pad = (s, n) => String(s).padEnd(n);
+        const padl = (s, n) => String(s).padStart(n);
+        const mbps = (kbps) => (Number(kbps || 0) / 1000).toFixed(2);
+
+        const r = await watchCatvOutput({ unitId, channels, seconds: secs, bindIp });
+        if (r.error) {
+          console.error("  " + r.error);
+          process.exit(1);
+        }
+
+        console.log("");
+        console.log("============================================================");
+        console.log("  TVLister 24/7 - Medición real del UDP hacia los moduladores");
+        console.log("  " + r.results.length + " canal(es) · " + secs + " s cada uno (≈" +
+          Math.ceil((r.results.length * secs) / 60) + " min en total) · interfaz: " +
+          (bindIp || "automática (la del canal)"));
+        console.log("  Se mide lo MISMO que recibe el modulador: se une al grupo y cuenta.");
+        console.log("============================================================");
+        console.log("");
+        console.log("  " + pad("CANAL", 7) + pad("EQUIPO", 17) + pad("DESTINO UDP", 24) +
+          padl("MEDIDO", 11) + padl("PKT/S", 8) + padl("DECLARADO", 12) + "  PIDs");
+
+        const measured = [];
+        for (const row of r.results) {
+          const m = row.measured;
+          const dest = row.udp_host + ":" + row.udp_port;
+          const pids = (m.pids || []).filter((p) => p.kbps > 0).slice(0, 3)
+            .map((p) => p.label).join(" ");
+          const unitLabel = (row.unit_name || "-").slice(0, 16);
+          console.log(
+            "  CH" + pad(row.catv_ch, 5) +
+            pad(unitLabel, 17) +
+            pad(dest, 24) +
+            padl(mbps(m.kbps) + " Mbps", 11) +
+            padl(m.pps || 0, 8) +
+            padl(mbps(row.declared_kbps) + " Mbps", 12) +
+            "  " + (pids || "-")
+          );
+          if (m.kbps > 0) measured.push(m.kbps);
+          for (const f of row.flags) {
+            const tag = f.level === "error" ? "[!!]" : "[!] ";
+            console.log("        " + tag + " " + f.text);
+          }
+          if (row.flags.length) {
+            const src = String(row.source || "-");
+            const srcShort = src.length > 74 ? src.slice(0, 71) + "..." : src;
+            console.log("        origen: " + srcShort);
+            console.log("        motor : " + (row.output_mode || "direct_spts") +
+              " · muxrate (CBR): " + (Number(row.muxrate_kbps) || 0) + " kbps" +
+              (Number(row.muxrate_kbps) ? "" : "  <- sin límite: la salida va al ritmo del origen"));
+          }
+          if (m.duplicates > 0) {
+            console.log("        [!!] " + m.duplicates + " paquete(s) con el mismo continuity_counter → el mismo TS llega más de una vez");
+          }
+        }
+
+        // Desbalance: desviación grande respecto a la mediana real del conjunto.
+        const sorted = [...measured].sort((a, b) => a - b);
+        const median = sorted.length
+          ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2))
+          : 0;
+        if (measured.length >= 3 && median > 0) {
+          const off = r.results.filter((x) => x.measured.kbps > 0 && (x.measured.kbps > median * 2 || x.measured.kbps < median * 0.5));
+          console.log("");
+          console.log("  Mediana del conjunto: " + mbps(median) + " Mbps");
+          if (!off.length) {
+            console.log("  [OK] Los canales están balanceados: ninguno se sale de ±2× la mediana.");
+          } else {
+            console.log("  [!!] DESBALANCEADOS (" + off.length + "): " +
+              off.map((x) => "CH" + x.catv_ch + " " + mbps(x.measured.kbps) + " Mbps").join(" · "));
+          }
+        }
+
+        const s = r.summary;
+        console.log("");
+        console.log("------------------------------------------------------------");
+        console.log("  Total medido: " + mbps(s.total_kbps) + " Mbps · media " + mbps(s.average_kbps) +
+          " Mbps · máximo " + mbps(s.max_kbps) + " Mbps · mínimo " + mbps(s.min_kbps) + " Mbps");
+        console.log("  Canales con problema: " + s.with_problems + " de " + s.channels);
+        console.log("");
+        console.log("  Cómo se lee:");
+        console.log("   - MEDIDO > DECLARADO por 2× o más  -> el emisor manda de más");
+        console.log("     (fuente gorda, ráfagas al reconectar o dos motores al mismo grupo).");
+        console.log("   - PAQUETES DUPLICADOS              -> hay OTRO emisor en el mismo grupo");
+        console.log("     (Flussonic, otro TVLister o dos equipos con la misma dirección).");
+        console.log("   - NO LLEGA NADA                    -> el grupo no entra por esta NIC;");
+        console.log("     repite con --ip <IP de la NIC de los moduladores>.");
+        console.log("============================================================");
+      '
+      ;;
     *)
-      echo "Uso: tvlister-admin catv [check|fill] [id_equipo] [--apply]"
+      echo "Uso: tvlister-admin catv [check|fill|watch] [id_equipo] [--apply]"
+      echo "     tvlister-admin catv watch [--secs 5] [--ch 2,3,5] [--ip 192.168.200.8]"
       return 1
       ;;
   esac
@@ -1044,7 +1180,7 @@ case "$ACTION" in
     ;;
   catv)
     shift
-    cmd_catv "${1:-check}" "${2:-}" "${3:-}" "${4:-}" "${5:-}"
+    cmd_catv "$@"
     ;;  update)
     cmd_update
     ;;
@@ -1081,9 +1217,10 @@ case "$ACTION" in
     echo " 18) Configuracion recomendada segun el hardware (tune)"
     echo " 19) Comprobar salida UDP/CATV hacia los moduladores (catv check)"
     echo " 20) Asignar canales del panel a las portadoras CATV (catv fill)"
+    echo " 21) Medir el UDP real que llega (Mbps, duplicados, desbalance) (catv watch)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-20]: " opt
+    read -r -p "Selecciona una opción [0-21]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -1105,6 +1242,7 @@ case "$ACTION" in
       18) cmd_tune "show" ;;
       19) cmd_catv "check" "" ;;
       20) cmd_catv "fill" "" ;;
+      21) cmd_catv "watch" "" ;;
       *) exit 0 ;;
     esac
     ;;
