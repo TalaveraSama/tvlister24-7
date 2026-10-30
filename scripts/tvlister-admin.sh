@@ -1049,6 +1049,11 @@ cmd_catv() {
             "  " + String(r.name).slice(0, 30) +
             (r.action ? "  [" + r.action + "]" : "")
           );
+          // La cadena completa: de dónde entra y por dónde sale.
+          const flags = r.engine === "ffmpeg"
+            ? "-c copy" + (r.constant ? ", -re" : "") + (r.new_muxrate ? ", CBR" : "")
+            : "sin dosificar";
+          console.log("        " + r.source_kind + "  ->  " + r.engine + " (" + flags + ")  ->  udp " + r.dest);
         }
 
         if (apply && (wantCbr || wantClear)) {

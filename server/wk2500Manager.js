@@ -1190,8 +1190,28 @@ export function catvOutputPlan({ unitId = null, onlyEnabled = true } = {}) {
     if (unitId && Number(row.unit_id) !== Number(unitId)) continue;
 
     const unit = unitById.get(Number(row.unit_id)) || null;
-    const direct = shouldUseDirectNodeUdpEngine(row, source, null);
+
+    // De dónde sale realmente el flujo: la URL remota (m3u8 de Flussonic) o el
+    // HLS que el propio panel escribe en RAMDisk para servir a los clientes.
+    const up = resolveSlotUpstream(row);
+    const inputUrl = source;
+    const isLocalHls = Boolean(up.localHls) && !row.custom_source_url;
+    const direct = shouldUseDirectNodeUdpEngine(row, source, up.localHls || null);
     const engine = direct ? 'direct_dgram' : 'ffmpeg';
+    const lower = String(source || '').toLowerCase();
+    const sourceKind = isLocalHls
+      ? 'HLS local (RAMDisk del panel)'
+      : lower.startsWith('mnf')
+      ? 'MNF'
+      : lower.includes('.m3u8') || lower.startsWith('hls')
+      ? 'HLS (m3u8 del origen)'
+      : lower.includes('.fmp4.')
+      ? 'CMAF / fMP4'
+      : lower.startsWith('rtp')
+      ? 'RTP'
+      : lower.startsWith('udp')
+      ? 'UDP'
+      : 'HTTP MPEG-TS';
 
     // Con el motor directo no hay -re posible; con FFmpeg se comprueba en los
     // argumentos reales que se van a lanzar.
@@ -1206,6 +1226,9 @@ export function catvOutputPlan({ unitId = null, onlyEnabled = true } = {}) {
       catv_ch: Number(row.catv_ch),
       name: row.custom_name || row.stream_name || `CH ${row.catv_ch}`,
       source,
+      input: isLocalHls ? up.localHls : inputUrl,
+      source_kind: sourceKind,
+      service_name: row.custom_name || row.stream_name || `CANAL ${row.catv_ch}`,
       unit_id: unit ? Number(unit.id) : null,
       unit_name: unit ? unit.name : '',
       output_mode: row.output_mode || 'direct_spts',

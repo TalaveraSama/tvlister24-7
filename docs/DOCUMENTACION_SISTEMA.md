@@ -2037,3 +2037,51 @@ sudo tvlister-admin catv watch --secs 10    # comprobar: forma constante, 0 tram
 - Si un canal se queda **en 0 y sin datos**, el problema no es el dosificado: es que el origen no entrega más rápido
   de lo que el flujo pide (`a trozos` se convierte en huecos). Eso se ve con `catv watch` y se arregla en el origen.
 
+### 8.39. La cadena real: m3u8 de Flussonic → panel → UDP a los moduladores (v2.5.14)
+
+El recorrido de un canal CATV en producción es siempre el mismo:
+
+```
+Flussonic (origen)  --m3u8-->  TVLister 24/7  --FFmpeg (-c copy, -re)-->  UDP 239.1.1.x:10xx  -->  modulador IP→analógico
+```
+
+Hay **dos entradas posibles** en el segundo salto, y conviene saber cuál está usando cada canal:
+
+| Entrada | Cuándo | Qué se lee |
+| --- | --- | --- |
+| **HLS del origen** | el canal tiene su propia URL (`custom_source_url`) o el stream no se está sirviendo por el motor 24/7 | el `index.m3u8` del Flussonic, tal cual |
+| **HLS local (RAMDisk del panel)** | el stream ya se está sirviendo a los clientes y el motor escribe `/dev/shm/tvlister_hls/stream_<id>/` | el manifiesto local que escribe el propio panel |
+
+Las dos acaban en el mismo sitio: **FFmpeg con `-c copy` y `-re`**, que es lo que hace que la salida sea constante.
+
+`tvlister-admin catv steady` (menú 22) enseña la cadena de cada canal:
+
+```
+  CANAL  MOTOR         DOSIFICADO    DECLARADO    MUXRATE  NOMBRE
+  CH2    ffmpeg        si (-re)      2.90 Mbps          -  CANAL 2 NACIONAL
+        HLS (m3u8 del origen)  ->  ffmpeg (-c copy, -re)  ->  udp 239.9.9.1:7111
+  CH3    ffmpeg        si (-re)      2.50 Mbps          -  Telemundo
+        HLS local (RAMDisk del panel)  ->  ffmpeg (-c copy, -re)  ->  udp 239.9.9.2:1003
+```
+
+Si aparece `sin dosificar`, ese canal va por el motor directo (MNF, o `TVLISTER_CATV_DIRECT=1`) y **no** habrá
+constancia: es la causa del 6/10/2/0.
+
+#### Medición de la cadena completa (worker real del panel)
+
+Origen: HLS **en vivo con ventana deslizante** (segmentos de 2 s que aparecen de golpe, como Flussonic).
+
+| Entrada usada | Media | Pico | Ráfagas | Tramos en 0 | Por segundo | Forma |
+| --- | --- | --- | --- | --- | --- | --- |
+| `m3u8` del origen | 2,95 Mbps | 3,65 | 1,24× | **0** | `3.0 2.9 2.8 3.2 2.7 2.8 3.1 2.9 2.7 3.3` | `constante` |
+| HLS local del panel (RAMDisk) | 2,93 Mbps | 3,65 | 1,25× | **0** | `2.8 2.8 3.2 2.8 2.9 3.1 2.9 2.9 3.1 2.8` | `constante` |
+
+En los dos casos la SDT sale con el nombre del canal (`CANAL 2 NACIONAL`), no `Service01`.
+
+#### Qué mirar si un canal no sale constante
+
+1. `catv steady` → si dice `sin dosificar`, ese canal no está por FFmpeg.
+2. `catv watch --secs 10` → si sale `a trozos`, la entrada llega a saltos y `-re` no está actuando.
+3. Si sale `cortes`, el origen no entrega más rápido de lo que el flujo consume: **no es la salida**, es el origen
+   (Flussonic con `-re` de más, CDN lento o enlace justo).
+
