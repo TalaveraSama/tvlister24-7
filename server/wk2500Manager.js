@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process';
 import express from 'express';
 import { db, withSqliteBusyRetry } from './db.js';
 import { buildTemplate, renderTemplate, templateSummary, parseCsv } from './catvCsvTemplate.js';
+import { verifyCatv, setCatvWorkerSnapshot } from './catvVerify.js';
 import { requireAuth, requireAdmin } from './auth.js';
 import { MnfToTsRemuxer } from './mnfProtocol.js';
 import {
@@ -1865,6 +1866,22 @@ wk2500Router.delete('/api/wk2500/units/:id', requireAuth, requireAdmin, (req, re
 });
 
 /**
+ * Comprobación de la salida CATV: qué envía el panel, qué lleva el CSV y si el
+ * equipo es alcanzable. GET /api/wk2500/verify[?unit_id=&ping=0]
+ */
+wk2500Router.get('/api/wk2500/verify', requireAuth, requireAdmin, async (req, res) => {
+  ensureCatvSlotsInitialized();
+  try {
+    const unitId = req.query.unit_id ? Number(req.query.unit_id) : null;
+    const body = await verifyCatv({ unitId, ping: String(req.query.ping ?? '1') !== '0' });
+    if (body.error) return res.status(404).json({ error: body.error });
+    res.json({ ok: true, ...body });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo comprobar la salida CATV' });
+  }
+});
+
+/**
  * Filas de muestra del equipo (3 primeras portadoras) para previsualizar cómo
  * queda el archivo con la plantilla del modulador.
  */
@@ -3020,13 +3037,22 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
     // header=0 quita la cabecera (algunos firmwares sólo leen filas de datos)
     const withHeader = String(req.query.header ?? '1') !== '0';
     const eol = String(req.query.eol || '').toLowerCase() === 'crlf' ? '\r\n' : '\n';
+    // name=1 añade una 7ª columna con el nombre del canal (algunos firmwares la
+    // aceptan en la tabla de canales; por defecto NO, para no romper el Import).
+    const withName = String(req.query.name ?? '0') === '1';
     const min = withHeader
-      ? ['Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP']
+      ? [
+          'Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP' +
+            (withName ? ',Nombre_Canal' : '')
+        ]
       : [];
     for (const r of fileRows) {
       const { info, unit } = infoFor(r);
       const carrier = unit ? carrierIndex.get(`${unit.id}:${r.catv_ch}`) ?? '' : '';
-      min.push(`${carrier},${r.catv_ch},${info.freq_mhz},${info.audio_mhz},${r.udp_host},${r.udp_port}`);
+      const label = withName
+        ? `,${String(r.custom_name || r.stream_name || `CH${r.catv_ch}`).replace(/[",\r\n]/g, ' ').trim()}`
+        : '';
+      min.push(`${carrier},${r.catv_ch},${info.freq_mhz},${info.audio_mhz},${r.udp_host},${r.udp_port}${label}`);
     }
     const minName = unitFilter ? `${unitSlug(unitFilter)}_import.csv` : 'wk2500_import_2_al_125.csv';
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -3087,3 +3113,6 @@ wk2500Router.get('/api/wk2500/export-units', requireAuth, requireAdmin, (req, re
     })
   });
 });
+
+// El verificador necesita ver los workers vivos sin acoplarse a este archivo.
+setCatvWorkerSnapshot(() => udpWorkers);

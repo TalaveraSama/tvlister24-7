@@ -1664,3 +1664,50 @@ formato compacto y avisa con `compact-fallback` (la UI lo muestra en ámbar).
 | Compacto sin cabecera | `header=0` ⇒ primera línea ya es dato |
 | Detección sin cabecera | `1;91.25;95.75;192.168.25.10;5095` ⇒ portadora/vídeo/audio/IP/puerto correctos |
 | 27 pruebas unitarias del parser/mapeo | todas OK (incluye nombres con comas y comillas) |
+
+### 8.32. Comprobar la salida UDP/CATV (v2.5.7)
+
+Cuando el modulador "no cambia nada" hay tres causas distintas y hay que poder separarlas sin adivinar. El panel
+incorpora una comprobación que mide **lo que realmente sale** y **lo que realmente lleva el archivo**.
+
+**Panel**: *UDP / CATV → tarjeta del equipo → **Comprobar***.
+**Terminal**: `tvlister-admin catv check [id_equipo]` (menú opción 19).
+
+**Qué comprueba y cómo**
+
+| Comprobación | Cómo lo sabe | Qué significa si falla |
+| --- | --- | --- |
+| Plantilla del modulador | `wk2500_units.csv_template` | `Import` está usando el formato compacto, no el del equipo |
+| **¿El archivo lleva nombres?** | columna `name` reconocida en la plantilla | el CSV **no puede** cambiar los nombres del modulador |
+| **¿El archivo lleva IP/puerto?** | columnas `ip` y `port` reconocidas | la IP/puerto se configuran en la página *Input/Mapping* del equipo, no en la tabla de canales |
+| Destinos UDP | `udp_host`/`udp_port` de cada portadora | IP repetida o inválida: dos canales al mismo socket |
+| Frecuencias | separación audio = vídeo + 4.5 MHz (NTSC-M) | plan de frecuencias incoherente |
+| **Emisión real** | dos muestras de `packetsSent` separadas 1.2 s ⇒ paquetes/s y kbps | el panel no está entregando al modulador |
+| Errores del motor | `lastError` de cada worker | origen caído, reconectando, etc. |
+| Ruta de red | `ip route get <IP del equipo>` | no hay camino hacia el modulador |
+| NIC del equipo | interfaz con la IP configurada en el equipo | el tráfico sale por otra IP (posible filtro en el equipo) |
+| Alcance | `ping -c1 -W1` | **informativo**: muchos moduladores bloquean ICMP |
+
+**API**
+
+| Llamada | Devuelve |
+| --- | --- |
+| `GET /api/wk2500/verify` | comprobaciones de todos los equipos |
+| `GET /api/wk2500/verify?unit_id=<id>` | sólo un equipo |
+| `GET /api/wk2500/verify?ping=0` | sin ping (más rápido) |
+
+Cada equipo devuelve `checks[]` (`{id, level, ok, title, detail}`), `carriers[]` (con `worker.packets_per_sec`,
+`bitrate_kbps`, `status`, `last_error`) y `mappingText`: una tabla `Portadora · Canal · MHz · UDP · Nombre`
+lista para copiar a la página de entrada del modulador.
+
+**Por qué los nombres no cambiaban.** El formato compacto de 6 columnas **no tiene columna de nombre**: el
+modulador no tiene nada que escribir. Sólo cambian si el CSV que se sube tiene esa columna, y eso ocurre cuando la
+plantilla es la del propio equipo (que sí la trae) o cuando se pide `format=csv-min&name=1` (7ª columna
+`Nombre_Canal`), que algunos firmwares aceptan en la tabla de canales.
+
+**Por qué el UDP no cambiaba.** La tabla de canales del modulador sólo programa canal y frecuencia; la entrada
+(IP/puerto UDP de cada portadora) se define en otra página del equipo (*Input* / *Mapping* / *Program*). La
+comprobación genera la tabla exacta para copiarla ahí.
+
+**Nota sobre el CLI**: `catv check` corre en un proceso distinto del servicio, así que no puede ver los workers
+vivos; muestra la configuración y remite al panel para paquetes/s reales. El panel sí mide en vivo.

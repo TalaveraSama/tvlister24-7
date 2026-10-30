@@ -21,6 +21,9 @@ import {
   Save,
   Upload,
   FileSpreadsheet,
+  ShieldCheck,
+  Copy,
+  RefreshCw,
   X
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
@@ -77,6 +80,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   const [unitModal, setUnitModal] = useState(null); // { id?, form }
   // Plantilla CSV del modulador: { unit, text, result, busy, error }
   const [tplModal, setTplModal] = useState(null);
+  // Comprobación de salida: { busy, data, error, unitId }
+  const [verifyModal, setVerifyModal] = useState(null);
   const [savingUnit, setSavingUnit] = useState(false);
   const [quickForm, setQuickForm] = useState({
     model_channels: 32,
@@ -502,6 +507,27 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   };
 
   // Un CSV por modulador: es lo que se sube a cada IP analógico.
+  // ====== Comprobar salida UDP / CATV ======
+  const runVerify = async (unit = null) => {
+    setVerifyModal({ busy: true, data: null, error: '', unitId: unit?.id ?? null });
+    try {
+      const qs = unit ? `?unit_id=${unit.id}` : '';
+      const res = await apiFetch(`/api/wk2500/verify${qs}`);
+      setVerifyModal({ busy: false, data: res, error: '', unitId: unit?.id ?? null });
+    } catch (err) {
+      setVerifyModal({ busy: false, data: null, error: err.message, unitId: unit?.id ?? null });
+    }
+  };
+
+  const copyMapping = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('📋 Tabla copiada: pégala en la página de entrada del modulador.');
+    } catch {
+      showToast('No se pudo copiar automáticamente: selecciona el texto y cópialo a mano.');
+    }
+  };
+
   // ====== Plantilla CSV del propio modulador ======
   const openTemplate = (unit) => {
     setTplModal({ unit, text: '', result: null, busy: false, error: '' });
@@ -1027,6 +1053,14 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                     M3U
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => runVerify(u)}
+                  title="Comprobar qué está enviando el panel, qué lleva el CSV y si el modulador es alcanzable"
+                  className="inline-flex w-full items-center justify-center gap-1 rounded-lg border border-sky-500/40 bg-sky-600/15 px-2 py-1.5 text-[10px] font-bold text-sky-200 hover:bg-sky-600/30"
+                >
+                  <ShieldCheck className="w-3 h-3" /> Comprobar
+                </button>
                 {!u.csv_template?.saved ? (
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[9px] leading-snug text-amber-200/90">
                     Sin plantilla: si el equipo <b>no carga ni cambia</b> los canales con el archivo, pulsa{' '}
@@ -1757,6 +1791,194 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         )}
       </div>
 
+      {/* ==================== MODAL: COMPROBAR SALIDA UDP / CATV ==================== */}
+      {verifyModal ? (
+        <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center overflow-y-auto bg-black/80 p-4">
+          <div className="w-full max-w-4xl overflow-hidden rounded-2xl border border-slate-800 bg-[#0e1526] shadow-2xl">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-800 bg-[#131c31] px-4 py-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <ShieldCheck className="h-4 w-4 shrink-0 text-sky-400" />
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">
+                    Diagnóstico de la salida UDP
+                  </div>
+                  <div className="truncate text-sm font-bold text-white">
+                    {verifyModal.busy
+                      ? 'Comprobando…'
+                      : verifyModal.data?.units?.[0]
+                      ? `Comprobación · ${verifyModal.data.units[0].unit.name}`
+                      : 'Comprobación'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVerifyModal(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="max-h-[70vh] space-y-3 overflow-y-auto p-4 text-xs">
+              {verifyModal.busy ? (
+                <div className="rounded-xl border border-slate-800 bg-[#090e1a] px-3 py-6 text-center text-slate-400">
+                  Midiendo paquetes durante 1.2 s y consultando la red…
+                </div>
+              ) : null}
+
+              {verifyModal.error ? (
+                <div className="flex items-start gap-1.5 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {verifyModal.error}
+                </div>
+              ) : null}
+
+              {(verifyModal.data?.units || []).map((vu) => (
+                <div key={vu.unit.id} className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                    <span className="rounded-lg border border-slate-700 bg-[#090e1a] px-2 py-1 font-mono text-slate-200">
+                      {vu.unit.dest_ip}
+                    </span>
+                    <span>{vu.carriers.length} portadoras</span>
+                    <span className="text-slate-600">·</span>
+                    <span>
+                      {vu.checks.filter((c) => c.ok).length}/{vu.checks.length} comprobaciones OK
+                    </span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {vu.checks.map((c) => (
+                      <div
+                        key={c.id}
+                        className={`rounded-xl border px-2.5 py-1.5 ${
+                          c.ok
+                            ? 'border-emerald-500/30 bg-emerald-500/8'
+                            : c.level === 'error'
+                            ? 'border-rose-500/40 bg-rose-500/10'
+                            : 'border-amber-500/30 bg-amber-500/8'
+                        }`}
+                      >
+                        <div className="flex items-start gap-1.5">
+                          {c.ok ? (
+                            <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                          ) : (
+                            <AlertTriangle
+                              className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
+                                c.level === 'error' ? 'text-rose-400' : 'text-amber-400'
+                              }`}
+                            />
+                          )}
+                          <div className="min-w-0">
+                            <div
+                              className={`font-semibold ${
+                                c.ok ? 'text-emerald-100' : c.level === 'error' ? 'text-rose-100' : 'text-amber-100'
+                              }`}
+                            >
+                              {c.title}
+                            </div>
+                            {c.detail ? (
+                              <div className="mt-0.5 text-[10.5px] leading-snug text-slate-400">{c.detail}</div>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div>
+                    <div className="mb-1 flex items-center justify-between">
+                      <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                        Portadoras · lo que el panel está enviando
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copyMapping(vu.mappingText)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-200 hover:bg-slate-700"
+                      >
+                        <Copy className="h-3 w-3" /> Copiar tabla
+                      </button>
+                    </div>
+                    <div className="max-h-56 overflow-auto rounded-lg border border-slate-800">
+                      <table className="w-full text-left text-[10.5px]">
+                        <thead className="sticky top-0 bg-[#131c31] text-slate-400">
+                          <tr>
+                            <th className="px-2 py-1">P</th>
+                            <th className="px-2 py-1">Canal</th>
+                            <th className="px-2 py-1">MHz</th>
+                            <th className="px-2 py-1">UDP destino</th>
+                            <th className="px-2 py-1">Nombre</th>
+                            <th className="px-2 py-1">Estado</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {vu.carriers.map((c) => (
+                            <tr key={c.catv_ch} className="border-t border-slate-800/70">
+                              <td className="px-2 py-1 font-mono text-slate-500">{c.carrier}</td>
+                              <td className="px-2 py-1 font-mono text-slate-200">{c.catv_ch}</td>
+                              <td className="px-2 py-1 font-mono text-slate-400">{c.freq_mhz}</td>
+                              <td className="px-2 py-1 font-mono text-slate-300">
+                                {c.udp_host}:{c.udp_port}
+                              </td>
+                              <td className="px-2 py-1 text-slate-300">
+                                {c.name}
+                                <span className="ml-1 text-[9px] text-slate-500">({c.name_source})</span>
+                              </td>
+                              <td className="px-2 py-1">
+                                {c.worker.packets_per_sec > 0 ? (
+                                  <span className="font-semibold text-emerald-300">
+                                    {c.worker.packets_per_sec} pkt/s · {c.worker.bitrate_kbps} kbps
+                                  </span>
+                                ) : (
+                                  <span className={c.worker.last_error ? 'text-rose-300' : 'text-slate-500'}>
+                                    {c.worker.status}
+                                    {c.worker.last_error ? ` · ${c.worker.last_error}` : ''}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {!verifyModal.busy && !verifyModal.error && !(verifyModal.data?.units || []).length ? (
+                <div className="rounded-xl border border-slate-800 bg-[#090e1a] px-3 py-6 text-center text-slate-400">
+                  No hay moduladores dados de alta.
+                </div>
+              ) : null}
+
+              <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-[10.5px] leading-relaxed text-sky-100">
+                <b>Importante:</b> el CSV cambia canal, frecuencia y nombre. La <b>IP y el puerto UDP</b> se configuran
+                en la página de entrada (<span className="font-mono">Input / Mapping</span>) del propio modulador: usa
+                «Copiar tabla» y pégalos ahí. Si el equipo no muestra nombres, es porque el archivo que subes no tiene
+                columna de nombre (la comprobación de arriba lo dice).
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 bg-[#131c31] px-4 py-3">
+              <button
+                type="button"
+                onClick={() => runVerify(verifyModal.unitId ? { id: verifyModal.unitId } : null)}
+                disabled={verifyModal.busy}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-bold text-slate-200 hover:bg-slate-700 disabled:opacity-40"
+              >
+                <RefreshCw className="h-3.5 w-3.5" /> Comprobar otra vez
+              </button>
+              <button
+                type="button"
+                onClick={() => setVerifyModal(null)}
+                className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {/* ==================== MODAL: PLANTILLA CSV DEL MODULADOR ==================== */}
       {tplModal ? (
         <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center overflow-y-auto bg-black/80 p-4">
@@ -1789,6 +2011,14 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                 con su primera línea. El panel rellena <b>ese mismo archivo</b> con tus canales: misma cabecera, mismo
                 orden de columnas, mismo separador. Es la única forma de que el equipo lo acepte y cambie los canales.
               </div>
+
+              {tplModal.unit.csv_template?.saved && !(tplModal.unit.csv_template.mapped || []).includes('name') ? (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10.5px] leading-snug text-amber-100">
+                  La plantilla guardada <b>no tiene columna de nombre</b>: el CSV no puede cambiar los nombres del
+                  modulador. Si quieres que los cambie, exporta de nuevo el archivo del equipo con esa columna visible
+                  y vuelve a pegarlo aquí.
+                </div>
+              ) : null}
 
               {tplModal.unit.csv_template?.saved && !tplModal.result ? (
                 <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">

@@ -543,6 +543,76 @@ cmd_ffmpeg() {
   esac
 }
 
+cmd_catv() {
+  # Comprobación de la salida UDP/CATV: qué envía el panel, qué lleva el CSV
+  # y si el modulador es alcanzable. Uso: tvlister-admin catv [check] [id_equipo]
+  local mode="${1:-check}"
+  local unit_id="${2:-}"
+  cd "$APP_DIR"
+  case "$mode" in
+    check | "" | show)
+      CATV_UNIT_ID="$unit_id" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { verifyCatv } from "./server/catvVerify.js";
+        initDb();
+        const unitId = process.env.CATV_UNIT_ID ? Number(process.env.CATV_UNIT_ID) : null;
+        const r = await verifyCatv({ unitId, ping: true, workerSource: "external" });
+        if (r.error) {
+          console.error("  " + r.error);
+          process.exit(1);
+        }
+        if (!r.units.length) {
+          console.log("  No hay moduladores dados de alta. Crea uno en UDP / CATV.");
+          process.exit(0);
+        }
+        const mark = (c) => (c.ok ? "[OK] " : c.level === "error" ? "[!!] " : "[!]  ");
+        for (const u of r.units) {
+          const errs = u.checks.filter((c) => !c.ok && c.level === "error").length;
+          const warns = u.checks.filter((c) => !c.ok && c.level === "warn").length;
+          console.log("");
+          console.log("============================================================");
+          console.log("  " + u.unit.name + "  ·  " + u.unit.dest_ip + "  ·  " + u.carriers.length + " portadoras");
+          console.log("============================================================");
+          for (const c of u.checks) {
+            console.log("  " + mark(c) + c.title);
+            if (c.detail) console.log("         " + c.detail);
+          }
+          const assigned = u.carriers.filter((c) => c.has_source);
+          console.log("");
+          console.log("  Portadoras del equipo: " + u.carriers.length +
+            "  ·  con canal asignado: " + assigned.length +
+            "  ·  habilitadas: " + u.carriers.filter((c) => c.enabled).length);
+          for (const c of u.carriers.slice(0, 6)) {
+            console.log(
+              "   P" + String(c.carrier).padEnd(3) +
+              "CH" + String(c.catv_ch).padEnd(4) +
+              String(c.freq_mhz + " MHz").padEnd(11) +
+              (c.udp_host + ":" + c.udp_port).padEnd(23) +
+              (c.has_source ? (c.enabled ? "ON  " : "off ") : "sin canal") +
+              "  " + c.name
+            );
+          }
+          console.log("");
+          console.log("  Tabla para la página de entrada del equipo (copiar/pegar):");
+          console.log("  Portadora  Canal  Frecuencia  UDP destino  Nombre");
+          for (const line of u.mappingText.split("\n").slice(0, 6)) console.log("  " + line);
+          if (u.carriers.length > 6) console.log("  ... (" + (u.carriers.length - 6) + " portadoras más)");
+          console.log("");
+          console.log("  Resultado: " + (u.checks.length - errs - warns) + " OK, " + warns + " aviso(s), " + errs + " error(es)");
+        }
+        console.log("");
+        console.log("  Recuerda: el CSV cambia canal, frecuencia y nombre. La IP/puerto UDP");
+        console.log("  se configuran en la página Input/Mapping del propio modulador.");
+        console.log("============================================================");
+      '
+      ;;
+    *)
+      echo "Uso: tvlister-admin catv [check] [id_equipo]"
+      return 1
+      ;;
+  esac
+}
+
 cmd_tune() {
   # Configuración recomendada según el hardware real de este servidor.
   # Uso: tvlister-admin tune [show|apply]
@@ -791,7 +861,9 @@ case "$ACTION" in
       console.log("   • Carátulas TMDB descargadas    :", st.tmdbEnriched);
     '
     ;;
-  update)
+  catv)
+    cmd_catv "${2:-check}" "${3:-}"
+    ;;  update)
     cmd_update
     ;;
   release)
@@ -825,9 +897,10 @@ case "$ACTION" in
     echo " 16) Motor FFmpeg: ver, elegir, instalar o copiar el de XUI.one (ffmpeg)"
     echo " 17) Instalar/actualizar desde un release publicado (release)"
     echo " 18) Configuracion recomendada segun el hardware (tune)"
+    echo " 19) Comprobar salida UDP/CATV hacia los moduladores (catv check)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-18]: " opt
+    read -r -p "Selecciona una opción [0-19]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -847,6 +920,7 @@ case "$ACTION" in
       16) cmd_ffmpeg "status" "" ;;
       17) cmd_release "latest" ;;
       18) cmd_tune "show" ;;
+      19) cmd_catv "check" "" ;;
       *) exit 0 ;;
     esac
     ;;
