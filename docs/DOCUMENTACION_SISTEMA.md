@@ -1983,3 +1983,57 @@ instantánea —la del modulador o la del panel— da 30, o 6, o 0, según el mo
 (si llega a trozos). Los picos instantáneos no se suman; los huecos sí se notan en la imagen (congelados de
 fracción de segundo).
 
+### 8.38. Salida constante: el motor directo no dosifica (v2.5.13)
+
+El síntoma era «veo 6, 10, 2 y después 0» y el objetivo «necesito que sea constante». La causa estaba en **qué motor
+se elige por canal**, no en FFmpeg:
+
+| Fuente del canal | Motor hasta v2.5.12 | Dosifica |
+| --- | --- | --- |
+| `http://…` MPEG-TS (Flussonic, panel viejo, `?ts`) | **`direct_dgram`** (Node copia bytes tal cual) | **No** |
+| `.m3u8` / HLS | `ffmpeg` | Sí, desde v2.5.11 |
+
+El motor directo existe para no abrir un proceso por canal, pero **copia el cuerpo HTTP al socket tal como llega**:
+si el origen entrega de golpe un segmento de 2 s, la salida también sale de golpe. De ahí los picos de 6–10 Mbps y
+los ceros entre entregas.
+
+#### Lo que cambia
+
+- Con el dosificado activo (`-re`), las fuentes **HTTP/TS van por FFmpeg**, que entrega al ritmo de los timestamps.
+- El motor directo queda para **MNF** (que ya llega dosificado por la red) y para quien lo fuerce con
+  `TVLISTER_CATV_DIRECT=1`.
+- `-re` se aplica **también cuando la portadora tiene `muxrate`**: el CBR sólo rellena con paquetes nulos, **no
+  dosifica la lectura** (comprobado: CBR sin `-re` sigue saliendo a trozos).
+- `tvlister-admin catv steady` (menú 22) enseña, canal por canal, qué motor va a usarse y si lleva `-re`, sin
+  reiniciar nada.
+
+#### Medición real (mismo origen a trozos: 800 KB cada 2 s, canal de 2,94 Mbps)
+
+| Configuración | Media | Pico | Ráfagas | Tramos en 0 | Forma |
+| --- | --- | --- | --- | --- | --- |
+| motor directo (antes) | 0,49 Mbps | 1,96 | 4,0× | 15 | `a trozos` · por segundo `0.0 1.0 0.0 1.0…` |
+| FFmpeg + `-re` (ahora) | 2,92 Mbps | 3,28 | 1,12× | **0** | `constante` · `2.9 3.0 2.8 3.0…` |
+| FFmpeg + `-re` + CBR 3,40 | **3,40 Mbps** | 3,87 | 1,14× | **0** | `constante` · `3.3 3.6 3.2 3.5…` |
+
+Medido con el **worker real del panel** (no un ffmpeg de laboratorio): `startWk2500ChannelWorker` → `catv watch`.
+
+#### Uso
+
+```bash
+tvlister-admin catv steady                  # ver cómo sale cada canal (vista previa)
+tvlister-admin catv steady --apply --cbr    # además, CBR por portadora (+15 % por defecto)
+tvlister-admin catv steady --apply --clear  # volver a VBR dosificado
+tvlister-admin restart
+sudo tvlister-admin catv watch --secs 10    # comprobar: forma constante, 0 tramos en 0
+```
+
+#### Coste y criterio
+
+- Cada canal HTTP/TS pasa a tener **un proceso FFmpeg más**, con `-c copy` y `-re` (sin re-codificar): es barato,
+  pero en un servidor con muchos canales hay que mirar la carga (`tvlister-admin tune show`).
+- **CBR sólo si lo necesitas**: rellena con paquetes nulos hasta el `muxrate`, así que un canal de 2,9 Mbps con
+  `muxrate 3,40` **ocupa 3,40 Mbps de subida de verdad**. Con 96 canales eso son ~50 Mbps extra. El VBR dosificado
+  (`-re` solo) ya sale constante en la práctica.
+- Si un canal se queda **en 0 y sin datos**, el problema no es el dosificado: es que el origen no entrega más rápido
+  de lo que el flujo pide (`a trozos` se convierte en huecos). Eso se ve con `catv watch` y se arregla en el origen.
+

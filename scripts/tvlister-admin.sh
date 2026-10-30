@@ -956,8 +956,153 @@ cmd_catv() {
         console.log("============================================================");
       '
       ;;
+    steady)
+      # Comprueba (y si se pide, aplica) que la salida UDP salga CONSTANTE:
+      # cada canal por FFmpeg con -re, y opcionalmente con muxrate (CBR).
+      # Uso: tvlister-admin catv steady [--apply] [--cbr] [--headroom 15]
+      #                                 [--clear] [id_equipo]
+      local apply="0" cbr="0" clear="0" headroom="15" prev2="" a2
+      local -a pos2=()
+      for a2 in "${@:2}"; do
+        case "$a2" in
+          --apply) apply="1" ; prev2="" ;;
+          --cbr) cbr="1" ; prev2="" ;;
+          --clear) clear="1" ; prev2="" ;;
+          --headroom=*) headroom="${a2#*=}" ; prev2="" ;;
+          --headroom) prev2="--headroom" ;;
+          "")
+            prev2=""
+            ;;
+          *)
+            if [ "$prev2" = "--headroom" ]; then
+              headroom="$a2"
+              prev2=""
+            else
+              pos2+=("$a2")
+            fi
+            ;;
+        esac
+      done
+      if [ "${#pos2[@]}" -gt 0 ] && [ -z "$unit_id" ]; then unit_id="${pos2[0]}"; fi
+
+      CATV_APPLY="$apply" CATV_CBR="$cbr" CATV_CLEAR="$clear" CATV_HEADROOM="$headroom" \
+      CATV_UNIT_ID="$unit_id" \
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb, db } from "./server/db.js";
+        import { catvOutputPlan } from "./server/wk2500Manager.js";
+        initDb();
+
+        const apply = process.env.CATV_APPLY === "1";
+        const wantCbr = process.env.CATV_CBR === "1";
+        const wantClear = process.env.CATV_CLEAR === "1";
+        const headroom = Math.max(0, Math.min(100, Number(process.env.CATV_HEADROOM) || 15));
+        const unitId = process.env.CATV_UNIT_ID ? Number(process.env.CATV_UNIT_ID) : null;
+
+        const pad = (s, n) => String(s).padEnd(n);
+        const padl = (s, n) => String(s).padStart(n);
+        const mbps = (k) => (Number(k || 0) / 1000).toFixed(2);
+
+        let rows = catvOutputPlan({ unitId, onlyEnabled: true });
+        if (!rows.length) {
+          console.log("  No hay canales habilitados con origen. Asigna canales primero:");
+          console.log("     tvlister-admin catv fill --apply");
+          process.exit(0);
+        }
+
+        const upd = db.prepare("UPDATE wk2500_channels SET muxrate_kbps = ?, updated_at = CURRENT_TIMESTAMP WHERE catv_ch = ?");
+
+        let writes = 0;
+        const plan = rows.map((r) => {
+          let muxrate = r.muxrate_kbps;
+          let action = "";
+          if (wantClear && muxrate > 0) {
+            muxrate = 0;
+            action = "quitar CBR";
+          } else if (wantCbr && r.declared_kbps > 0) {
+            const target = Math.ceil((r.declared_kbps * (1 + headroom / 100)) / 100) * 100;
+            if (target !== muxrate) {
+              muxrate = target;
+              action = "CBR " + mbps(target) + " Mbps (+" + headroom + "%)";
+            }
+          }
+          return { ...r, new_muxrate: muxrate, action };
+        });
+
+        const broken = plan.filter((r) => r.engine === "ffmpeg" && !r.pacing);
+        const direct = plan.filter((r) => r.engine === "direct_dgram");
+
+        console.log("");
+        console.log("============================================================");
+        console.log("  TVLister 24/7 - Salida UDP CONSTANTE hacia los moduladores");
+        console.log("  " + plan.length + " canal(es) habilitados con origen");
+        console.log("============================================================");
+        console.log("");
+        console.log("  " + pad("CANAL", 7) + pad("MOTOR", 14) + pad("DOSIFICADO", 12) +
+          padl("DECLARADO", 11) + padl("MUXRATE", 11) + "  NOMBRE");
+        for (const r of plan) {
+          console.log(
+            "  CH" + pad(r.catv_ch, 5) +
+            pad(r.engine, 14) +
+            pad(r.constant ? "si (-re)" : "NO", 12) +
+            padl(mbps(r.declared_kbps) + " Mbps", 11) +
+            padl(r.new_muxrate ? mbps(r.new_muxrate) + " Mbps" : "-", 11) +
+            "  " + String(r.name).slice(0, 30) +
+            (r.action ? "  [" + r.action + "]" : "")
+          );
+        }
+
+        if (apply && (wantCbr || wantClear)) {
+          db.exec("BEGIN IMMEDIATE;");
+          try {
+            for (const r of plan) {
+              if (r.new_muxrate !== r.muxrate_kbps) {
+                upd.run(r.new_muxrate, r.catv_ch);
+                writes += 1;
+              }
+            }
+            db.exec("COMMIT;");
+          } catch (err) {
+            db.exec("ROLLBACK;");
+            throw err;
+          }
+        }
+
+        console.log("");
+        console.log("------------------------------------------------------------");
+        if (broken.length) {
+          console.log("  [!!] " + broken.length + " canal(es) por FFmpeg SIN dosificar: " +
+            broken.slice(0, 8).map((r) => "CH" + r.catv_ch).join(" "));
+        } else {
+          console.log("  [OK] Todos los canales con FFmpeg salen dosificados (-re).");
+        }
+        if (direct.length) {
+          console.log("  [!!] " + direct.length + " canal(es) por el motor directo (sin dosificar): " +
+            direct.slice(0, 8).map((r) => "CH" + r.catv_ch).join(" "));
+          console.log("       Es MNF o TVLISTER_CATV_DIRECT=1. Con MNF el flujo ya llega dosificado.");
+        }
+        if (wantCbr || wantClear) {
+          if (apply) {
+            console.log("  " + (wantClear ? "Quitado el CBR" : "CBR aplicado") + " en " + writes + " canal(es).");
+            console.log("  Aplica con:  tvlister-admin restart");
+          } else {
+            console.log("  Vista previa: " + plan.filter((r) => r.action).length + " canal(es) cambiarían.");
+            console.log("  Escribe con: tvlister-admin catv steady --apply" + (wantClear ? " --clear" : " --cbr"));
+          }
+        } else {
+          console.log("");
+          console.log("  Para forzar además un flujo plano (CBR, rellena con paquetes nulos):");
+          console.log("     tvlister-admin catv steady --apply --cbr [--headroom 15]");
+          console.log("  Para volver a VBR dosificado:");
+          console.log("     tvlister-admin catv steady --apply --clear");
+        }
+        console.log("");
+        console.log("  Comprueba el resultado con:  sudo tvlister-admin catv watch --secs 10");
+        console.log("  Debe salir  forma : constante   y   sin tramos en 0.");
+        console.log("============================================================");
+      '
+      ;;
     *)
-      echo "Uso: tvlister-admin catv [check|fill|watch] [id_equipo] [--apply]"
+      echo "Uso: tvlister-admin catv [check|fill|watch|steady] [id_equipo] [--apply]"
       echo "     tvlister-admin catv watch [--secs 5] [--ch 2,3,5] [--ip 192.168.200.8]"
       return 1
       ;;
@@ -1252,9 +1397,10 @@ case "$ACTION" in
     echo " 19) Comprobar salida UDP/CATV hacia los moduladores (catv check)"
     echo " 20) Asignar canales del panel a las portadoras CATV (catv fill)"
     echo " 21) Medir el UDP real que llega (Mbps, duplicados, desbalance) (catv watch)"
+    echo " 22) Dejar la salida UDP constante, sin picos (catv steady)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-21]: " opt
+    read -r -p "Selecciona una opción [0-22]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -1277,6 +1423,7 @@ case "$ACTION" in
       19) cmd_catv "check" "" ;;
       20) cmd_catv "fill" "" ;;
       21) cmd_catv "watch" "" ;;
+      22) cmd_catv "steady" "" ;;
       *) exit 0 ;;
     esac
     ;;

@@ -562,6 +562,23 @@ function classifyUpstreamProto(rawUrl = '') {
   return 'HTTP MPEG-TS';
 }
 
+/**
+ * Motor de salida UDP por canal.
+ *
+ * `direct_dgram` copia los bytes del origen al socket tal como llegan, sin
+ * dosificar: si el origen entrega a trozos (un segmento de 2 s de golpe), la
+ * salida también sale a trozos y el modulador ve picos de 6, 10, 2 y 0.
+ *
+ * Por eso, con el dosificado activo (-re), las fuentes HTTP/TS van por FFmpeg,
+ * que sí las entrega al ritmo de sus timestamps. El motor directo se conserva
+ * para MNF (que ya llega dosificado por la red) y para quien lo fuerce con
+ * TVLISTER_CATV_DIRECT=1.
+ */
+function catvDirectEngineForced() {
+  const v = String(process.env.TVLISTER_CATV_DIRECT ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
 function shouldUseDirectNodeUdpEngine(slotRow, rawUrl, localHls) {
   if (localHls) return false; // Local HLS manifest is best muxed to SPTS via FFmpeg -c copy
   if (slotRow.output_mode !== 'direct_spts') return false;
@@ -573,10 +590,15 @@ function shouldUseDirectNodeUdpEngine(slotRow, rawUrl, localHls) {
   if (lower.startsWith('mnf://') || lower.startsWith('mnfs://') || lower.endsWith('.mnf')) return true;
   if (lower.includes('.m3u8') || lower.startsWith('hls://') || lower.startsWith('hlss://')) return false;
   if (lower.startsWith('m4f://') || lower.startsWith('m4fs://')) return false;
-  if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('tshttp://') || lower.startsWith('tshttps://')) {
-    return true;
-  }
-  return false;
+  const isHttpTs =
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('tshttp://') ||
+    lower.startsWith('tshttps://');
+  if (!isHttpTs) return false;
+  // Con dosificado activo, HTTP/TS se muxea con FFmpeg para que salga constante.
+  if (catvPacingEnabled() && !catvDirectEngineForced()) return false;
+  return true;
 }
 
 function buildUdpTargetFfmpegUrl(slotRow, transport = null) {
@@ -631,10 +653,12 @@ export function buildFfmpegUdpOutputArgs(slotRow, inputSpec, opts = {}) {
   );
   const serviceProvider = sanitizeServiceText(opts.serviceProvider || 'TVLister', 'TVLister');
 
-  // -re (leer al ritmo nativo) suaviza las ráfagas del origen. Sólo tiene
-  // sentido en fuentes reales, nunca en pipe:0 ni cuando ya hay CBR.
+  // -re (leer al ritmo nativo) es lo que hace constante la salida. Se aplica
+  // también con muxrate: el CBR sólo rellena con paquetes nulos, no dosifica
+  // la lectura (comprobado: CBR sin -re sigue saliendo a trozos).
+  // Nunca en pipe:0 (MNF), que ya llega dosificado por la red.
   const pacing = opts.pacing !== undefined ? Boolean(opts.pacing) : catvPacingEnabled();
-  const usePacing = pacing && inputSpec !== 'pipe:0' && muxrate === 0;
+  const usePacing = pacing && inputSpec !== 'pipe:0';
 
   const isPureCopy = mode === 'direct_spts';
   const isVideoCopy = mode !== 'ntsc_sd_wk2500';
@@ -1134,6 +1158,66 @@ export function startWk2500ChannelWorker(catvCh) {
 
   runCycle();
   return true;
+}
+
+/**
+ * Cómo va a salir cada canal por UDP, calculado con la misma lógica real del
+ * motor (no una aproximación): motor elegido, si lleva -re y con qué muxrate.
+ * Es lo que usa `tvlister-admin catv steady` para comprobar que todo sale
+ * constante sin tener que reiniciar y esperar a ver.
+ */
+export function catvOutputPlan({ unitId = null, onlyEnabled = true } = {}) {
+  ensureCatvSlotsInitialized();
+  const slots = db
+    .prepare(
+      `SELECT w.*, s.name AS stream_name, s.source_url AS stream_source_url,
+              s.bitrate_kbps AS stream_bitrate
+       FROM wk2500_channels w
+       LEFT JOIN streams s ON s.id = w.stream_id
+       WHERE w.catv_ch BETWEEN ? AND ?
+       ORDER BY w.catv_ch ASC`
+    )
+    .all(CATV_MIN_CH, CATV_MAX_CH);
+
+  const units = db.prepare('SELECT * FROM wk2500_units ORDER BY id ASC').all();
+  const unitById = new Map(units.map((u) => [Number(u.id), u]));
+
+  const rows = [];
+  for (const row of slots) {
+    if (onlyEnabled && !row.enabled) continue;
+    const source = String(row.custom_source_url || row.stream_source_url || '').trim();
+    if (!source && !row.stream_id) continue;
+    if (unitId && Number(row.unit_id) !== Number(unitId)) continue;
+
+    const unit = unitById.get(Number(row.unit_id)) || null;
+    const direct = shouldUseDirectNodeUdpEngine(row, source, null);
+    const engine = direct ? 'direct_dgram' : 'ffmpeg';
+
+    // Con el motor directo no hay -re posible; con FFmpeg se comprueba en los
+    // argumentos reales que se van a lanzar.
+    let pacing = false;
+    if (!direct) {
+      const args = buildFfmpegUdpOutputArgs(row, source, { channelTitle: row.custom_name || row.stream_name, pacing: row.pacing });
+      pacing = args.includes('-re');
+    }
+
+    const declared = Number(row.stream_bitrate) || 0;
+    rows.push({
+      catv_ch: Number(row.catv_ch),
+      name: row.custom_name || row.stream_name || `CH ${row.catv_ch}`,
+      source,
+      unit_id: unit ? Number(unit.id) : null,
+      unit_name: unit ? unit.name : '',
+      output_mode: row.output_mode || 'direct_spts',
+      muxrate_kbps: Number(row.muxrate_kbps) || 0,
+      declared_kbps: declared,
+      engine,
+      pacing,
+      constant: engine === 'direct_dgram' ? false : pacing,
+      dest: `${row.udp_host}:${row.udp_port}`
+    });
+  }
+  return rows;
 }
 
 export function resumeEnabledWk2500Channels() {
