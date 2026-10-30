@@ -509,13 +509,13 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   // Un CSV por modulador: es lo que se sube a cada IP analógico.
   // ====== Comprobar salida UDP / CATV ======
   const runVerify = async (unit = null) => {
-    setVerifyModal({ busy: true, data: null, error: '', unitId: unit?.id ?? null });
+    setVerifyModal({ busy: true, data: null, error: '', unit, unitId: unit?.id ?? null });
     try {
       const qs = unit ? `?unit_id=${unit.id}` : '';
       const res = await apiFetch(`/api/wk2500/verify${qs}`);
-      setVerifyModal({ busy: false, data: res, error: '', unitId: unit?.id ?? null });
+      setVerifyModal((prev) => ({ ...(prev || {}), busy: false, data: res, error: '', unit, unitId: unit?.id ?? null }));
     } catch (err) {
-      setVerifyModal({ busy: false, data: null, error: err.message, unitId: unit?.id ?? null });
+      setVerifyModal((prev) => ({ ...(prev || {}), busy: false, data: null, error: err.message, unit }));
     }
   };
 
@@ -1890,13 +1890,31 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                       <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
                         Portadoras · lo que el panel está enviando
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => copyMapping(vu.mappingText)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-200 hover:bg-slate-700"
-                      >
-                        <Copy className="h-3 w-3" /> Copiar tabla
-                      </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => copyMapping(vu.mappingText)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-200 hover:bg-slate-700"
+                        >
+                          <Copy className="h-3 w-3" /> Copiar entrada UDP
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => downloadCsv('input', verifyModal.unit || { id: vu.unit.id })}
+                          className="inline-flex items-center gap-1 rounded-lg border border-violet-500/40 bg-violet-600/15 px-2 py-1 text-[10px] font-semibold text-violet-200 hover:bg-violet-600/30"
+                          title="CSV de la página Input/Mapping: Portadora, IP/grupo UDP, puerto"
+                        >
+                          <Download className="h-3 w-3" /> CSV entrada UDP
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => downloadCsv('channel', verifyModal.unit || { id: vu.unit.id })}
+                          className="inline-flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-600/15 px-2 py-1 text-[10px] font-semibold text-amber-200 hover:bg-amber-600/30"
+                          title="CSV de la página de canales: Portadora, canal, MHz de vídeo y audio"
+                        >
+                          <Download className="h-3 w-3" /> CSV canales
+                        </button>
+                      </div>
                     </div>
                     <div className="max-h-56 overflow-auto rounded-lg border border-slate-800">
                       <table className="w-full text-left text-[10.5px]">
@@ -1951,10 +1969,12 @@ export default function Wk2500CatvPage({ setActiveTab }) {
               ) : null}
 
               <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-[10.5px] leading-relaxed text-sky-100">
-                <b>Importante:</b> el CSV cambia canal, frecuencia y nombre. La <b>IP y el puerto UDP</b> se configuran
-                en la página de entrada (<span className="font-mono">Input / Mapping</span>) del propio modulador: usa
-                «Copiar tabla» y pégalos ahí. Si el equipo no muestra nombres, es porque el archivo que subes no tiene
-                columna de nombre (la comprobación de arriba lo dice).
+                <b>Importante:</b> el modulador tiene <b>dos páginas</b> y ningún CSV cambia las dos a la vez.
+                La página de <b>canales</b> lleva canal y frecuencia (<b>CSV canales</b>); la página de
+                <b> entrada</b> (<span className="font-mono">Input / Mapping</span>) lleva el grupo o IP y el puerto UDP
+                de cada portadora (<b>CSV entrada UDP</b>). Si el equipo no muestra nombres, importa el archivo de su
+                <b> plantilla</b> (trae su columna de nombre). En multicast no se hace ping: un grupo no responde, eso
+                no significa que esté caído.
               </div>
             </div>
 

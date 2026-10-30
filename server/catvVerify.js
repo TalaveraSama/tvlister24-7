@@ -52,6 +52,11 @@ async function pingOnce(ip) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const isMulticast = (ip = '') => {
+  const first = Number(String(ip).trim().split('.')[0]);
+  return first >= 224 && first <= 239;
+};
+
 /**
  * Estado en vivo de los workers UDP del motor CATV (lo rellena wk2500Manager).
  * Se guarda en globalThis para que funcione aunque los dos módulos se importen
@@ -265,28 +270,74 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
 
     // ---- 4. Alcance de red ------------------------------------------------
     const destIp = String(unit.dest_ip || '').trim();
+    const multicastMode = String(unit.ip_mode || '') === 'multicast' || isMulticast(destIp);
     if (destIp) {
-      const route = await routeTo(destIp);
       const dedicated = String(unit.local_interface_ip || '').trim();
       const nic = interfaces.find((i) => i.address === dedicated);
+      // Con multicast se consulta la ruta al GRUPO del primer canal, no a la base
+      const probeIp = multicastMode ? carriers[0]?.udp_host || destIp : destIp;
+      const route = await routeTo(probeIp);
       add(
         'route',
         route.ok ? 'ok' : 'error',
         route.ok,
-        route.ok ? `Hay ruta hacia ${destIp} por ${route.dev}` : `No hay ruta hacia ${destIp}`,
+        route.ok
+          ? `Sale por ${route.dev}${multicastMode ? ` hacia el grupo ${probeIp}` : ` hacia ${destIp}`}`
+          : `No hay ruta hacia ${probeIp}`,
         [
           route.via ? `gateway ${route.via}` : '',
-          route.src ? `sale con IP ${route.src}` : '',
-          dedicated ? `NIC del equipo: ${dedicated}${nic ? ` (${nic.name})` : ' — no está en este servidor'}` : 'NIC dedicada: automática',
+          route.src ? `IP de origen ${route.src}` : '',
+          dedicated
+            ? `NIC del equipo: ${dedicated}${nic ? ` (${nic.name})` : ' — no está en este servidor'}`
+            : 'NIC dedicada: automática (se usa la ruta del sistema)',
           route.ok && dedicated && route.src && route.src !== dedicated
-            ? '⚠ el tráfico sale con otra IP: el modulador podría ignorarlo si filtra por IP de origen.'
+            ? '⚠ sale con otra IP: si el modulador filtra por IP de origen, lo descartará.'
             : ''
         ]
           .filter(Boolean)
           .join(' · ')
       );
 
-      if (ping) {
+      // Varios equipos con la MISMA IP: en unicast es un conflicto, en multicast
+      // es normal (cada equipo se queda con sus grupos).
+      const twins = unitRows().filter(
+        (u) => Number(u.id) !== Number(unit.id) && String(u.dest_ip || '').trim() === destIp
+      );
+      if (twins.length) {
+        add(
+          'shared-ip',
+          multicastMode ? 'info' : 'error',
+          multicastMode,
+          multicastMode
+            ? `${twins.length + 1} equipos comparten la base multicast ${destIp}`
+            : `${twins.length + 1} equipos con la MISMA IP ${destIp} en modo unicast`,
+          multicastMode
+            ? 'Es correcto: cada portadora usa el grupo 239.1.1.<canal>. Cada modulador debe tener en su página de entrada SÓLO los grupos de sus portadoras.'
+            : 'En unicast cada modulador necesita su propia IP: el switch entregaría el flujo al primero que la tenga.'
+        );
+      }
+
+      if (multicastMode) {
+        // Un grupo multicast no responde a ping: no tiene sentido intentarlo.
+        const groups = carriers.map((c) => `${c.udp_host}:${c.udp_port}`);
+        const ttl = Math.max(1, Number(unit.ttl) || 16);
+        add(
+          'multicast',
+          'ok',
+          true,
+          `Multicast: ${carriers.length} grupos (${groups[0]} … ${groups[groups.length - 1]})`,
+          `El panel EMITE a esos grupos; no se puede hacer ping a un grupo. Cada modulador debe tener en su página de entrada el grupo y puerto de sus portadoras (ver tabla de abajo) y unirse con IGMP. TTL configurado: ${ttl}.`
+        );
+        if (ttl < 2) {
+          add(
+            'ttl',
+            'warn',
+            false,
+            `TTL ${ttl}: los paquetes mueren en el primer switch`,
+            'Con TTL 1 sólo llegan al mismo segmento. Si el modulador está detrás de otro switch/router, sube el TTL del equipo (valor seguro: 16).'
+          );
+        }
+      } else if (ping) {
         const p = await pingOnce(destIp);
         add(
           'reachability',
@@ -299,6 +350,16 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
         );
       }
     }
+
+    // ---- 5. Qué puede cambiar cada página del equipo ---------------------
+    add(
+      'two-pages',
+      'info',
+      true,
+      'El modulador tiene dos páginas: Canales y Entrada (Input/Mapping)',
+      `Canales: ${carriers.length} filas con canal y frecuencia. Entrada: ${carriers.length} filas con grupo/IP y puerto UDP. ` +
+        'El CSV de canales NO cambia la entrada; usa «CSV entrada UDP» para la otra página.'
+    );
 
     out.push({
       unit: {
@@ -315,9 +376,13 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
       template,
       carriers,
       checks,
-      // Tabla lista para copiar/pegar en la página de entrada del equipo
+      // Tabla lista para copiar/pegar en la página de ENTRADA del equipo
       mappingText: carriers
-        .map((c) => `P${c.carrier}\tCH${c.catv_ch}\t${c.freq_mhz} MHz\t${c.udp_host}:${c.udp_port}\t${c.name}`)
+        .map((c) => `P${c.carrier}\t${c.udp_host}\t${c.udp_port}\tCH${c.catv_ch}\t${c.name}`)
+        .join('\n'),
+      // Tabla para la página de CANALES del equipo
+      channelText: carriers
+        .map((c) => `P${c.carrier}\tCH${c.catv_ch}\t${c.freq_mhz}\t${c.audio_mhz}\t${c.name}`)
         .join('\n')
     });
   }

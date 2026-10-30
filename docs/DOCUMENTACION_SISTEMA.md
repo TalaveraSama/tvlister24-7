@@ -1711,3 +1711,53 @@ comprobación genera la tabla exacta para copiarla ahí.
 
 **Nota sobre el CLI**: `catv check` corre en un proceso distinto del servicio, así que no puede ver los workers
 vivos; muestra la configuración y remite al panel para paquetes/s reales. El panel sí mide en vivo.
+
+### 8.33. Multicast real y las dos páginas del modulador (v2.5.8)
+
+Con 4 × 32 en **multicast** (`239.1.1.0`, base de puerto 1000) la comprobación anterior daba un falso aviso:
+hacía `ping` a `239.1.1.0`, que es una **base de grupo**, no un equipo. Un grupo multicast nunca responde.
+
+**Corregido**
+
+| Antes | Ahora |
+| --- | --- |
+| `ping 239.1.1.0` ⇒ «no responde» | En multicast **no se hace ping**; se comprueba la ruta al **grupo del primer canal** |
+| Sin distinción de modo | Detecta multicast por `ip_mode` o por el primer octeto (224–239) |
+| — | Comprueba **TTL** (avisa si es 1: los paquetes mueren en el primer switch) |
+| — | Avisa si **varios equipos comparten la misma IP**: normal en multicast, **error en unicast** |
+| — | Recuerda que cada modulador debe tener en su página de entrada **sólo sus grupos** |
+
+**Las dos páginas del modulador (la causa real de "no cambia el UDP").** Estos equipos tienen dos tablas
+independientes y ningún CSV cambia las dos:
+
+| Página del equipo | Qué lleva | CSV del panel |
+| --- | --- | --- |
+| **Canales** | Canal RF + frecuencia de vídeo y audio | `format=channel` |
+| **Entrada / Input / Mapping** | Grupo o IP + puerto UDP por portadora | `format=input` |
+
+```
+format=channel   →  Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,Nombre_Canal
+format=input     →  Portadora,IP_Destino_UDP,Puerto_UDP,Nombre_Canal
+```
+
+Archivos: `<equipo>_P1-CH<n>_<n>port_canales.csv` y `<equipo>_P1-CH<n>_<n>port_entrada_udp.csv`.
+Cabecera `X-TVLister-CSV-Mode: page-channels | page-input`.
+
+En el panel, el modal **Comprobar** trae los botones *CSV canales*, *CSV entrada UDP* y *Copiar entrada UDP*.
+`tvlister-admin catv check` imprime las dos tablas separadas.
+
+**Multicast: cómo se reparte** (verificado con el plan real de 4 × 32)
+
+| Equipo | Portadoras | Grupos |
+| --- | --- | --- |
+| WK2500 1 | CH 2–33 | `239.1.1.2:1002` … `239.1.1.33:1033` |
+| WK2500 2 | CH 34–65 | `239.1.1.34:1034` … `239.1.1.65:1065` |
+| WK2500 3 | CH 66–97 | `239.1.1.66:1066` … `239.1.1.97:1097` |
+| WK2500 4 | CH 98–125 (28) | `239.1.1.98:1098` … `239.1.1.125:1125` |
+
+Regla del modo multicast: `host = base con el último octeto = canal`, `puerto = base_port + canal`.
+Los cuatro equipos comparten la base y **eso es correcto**; lo que cambia es qué grupos tiene cada uno.
+
+**Si el modulador espera unicast.** Muchos 2500C vienen configurados para recibir en una IP propia
+(`192.168.200.x`). En ese caso hay que poner cada equipo en modo **unicast** con **su** IP: el panel lo marca como
+error si dos equipos comparten IP en unicast, porque el switch entregaría el flujo al primero.

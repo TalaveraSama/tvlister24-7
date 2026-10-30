@@ -593,16 +593,25 @@ cmd_catv() {
             );
           }
           console.log("");
-          console.log("  Tabla para la página de entrada del equipo (copiar/pegar):");
-          console.log("  Portadora  Canal  Frecuencia  UDP destino  Nombre");
+          console.log("  --- Página CANALES del equipo (canal + frecuencia) ---");
+          console.log("  P\tCanal\tMHz vídeo\tMHz audio\tNombre");
+          for (const line of u.channelText.split("\n").slice(0, 6)) console.log("  " + line);
+          if (u.carriers.length > 6) console.log("  ... (" + (u.carriers.length - 6) + " portadoras más)");
+          console.log("");
+          console.log("  --- Página ENTRADA / Input (grupo o IP + puerto UDP) ---");
+          console.log("  P\tIP/Grupo\tPuerto\tCanal\tNombre");
           for (const line of u.mappingText.split("\n").slice(0, 6)) console.log("  " + line);
           if (u.carriers.length > 6) console.log("  ... (" + (u.carriers.length - 6) + " portadoras más)");
+          console.log("");
+          console.log("  Descargas: csv -> plan completo · channel -> página de canales");
+          console.log("             input -> página de entrada UDP · Import -> plantilla del equipo");
           console.log("");
           console.log("  Resultado: " + (u.checks.length - errs - warns) + " OK, " + warns + " aviso(s), " + errs + " error(es)");
         }
         console.log("");
-        console.log("  Recuerda: el CSV cambia canal, frecuencia y nombre. La IP/puerto UDP");
-        console.log("  se configuran en la página Input/Mapping del propio modulador.");
+        console.log("  Recuerda: el CSV de canales cambia canal, frecuencia y nombre.");
+        console.log("  La IP/puerto UDP se cargan en la página Input/Mapping del modulador.");
+        console.log("  En multicast NO se hace ping al grupo: es normal que no responda.");
         console.log("============================================================");
       '
       ;;

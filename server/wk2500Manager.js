@@ -2979,6 +2979,41 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
     return res.send(out.join('\n') + '\n');
   }
 
+  // ---- Páginas separadas del modulador -----------------------------------
+  // Estos equipos tienen DOS tablas: la de canales (canal + frecuencia) y la de
+  // entrada (grupo/IP + puerto UDP por portadora). Un CSV de una no cambia la
+  // otra, y por eso «no cambiaba el UDP» al importar el archivo de canales.
+  //   format=channel → Portadora, Canal, MHz vídeo, MHz audio [, Nombre]
+  //   format=input   → Portadora, IP/Grupo UDP, Puerto UDP [, Nombre]
+  if (format === 'channel' || format === 'input') {
+    const eol = String(req.query.eol || '').toLowerCase() === 'crlf' ? '\r\n' : '\n';
+    const withName = String(req.query.name ?? '1') === '1';
+    const rows = [];
+    if (format === 'channel') {
+      rows.push(`Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz${withName ? ',Nombre_Canal' : ''}`);
+      for (const r of fileRows) {
+        const { info, unit } = infoFor(r);
+        const carrier = unit ? carrierIndex.get(`${unit.id}:${r.catv_ch}`) ?? '' : '';
+        const nm = withName ? `,${String(r.custom_name || r.stream_name || `CH${r.catv_ch}`).replace(/[",\r\n]/g, ' ').trim()}` : '';
+        rows.push(`${carrier},${r.catv_ch},${info.freq_mhz},${info.audio_mhz}${nm}`);
+      }
+    } else {
+      rows.push(`Portadora,IP_Destino_UDP,Puerto_UDP${withName ? ',Nombre_Canal' : ''}`);
+      for (const r of fileRows) {
+        const { unit } = infoFor(r);
+        const carrier = unit ? carrierIndex.get(`${unit.id}:${r.catv_ch}`) ?? '' : '';
+        const nm = withName ? `,${String(r.custom_name || r.stream_name || `CH${r.catv_ch}`).replace(/[",\r\n]/g, ' ').trim()}` : '';
+        rows.push(`${carrier},${r.udp_host},${r.udp_port}${nm}`);
+      }
+    }
+    const base = unitFilter ? unitSlug(unitFilter) : 'wk2500';
+    const name = `${base}_${format === 'channel' ? 'canales' : 'entrada_udp'}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    res.setHeader('X-TVLister-CSV-Mode', format === 'channel' ? 'page-channels' : 'page-input');
+    return res.send(rows.join(eol) + eol);
+  }
+
   // ---- Formato REAL del equipo -------------------------------------------
   // Se rellena el CSV que exporta el propio modulador, así que la cabecera, el
   // orden de columnas, el separador y el final de línea son los suyos. Es el
