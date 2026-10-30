@@ -1600,3 +1600,67 @@ No se toca la línea de argumentos de FFmpeg: el prebuffer es entrega y lectura,
 
 **Escape por petición.** Un reproductor puede pedir `?prebuffer=0` (o la cabecera `X-XUI-Prebuffer: 0`) para
 saltarse la espera en ese canal concreto, sin cambiar la configuración global.
+
+### 8.31. CSV con el formato real del modulador (v2.5.6)
+
+**El problema de campo.** El botón *Import* generaba un CSV de 6 columnas
+(`Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP`). Los moduladores
+IP→analógico de la familia 2500C (CSP-2500C, WK-2500C, SFT2500C y clones) **no aceptan un archivo con columnas
+inventadas**: su ventana de importación valida su propia estructura. Si la cabecera, el orden de columnas, el
+separador o el final de línea no coinciden, el equipo **ignora el archivo**: no crea los canales UDP ni modifica
+los que ya tiene.
+
+**La solución: no adivinar el formato, usar el del equipo.** El panel guarda, por modulador, el CSV que el propio
+equipo exporta y rellena *ese mismo archivo* con el plan real.
+
+1. En la web del modulador (p. ej. `192.168.25.10`) → tabla de canales → **Export / Descargar**.
+2. En el panel: **UDP / CATV → tarjeta del equipo → `Plantilla`** → pegar el archivo (o *Abrir archivo…*) → **Guardar plantilla**.
+3. El panel muestra qué reconoció y una vista previa de 3 portadoras ya rellenadas.
+4. **`Import`** descarga el archivo con la estructura del equipo y los canales reales.
+
+**Qué se conserva del archivo del equipo** y qué se rellena:
+
+| Se rellena | Se conserva tal cual |
+| --- | --- |
+| Canal / Channel | Nivel (`Level`, p. ej. `1.0`) |
+| Frecuencia de vídeo (MHz) | Ancho de banda (`Bandwidth`, p. ej. `6.000`) |
+| Frecuencia de audio (MHz) | Estándar que el equipo ya tenga escrito |
+| IP destino y puerto UDP | Cualquier otra columna propia (enable, flags, índices…) |
+| Nombre del canal (si existe la columna) | Separador, fin de línea (CRLF/LF) y cabecera |
+
+**Detección de columnas.** Reconoce cabeceras en español e inglés, con o sin acentos y con cualquier separador
+(`,` `;` tabulador `|`): `Portadora`/`Carrier`, `Canal_CATV`/`Channel`, `Frecuencia_Video`/`Frequency(MHz)`,
+`Frecuencia_Audio`/`Audio Frequency`, `IP_Destino_UDP`/`IP Address`, `Puerto_UDP`/`Port`, `Nivel`/`Level`,
+`Ancho de banda`/`Bandwidth`, `Estandar`/`Standard`, `Nombre`/`Name`, `Program`, `Enable`.
+
+Si el archivo **no trae cabecera**, las columnas se deducen por su contenido en la primera fila: la IPv4 es la IP,
+el entero alto (≥1000) el puerto, los dos números con decimales entre 40 y 900 son vídeo y audio (el menor es
+vídeo), el entero entre 2 y 125 el canal y el que queda la portadora.
+
+**API**
+
+| Llamada | Efecto |
+| --- | --- |
+| `POST /api/wk2500/units/:id/csv-template` `{text}` | Analiza y guarda la plantilla; devuelve mapeo + vista previa |
+| `GET /api/wk2500/units/:id/csv-template` | Resumen y vista previa de la plantilla guardada |
+| `DELETE /api/wk2500/units/:id/csv-template` | Vuelve al formato compacto |
+| `GET /api/wk2500/export-table?format=dev&unit_id=<id>` | CSV en el formato del equipo |
+| `GET /api/wk2500/export-table?format=csv-min&header=0&eol=crlf` | Compacto sin cabecera y con CRLF (firmwares antiguos) |
+
+Cabeceras de respuesta: `X-TVLister-CSV-Mode` (`device-template`, `compact` o `compact-fallback`),
+`X-TVLister-CSV-Rows`, `X-TVLister-CSV-Columns`. Si el equipo no tiene plantilla, `format=dev` responde con el
+formato compacto y avisa con `compact-fallback` (la UI lo muestra en ámbar).
+
+**Verificación realizada** (panel real, 4 moduladores de 32 con el reparto `95, 2-28, 96-99` / `29-60` / `61-92` / `93-94, 100-125`):
+
+| Prueba | Resultado |
+| --- | --- |
+| Plantilla de 11 columnas con `;` y CRLF | 11 columnas, separador `;`, CRLF y los 5 campos clave reconocidos |
+| Descarga `format=dev` del equipo 1 | 32 portadoras + cabecera, 11 columnas en todas las filas |
+| Portadora 1 | CH95 · 91.25 / 95.75 MHz · `192.168.25.10:5095` |
+| Nivel y ancho de banda | Se conservan `1.0` y `6.000` del archivo del equipo |
+| Editar el equipo (nombre, canales, IP) | La plantilla **no se pierde** |
+| Equipo sin plantilla | `compact-fallback` + aviso en la UI |
+| Compacto sin cabecera | `header=0` ⇒ primera línea ya es dato |
+| Detección sin cabecera | `1;91.25;95.75;192.168.25.10;5095` ⇒ portadora/vídeo/audio/IP/puerto correctos |
+| 27 pruebas unitarias del parser/mapeo | todas OK (incluye nombres con comas y comillas) |

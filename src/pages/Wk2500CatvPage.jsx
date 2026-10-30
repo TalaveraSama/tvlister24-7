@@ -19,6 +19,8 @@ import {
   Layers,
   Wand2,
   Save,
+  Upload,
+  FileSpreadsheet,
   X
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
@@ -73,6 +75,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   // Equipos WK2500 (modelos de 32 / 64 / 125 canales)
   const [unitFilter, setUnitFilter] = useState('all');
   const [unitModal, setUnitModal] = useState(null); // { id?, form }
+  // Plantilla CSV del modulador: { unit, text, result, busy, error }
+  const [tplModal, setTplModal] = useState(null);
   const [savingUnit, setSavingUnit] = useState(false);
   const [quickForm, setQuickForm] = useState({
     model_channels: 32,
@@ -498,6 +502,40 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   };
 
   // Un CSV por modulador: es lo que se sube a cada IP analógico.
+  // ====== Plantilla CSV del propio modulador ======
+  const openTemplate = (unit) => {
+    setTplModal({ unit, text: '', result: null, busy: false, error: '' });
+  };
+
+  const saveTemplate = async () => {
+    if (!tplModal) return;
+    setTplModal((prev) => ({ ...prev, busy: true, error: '' }));
+    try {
+      const res = await apiFetch(`/api/wk2500/units/${tplModal.unit.id}/csv-template`, {
+        method: 'POST',
+        body: JSON.stringify({ text: tplModal.text })
+      });
+      setTplModal((prev) => ({ ...prev, busy: false, result: res }));
+      await loadPlan(true);
+      showToast(`✅ Plantilla de ${tplModal.unit.name}: ${res.template.cols} columnas reconocidas.`);
+    } catch (err) {
+      setTplModal((prev) => ({ ...prev, busy: false, error: err.message }));
+    }
+  };
+
+  const removeTemplate = async () => {
+    if (!tplModal) return;
+    setTplModal((prev) => ({ ...prev, busy: true, error: '' }));
+    try {
+      await apiFetch(`/api/wk2500/units/${tplModal.unit.id}/csv-template`, { method: 'DELETE' });
+      setTplModal(null);
+      await loadPlan(true);
+      showToast('Plantilla quitada: el botón Import vuelve al formato compacto.');
+    } catch (err) {
+      setTplModal((prev) => ({ ...prev, busy: false, error: err.message }));
+    }
+  };
+
   const handleDownloadUnit = async (unit, format = 'csv') => {
     try {
       const name = await downloadCsv(format, unit);
@@ -950,11 +988,35 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleDownloadUnit(u, 'csv-min')}
-                    title="CSV compacto (Portadora, Canal, MHz, MHz audio, UDP) para la ventana de importación del equipo"
-                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2 py-1.5 text-[10px] font-bold text-slate-300"
+                    onClick={() => handleDownloadUnit(u, u.csv_template?.saved ? 'dev' : 'csv-min')}
+                    title={
+                      u.csv_template?.saved
+                        ? `Importar en el equipo: mismo formato que exporta ${u.name} (${u.csv_template.cols} columnas, separador "${u.csv_template.delimiter}")`
+                        : 'CSV compacto de 6 columnas. Si el modulador no carga los canales, pulsa «Plantilla» y pega el CSV que exporta el equipo.'
+                    }
+                    className={`inline-flex items-center justify-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold ${
+                      u.csv_template?.saved
+                        ? 'bg-emerald-600/20 hover:bg-emerald-600/35 border-emerald-500/40 text-emerald-200'
+                        : 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-slate-300'
+                    }`}
                   >
                     Import
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openTemplate(u)}
+                    title={
+                      u.csv_template?.saved
+                        ? `Plantilla cargada: ${u.csv_template.cols} columnas, separador "${u.csv_template.delimiter}". Pulsa para verla o reemplazarla.`
+                        : 'Sin plantilla: pega aquí el CSV que exporta el modulador para que el Import tenga SU formato exacto'
+                    }
+                    className={`inline-flex items-center justify-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold ${
+                      u.csv_template?.saved
+                        ? 'bg-emerald-600/15 hover:bg-emerald-600/30 border-emerald-500/40 text-emerald-200'
+                        : 'bg-amber-600/15 hover:bg-amber-600/30 border-amber-500/40 text-amber-200'
+                    }`}
+                  >
+                    <Upload className="w-3 h-3" /> Plantilla
                   </button>
                   <button
                     type="button"
@@ -965,6 +1027,18 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                     M3U
                   </button>
                 </div>
+                {!u.csv_template?.saved ? (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[9px] leading-snug text-amber-200/90">
+                    Sin plantilla: si el equipo <b>no carga ni cambia</b> los canales con el archivo, pulsa{' '}
+                    <b>Plantilla</b> y pega el CSV que exporta su propia web.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-2 py-1 text-[9px] leading-snug text-emerald-200/90">
+                    Plantilla del equipo cargada: {u.csv_template.cols} columnas · separador «
+                    {u.csv_template.delimiter === '\t' ? 'TAB' : u.csv_template.delimiter}» ·{' '}
+                    {u.csv_template.mapped?.length || 0} campos reconocidos.
+                  </div>
+                )}
                 <div className="flex flex-wrap items-center gap-1">
                   <span className="rounded bg-sky-500/12 border border-sky-500/30 px-1.5 py-0.5 text-[9.5px] font-bold text-sky-300">
                     {u.tv_standard_label || 'NTSC-M'}
@@ -1682,6 +1756,154 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           </div>
         )}
       </div>
+
+      {/* ==================== MODAL: PLANTILLA CSV DEL MODULADOR ==================== */}
+      {tplModal ? (
+        <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center overflow-y-auto bg-black/80 p-4">
+          <div className="w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-800 bg-[#0e1526] shadow-2xl">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-800 bg-[#131c31] px-4 py-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <FileSpreadsheet className="h-4 w-4 shrink-0 text-emerald-400" />
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">
+                    Formato de importación del equipo
+                  </div>
+                  <div className="truncate text-sm font-bold text-white">
+                    Plantilla CSV · {tplModal.unit.name}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTplModal(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 p-4 text-xs">
+              <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2 leading-relaxed text-sky-100">
+                En la web del modulador (<span className="font-mono">{tplModal.unit.dest_ip}</span>) entra a la tabla de
+                canales y pulsa <b>Export / Descargar</b>. Abre ese archivo con el Bloc de notas y pégalo aquí completo,
+                con su primera línea. El panel rellena <b>ese mismo archivo</b> con tus canales: misma cabecera, mismo
+                orden de columnas, mismo separador. Es la única forma de que el equipo lo acepte y cambie los canales.
+              </div>
+
+              {tplModal.unit.csv_template?.saved && !tplModal.result ? (
+                <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">
+                  Plantilla guardada: {tplModal.unit.csv_template.cols} columnas · separador «
+                  {tplModal.unit.csv_template.delimiter}» · {tplModal.unit.csv_template.mapped?.length || 0} campos
+                  reconocidos. Pega otro archivo abajo si quieres reemplazarla.
+                </div>
+              ) : null}
+
+              <div>
+                <label className="mb-1 block text-[11px] font-semibold text-slate-300">
+                  CSV que exporta el modulador
+                </label>
+                <textarea
+                  value={tplModal.text}
+                  onChange={(e) => setTplModal((prev) => ({ ...prev, text: e.target.value }))}
+                  rows={7}
+                  spellCheck={false}
+                  placeholder={'Channel,Frequency(MHz),Audio Frequency(MHz),Program,IP Address,Port,Standard,Level,Bandwidth,Name,Enable\n1,91.25,95.75,1,192.168.25.10,5095,NTSC,1.0,6.000,CH95,1'}
+                  className="w-full rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 font-mono text-[11px] text-emerald-200/90 placeholder:text-slate-600"
+                />
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-200 hover:bg-slate-700">
+                    <Upload className="h-3 w-3" /> Abrir archivo…
+                    <input
+                      type="file"
+                      accept=".csv,.txt,text/csv"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const text = await file.text();
+                        setTplModal((prev) => (prev ? { ...prev, text, result: null, error: '' } : prev));
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                  <span className="text-[10px] text-slate-500">
+                    Se acepta «,» «;» tabulador y archivos sin cabecera.
+                  </span>
+                </div>
+              </div>
+
+              {tplModal.error ? (
+                <div className="flex items-start gap-1.5 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {tplModal.error}
+                </div>
+              ) : null}
+
+              {tplModal.result ? (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {[
+                      { label: 'Columnas', value: tplModal.result.template.cols },
+                      { label: 'Separador', value: tplModal.result.delimiter === '\t' ? 'TAB' : tplModal.result.delimiter },
+                      { label: 'Fin de línea', value: tplModal.result.eol === 'crlf' ? 'CRLF' : 'LF' },
+                      {
+                        label: 'Campos',
+                        value: `${tplModal.result.template.mapped?.length || 0}/5`
+                      }
+                    ].map((box) => (
+                      <div key={box.label} className="rounded-lg border border-slate-800 bg-[#090e1a] px-2 py-1.5">
+                        <div className="text-slate-500">{box.label}</div>
+                        <div className="font-mono font-semibold text-white">{box.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {(tplModal.result.template.missing || []).length ? (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10.5px] leading-snug text-amber-100">
+                      No se encontraron estas columnas: {tplModal.result.template.missing.join(', ')}. Se conserva el
+                      valor que trae el archivo del equipo en esas columnas.
+                    </div>
+                  ) : null}
+                  <div>
+                    <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                      Así saldrá el archivo (3 primeras portadoras)
+                    </div>
+                    <pre className="max-h-40 overflow-auto whitespace-pre rounded-lg border border-slate-800 bg-[#070b13] p-2 font-mono text-[10px] leading-relaxed text-emerald-200/90">
+                      {(tplModal.result.preview || []).join('\n')}
+                    </pre>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 bg-[#131c31] px-4 py-3">
+              {tplModal.unit.csv_template?.saved ? (
+                <button
+                  type="button"
+                  onClick={removeTemplate}
+                  disabled={tplModal.busy}
+                  className="mr-auto inline-flex items-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-bold text-rose-200 hover:bg-rose-500/20 disabled:opacity-40"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Quitar plantilla
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setTplModal(null)}
+                className="rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-bold text-slate-200 hover:bg-slate-700"
+              >
+                Cerrar
+              </button>
+              <button
+                type="button"
+                onClick={saveTemplate}
+                disabled={tplModal.busy || !tplModal.text.trim()}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-40"
+              >
+                <Save className="h-3.5 w-3.5" /> {tplModal.busy ? 'Analizando…' : 'Guardar plantilla'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* ==================== MODAL: EQUIPO WK2500 ==================== */}
       {modalUnit ? (

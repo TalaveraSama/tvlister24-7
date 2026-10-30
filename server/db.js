@@ -572,6 +572,9 @@ function runInitDbBody() {
   ensureColumn('wk2500_units', 'rtp', 'INTEGER NOT NULL DEFAULT 0');
   // Lista explícita de canales por equipo (orden = orden de portadora). NULL = rango contiguo.
   ensureColumn('wk2500_units', 'channels_json', 'TEXT');
+  // CSV que exporta el propio modulador, guardado como plantilla (JSON) para que
+  // el archivo que descargamos tenga EXACTAMENTE su estructura y el equipo lo acepte.
+  ensureColumn('wk2500_units', 'csv_template', "TEXT NOT NULL DEFAULT ''");
   // Overrides por canal: 0 = hereda del equipo, 1 = valor propio
   ensureColumn('wk2500_channels', 'pkt_size', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('wk2500_channels', 'rtp', 'INTEGER NOT NULL DEFAULT -1');

@@ -16,6 +16,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import express from 'express';
 import { db, withSqliteBusyRetry } from './db.js';
+import { buildTemplate, renderTemplate, templateSummary, parseCsv } from './catvCsvTemplate.js';
 import { requireAuth, requireAdmin } from './auth.js';
 import { MnfToTsRemuxer } from './mnfProtocol.js';
 import {
@@ -238,7 +239,9 @@ export function unitPublicView(unit = {}) {
     range_freq: {
       from_mhz: freqs.length ? Math.min(...freqs) : 0,
       to_mhz: freqs.length ? Math.max(...freqs) : 0
-    }
+    },
+    // ¿Ya se guardó el CSV real del equipo? La UI lo usa para el botón Import.
+    csv_template: templateSummary(unit)
   };
 }
 
@@ -1861,6 +1864,103 @@ wk2500Router.delete('/api/wk2500/units/:id', requireAuth, requireAdmin, (req, re
   res.json({ ok: true, removed: { id, name: unit.name }, disabledChannels: list.length, stoppedWorkers: stopped });
 });
 
+/**
+ * Filas de muestra del equipo (3 primeras portadoras) para previsualizar cómo
+ * queda el archivo con la plantilla del modulador.
+ */
+function previewUnitRows(unit, limit = 3) {
+  return unitChannelList(unit)
+    .slice(0, limit)
+    .map((ch, idx) => {
+      const info = getCatvStdChannelInfo(ch, unit.tv_standard || DEFAULT_TV_STANDARD);
+      const addr = computeDefaultUdpAddress(ch, unit.ip_mode, unit.dest_ip, unit.base_port);
+      const row = db
+        .prepare(
+          `SELECT w.custom_name, w.service_id, w.output_mode, s.name AS stream_name
+             FROM wk2500_channels w LEFT JOIN streams s ON s.id = w.stream_id
+            WHERE w.catv_ch = ?`
+        )
+        .get(ch);
+      return {
+        carrier: idx + 1,
+        catv_ch: ch,
+        freq_mhz: info.freq_mhz,
+        audio_mhz: info.audio_mhz,
+        udp_host: addr.udp_host,
+        udp_port: addr.udp_port,
+        name: row?.custom_name || row?.stream_name || `CH${ch}`,
+        standard_short: info.standard_short,
+        service_id: row?.service_id,
+        output_mode: row?.output_mode
+      };
+    });
+}
+
+/**
+ * Guarda la plantilla CSV del equipo. Acepta el archivo tal cual lo exporta el
+ * modulador (pegado en `text`) y devuelve qué columnas reconoció y una vista
+ * previa de 3 portadoras ya rellenadas.
+ */
+wk2500Router.post('/api/wk2500/units/:id/csv-template', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const unit = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(id);
+  if (!unit) return res.status(404).json({ error: 'Equipo no encontrado.' });
+
+  let text = String(req.body?.text ?? req.body?.csv ?? '');
+  if (text.length > 2_000_000) return res.status(400).json({ error: 'El archivo es demasiado grande (máx. 2 MB).' });
+  if (!text.trim()) return res.status(400).json({ error: 'Pega el CSV que exporta el modulador.' });
+
+  const template = buildTemplate(text);
+  if (template.error) return res.status(400).json({ error: template.error });
+
+  db.prepare("UPDATE wk2500_units SET csv_template = ?, updated_at = datetime('now') WHERE id = ?").run(
+    JSON.stringify(template),
+    id
+  );
+
+  const saved = { ...unit, csv_template: JSON.stringify(template) };
+  res.json({
+    ok: true,
+    unit_id: id,
+    template: templateSummary(saved),
+    mapping: template.mapping,
+    header: template.header,
+    delimiter: template.delimiter,
+    eol: template.eol,
+    preview: renderTemplate(template, previewUnitRows(saved, 3))
+      .split(/\r?\n/)
+      .filter(Boolean)
+  });
+});
+
+/** Ver la plantilla guardada (sin el archivo completo). */
+wk2500Router.get('/api/wk2500/units/:id/csv-template', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const unit = db.prepare('SELECT * FROM wk2500_units WHERE id = ?').get(id);
+  if (!unit) return res.status(404).json({ error: 'Equipo no encontrado.' });
+  const summary = templateSummary(unit);
+  let preview = [];
+  if (summary.saved) {
+    try {
+      preview = renderTemplate(JSON.parse(unit.csv_template), previewUnitRows(unit, 3))
+        .split(/\r?\n/)
+        .filter(Boolean);
+    } catch {
+      preview = [];
+    }
+  }
+  res.json({ ok: true, template: summary, preview });
+});
+
+/** Quitar la plantilla: el botón Import vuelve al formato compacto. */
+wk2500Router.delete('/api/wk2500/units/:id/csv-template', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const unit = db.prepare('SELECT id FROM wk2500_units WHERE id = ?').get(id);
+  if (!unit) return res.status(404).json({ error: 'Equipo no encontrado.' });
+  db.prepare("UPDATE wk2500_units SET csv_template = '', updated_at = datetime('now') WHERE id = ?").run(id);
+  res.json({ ok: true });
+});
+
 /** Reasigna rangos contiguos (CH 2 en adelante) según la capacidad real de cada modelo. */
 wk2500Router.post('/api/wk2500/units/auto-distribute', requireAuth, requireAdmin, (req, res) => {
   ensureCatvSlotsInitialized();
@@ -2862,10 +2962,67 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
     return res.send(out.join('\n') + '\n');
   }
 
+  // ---- Formato REAL del equipo -------------------------------------------
+  // Se rellena el CSV que exporta el propio modulador, así que la cabecera, el
+  // orden de columnas, el separador y el final de línea son los suyos. Es el
+  // único que estos equipos aceptan en su ventana de importación.
+  if (format === 'dev' || format === 'device' || format === 'equipo') {
+    let template = null;
+    try {
+      template = unitFilter?.csv_template ? JSON.parse(unitFilter.csv_template) : null;
+    } catch {
+      template = null;
+    }
+    if (!template) {
+      res.setHeader('X-TVLister-CSV-Mode', 'compact-fallback');
+      res.setHeader('X-TVLister-CSV-Warning', 'missing-template');
+      const min = ['Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP'];
+      for (const r of fileRows) {
+        const { info, unit } = infoFor(r);
+        const carrier = unit ? carrierIndex.get(`${unit.id}:${r.catv_ch}`) ?? '' : '';
+        min.push(`${carrier},${r.catv_ch},${info.freq_mhz},${info.audio_mhz},${r.udp_host},${r.udp_port}`);
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${unitFilter ? `${unitSlug(unitFilter)}_import.csv` : 'wk2500_import_2_al_125.csv'}"`
+      );
+      return res.send(min.join('\n') + '\n');
+    }
+    const devRows = fileRows.map((r) => {
+      const { info, unit } = infoFor(r);
+      return {
+        carrier: unit ? carrierIndex.get(`${unit.id}:${r.catv_ch}`) ?? '' : '',
+        catv_ch: r.catv_ch,
+        freq_mhz: info.freq_mhz,
+        audio_mhz: info.audio_mhz,
+        udp_host: r.udp_host,
+        udp_port: r.udp_port,
+        name: r.custom_name || r.stream_name || `CH${r.catv_ch}`,
+        standard_short: info.standard_short,
+        service_id: r.service_id,
+        output_mode: r.output_mode
+      };
+    });
+    const body = renderTemplate(template, devRows);
+    const devName = unitFilter ? `${unitSlug(unitFilter)}_import.csv` : 'wk2500_import_2_al_125.csv';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${devName}"`);
+    res.setHeader('X-TVLister-CSV-Mode', 'device-template');
+    res.setHeader('X-TVLister-CSV-Rows', String(devRows.length));
+    res.setHeader('X-TVLister-CSV-Columns', String(template.cols || 0));
+    return res.send(body);
+  }
+
   // Formato compacto para la ventana de importación del modulador:
   // Portadora,Canal,Frecuencia de video,Audio,UDP — sin comillas ni columnas de relleno.
   if (format === 'csv-min' || format === 'csv_import') {
-    const min = ['Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP'];
+    // header=0 quita la cabecera (algunos firmwares sólo leen filas de datos)
+    const withHeader = String(req.query.header ?? '1') !== '0';
+    const eol = String(req.query.eol || '').toLowerCase() === 'crlf' ? '\r\n' : '\n';
+    const min = withHeader
+      ? ['Portadora,Canal_CATV,Frecuencia_Video_MHz,Frecuencia_Audio_MHz,IP_Destino_UDP,Puerto_UDP']
+      : [];
     for (const r of fileRows) {
       const { info, unit } = infoFor(r);
       const carrier = unit ? carrierIndex.get(`${unit.id}:${r.catv_ch}`) ?? '' : '';
@@ -2874,7 +3031,8 @@ wk2500Router.get('/api/wk2500/export-table', requireAuth, requireAdmin, (req, re
     const minName = unitFilter ? `${unitSlug(unitFilter)}_import.csv` : 'wk2500_import_2_al_125.csv';
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${minName}"`);
-    return res.send(min.join('\n') + '\n');
+    res.setHeader('X-TVLister-CSV-Mode', 'compact');
+    return res.send(min.join(eol) + eol);
   }
 
   const csv = [
