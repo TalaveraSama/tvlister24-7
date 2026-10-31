@@ -1,4 +1,7 @@
-# TVLister 24/7 — v2.5.15 «Lo de XUI.one, medido»
+# TVLister 24/7 — v2.5.16 «Lo de XUI.one, medido»
+
+> **v2.5.16** corrige `tvlister-admin hls` (fallaba con `local: can only be used in a function`).
+> Si instalaste v2.5.15, actualiza: el comando ahora responde tal cual se describe aquí.
 
 Leí el código de `xuione_decoded` (43 MB, `decoded/` + `opc/`) para sacar **exactamente** con qué
 opciones genera su HLS y qué merece la pena traerse. El resultado es un interruptor de tres
@@ -19,7 +22,7 @@ También está en el panel: **Motor FFmpeg → «Afinado HLS (referencia XUI.one
 ## Instalación / actualización
 
 ```bash
-tvlister-admin release v2.5.15
+tvlister-admin release v2.5.16
 tvlister-admin restart
 ```
 

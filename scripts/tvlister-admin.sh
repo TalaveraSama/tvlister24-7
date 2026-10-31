@@ -1377,13 +1377,14 @@ case "$ACTION" in
   hls)
     # Afinado HLS con el juego de opciones de XUI.one.
     # Uso: tvlister-admin hls [status|xui off|xui safe|xui full]
-    local sub="${2:-status}" mode="${3:-}"
+    sub="${2:-status}"
+    mode="${3:-}"
     cd "$APP_DIR"
     case "$sub" in
       xui | afinar | tune)
         case "$mode" in
           off | safe | full) : ;;
-          *) echo "Uso: tvlister-admin hls xui [off|safe|full]"; return 1 ;;
+          *) echo "Uso: tvlister-admin hls xui [off|safe|full]"; exit 1 ;;
         esac
         HLS_MODE="$mode" "$NODE_BIN" --no-warnings --input-type=module -e '
           import { initDb, db } from "./server/db.js";
@@ -1394,7 +1395,7 @@ case "$ACTION" in
           const names = {
             off: "línea original del panel (byte a byte)",
             safe: "original + extras de XUI.one (header trailer, delete threshold, discont_start, err_detect)",
-            full: "juego completo de XUI.one (incluye -re y su bloque de timestamps)"
+            full: "juego completo de XUI.one (incluye -re en la entrada)"
           };
           console.log("");
           console.log("  Modo HLS: " + mode + "  ->  " + names[mode]);
@@ -1442,7 +1443,7 @@ case "$ACTION" in
         ;;
       *)
         echo "Uso: tvlister-admin hls [status | xui off|safe|full]"
-        return 1
+        exit 1
         ;;
     esac
     ;;
