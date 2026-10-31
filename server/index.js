@@ -79,6 +79,12 @@ import {
 } from './streamEngine.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
+import {
+  startStabilityGuard,
+  getStabilityReport,
+  getStabilityGuardState,
+  runDbMaintenance
+} from './stability.js';
 import { diagnoseStream } from './diagnostics.js';
 import { APP_VERSION } from './version.js';
 import {
@@ -174,15 +180,27 @@ app.get('/api/health', (_req, res) => {
   try {
     const streamsCount = db.prepare('SELECT COUNT(*) as c FROM streams').get().c;
     const activeConns = db.prepare('SELECT COUNT(*) as c FROM active_connections').get().c;
+    // El estado de la base se comprueba de verdad (antes decía "wal_ok" fijo).
+    let dbOk = true;
+    let journalMode = 'desconocido';
+    try {
+      const row = db.prepare('PRAGMA journal_mode').get();
+      journalMode = String(Object.values(row)[0] || '').toLowerCase();
+      db.prepare('SELECT 1 FROM streams LIMIT 1').get();
+    } catch {
+      dbOk = false;
+    }
     res.json({
-      status: 'ok',
+      status: dbOk ? 'ok' : 'error',
       version: APP_VERSION,
       env: isProd ? 'production' : 'development',
       uptimeSec: Math.floor(process.uptime()),
-      db: 'wal_ok',
+      rssMb: Math.round(process.memoryUsage().rss / 1048576),
+      db: dbOk ? `ok_${journalMode}` : 'error',
       ffmpeg: isFfmpegAvailable(),
       streams: streamsCount,
-      activeConnections: activeConns
+      activeConnections: activeConns,
+      stability: getStabilityGuardState()
     });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
@@ -1986,6 +2004,24 @@ app.get('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (_req, res) => {
     segmentMisses: missStats,
     sampleCommand
   });
+});
+
+// Estado de estabilidad 24/7 (lo mismo que imprime `tvlister-admin health`)
+app.get('/api/system/stability', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const report = await getStabilityReport({ deep: String(req.query.deep || '') === '1' });
+    res.json({ ok: true, ...report, guard: getStabilityGuardState() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/system/stability/maintenance', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...runDbMaintenance({ walThresholdMb: 0 }) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
@@ -4186,6 +4222,8 @@ async function startServer() {
   // Background Schedulers: Daily Automated Backups, 12h XMLTV Sync, 60s On-Demand Idle Reaper & 30m DVR Cleanup
   startAutomatedBackupScheduler();
   startEpgAutoSyncScheduler(PORT);
+  // Guardia 24/7: huérfanos, RAMDisk, SQLite y canales colgados.
+  startStabilityGuard();
 
   setInterval(() => {
     try {

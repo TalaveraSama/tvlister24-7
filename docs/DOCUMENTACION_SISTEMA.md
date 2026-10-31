@@ -2131,3 +2131,64 @@ Una sola configuración para `VideoModal` y `WebTvPortal`: `lowLatencyMode: fals
 es LL-HLS), `liveSyncDurationCount` como prebuffer, `maxLiveSyncPlaybackRate 1.1`, buffer acotado a
 la ventana y reintentos de manifiesto/lista/fragmento más 3 reintentos de red antes de declarar el
 canal caído.
+---
+
+## 8.41 Estabilidad 24/7 (guardia, salud y mantenimiento)
+
+Pensado para meses encendido. El módulo `server/stability.js` arranca con el panel
+(`startStabilityGuard()`) y **no toca la línea de FFmpeg ni la cadena UDP**: sólo vigila, limpia y
+reinicia lo que ya estaba roto.
+
+### Qué vigila, cada cuánto
+
+| Cada | Qué hace |
+| --- | --- |
+| Al arrancar | Barre los FFmpeg de la ejecución anterior (marca `TVLISTER_WORKER=1`). Sin esto, tras un `kill -9` quedan dos emisores al mismo grupo UDP y el modulador recibe el doble de bitrate. |
+| 1 min | Canales HLS con manifiesto parado > 90 s → mata el FFmpeg; el supervisor del worker lo relanza con su backoff. Canales CATV con 3 vueltas seguidas (3 min) sin un byte → `restartWk2500ChannelWorker`. |
+| 10 min | Borra directorios HLS y listas `channel247_*.txt` que no pertenecen a ningún worker vivo (antigüedad mínima 10 min / 24 h). |
+| 60 min | `PRAGMA optimize`, checkpoint `TRUNCATE` del WAL si pasa de 32 MB y borrado de `active_connections` de más de 1 día. |
+| 5 min | Recalcula el informe completo (`ps` + `quick_check` de SQLite). |
+
+Todo va dentro de `try/catch`: la guardia nunca puede tumbar el panel.
+
+### Comandos
+
+```bash
+tvlister-admin health              # informe + código de salida 1 si hay fallas
+tvlister-admin health --clean      # libera directorios HLS sin worker y recorta el WAL
+tvlister-admin health --vacuum     # compacta la base (bloquea mientras dura)
+tvlister-admin health --orphans    # busca y termina FFmpeg de una ejecución anterior
+```
+
+Menú interactivo: opción **24**. API: `GET /api/system/stability` (admin) y
+`POST /api/system/stability/maintenance`. El Dashboard muestra el veredicto en una tarjeta
+(verde/ámbar/rojo) con los puntos que no están en `ok`.
+
+### Copias de seguridad
+
+`tvlister-admin backup` ahora usa `VACUUM INTO`: copia **consistente** con el panel encendido. Un
+`cp` de un SQLite en modo WAL se lleva la base sin lo que aún está en el `.db-wal` y puede salir
+corrupto. Si `VACUUM INTO` fallara, se copian `db + -wal + -shm` juntos.
+
+`tvlister-admin release` y `tvlister-admin update` hacen esa copia **antes** de instalar.
+
+Las tablas respaldadas incluyen ahora `users`, `wk2500_units`, `wk2500_channels`,
+`flussonic_servers`, `mnf_trunks`, `headend_nodes`, `ingest_endpoints`, `vod_watch_folders` y
+`credit_logs`: sin ellas un respaldo no sirve para levantar el sistema en otra máquina.
+
+### Unidad systemd
+
+`install_ubuntu.sh` escribe la unidad con `StartLimitIntervalSec=0`: sin eso, tras 5 caídas en 10 s
+systemd deja el servicio en `failed` y **no lo vuelve a levantar** hasta hacerlo a mano — el fallo
+clásico del equipo que "se quedó apagado toda la noche". Además `TimeoutStopSec=25` da margen a
+cerrar workers y hacer checkpoint del WAL antes del `SIGKILL`.
+
+### `/api/health`
+
+Devolvía `db: 'wal_ok'` fijo. Ahora comprueba de verdad el diario y una consulta real, y añade
+`rssMb` y `stability` (estado de la guardia). Respuesta típica:
+
+```json
+{ "status": "ok", "db": "ok_wal", "rssMb": 412, "ffmpeg": true,
+  "stability": { "running": true, "restartedHls": 0, "restartedCatv": 0 } }
+```

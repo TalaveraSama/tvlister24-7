@@ -6,7 +6,12 @@ import { db } from './db.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const BACKUPS_DIR = path.resolve(__dirname, '../data/backups');
 
+// Todo lo que hace falta para levantar el sistema en otra máquina tras un
+// desastre. Antes faltaban justo las tablas que más cuesta reconstruir a mano:
+// los usuarios (sin ellas no se puede entrar al panel) y toda la configuración
+// de los moduladores (wk2500_*), Flussonic, troncales MNF y nodos headend.
 const BACKUP_TABLES = [
+  'users',
   'categories',
   'transcode_profiles',
   'servers',
@@ -20,15 +25,24 @@ const BACKUP_TABLES = [
   'lines',
   'epg_sources',
   'epg_programs',
+  'osd_messages',
   'firewall_rules',
-  'settings'
+  'settings',
+  'ingest_endpoints',
+  'vod_watch_folders',
+  'headend_nodes',
+  'flussonic_servers',
+  'mnf_trunks',
+  'wk2500_units',
+  'wk2500_channels',
+  'credit_logs'
 ];
 
 export function buildFullBackupObject() {
   const dump = {
     exported_at: new Date().toISOString(),
     panel: 'TVLister 24/7 Panel',
-    version: '2.3.0',
+    version: '2.5.17',
     data: {}
   };
   for (const t of BACKUP_TABLES) {
@@ -59,6 +73,28 @@ export function createServerSnapshot(label = 'auto') {
     sizeKb: Math.max(1, Math.round(Buffer.byteLength(payload) / 1024)),
     created_at: now.toISOString()
   };
+}
+
+/**
+ * Copia CONSISTENTE de la base con el panel encendido.
+ *
+ * `cp` de un SQLite en modo WAL se lleva el .db sin lo que aún está en el
+ * .db-wal: el respaldo puede salir viejo o directamente corrupto. `VACUUM INTO`
+ * escribe una copia completa y coherente en un solo paso, sin bloquear la
+ * operación normal del panel.
+ */
+export function backupDatabaseTo(destPath) {
+  const target = path.resolve(destPath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  try {
+    fs.rmSync(target, { force: true });
+  } catch {
+    /* ignore */
+  }
+  const escaped = target.replace(/'/g, "''");
+  db.exec(`VACUUM INTO '${escaped}';`);
+  const st = fs.statSync(target);
+  return { path: target, sizeMb: Math.round((st.size / 1048576) * 10) / 10, created_at: new Date().toISOString() };
 }
 
 export function listServerSnapshots() {

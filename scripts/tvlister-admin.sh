@@ -108,13 +108,29 @@ cmd_set_port() {
 }
 
 cmd_backup() {
-  local ts out dbfile
+  # Copia CONSISTENTE con el panel encendido (VACUUM INTO). Un `cp` del .db en
+  # modo WAL se lleva la base sin lo que aún está en el .db-wal y puede salir
+  # corrupto justo el día que hace falta.
+  local ts out
   ts=$(date +%Y%m%d_%H%M%S)
   out="/root/tvlister247_backup_${ts}.db"
-  dbfile="${APP_DIR}/data/tvlister.db"
-  cp "$dbfile" "$out"
-  find /root -maxdepth 1 -name "tvlister247_backup_*.db" -mtime +7 -delete 2>/dev/null || true
-  echo "✅ Copia de seguridad guardada en: ${out}"
+  cd "$APP_DIR"
+  if OUT_PATH="$out" "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { initDb } from "./server/db.js";
+      import { backupDatabaseTo } from "./server/backupScheduler.js";
+      initDb();
+      const r = backupDatabaseTo(process.env.OUT_PATH);
+      console.log(`✅ Copia de seguridad consistente: ${r.path} (${r.sizeMb} MB)`);
+    '; then
+    :
+  else
+    echo "⚠️  No se pudo usar VACUUM INTO; copiando db + wal + shm juntos..."
+    cp "${APP_DIR}/data/tvlister.db" "$out"
+    cp "${APP_DIR}/data/tvlister.db-wal" "${out}-wal" 2>/dev/null || true
+    echo "✅ Copia guardada en: ${out} (con su WAL)"
+  fi
+  find /root -maxdepth 1 -name "tvlister247_backup_*.db*" -mtime +7 -delete 2>/dev/null || true
+  echo "   Retención: 7 días en /root"
 }
 
 cmd_enable_cron() {
@@ -181,6 +197,90 @@ cmd_shield() {
     console.log("✅ Blindaje Stream Shield Proxy (TS + HLS), Anti-Restreaming y protección CGNAT activados.");
   '
   systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+}
+
+cmd_health() {
+  # Salud del sistema en producción 24/7: lo mismo que ve el panel en
+  # /api/system/stability, pero desde la consola y con código de salida.
+  local mode="${1:-}"
+  local port
+  port=$(get_current_port)
+  cd "$APP_DIR"
+  echo "============================================================"
+  echo "  TVLister 24/7 — Salud del sistema (24/7)"
+  echo "============================================================"
+  case "$mode" in
+    --vacuum)
+      VAC_MODE=1 "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { vacuumDatabase } from "./server/stability.js";
+        initDb();
+        const r = vacuumDatabase();
+        console.log(`  Base compactada: ${r.beforeMb.toFixed(1)} MB -> ${r.afterMb.toFixed(1)} MB (espacio muerto ${(r.freeRatio*100).toFixed(0)} %)`);
+      '
+      echo "============================================================"
+      return 0
+      ;;
+    --clean)
+      CLEAN_MODE=1 "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { cleanStaleWorkDirs, runDbMaintenance } from "./server/stability.js";
+        initDb();
+        const dirs = cleanStaleWorkDirs();
+        const m = runDbMaintenance({ walThresholdMb: 0 });
+        console.log(`  Directorios sin worker liberados: ${dirs.length}`);
+        console.log(`  Conexiones zombis borradas       : ${m.purgedConnections}`);
+        console.log(`  WAL recortado                    : ${m.walCheckpoint ? "sí" : "no hacía falta"}`);
+      '
+      echo "============================================================"
+      return 0
+      ;;
+    --orphans)
+      ORPH_MODE=1 "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { countOrphanWorkers, reapOrphanWorkers } from "./server/stability.js";
+        const before = await countOrphanWorkers();
+        if (!before.length) { console.log("  Procesos huérfanos: ninguno"); process.exit(0); }
+        console.log(`  Huérfanos encontrados: ${before.join(", ")} -> terminando...`);
+        const r = await reapOrphanWorkers();
+        console.log(`  Terminados: ${r.killed}`);
+      '
+      echo "============================================================"
+      return 0
+      ;;
+  esac
+
+  local rc=0
+  # `set -e` está activo: el informe sale con código 1 si hay fallas, así que
+  # se captura sin abortar la comprobación HTTP que viene después.
+  PANEL_PORT="$port" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb } from "./server/db.js";
+    import { getStabilityReport, startLoopMonitoring, countOrphanWorkers } from "./server/stability.js";
+    initDb();
+    startLoopMonitoring();
+    await new Promise((r) => setTimeout(r, 300));
+    const rep = await getStabilityReport({ deep: true });
+    const tag = { ok: "[OK]  ", warn: "[AVISO]", fail: "[FALLA]" };
+    for (const c of rep.checks) {
+      console.log(`  ${tag[c.level] || "[?]"} ${c.label}: ${c.detail}`);
+    }
+    console.log("------------------------------------------------------------");
+    console.log(`  Veredicto: ${rep.verdict === "ok" ? "todo en orden" : rep.verdict === "warn" ? "funciona, con avisos" : "hay fallas que corregir"}`);
+    process.exit(rep.fails ? 1 : 0);
+  ' || rc=$?
+  if curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then
+    echo "  [OK]   HTTP: /api/health responde en el puerto ${port}"
+  else
+    echo "  [FALLA] HTTP: el panel no responde en 127.0.0.1:${port}"
+    rc=1
+  fi
+  echo "============================================================"
+  if [ "$rc" -ne 0 ]; then
+    echo "  Hay puntos en FALLA. Revisa el detalle de arriba."
+  else
+    echo "  Sin fallas. Para mantenimiento: health --clean | health --vacuum | health --orphans"
+  fi
+  return "$rc"
 }
 
 cmd_doctor() {
@@ -1213,6 +1313,9 @@ cmd_release() {
     rm -f "$tmp_script"
     return 1
   fi
+  # Antes de tocar nada: copia consistente de la base (si el release sale mal,
+  # el panel vuelve con los datos de hace un minuto, no de ayer).
+  cmd_backup || echo "⚠️  No se pudo crear el respaldo previo; continúa la instalación."
   PORT="$port" exec bash "$tmp_script" --tag "$tag"
 }
 
@@ -1225,6 +1328,7 @@ cmd_update() {
     "https://api.github.com/repos/TalaveraSama/tvlister24-7/contents/scripts/install_ubuntu.sh?ref=arena/85cc9902-tvlister24-7" -o "$tmp_script" 2>/dev/null; then
     curl -fsSL "https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/arena/85cc9902-tvlister24-7/scripts/install_ubuntu.sh" -o "$tmp_script"
   fi
+  cmd_backup || echo "⚠️  No se pudo crear el respaldo previo; continúa la actualización."
   PORT="$port" exec bash "$tmp_script"
 }
 
@@ -1267,6 +1371,9 @@ case "$ACTION" in
     ;;
   doctor)
     cmd_doctor
+    ;;
+  health | salud)
+    cmd_health "${2:-}"
     ;;
   setup-ssl)
     cmd_setup_ssl "${2:-}" "${3:-}"
@@ -1477,9 +1584,10 @@ case "$ACTION" in
     echo " 21) Medir el UDP real que llega (Mbps, duplicados, desbalance) (catv watch)"
     echo " 22) Dejar la salida UDP constante, sin picos (catv steady)"
     echo " 23) Afinar el HLS con lo de XUI.one (hls xui safe|full|off)"
+    echo " 24) Salud del sistema 24/7 (health) + mantenimiento"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-23]: " opt
+    read -r -p "Selecciona una opción [0-24]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -1504,6 +1612,7 @@ case "$ACTION" in
       21) cmd_catv "watch" "" ;;
       22) cmd_catv "steady" "" ;;
       23) "$0" hls status ;;
+      24) cmd_health "" || true ;;
       *) exit 0 ;;
     esac
     ;;

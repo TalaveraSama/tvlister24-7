@@ -13,7 +13,9 @@ import {
   RefreshCw,
   AlertCircle,
   Clock,
-  Database
+  Database,
+  ShieldCheck,
+  ShieldAlert
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -28,6 +30,7 @@ function formatUptime(sec = 0) {
 export default function DashboardPage({ user, onPreview, setActiveTab }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [stability, setStability] = useState(null);
 
   const loadDashboard = async () => {
     try {
@@ -40,10 +43,24 @@ export default function DashboardPage({ user, onPreview, setActiveTab }) {
     }
   };
 
+  const loadStability = async () => {
+    try {
+      const res = await apiFetch('/api/system/stability');
+      setStability(res);
+    } catch {
+      // el bloque simplemente no se muestra si no hay permiso
+    }
+  };
+
   useEffect(() => {
     loadDashboard();
+    loadStability();
     const timer = setInterval(loadDashboard, 6000);
-    return () => clearInterval(timer);
+    const stabTimer = setInterval(loadStability, 60000);
+    return () => {
+      clearInterval(timer);
+      clearInterval(stabTimer);
+    };
   }, []);
 
   const handleKick = async (id) => {
@@ -132,6 +149,57 @@ export default function DashboardPage({ user, onPreview, setActiveTab }) {
             >
               Crear Línea
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Estabilidad 24/7 — lo mismo que `tvlister-admin health` */}
+      {stability?.checks?.length > 0 && (
+        <div
+          className={`rounded-2xl border p-4 ${
+            stability.verdict === 'ok'
+              ? 'bg-emerald-500/10 border-emerald-500/30'
+              : stability.verdict === 'warn'
+              ? 'bg-amber-500/10 border-amber-500/30'
+              : 'bg-rose-500/10 border-rose-500/30'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2">
+              {stability.verdict === 'ok' ? (
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <ShieldAlert className={`w-4 h-4 ${stability.verdict === 'warn' ? 'text-amber-400' : 'text-rose-400'}`} />
+              )}
+              <span className="text-xs font-bold uppercase tracking-wider text-white">
+                Estabilidad 24/7
+              </span>
+            </div>
+            <span className="text-[11px] text-slate-300">
+              {stability.verdict === 'ok'
+                ? 'Todo en orden'
+                : `${stability.fails} falla(s) · ${stability.warns} aviso(s)`}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-1">
+            {stability.checks
+              .filter((c) => c.level !== 'ok')
+              .slice(0, 6)
+              .map((c) => (
+                <div key={c.id} className="text-[11px] text-slate-200 flex items-start gap-1.5">
+                  <span className={c.level === 'fail' ? 'text-rose-400' : 'text-amber-400'}>
+                    {c.level === 'fail' ? '●' : '●'}
+                  </span>
+                  <span>
+                    <strong className="text-white">{c.label}:</strong> {c.detail}
+                  </span>
+                </div>
+              ))}
+            {stability.checks.every((c) => c.level === 'ok') && (
+              <div className="text-[11px] text-slate-200">
+                Panel, base de datos, disco, RAMDisk, canales y moduladores sin incidencias.
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -347,6 +347,10 @@ cat >"$SERVICE_FILE" <<EOF
 [Unit]
 Description=TVLister 24/7 IPTV/OTT/VOD Streaming Panel
 After=network.target
+# 24/7: systemd NO debe rendirse si el panel cae varias veces seguidas (por
+# ejemplo durante un arranque con el puerto todavía ocupado). Sin esto, tras 5
+# caídas en 10 s el servicio queda "failed" y no se levanta hasta hacerlo a mano.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -359,6 +363,9 @@ Environment=FFMPEG_PATH=${RUNTIME_BIN}/ffmpeg
 ExecStart=${NODE_DIR}/bin/node --no-warnings server/index.js
 Restart=always
 RestartSec=3
+# Tiempo para cerrar workers y hacer checkpoint del WAL antes del SIGKILL.
+TimeoutStopSec=25
+KillSignal=SIGTERM
 LimitNOFILE=524288
 TasksMax=infinity
 

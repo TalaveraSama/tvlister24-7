@@ -851,6 +851,13 @@ export function stopWk2500ChannelWorker(catvCh) {
   udpWorkers.delete(ch);
 }
 
+/** Reinicia un canal CATV (lo usa la guardia de estabilidad). */
+export function restartWk2500ChannelWorker(catvCh) {
+  const ch = Number(catvCh);
+  stopWk2500ChannelWorker(ch);
+  return startWk2500ChannelWorker(ch);
+}
+
 export function stopAllWk2500Workers() {
   for (const ch of Array.from(udpWorkers.keys())) {
     stopWk2500ChannelWorker(ch);
@@ -1016,7 +1023,10 @@ export function startWk2500ChannelWorker(catvCh) {
     const child = spawn(bin, args, {
       stdio: [isMnf ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       detached: false,
-      env
+      // Marca de propiedad: la guardia de estabilidad barre los FFmpeg que
+      // queden vivos de una ejecución anterior (dos emisores al mismo grupo
+      // UDP duplican el bitrate que ve el modulador).
+      env: { ...env, TVLISTER_WORKER: '1', TVLISTER_WORKER_KEY: `catv_${ch}` }
     });
     state.child = child;
     state.status = 'connecting';
@@ -3296,3 +3306,5 @@ wk2500Router.get('/api/wk2500/export-units', requireAuth, requireAdmin, (req, re
 
 // El verificador necesita ver los workers vivos sin acoplarse a este archivo.
 setCatvWorkerSnapshot(() => udpWorkers);
+// La guardia de estabilidad reengancha canales sin importar este archivo.
+globalThis.__tvlisterCatvRestartWorker = (ch) => restartWk2500ChannelWorker(ch);

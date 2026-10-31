@@ -239,7 +239,10 @@ function startBuiltInNodeIngest(cfg) {
       outM3u8,
     ];
 
-    const proc = spawn(ffBin, ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const proc = spawn(ffBin, ffArgs, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, TVLISTER_WORKER: '1', TVLISTER_WORKER_KEY: `ingest_${key}` }
+    });
     proc.stderr.on('data', (chunk) => {
       const msg = chunk.toString('utf8').trim();
       if (msg) pushLog(`[FFmpeg ${key}] ${msg.split('\n')[0]}`);
@@ -449,6 +452,7 @@ export async function startIngestServer(mainPort = currentMainPort) {
   const proc = spawn(binPath, [ymlPath], {
     cwd: RUNTIME_STREAM_DIR,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, TVLISTER_WORKER: '1', TVLISTER_WORKER_KEY: 'mediamtx' }
   });
 
   const appendLog = (chunk) => {

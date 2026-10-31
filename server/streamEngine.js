@@ -1622,7 +1622,10 @@ export function startSupervisedWorker(key, argsBuilder, onPidChange) {
     }
 
     const bin = getFfmpegBin();
-    const env = ffmpegEnvFor(bin);
+    // Marca TVLISTER_WORKER=1: si el panel muere de golpe, la guardia de
+    // estabilidad reconoce sus FFmpeg y los barre antes de arrancar otros
+    // (dos emisores al mismo UDP del modulador = doble bitrate).
+    const env = { ...ffmpegEnvFor(bin), TVLISTER_WORKER: '1', TVLISTER_WORKER_KEY: String(key) };
 
     const startedAt = Date.now();
     // Kernel /dev/null ('ignore') on all unused FDs -> 0.00% Node.js event-loop load across 200+ HLS channels!
@@ -1885,6 +1888,44 @@ export function getWorkerDiagnostics() {
     });
   }
   return out;
+}
+
+/**
+ * Empuja a un worker con el manifiesto congelado: si de verdad lleva
+ * `staleSec` sin escribir segmento, se mata su FFmpeg. El supervisor del
+ * propio worker lo relanza con su backoff normal, así que no hace falta tocar
+ * la línea de argumentos ni la configuración del canal.
+ * @returns {boolean} true si se reinició algo
+ */
+export function nudgeStalledWorker(key, staleSec = 90) {
+  const state = workers.get(key);
+  if (!state || !state.pid || state.stoppedManually) return false;
+  const dir = resolveHlsDirForKey(key);
+  let ageSec = null;
+  try {
+    ageSec = (Date.now() - fs.statSync(path.join(dir, 'index.m3u8')).mtimeMs) / 1000;
+  } catch {
+    ageSec = null; // sin manifiesto todavía: puede estar arrancando
+  }
+  if (ageSec !== null && ageSec > staleSec) {
+    try {
+      state.child?.kill('SIGKILL');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  // Sin manifiesto y con el proceso llevando demasiado tiempo arriba: también
+  // se considera colgado (nunca llegó a escribir el primer segmento).
+  if (ageSec === null && state.lastStartAt && Date.now() - state.lastStartAt > staleSec * 2 * 1000) {
+    try {
+      state.child?.kill('SIGKILL');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 export function stopAllWorkers() {
