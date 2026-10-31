@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
+import { buildHlsConfig } from '../lib/hlsConfig.js';
 import { X, Radio, Volume2, VolumeX, RefreshCw, AlertTriangle, Tv } from 'lucide-react';
 import { getToken } from '../lib/api.js';
 
@@ -142,10 +143,10 @@ export default function VideoModal({ item, onClose }) {
     };
 
     if (isHls && Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-      });
+      // Configuración compartida con el portal: manifiesto de 2 s × 6 seg, sin
+      // lowLatencyMode (no es LL-HLS) y con reintentos antes de darlo por caído.
+      const hls = new Hls(buildHlsConfig());
+      let netRetries = 0;
       hlsRef.current = hls;
       hls.loadSource(playableUrl);
       hls.attachMedia(video);
@@ -166,6 +167,15 @@ export default function VideoModal({ item, onClose }) {
       });
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data.fatal) {
+          // Un corte de red breve no debe cerrar el canal: hls.js recarga la
+          // lista unas cuantas veces antes de dar el error por definitivo.
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetries < 3) {
+            netRetries += 1;
+            setTimeout(() => {
+              if (hlsRef.current === hls) hls.startLoad();
+            }, 1500 * netRetries);
+            return;
+          }
           // If stream turns out to be raw MPEG-TS instead of HLS, fall back to direct <video> src
           if (data.details === 'manifestParsingError') {
             hls.destroy();

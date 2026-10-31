@@ -65,6 +65,7 @@ import {
   FFMPEG_ENGINE_PRESETS,
   FFMPEG_ENGINE_LIMITS,
   FFMPEG_ENGINE_DEFAULTS,
+  FFMPEG_HLS_XUI_MODES,
   invalidateFfmpegEfficiencyCache,
   getWorkerDiagnostics,
   getFfmpegBinInfo,
@@ -2028,6 +2029,7 @@ app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
   setNum('ffmpeg_analyze_local', values.analyzeLocal, FFMPEG_ENGINE_LIMITS.analyzeLocal, 'Analysis Duration local/UDP');
   setNum('ffmpeg_hls_time', values.hlsTime, FFMPEG_ENGINE_LIMITS.hlsTime, 'Duración de segmento HLS');
   setNum('ffmpeg_hls_list_size', values.hlsListSize, FFMPEG_ENGINE_LIMITS.hlsListSize, 'Segmentos en el manifiesto');
+  setEnum('ffmpeg_hls_xui', values.hlsXuiMode, FFMPEG_HLS_XUI_MODES, 'Afinado HLS (referencia XUI.one)');
   setNum('ffmpeg_ram_reserve_mb', values.ramReserveMb, FFMPEG_ENGINE_LIMITS.ramReserveMb, 'Reserva de RAMDisk');
   setNum('ffmpeg_tailer_interval_ms', values.tailerIntervalMs, FFMPEG_ENGINE_LIMITS.tailerIntervalMs, 'Intervalo del tailer');
   setNum('ffmpeg_tailer_burst', values.tailerBurst, FFMPEG_ENGINE_LIMITS.tailerBurst, 'Segmentos iniciales del tailer');

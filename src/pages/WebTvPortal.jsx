@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
+import { buildHlsConfig } from '../lib/hlsConfig.js';
 import {
   ArrowLeft,
   Radio,
@@ -152,7 +153,9 @@ export default function WebTvPortal({ onBackToAdmin }) {
     };
 
     if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true });
+      // Configuración del panel (2 s × 6 seg): sin lowLatencyMode, entrada
+      // estable a 2 segmentos del borde y reintentos propios.
+      const hls = new Hls(buildHlsConfig());
       hlsRef.current = hls;
       hls.loadSource(selected.url);
       hls.attachMedia(video);

@@ -1374,6 +1374,78 @@ case "$ACTION" in
   tune)
     cmd_tune "${2:-show}"
     ;;
+  hls)
+    # Afinado HLS con el juego de opciones de XUI.one.
+    # Uso: tvlister-admin hls [status|xui off|xui safe|xui full]
+    local sub="${2:-status}" mode="${3:-}"
+    cd "$APP_DIR"
+    case "$sub" in
+      xui | afinar | tune)
+        case "$mode" in
+          off | safe | full) : ;;
+          *) echo "Uso: tvlister-admin hls xui [off|safe|full]"; return 1 ;;
+        esac
+        HLS_MODE="$mode" "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb, db } from "./server/db.js";
+          initDb();
+          const mode = process.env.HLS_MODE;
+          db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .run("ffmpeg_hls_xui", mode);
+          const names = {
+            off: "línea original del panel (byte a byte)",
+            safe: "original + extras de XUI.one (header trailer, delete threshold, discont_start, err_detect)",
+            full: "juego completo de XUI.one (incluye -re y su bloque de timestamps)"
+          };
+          console.log("");
+          console.log("  Modo HLS: " + mode + "  ->  " + names[mode]);
+          console.log("");
+          console.log("  Aplica a los canales con:  tvlister-admin restart");
+          console.log("  Ver la línea resultante:   tvlister-admin hls status");
+        '
+        ;;
+      status | show | "")
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb, db } from "./server/db.js";
+          import { getFfmpegEfficiencyConfig, resolveHlsXuiTokens } from "./server/streamEngine.js";
+          initDb();
+          const eff = getFfmpegEfficiencyConfig();
+          const mode = eff.hlsXuiMode || "off";
+          const names = {
+            off: "línea original del panel",
+            safe: "original + extras de XUI.one",
+            full: "juego completo de XUI.one"
+          };
+          console.log("");
+          console.log("============================================================");
+          console.log("  TVLister 24/7 - Motor HLS (analisis del codigo de XUI.one)");
+          console.log("============================================================");
+          console.log("  Modo                : " + mode + "  (" + names[mode] + ")");
+          console.log("  Segmento            : " + eff.hlsTime + " s");
+          console.log("  Ventana             : " + eff.hlsListSize + " segmentos (~" + (eff.hlsTime * eff.hlsListSize) + " s)");
+          console.log("  Sonda HTTP          : " + eff.probeHttp + " bytes / " + eff.analyzeHttp + " us");
+          const tk = resolveHlsXuiTokens(mode, true);
+          console.log("  -hls_flags          : " + tk.flags);
+          console.log("  Opciones extra      : " + (tk.extra.length ? tk.extra.join(" ") : "(ninguna)"));
+          console.log("  -err_detect         : " + (tk.errDetect ? "ignore_err" : "(no se pone)"));
+          console.log("  -re en la entrada   : " + (tk.readNative ? "sí" : "no"));
+          console.log("");
+          if (mode === "off") {
+            console.log("  Para afinar con lo de XUI.one:");
+            console.log("     tvlister-admin hls xui safe     (recomendado)");
+            console.log("     tvlister-admin hls xui full     (solo si safe no basta)");
+          } else {
+            console.log("  Volver atras en cualquier momento:");
+            console.log("     tvlister-admin hls xui off");
+          }
+          console.log("============================================================");
+        '
+        ;;
+      *)
+        echo "Uso: tvlister-admin hls [status | xui off|safe|full]"
+        return 1
+        ;;
+    esac
+    ;;
   ffmpeg)
     cmd_ffmpeg "${2:-status}" "${3:-}"
     ;;
@@ -1403,9 +1475,10 @@ case "$ACTION" in
     echo " 20) Asignar canales del panel a las portadoras CATV (catv fill)"
     echo " 21) Medir el UDP real que llega (Mbps, duplicados, desbalance) (catv watch)"
     echo " 22) Dejar la salida UDP constante, sin picos (catv steady)"
+    echo " 23) Afinar el HLS con lo de XUI.one (hls xui safe|full|off)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-22]: " opt
+    read -r -p "Selecciona una opción [0-23]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -1429,6 +1502,7 @@ case "$ACTION" in
       20) cmd_catv "fill" "" ;;
       21) cmd_catv "watch" "" ;;
       22) cmd_catv "steady" "" ;;
+      23) "$0" hls status ;;
       *) exit 0 ;;
     esac
     ;;

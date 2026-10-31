@@ -64,6 +64,22 @@ const FIELDS = [
     hint: 'Ventana = duración × segmentos. Más segmentos = más RAM en /dev/shm.'
   },
   {
+    key: 'hlsXuiMode',
+    group: 'basic',
+    label: 'Afinado HLS (referencia XUI.one)',
+    type: 'select',
+    options: [
+      { value: 'off', label: 'off — línea original del panel (byte a byte)' },
+      { value: 'safe', label: 'safe — original + extras de XUI.one (recomendado)' },
+      { value: 'full', label: 'full — juego completo de XUI.one (incluye -re)' }
+    ],
+    fmt: (v) => String(v ?? 'off'),
+    hint:
+      'off deja la salida HLS exactamente como está hoy. safe añade lo que XUI.one usa y no cambia el resto ' +
+      '(-individual_header_trailer 0, -hls_delete_threshold 2, discont_start, -err_detect ignore_err). ' +
+      'full es su juego completo: quita append_list y añade -re. Cualquier cambio se aplica al reiniciar los canales.'
+  },
+  {
     key: 'h264Threads',
     group: 'basic',
     label: 'Hilos por encoder H.264',

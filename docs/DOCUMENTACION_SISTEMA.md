@@ -2085,3 +2085,49 @@ En los dos casos la SDT sale con el nombre del canal (`CANAL 2 NACIONAL`), no `S
 3. Si sale `cortes`, el origen no entrega más rápido de lo que el flujo consume: **no es la salida**, es el origen
    (Flussonic con `-re` de más, CDN lento o enlace justo).
 
+---
+
+## 8.40 Afinado HLS con el juego de opciones de XUI.one
+
+El HLS del panel se puede afinar con tres modos, sin reinstalar y volviendo atrás al instante:
+
+```
+tvlister-admin hls status          # modo y tokens resueltos
+tvlister-admin hls xui safe        # recomendado
+tvlister-admin hls xui full        # juego completo de XUI.one
+tvlister-admin hls xui off         # línea original (por defecto)
+tvlister-admin restart
+```
+
+También en **Motor FFmpeg → «Afinado HLS (referencia XUI.one)»**. La clave en la base es
+`ffmpeg_hls_xui` (`off|safe|full`) y se lee en `getFfmpegEngineConfig()`.
+
+| Modo | `-hls_flags` | Extra | Entrada |
+| --- | --- | --- | --- |
+| `off` | `delete_segments+independent_segments+omit_endlist` | — | sin cambios |
+| `safe` | `…+discont_start` (sin `append_list`) | `-individual_header_trailer 0 -hls_delete_threshold 2` | `-err_detect ignore_err` |
+| `full` | `delete_segments+discont_start+omit_endlist` | los tres tokens + `-hls_segment_type mpegts` | `-err_detect ignore_err -re` |
+
+La función `resolveHlsXuiTokens(mode, isZeroLatency)` de `server/streamEngine.js` es la única
+fuente de verdad: la usan el motor y el CLI, así que lo que imprime `hls status` es exactamente lo
+que se ejecuta.
+
+### Qué se trae de XUI.one y qué no
+
+Se trae: `discont_start` (canal que se reinicia sobre segmentos viejos), `-hls_delete_threshold 2`
+(cliente que llega tarde no pide un `.ts` borrado), `-individual_header_trailer 0`,
+`-err_detect ignore_err` y la salida de `append_list`.
+
+No se trae: `-f segment` (el muxer `hls` nativo lo hace mejor), el bloque de timestamps de
+timeshift (`-copyts -avoid_negative_ts disabled …`), `split_by_time`/`ignore_keyframes` (corta sin
+keyframe → artefactos al zapear) ni su servidor de manifiestos en PHP con long-poll por cliente.
+
+`-re` sólo entra en `full`: la cadena de moduladores ya lo lleva donde importa (v2.5.13) y
+duplicarlo en el HLS sólo añade latencia de arranque.
+
+### Reproductor del panel (`src/lib/hlsConfig.js`)
+
+Una sola configuración para `VideoModal` y `WebTvPortal`: `lowLatencyMode: false` (el manifiesto no
+es LL-HLS), `liveSyncDurationCount` como prebuffer, `maxLiveSyncPlaybackRate 1.1`, buffer acotado a
+la ventana y reintentos de manifiesto/lista/fragmento más 3 reintentos de red antes de declarar el
+canal caído.

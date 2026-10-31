@@ -650,8 +650,16 @@ export const FFMPEG_ENGINE_DEFAULTS = {
   prebufferSegments: 0,
   prebufferWaitMs: 3000,
   // Binario FFmpeg elegido ('auto' = orden histórico del motor)
-  binPreference: 'auto'
+  binPreference: 'auto',
+  // Afinado HLS con el juego de opciones de XUI.one (analizado en su código):
+  //   off  -> línea original, byte a byte (comportamiento validado)
+  //   safe -> sólo lo que no puede romper: -individual_header_trailer 0,
+  //           -hls_delete_threshold, discont_start y -err_detect ignore_err
+  //   full -> el juego completo de XUI.one (incluye su bloque de timestamps)
+  hlsXuiMode: 'off'
 };
+
+export const FFMPEG_HLS_XUI_MODES = ['off', 'safe', 'full'];
 
 export const FFMPEG_ENGINE_LIMITS = {
   h264Threads: [1, 16],
@@ -691,7 +699,7 @@ export function getFfmpegEngineConfig() {
       .prepare(
         `SELECT key, value FROM settings WHERE key IN (
            'ffmpeg_ts_pipe_mode','ffmpeg_h264_threads','ffmpeg_probe_http','ffmpeg_analyze_http',
-           'ffmpeg_probe_local','ffmpeg_analyze_local','ffmpeg_hls_time','ffmpeg_hls_list_size',
+           'ffmpeg_probe_local','ffmpeg_analyze_local','ffmpeg_hls_time','ffmpeg_hls_list_size','ffmpeg_hls_xui',
            'ffmpeg_log_level','ffmpeg_ram_reserve_mb','ffmpeg_tailer_interval_ms','ffmpeg_tailer_burst',
            'ffmpeg_ts_join_segment','ffmpeg_prebuffer_segments','ffmpeg_prebuffer_wait_ms',
            'ffmpeg_bin_preference'
@@ -713,6 +721,7 @@ export function getFfmpegEngineConfig() {
     probeLocal: clampInt(map.ffmpeg_probe_local, L.probeLocal[0], L.probeLocal[1], d.probeLocal),
     analyzeLocal: clampInt(map.ffmpeg_analyze_local, L.analyzeLocal[0], L.analyzeLocal[1], d.analyzeLocal),
     hlsTime: clampInt(map.ffmpeg_hls_time, L.hlsTime[0], L.hlsTime[1], d.hlsTime),
+    hlsXuiMode: FFMPEG_HLS_XUI_MODES.includes(map.ffmpeg_hls_xui) ? map.ffmpeg_hls_xui : d.hlsXuiMode,
     hlsListSize: clampInt(map.ffmpeg_hls_list_size, L.hlsListSize[0], L.hlsListSize[1], d.hlsListSize),
     logLevel: ['warning', 'error'].includes(map.ffmpeg_log_level) ? map.ffmpeg_log_level : d.logLevel,
     ramReserveMb: clampInt(map.ffmpeg_ram_reserve_mb, L.ramReserveMb[0], L.ramReserveMb[1], d.ramReserveMb),
@@ -858,6 +867,44 @@ export function isStreamAudioLeveled(stream, profile) {
   return getGlobalAudioLevelingConfig().enabled;
 }
 
+/**
+ * Juego de flags HLS según el modo de afinado (referencia: el código de XUI.one).
+ *   off  -> la línea original del panel, sin un solo token extra
+ *   safe -> original + lo que XUI.one añade y aquí es seguro
+ *   full -> el juego completo de XUI.one
+ * Es una función pura: la usan el motor y `tvlister-admin hls status` para que
+ * lo que se muestra en consola sea exactamente lo que se ejecuta.
+ */
+export function resolveHlsXuiTokens(mode, isZeroLatency = false) {
+  const baseFlags = isZeroLatency
+    ? 'delete_segments+independent_segments+omit_endlist'
+    : 'delete_segments+append_list+omit_endlist';
+
+  if (mode === 'safe') {
+    return {
+      flags: isZeroLatency
+        ? 'delete_segments+independent_segments+discont_start+omit_endlist'
+        : 'delete_segments+discont_start+omit_endlist',
+      extra: ['-individual_header_trailer', '0', '-hls_delete_threshold', '2'],
+      errDetect: true,
+      readNative: false
+    };
+  }
+  if (mode === 'full') {
+    return {
+      flags: 'delete_segments+discont_start+omit_endlist',
+      extra: [
+        '-individual_header_trailer', '0',
+        '-hls_delete_threshold', '2',
+        '-hls_segment_type', 'mpegts'
+      ],
+      errDetect: true,
+      readNative: true
+    };
+  }
+  return { flags: baseFlags, extra: [], errDetect: false, readNative: false };
+}
+
 export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   const candidates = resolveFfmpegCompatibleCandidates(stream.source_url);
   const inputUrl = candidates[Math.max(0, Number(attemptIndex) || 0) % candidates.length] || stream.source_url;
@@ -902,10 +949,24 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   // Fuentes HTTP/HLS (Flussonic) necesitan sonda amplia para HD: con 1 MB FFmpeg pierde el SPS/PPS
   // del primer segmento en canales de 8-12 Mbps y arranca tarde o entrecortado.
   const isHttpInput = /^https?:\/\//i.test(inputUrl);
+  // XUI.one aplica -re a las fuentes en vivo ({READ_NATIVE}) para que el muxer
+  // no vacíe el búfer de golpe. Sólo tiene sentido con fuentes reales.
+  const isLiveInput = isHttpInput || /^(udp|rtp|rtmp|mnf|m4f)/i.test(inputUrl);
   const probeSize = String(isHttpInput ? efficiency.probeHttp : efficiency.probeLocal);
   const analyzeDuration = String(isHttpInput ? efficiency.analyzeHttp : efficiency.analyzeLocal);
   // -avoid_negative_ts sólo cuando emitimos MPEG-TS continuo (pipe), no en HLS puro (evita micro-saltos de PTS)
   const needTsContinuity = ramMpegTsOnly || dualTeeTsPipe;
+
+  // XUI.one pone -err_detect ignore_err en la entrada: un paquete corrupto del
+  // origen no debe tumbar el canal (se descarta y se sigue).
+  if (efficiency.hlsXuiMode && efficiency.hlsXuiMode !== 'off') {
+    args.push('-err_detect', 'ignore_err');
+  }
+  // -re sólo en modo 'full': es lo que usa XUI.one ({READ_NATIVE}) para que el
+  // muxer no vacíe el búfer de golpe, pero también añade latencia al arranque.
+  if (efficiency.hlsXuiMode === 'full' && isLiveInput && !ramMpegTsOnly) {
+    args.push('-re');
+  }
 
   if (isPureCopy) {
     // Copy/Copy Zero-CPU: 1 hilo OS, sin re-encode (14-16 MB RSS por canal)
@@ -1056,9 +1117,16 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
   }
 
   const hlsTime = String(isZeroLatency ? efficiency.hlsTime : Math.max(4, efficiency.hlsTime));
-  const hlsFlags = isZeroLatency
-    ? 'delete_segments+independent_segments+omit_endlist'
-    : 'delete_segments+append_list+omit_endlist';
+  const xuiMode = efficiency.hlsXuiMode || 'off';
+
+  // ---- Juego de flags HLS ----------------------------------------------------
+  // `off`  : la línea original (validada en producción). 
+  // `safe` : la original + lo que en XUI.one evita problemas sin tocar el resto.
+  // `full` : el juego exacto de XUI.one (includes/hui.php -> -f hls ...).
+  const xui = resolveHlsXuiTokens(xuiMode, isZeroLatency);
+  const hlsFlags = xui.flags;
+  const xuiExtra = xui.extra;
+
   const outM3u8 = path.join(outDir, 'index.m3u8');
 
   if (dualTeeTsPipe) {
@@ -1083,6 +1151,7 @@ export function buildFfmpegArgsForStream(stream, profile, attemptIndex = 0) {
     String(efficiency.hlsListSize),
     '-hls_flags',
     hlsFlags,
+    ...xuiExtra,
     outM3u8
   );
   return args;
