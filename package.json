@@ -1,0 +1,32 @@
+{
+  "name": "tvlister24-7",
+  "version": "2.5.17",
+  "description": "TVLister 24/7 Panel: Self-Hosted IPTV/OTT/VOD & 24/7 Linear Channel Streaming Server",
+  "type": "module",
+  "scripts": {
+    "dev": "node --no-warnings server/index.js",
+    "server": "node --no-warnings server/index.js",
+    "build": "vite build",
+    "start": "NODE_ENV=production node --no-warnings server/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "hls.js": "^1.5.18",
+    "lucide-react": "^0.475.0",
+    "mysql2": "^3.24.6",
+    "node-media-server": "^2.7.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.9",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.9",
+    "vite": "^6.2.0"
+  },
+  "optionalDependencies": {
+    "@ffmpeg-installer/linux-x64": "^4.1.0"
+  }
+}

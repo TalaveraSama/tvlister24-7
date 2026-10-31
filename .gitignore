@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+data/
+streams_runtime/
+.env
+*.log
+
+# Harness temporal de pruebas (jsdom/esbuild)
+.tmp-harness/
+
+# Binarios del runtime aislado (Node/FFmpeg descargados por el instalador)
+.runtime/
+
+# Paquetes generados por scripts/build_release.sh
+release/

@@ -1,0 +1,84 @@
+name: Release
+
+# Publica un release con el paquete instalable del panel cada vez que se empuja
+# un tag vX.Y.Z (o a mano desde Actions → Run workflow).
+#
+#   git tag v2.3.0 && git push origin v2.3.0
+#
+# Artefactos publicados:
+#   tvlister24-7-vX.Y.Z.tar.gz   código del panel
+#   install.sh                   instalador de una línea
+#   SHA256SUMS                   checksums
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag a publicar (ej. v2.3.1). Debe existir en el repo.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolver versión
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publicando $TAG"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instalar dependencias y compilar (verificación)
+        run: |
+          npm install --include=dev --no-audit --no-fund
+          npm run build
+
+      - name: Empaquetar release
+        run: bash scripts/build_release.sh "${{ steps.version.outputs.tag }}"
+
+      - name: Publicar en GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          NAME="tvlister24-7-${TAG}"
+          NOTES="docs/RELEASE_NOTES_${TAG}.md"
+          TITLE="TVLister 24/7 ${TAG}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # El release ya existe (p. ej. creado a mano): sólo se refrescan los artefactos
+            gh release upload "$TAG" \
+              "release/${NAME}.tar.gz" "release/install.sh" "release/SHA256SUMS" --clobber
+            if [ -f "$NOTES" ]; then
+              gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES"
+            fi
+          else
+            if [ -f "$NOTES" ]; then
+              gh release create "$TAG" \
+                "release/${NAME}.tar.gz" "release/install.sh" "release/SHA256SUMS" \
+                --title "$TITLE" --notes-file "$NOTES" --latest
+            else
+              gh release create "$TAG" \
+                "release/${NAME}.tar.gz" "release/install.sh" "release/SHA256SUMS" \
+                --title "$TITLE" --generate-notes --latest
+            fi
+          fi
