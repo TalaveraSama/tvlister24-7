@@ -137,20 +137,109 @@ export function verifyUpstreamUrl(encoded, sig, streamId) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * IP real del cliente detrás de nginx / Cloudflare
+ * ---------------------------------------------------------------------------
+ * `CF-Connecting-IP` y `X-Forwarded-For` los puede escribir CUALQUIERA. Si se
+ * aceptan siempre, basta con mandar la cabecera a mano para saltarse el bloqueo
+ * por IP de las líneas (`allowed_ips`), el firewall y el control de sharers:
+ * el panel creería que la petición viene de la IP que le digan.
+ *
+ * Por eso las cabeceras de proxy sólo se creen cuando la conexión llega desde
+ * un proxy de confianza: loopback, red privada, o lo que se declare en
+ * TVLISTER_TRUSTED_PROXIES (lista separada por comas, admite CIDR).
+ * ------------------------------------------------------------------------- */
+
+const normalizeIp = (ip) => String(ip || '').trim().replace(/^::ffff:/i, '');
+
+function ipv4ToInt(ip) {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  let n = 0n;
+  for (const p of parts) {
+    const v = Number(p);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
+    n = (n << 8n) | BigInt(v);
+  }
+  return n;
+}
+
+function ipv6ToBigInt(ip) {
+  const clean = ip.split('%')[0];
+  const halves = clean.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill('0'), ...tail];
+  if (groups.length !== 8) return null;
+  let n = 0n;
+  for (const g of groups) {
+    const v = parseInt(g || '0', 16);
+    if (Number.isNaN(v)) return null;
+    n = (n << 16n) | BigInt(v);
+  }
+  return n;
+}
+
+/** ¿`ip` está dentro de `cidr` (acepta "1.2.3.4" o "1.2.3.0/24", v4 y v6)? */
+export function ipInCidr(ip, cidr) {
+  const target = normalizeIp(ip);
+  const rule = normalizeIp(cidr);
+  if (!target || !rule) return false;
+  const [base, bitsRaw] = rule.split('/');
+  const isV6 = target.includes(':') || base.includes(':');
+  const toNum = isV6 ? ipv6ToBigInt : ipv4ToInt;
+  const a = toNum(target);
+  const b = toNum(base);
+  if (a === null || b === null) return false;
+  const width = isV6 ? 128 : 32;
+  const bits = bitsRaw === undefined ? width : Number(bitsRaw);
+  if (!Number.isInteger(bits) || bits < 0 || bits > width) return false;
+  const shift = BigInt(width - bits);
+  return a >> shift === b >> shift;
+}
+
+/** Lista de proxies de confianza (variable de entorno, opcional). */
+function trustedProxyList() {
+  return String(process.env.TVLISTER_TRUSTED_PROXIES || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+/** ¿La conexión viene de nginx local, de la red privada o de un proxy declarado? */
+export function isTrustedProxy(ip) {
+  const addr = normalizeIp(ip);
+  if (!addr) return false;
+  if (addr === '::1' || addr === '127.0.0.1') return true;
+  // Nginx y el panel suelen compartir host o VLAN: 10/8, 172.16/12, 192.168/16.
+  const privateRanges = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'fc00::/7', 'fe80::/10'];
+  if (privateRanges.some((c) => ipInCidr(addr, c))) return true;
+  return trustedProxyList().some((rule) => ipInCidr(addr, rule));
+}
+
 export function extractClientIp(req) {
+  const socketIp = normalizeIp(req.socket?.remoteAddress || req.connection?.remoteAddress || '127.0.0.1');
+
+  // Sin proxy de confianza delante, mandar las cabeceras no cambia nada: manda
+  // el IP real de la conexión. Evita por completo el spoofing desde Internet.
+  if (!isTrustedProxy(socketIp)) return socketIp;
+
   const cfIp = req.headers?.['cf-connecting-ip'] || req.headers?.['true-client-ip'];
   if (typeof cfIp === 'string' && cfIp.trim()) {
-    return cfIp.trim().replace(/^::ffff:/i, '');
+    return normalizeIp(cfIp);
   }
   const xff = req.headers?.['x-forwarded-for'];
   if (typeof xff === 'string' && xff.length > 0) {
-    return xff.split(',')[0].trim().replace(/^::ffff:/i, '');
+    return normalizeIp(xff.split(',')[0]);
   }
   const xReal = req.headers?.['x-real-ip'];
   if (typeof xReal === 'string' && xReal.trim()) {
-    return xReal.trim().replace(/^::ffff:/i, '');
+    return normalizeIp(xReal);
   }
-  return (req.socket?.remoteAddress || '127.0.0.1').replace(/^::ffff:/i, '');
+  return socketIp;
 }
 
 const KNOWN_RESTREAM_SCANNERS = ['masscan', 'zgrab', 'censys', 'nmap', 'nikto', 'sqlmap'];

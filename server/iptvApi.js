@@ -72,6 +72,31 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
+/**
+ * Base pública para las URLs de STREAMING (playlist, .m3u8, .ts, VOD, catchup).
+ *
+ * Cuando el panel va detrás de Cloudflare, el video NO debe salir por el mismo
+ * dominio: Cloudflare no permite el tráfico de video continuo en los planes
+ * self-serve y además mete buffering. Con la clave `public_stream_base`
+ * (ej. https://stream.midominio.com) todos los enlaces de video apuntan a ese
+ * subdominio (DNS only), mientras el panel y su API siguen por el dominio
+ * proxied.
+ *
+ * Sin esa clave, todo se comporta como siempre (mismo host de la petición).
+ */
+export function getStreamBaseUrl(req) {
+  let configured = '';
+  try {
+    configured = String(
+      db.prepare("SELECT value FROM settings WHERE key = 'public_stream_base'").get()?.value || ''
+    ).trim();
+  } catch {
+    configured = '';
+  }
+  if (/^https?:\/\//i.test(configured)) return configured.replace(/\/+$/, '');
+  return getBaseUrl(req);
+}
+
 export function authenticateLine(username, password, req = null) {
   if (!username || !password) return { error: 'Credenciales requeridas', code: 401 };
   const line = db.prepare('SELECT * FROM lines WHERE username = ? AND password = ?').get(username, password);
@@ -580,7 +605,7 @@ iptvRouter.get('/get.php', (req, res) => {
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
 
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = getStreamBaseUrl(req);
   const isMnfOutput = output === 'mnf';
   const ext = isMnfOutput ? 'mnf' : output === 'ts' ? 'ts' : 'm3u8';
   const livePrefix = isMnfOutput ? 'mnf' : 'live';
@@ -643,7 +668,7 @@ iptvRouter.get('/enigma2.php', (req, res) => {
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).type('text/plain').send(auth.error);
 
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = getStreamBaseUrl(req);
   const { streams, channels247, vodItems } = getAllowedContentForLine(auth.line);
 
   const xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<items>'];
@@ -1333,7 +1358,7 @@ iptvRouter.get('/hls_proxy/:username/:password/:streamId', async (req, res) => {
     if (isSubManifest) {
       const text = await upRes.text();
       if (text.includes('#EXTM3U')) {
-        const proxyPrefix = `${getBaseUrl(req)}/hls_proxy/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${sid}`;
+        const proxyPrefix = `${getStreamBaseUrl(req)}/hls_proxy/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${sid}`;
         const rewritten = rewriteHlsManifestForProxy(text, upRes.url || targetUrl, proxyPrefix, sid);
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Cache-Control', 'no-store');
@@ -1528,7 +1553,7 @@ async function serveLiveStreamRequest(req, res) {
           if (upRes.ok) {
             const manifestText = await upRes.text();
             if (manifestText.includes('#EXTM3U')) {
-              const proxyPrefix = `${getBaseUrl(req)}/hls_proxy/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${stream.id}`;
+              const proxyPrefix = `${getStreamBaseUrl(req)}/hls_proxy/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${stream.id}`;
               const rewritten = rewriteHlsManifestForProxy(
                 manifestText,
                 upRes.url || upstreamUrl,

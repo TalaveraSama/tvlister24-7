@@ -2221,3 +2221,59 @@ al cambiar de canal había que subir y bajar la página.
 
 Con el portal abierto en el teléfono: elegir un canal del final de la lista, comprobar que el video
 sigue visible arriba y que al reabrir el portal la lista aparece en ese canal, no al principio.
+---
+
+## 8.43 Cloudflare delante del panel (y el video por fuera)
+
+```bash
+tvlister-admin cloudflare <dominio_panel> [dominio_streams]
+tvlister-admin cloudflare --clear
+```
+
+### Reparto de tráfico
+
+| Tráfico | Dominio | Cloudflare | Por qué |
+| --- | --- | --- | --- |
+| Panel, API, WebTV, MNF/WebSocket, VOD pequeño | `tv.midominio.com` | **Proxied (naranja)** | SSL, anti-DDoS y caché de la interfaz. |
+| Playlist `.m3u8`, segmentos `.ts`, catchup | `stream.midominio.com` | **DNS only (gris)** | Cloudflare no permite video continuo en planes self-serve (§2.8) y su proxy mete buffering y corta conexiones largas. |
+
+### Archivos que genera
+
+- `/etc/nginx/sites-available/tvlister247-panel.conf` — proxy con WebSocket, `proxy_buffering off`,
+  `proxy_read_timeout 3600s`, `client_max_body_size 250M`.
+- `/etc/nginx/sites-available/tvlister247-streams.conf` — `proxy_buffering off`, `proxy_cache off`,
+  `gzip off`, `sendfile`, `tcp_nopush`, `chunked_transfer_encoding`; `.m3u8` → `Cache-Control:
+  no-store`, segmentos → `max-age=30`.
+- `/etc/nginx/conf.d/tvlister-cloudflare-realip.conf` — `set_real_ip_from` de los rangos de
+  Cloudflare (se descargan de `cloudflare.com/ips-v4|-v6`, con lista de respaldo) y
+  `real_ip_header CF-Connecting-IP`.
+- `/etc/systemd/system/tvlister24-7.service.d/cloudflare.conf` — `TVLISTER_TRUSTED_PROXIES` con esos
+  rangos.
+
+Si el servidor no tiene `/etc/nginx/sites-available` (XUI.one con nginx embebido), los dos server
+blocks se escriben en `/root/tvlister247_panel_<dominio>.conf` y `/root/tvlister247_streams_<dominio>.conf`.
+
+### Base pública de streaming (`public_stream_base`)
+
+El comando guarda en `settings` la clave `public_stream_base` (ej. `https://stream.midominio.com`).
+`getStreamBaseUrl(req)` en `server/iptvApi.js` la usa para construir las URLs de video:
+
+- `get.php` (playlist M3U/M3U_Plus), catchup/timeshift, Enigma2 y los prefijos `hls_proxy`.
+- `player_api.php → server_info` **no** la usa: sigue informando el host del panel.
+
+Sin la clave, todas las URLs vuelven a salir con el host de la petición (comportamiento anterior).
+
+### Seguridad: cabeceras de proxy
+
+`extractClientIp()` (`server/auth.js`) ya no acepta `CF-Connecting-IP` / `X-Forwarded-For` de
+cualquiera. Sólo se creen cuando el socket viene de loopback, de una red privada o de algo declarado
+en `TVLISTER_TRUSTED_PROXIES` (admite CIDR; `ipInCidr()` soporta v4 y v6). Una conexión directa
+desde Internet con esas cabeceras a mano se queda con su IP real, así que el bloqueo por IP de las
+líneas, el firewall y el control de sharers no se pueden saltar escribiendo una cabecera.
+
+### Checklist en el panel de Cloudflare
+
+1. `tv.` → naranja; `stream.` → gris.
+2. SSL/TLS **Full (strict)** + certificado real en el servidor (`tvlister-admin setup-ssl`).
+3. Regla de caché: rutas `.m3u8` / `.ts` → *Bypass cache*.
+4. Rocket Loader **OFF**; WebSockets **ON**.

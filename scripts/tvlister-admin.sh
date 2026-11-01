@@ -392,6 +392,255 @@ EOF
   fi
 }
 
+cmd_cloudflare() {
+  # Proxy inverso delante del panel, con Cloudflare (o sin él).
+  #
+  # Uso: tvlister-admin cloudflare <dominio_panel> [dominio_streams]
+  #
+  # Regla de oro: por Cloudflare va el PANEL (HTML, API, WebSocket, VOD
+  # pequeño). Los streams TS/HLS van por un subdominio SIN proxy (nube gris),
+  # porque el tráfico de video continuo no está permitido en los planes
+  # self-serve de Cloudflare y además el proxy no está hecho para eso
+  # (cortes, buffering, límite de tiempo de respuesta).
+  local domain="${1:-}"
+  local stream_domain="${2:-}"
+  local port
+  port=$(get_current_port)
+
+  if [ "$domain" = "--clear" ]; then
+    cd "$APP_DIR"
+    "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { initDb, db } from "./server/db.js";
+      initDb();
+      db.prepare("DELETE FROM settings WHERE key = ?").run("public_stream_base");
+      console.log("✅ Base pública de streaming borrada: los enlaces de video vuelven a usar el dominio del panel.");
+    '
+    echo "   Aplica con: tvlister-admin restart"
+    return 0
+  fi
+
+  if [ -z "$domain" ]; then
+    echo "Uso: tvlister-admin cloudflare <dominio_panel> [dominio_streams]"
+    echo "Ej.:  tvlister-admin cloudflare tv.midominio.com stream.midominio.com"
+    return 1
+  fi
+  if [ -z "$stream_domain" ]; then
+    stream_domain="stream.${domain}"
+  fi
+
+  echo "============================================================"
+  echo "  TVLister 24/7 — Proxy inverso para Cloudflare"
+  echo "============================================================"
+  echo "  Panel   (por Cloudflare)  : ${domain}  ->  127.0.0.1:${port}"
+  echo "  Streams (sin Cloudflare)  : ${stream_domain}  ->  127.0.0.1:${port}"
+  echo ""
+
+  # --- Rangos de Cloudflare (para la IP real y para confiar en el proxy) ----
+  local cf_v4 cf_v6
+  cf_v4=$(curl -fsS --max-time 6 https://www.cloudflare.com/ips-v4 2>/dev/null | tr '\n' ' ' || true)
+  cf_v6=$(curl -fsS --max-time 6 https://www.cloudflare.com/ips-v6 2>/dev/null | tr '\n' ' ' || true)
+  if [ -z "$cf_v4" ]; then
+    cf_v4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+  fi
+
+  if [ ! -d /etc/nginx/sites-available ]; then
+    echo "ℹ️  No hay nginx del sistema (/etc/nginx/sites-available)."
+    echo "   Se generan los archivos en /root para que los incluyas donde ya tengas tu proxy:"
+    echo "   - /root/tvlister247_panel_${domain}.conf"
+    echo "   - /root/tvlister247_streams_${stream_domain}.conf"
+    cat > "/root/tvlister247_panel_${domain}.conf" <<EOF
+server {
+    listen 80;
+    server_name ${domain};
+    client_max_body_size 250M;
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}
+EOF
+    cat > "/root/tvlister247_streams_${stream_domain}.conf" <<EOF
+# Subdominio SIN proxy de Cloudflare (nube gris): el video no pasa por su CDN.
+server {
+    listen 80;
+    server_name ${stream_domain};
+
+    proxy_buffering off;
+    proxy_cache off;
+    gzip off;
+    sendfile on;
+    tcp_nopush on;
+    chunked_transfer_encoding on;
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        add_header Cache-Control "no-store" always;
+    }
+}
+EOF
+    echo ""
+    echo "   Copia el contenido en tu nginx y recarga."
+  else
+    # --- IP real del cliente detrás de Cloudflare -------------------------
+    {
+      echo "# TVLister 24/7 — IP real del cliente detrás de Cloudflare"
+      echo "# Generado por: tvlister-admin cloudflare"
+      echo "# Sin esto, todos los clientes aparecen con la IP de Cloudflare y el"
+      echo "# bloqueo por IP de las líneas y el control de sharers no sirve."
+      for r in $cf_v4 $cf_v6; do echo "set_real_ip_from ${r};"; done
+      echo "real_ip_header CF-Connecting-IP;"
+      echo "real_ip_recursive on;"
+    } > /etc/nginx/conf.d/tvlister-cloudflare-realip.conf
+
+    # --- Panel: sí por Cloudflare ----------------------------------------
+    cat > "/etc/nginx/sites-available/tvlister247-panel.conf" <<EOF
+# Panel TVLister 24/7 — va por Cloudflare (nube naranja).
+server {
+    listen 80;
+    server_name ${domain};
+    client_max_body_size 250M;
+
+    # El reproductor y la API necesitan conexiones largas (HLS, MNF, WebSocket).
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+    }
+}
+EOF
+
+    # --- Streams: nube gris (DNS only) ------------------------------------
+    cat > "/etc/nginx/sites-available/tvlister247-streams.conf" <<EOF
+# Streams TS/HLS — este subdominio va SIN proxy de Cloudflare (nube GRIS).
+# Todo lo que sea segmentos de video va aquí: así no depende de los límites y
+# el buffering de la CDN, y no incumple las condiciones del plan self-serve.
+server {
+    listen 80;
+    server_name ${stream_domain};
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+
+    # Streams: nada de buffer ni compresión (matarían la latencia y el zapeo).
+    proxy_buffering off;
+    proxy_cache off;
+    gzip off;
+    sendfile on;
+    tcp_nopush on;
+    chunked_transfer_encoding on;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    # Listas: siempre frescas. Segmentos: pueden cachearse un poco.
+    location ~* \.m3u8\$ {
+        proxy_pass http://127.0.0.1:${port};
+        add_header Cache-Control "no-store" always;
+    }
+    location ~* \.(ts|m4s|mp4|mkv|avi)\$ {
+        proxy_pass http://127.0.0.1:${port};
+        add_header Cache-Control "public, max-age=30" always;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        add_header Cache-Control "no-store" always;
+    }
+}
+EOF
+
+    ln -sf /etc/nginx/sites-available/tvlister247-panel.conf /etc/nginx/sites-enabled/tvlister247-panel.conf
+    ln -sf /etc/nginx/sites-available/tvlister247-streams.conf /etc/nginx/sites-enabled/tvlister247-streams.conf
+
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx
+      echo "✅ Nginx recargado con el proxy del panel y el de streams."
+    else
+      echo "[WARN] nginx -t falló. Revisa /etc/nginx/sites-available/tvlister247-panel.conf"
+      nginx -t 2>&1 | tail -5
+    fi
+  fi
+
+  # --- Confiar en las cabeceras sólo si vienen de Cloudflare ---------------
+  mkdir -p /etc/systemd/system/tvlister24-7.service.d
+  cat > /etc/systemd/system/tvlister24-7.service.d/cloudflare.conf <<EOF
+[Service]
+# Cloudflare conecta desde sus propios rangos: se declaran como proxies de
+# confianza para que CF-Connecting-IP sea la IP real del cliente. Cualquier
+# otra conexión directa que mande esa cabecera se ignora (anti-spoofing).
+Environment=TVLISTER_TRUSTED_PROXIES=$(echo $cf_v4 $cf_v6 | tr ' ' ',')
+EOF
+  systemctl daemon-reload
+  systemctl restart tvlister24-7 >/dev/null 2>&1 || true
+
+  # --- Los enlaces de video apuntan al subdominio sin Cloudflare ----------
+  if [ -d /etc/nginx/sites-available ]; then
+    cd "$APP_DIR"
+    STREAM_BASE="https://${stream_domain}" PANEL_DOMAIN="${domain}" "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { initDb, db } from "./server/db.js";
+      initDb();
+      const base = String(process.env.STREAM_BASE || "").replace(/\/+$/, "");
+      db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .run("public_stream_base", base);
+      console.log("");
+      console.log("  Base pública de streaming: " + base);
+      console.log("  Las playlist, .m3u8 y .ts saldrán por ahí (sin Cloudflare).");
+      console.log("  El panel y su API siguen por " + (process.env.PANEL_DOMAIN || "el dominio del panel") + ".");
+      console.log("  Para volver atrás: tvlister-admin cloudflare --clear");
+    '
+  fi
+
+  echo ""
+  echo "------------------------------------------------------------"
+  echo "  En el panel de Cloudflare"
+  echo "------------------------------------------------------------"
+  echo "  1. DNS"
+  echo "       ${domain}        A  <IP del servidor>   NARANJA (proxied)"
+  echo "       ${stream_domain} A  <IP del servidor>   GRIS    (DNS only)"
+  echo "     Los streams NO van por Cloudflare: no es un límite técnico que se"
+  echo "     pueda sortear, es su política (tráfico de video = plan aparte)."
+  echo "     Si los pones en naranja, Cloudflare lo detecta y puede suspender el"
+  echo "     dominio; además el proxy corta conexiones largas y añade buffering."
+  echo "  2. SSL/TLS -> modo \"Full (strict)\" y un certificado real en el servidor:"
+  echo "       tvlister-admin setup-ssl ${domain} tu@correo.com"
+  echo "       tvlister-admin setup-ssl ${stream_domain} tu@correo.com"
+  echo "  3. Caching -> Rule: si la ruta acaba en .m3u8 o .ts, \"Bypass cache\"."
+  echo "  4. Rocket Loader: OFF (rompe el reproductor)."
+  echo "  5. WebSockets: ON (lo usan MNF y la vista en vivo del panel)."
+  echo ""
+  echo "  Comprueba después:"
+  echo "     curl -sI https://${domain}/ | head -1"
+  echo "     curl -sI https://${stream_domain}/ | head -1   (servidor: nginx)"
+  echo "     tvlister-admin health"
+  echo "============================================================"
+}
+
 cmd_ffmpeg() {
   local sub="${1:-status}"
   cd "$APP_DIR"
@@ -1375,6 +1624,9 @@ case "$ACTION" in
   health | salud)
     cmd_health "${2:-}"
     ;;
+  cloudflare | cf)
+    cmd_cloudflare "${2:-}" "${3:-}"
+    ;;
   setup-ssl)
     cmd_setup_ssl "${2:-}" "${3:-}"
     ;;
@@ -1585,9 +1837,10 @@ case "$ACTION" in
     echo " 22) Dejar la salida UDP constante, sin picos (catv steady)"
     echo " 23) Afinar el HLS con lo de XUI.one (hls xui safe|full|off)"
     echo " 24) Salud del sistema 24/7 (health) + mantenimiento"
+    echo " 25) Proxy inverso para Cloudflare: panel sí, streams directos (cloudflare)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-24]: " opt
+    read -r -p "Selecciona una opción [0-25]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -1613,6 +1866,12 @@ case "$ACTION" in
       22) cmd_catv "steady" "" ;;
       23) "$0" hls status ;;
       24) cmd_health "" || true ;;
+      25)
+        read -r -p "Dominio del panel (ej. tv.midominio.com): " CF_DOM
+        read -r -p "Dominio para streams [stream.${CF_DOM}]: " CF_STREAM
+        if [ -z "$CF_STREAM" ]; then CF_STREAM="stream.${CF_DOM}"; fi
+        cmd_cloudflare "$CF_DOM" "$CF_STREAM" || true
+        ;;
       *) exit 0 ;;
     esac
     ;;
