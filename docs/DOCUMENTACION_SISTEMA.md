@@ -2391,3 +2391,21 @@ API (sólo administradores): `GET/POST /api/access-codes`, `PUT/DELETE /api/acce
 Consola: `tvlister-admin access-code [list|add|on|off|rm|url]` (menú, opción 27).
 Pantalla: **Access Codes** en el menú lateral, con tabla, buscador, paginación, alta/edición,
 activación instantánea y copia del enlace con el código.
+
+### v2.5.24: `streams-check` sigue la cadena HLS completa
+
+El bloque de segmentos de `cmd_streams_check` deja de conformarse con el primer enlace de la
+playlist. Bucle de hasta 4 niveles:
+
+1. Si la playlist tiene `#EXT-X-STREAM-INF` (maestra), avisa del número de variantes y sigue
+   la primera.
+2. Si es de medios, cuenta segmentos y descarga el primero, resolviendo rutas relativas
+   (`resolve_url`: absolutas, `/ruta` y `relativa` contra la URL actual).
+3. Si lo descargado empieza por `#EXTM3U`, informa «ese enlace es OTRA playlist (N B), no
+   vídeo» y sigue bajando un nivel.
+4. Cuando llega contenido binario, lo reporta como «Trozo de vídeo real» con código, tamaño y
+   tipo. Sólo da `[OK]` si el código es 200 y el tamaño supera 2 KB (por debajo, `[AVISO]`).
+
+Motivo: con la v2.5.22, ante una fuente que devuelve playlist maestra → variante → segmento, el
+comando tomaba la variante como «segmento» (939 B, `application/vnd.apple.mpegurl`) y daba
+`[OK]` sin haber comprobado ningún byte de vídeo.

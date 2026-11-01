@@ -628,33 +628,94 @@ cmd_streams_check() {
       echo "          Suele ser el panel de Cloudflare, un 404 de nginx o un portal."
       echo "          Título: $(grep -o -m1 '<title>[^<]*' "$body" 2>/dev/null | cut -c8-)"
     elif grep -q '^#EXTM3U' "$body" 2>/dev/null; then
-      local segs
-      segs=$(grep -vc '^#' "$body" 2>/dev/null || true)
-      segs=${segs:-0}
-      echo "  [OK]    Playlist HLS válida (${segs} líneas de segmento)"
-      if [ "$segs" -eq 0 ] 2>/dev/null; then
-        echo "  [FALLA] La playlist está vacía: la fuente del canal no está entregando."
-        echo "          -> revisa la fuente en el panel y 'tvlister-admin logs'"
-      else
-        # --- 3. El primer segmento: donde suele morir la reproducción -----
-        local seg
-        seg=$(grep -v '^#' "$body" | grep -v '^$' | head -1)
-        local segurl
-        case "$seg" in
-          http*) segurl="$seg" ;;
-          /*) segurl="$(printf '%s' "$churl" | sed -E 's#^([a-z]+://[^/]+).*#\1#')${seg}" ;;
-          *) segurl="$(printf '%s' "$churl" | sed -E 's#/[^/]*$##')/${seg}" ;;
+      # --- 2b. Seguir la cadena HLS hasta un trozo de vídeo de verdad ------
+      # Una fuente puede devolver: playlist maestra -> variante -> segmento.
+      # Antes se paraba en el primer nivel y llamaba "segmento" a otra
+      # playlist (939 B de tipo mpegurl), dando un OK falso.
+      resolve_url() {
+        case "$2" in
+          http*) printf '%s' "$2" ;;
+          /*) printf '%s%s' "$(printf '%s' "$1" | sed -E 's#^([a-z]+://[^/]+).*#\1#')" "$2" ;;
+          *) printf '%s/%s' "$(printf '%s' "$1" | sed -E 's#/[^/]*$##')" "$2" ;;
         esac
-        local sinfo
-        sinfo=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}|%{content_type}|%{size_download}' "$segurl" 2>/dev/null || true)
-        local s_sin
-        s_sin=$(printf '%s' "$sinfo" | awk -F'|' '{ print $1 "/" $3 " B " $2 }')
-        echo "  [INFO]  Primer segmento: ${segurl}"
+      }
+
+      local cur_url="$churl" depth=0 final_ok=0
+      while [ "$depth" -lt 4 ]; do
+        depth=$((depth + 1))
+        local nvar
+        nvar=$(grep -c '^#EXT-X-STREAM-INF' "$body" 2>/dev/null || true)
+        nvar=${nvar:-0}
+        if [ "$nvar" -gt 0 ] 2>/dev/null; then
+          local variant
+          variant=$(awk '/^#EXT-X-STREAM-INF/ { f = 1; next } f && /^[^#]/ { print; exit }' "$body" 2>/dev/null || true)
+          if [ -z "$variant" ]; then
+            echo "  [FALLA] Playlist maestra sin ninguna variante utilizable."
+            break
+          fi
+          cur_url=$(resolve_url "$cur_url" "$variant")
+          echo "  [INFO]  La fuente entrega una playlist MAESTRA (${nvar} variante(s))."
+          echo "          Nivel ${depth}: se sigue la primera -> ${cur_url}"
+          local c2
+          c2=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' "$cur_url" 2>/dev/null || true)
+          if [ "$c2" != "200" ]; then
+            echo "  [FALLA] La variante contesta ${c2:-000}: el reproductor no podrá elegir calidad."
+            break
+          fi
+          continue
+        fi
+
+        local segs
+        segs=$(grep -v '^#' "$body" 2>/dev/null | grep -v '^$' | wc -l | tr -d ' ' || true)
+        segs=${segs:-0}
+        if [ "$depth" -gt 1 ]; then
+          echo "  [OK]    Nivel ${depth}: playlist HLS de medios (${segs} segmento(s))."
+        else
+          echo "  [OK]    Playlist HLS de medios (${segs} segmento(s) en el momento de la prueba)"
+        fi
+        if [ "$segs" -eq 0 ] 2>/dev/null; then
+          echo "  [FALLA] La playlist no tiene segmentos: la fuente no está entregando."
+          echo "          -> revisa la fuente del canal en el panel y 'tvlister-admin logs'"
+          break
+        fi
+
+        local seg segurl sinfo s_sin
+        seg=$(grep -v '^#' "$body" | grep -v '^$' | head -1)
+        segurl=$(resolve_url "$cur_url" "$seg")
+        sinfo=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}|%{content_type}|%{size_download}' "$segurl" 2>/dev/null || true)
+        s_sin=$(printf '%s' "$sinfo" | awk -F'|' '{ print $1 " · " $3 " B · " $2 }')
+
+        # ¿Lo que llegó es otro nivel de playlist? Entonces hay que seguir.
+        if head -c 7 "$body" 2>/dev/null | grep -q '#EXTM3U'; then
+          local bytes
+          bytes=$(wc -c < "$body" 2>/dev/null | tr -d ' ' || true)
+          echo "  [INFO]  Nivel ${depth}: ese enlace es OTRA playlist (${bytes:-0} B), no vídeo."
+          echo "          => ${segurl}"
+          cur_url="$segurl"
+          continue
+        fi
+
+        echo "  [INFO]  Trozo de vídeo real:"
+        echo "          ${segurl}"
         echo "          ${s_sin}"
         case "$sinfo" in
-          200*) echo "  [OK]    El segmento llega completo: el canal se puede reproducir." ;;
-          *) echo "  [FALLA] El segmento no llega (${s_sin}): el reproductor se queda en negro." ;;
+          200*)
+            local size
+            size=$(printf '%s' "$sinfo" | awk -F'|' '{ print $3 }')
+            if [ "${size:-0}" -gt 2000 ] 2>/dev/null; then
+              echo "  [OK]    El segmento de vídeo llega completo: el canal se puede reproducir."
+            else
+              echo "  [AVISO] Llegó muy poco (${size} B): puede ser un segmento vacío."
+            fi
+            final_ok=1
+            ;;
+          *) echo "  [FALLA] El segmento de vídeo no llega (${s_sin}): el reproductor se queda en negro." ;;
         esac
+        break
+      done
+      if [ "$depth" -ge 4 ] && [ "$final_ok" -eq 0 ]; then
+        echo "  [AVISO] Se siguieron 4 niveles de playlist sin encontrar vídeo: la fuente"
+        echo "          encadena playlists (revisa la URL del canal en el panel)."
       fi
     else
       local bsize
