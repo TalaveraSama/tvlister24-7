@@ -2277,3 +2277,14 @@ líneas, el firewall y el control de sharers no se pueden saltar escribiendo una
 2. SSL/TLS **Full (strict)** + certificado real en el servidor (`tvlister-admin setup-ssl`).
 3. Regla de caché: rutas `.m3u8` / `.ts` → *Bypass cache*.
 4. Rocket Loader **OFF**; WebSockets **ON**.
+
+### Comprobación: `tvlister-admin cloudflare --check [panel] [streams]`
+
+Lee la base guardada (`public_stream_base`), pide el `HEAD` de los dos dominios y muestra, por cada uno:
+IP resuelta, cabecera `server`, presencia de `cf-ray` (es decir, si pasa por Cloudflare) y la fecha de
+caducidad del certificado. Además comprueba que existan el `conf.d/tvlister-cloudflare-realip.conf` y
+el drop-in de systemd con los proxies de confianza.
+
+- Streams con `cf-ray` → **FALLA** (registro en naranja: hay que pasarlo a gris) y código de salida 1.
+- Panel sin `cf-ray` → aviso (el panel no está usando Cloudflare).
+- Código 0 sólo si todo está como debe.

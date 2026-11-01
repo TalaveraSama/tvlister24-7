@@ -1,9 +1,13 @@
-# TVLister 24/7 — v2.5.19 «Cloudflare delante del panel, el video por fuera»
+# TVLister 24/7 — v2.5.20 «Cloudflare delante del panel, el video por fuera»
+
+> **v2.5.20** añade `cloudflare --check`, que comprueba con datos si el reparto quedó bien
+> (quién pasa por Cloudflare y quién no), en vez de fiarse de lo que diga el panel de Cloudflare.
 
 Proxy inverso listo para poner el panel detrás de Cloudflare **sin que el video pase por su CDN**.
 
 ```bash
 tvlister-admin cloudflare tv.midominio.com stream.midominio.com
+tvlister-admin cloudflare --check tv.midominio.com stream.midominio.com
 ```
 
 ---
@@ -97,3 +101,30 @@ Ahora sólo se aceptan si la conexión llega de un proxy de confianza (loopback,
 - O una CDN de video de verdad (Bunny, Fastly, Akamai) delante del subdominio de streams.
 
 Un plan gratis/pro con 145 canales en TS no es el sitio: ni por contrato ni por rendimiento.
+
+---
+
+## 6. Comprobación con datos (`cloudflare --check`)
+
+```bash
+tvlister-admin cloudflare --check tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz
+```
+
+```
+  [OK]    Base pública de streaming: https://live-stream.alphadigitalnic.xyz
+  Panel: https://tvadmin.alphadigitalnic.xyz
+         IP resuelta : 104.21.44.7
+         Servidor    : cloudflare  (cf-ray presente = va por Cloudflare)
+         [OK]    El panel sí puede ir por Cloudflare.
+         Certificado : Mar 14 12:00:00 2027 GMT
+  Streams: https://live-stream.alphadigitalnic.xyz
+         IP resuelta : 203.0.113.20
+         Servidor    : nginx/1.18.0 (Ubuntu)
+         [OK]    Directo al servidor (sin Cloudflare), como debe ser.
+         Certificado : Mar 14 12:00:00 2027 GMT
+  [OK]    nginx toma la IP real (CF-Connecting-IP) de los rangos de Cloudflare
+  [OK]    Proxies de confianza declarados en el servicio (anti-spoofing)
+```
+
+Mira `cf-ray` / `server`: si el **subdominio de streams** sale con `server: cloudflare`, el registro
+está en naranja y hay que pasarlo a gris. Devuelve **código 1** en ese caso, así que sirve en cron.

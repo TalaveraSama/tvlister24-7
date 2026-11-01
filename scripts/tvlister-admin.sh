@@ -392,6 +392,116 @@ EOF
   fi
 }
 
+cmd_cf_check() {
+  # Comprueba que el reparto quedó bien: panel por Cloudflare, streams directos.
+  # Uso: tvlister-admin cloudflare --check [dominio_panel] [dominio_streams]
+  local panel="${1:-}"
+  local stream="${2:-}"
+  local fails=0
+  cd "$APP_DIR"
+
+  echo "============================================================"
+  echo "  Comprobación del proxy (Cloudflare / streams)"
+  echo "============================================================"
+
+  # Base pública de streaming configurada en el panel
+  local base
+  base=$("$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb, db } from "./server/db.js";
+    initDb();
+    const r = db.prepare("SELECT value FROM settings WHERE key = ?").get("public_stream_base");
+    console.log(r?.value || "");
+  ' 2>/dev/null | tail -1)
+  if [ -n "$base" ]; then
+    echo "  [OK]    Base pública de streaming: ${base}"
+    [ -z "$stream" ] && stream=$(echo "$base" | sed -E 's#^https?://##; s#/.*$##')
+  else
+    echo "  [AVISO] Sin base pública de streaming: los enlaces de video usan el dominio del panel"
+    echo "          -> ejecuta: tvlister-admin cloudflare <dominio_panel> <dominio_streams>"
+  fi
+
+  header_of() {
+    curl -sS -o /dev/null -D - --max-time 12 "https://$1/" 2>/dev/null | tr -d '\r'
+  }
+
+  check_host() {
+    local host="$1" role="$2"
+    [ -z "$host" ] && return 0
+    local hdrs server cfray ip
+    hdrs=$(header_of "$host")
+    if [ -z "$hdrs" ]; then
+      echo "  [FALLA] ${role} https://${host} no responde (DNS o firewall)"
+      fails=$((fails + 1))
+      return 0
+    fi
+    # Sin `| head` en tuberías: con `set -o pipefail` el SIGPIPE de head
+    # abortaba la comprobación a mitad (exit 141).
+    server=$(printf '%s\n' "$hdrs" | awk 'tolower($0) ~ /^server:/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
+    cfray=$(printf '%s\n' "$hdrs" | grep -ci '^cf-ray:' || true)
+    ip=$(getent hosts "$host" 2>/dev/null | awk 'NR==1{print $1}')
+    echo "  ${role}: https://${host}"
+    echo "         IP resuelta : ${ip:-?}"
+    echo "         Servidor    : ${server:-?}$([ "$cfray" -gt 0 ] && echo '  (cf-ray presente = va por Cloudflare)')"
+    if [ "$cfray" -gt 0 ]; then
+      if [ "$role" = "Streams" ]; then
+        echo "         [FALLA] Los streams están pasando por Cloudflare. Pon ese registro en"
+        echo "                 GRIS (DNS only). Con video continuo te pueden suspender el dominio."
+        fails=$((fails + 1))
+      else
+        echo "         [OK]    El panel sí puede ir por Cloudflare."
+      fi
+    else
+      if [ "$role" = "Streams" ]; then
+        echo "         [OK]    Directo al servidor (sin Cloudflare), como debe ser."
+      else
+        echo "         [AVISO] El panel no está pasando por Cloudflare (¿nube gris?)."
+      fi
+    fi
+    # Certificado
+    local cn_exp=""
+    cn_exp=$(timeout 8 openssl s_client -servername "$host" -connect "${host}:443" </dev/null 2>/dev/null \
+      | openssl x509 -noout -enddate 2>/dev/null \
+      | sed -n 's/^notAfter=//p') || true
+    if [ -n "$cn_exp" ]; then
+      echo "         Certificado : caduca ${cn_exp}"
+    else
+      echo "         Certificado : no se pudo leer (¿HTTP sin HTTPS?)"
+    fi
+  }
+
+  check_host "$panel" "Panel"
+  if [ -n "$stream" ] && [ "$stream" != "$panel" ]; then
+    check_host "$stream" "Streams"
+  else
+    echo "  [AVISO] No se indicó dominio de streams distinto del panel."
+  fi
+
+  # nginx: IP real del cliente detrás de Cloudflare
+  if [ -f /etc/nginx/conf.d/tvlister-cloudflare-realip.conf ]; then
+    echo "  [OK]    nginx toma la IP real (CF-Connecting-IP) de los rangos de Cloudflare"
+  elif [ -d /etc/nginx/sites-available ]; then
+    echo "  [AVISO] Falta /etc/nginx/conf.d/tvlister-cloudflare-realip.conf:"
+    echo "          todos los clientes se verían con IP de Cloudflare"
+    fails=$((fails + 1))
+  fi
+
+  # systemd: proxies de confianza para no aceptar cabeceras de cualquiera
+  if [ -f /etc/systemd/system/tvlister24-7.service.d/cloudflare.conf ]; then
+    echo "  [OK]    Proxies de confianza declarados en el servicio (anti-spoofing)"
+  else
+    echo "  [AVISO] Sin drop-in de proxies de confianza: el panel sólo creerá las"
+    echo "          cabeceras de proxy si llegan de loopback o red privada"
+  fi
+
+  echo "============================================================"
+  if [ "$fails" -gt 0 ]; then
+    echo "  ${fails} problema(s) que hay que corregir."
+    return 1
+  fi
+  echo "  Todo en orden: panel por Cloudflare, video directo."
+  return 0
+}
+
 cmd_cloudflare() {
   # Proxy inverso delante del panel, con Cloudflare (o sin él).
   #
@@ -404,8 +514,14 @@ cmd_cloudflare() {
   # (cortes, buffering, límite de tiempo de respuesta).
   local domain="${1:-}"
   local stream_domain="${2:-}"
+  local third="${3:-}"
   local port
   port=$(get_current_port)
+
+  if [ "$domain" = "--check" ]; then
+    cmd_cf_check "$stream_domain" "$third"
+    return $?
+  fi
 
   if [ "$domain" = "--clear" ]; then
     cd "$APP_DIR"
@@ -421,6 +537,8 @@ cmd_cloudflare() {
 
   if [ -z "$domain" ]; then
     echo "Uso: tvlister-admin cloudflare <dominio_panel> [dominio_streams]"
+    echo "     tvlister-admin cloudflare --check [dominio_panel] [dominio_streams]"
+    echo "     tvlister-admin cloudflare --clear"
     echo "Ej.:  tvlister-admin cloudflare tv.midominio.com stream.midominio.com"
     return 1
   fi
@@ -1625,7 +1743,7 @@ case "$ACTION" in
     cmd_health "${2:-}"
     ;;
   cloudflare | cf)
-    cmd_cloudflare "${2:-}" "${3:-}"
+    cmd_cloudflare "${2:-}" "${3:-}" "${4:-}"
     ;;
   setup-ssl)
     cmd_setup_ssl "${2:-}" "${3:-}"
