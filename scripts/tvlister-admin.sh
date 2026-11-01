@@ -283,6 +283,273 @@ cmd_health() {
   return "$rc"
 }
 
+# ==================== PRUEBA DE REPRODUCCIÓN (canal de punta a punta) ======
+# Uso: tvlister-admin streams-check [usuario] [contraseña] [id_canal]
+#
+# Recorre el mismo camino que un cliente IPTV: pide get.php al panel, toma el
+# primer canal de la lista, descarga ese enlace y después el primer segmento.
+# Así se ve en qué eslabón se rompe: panel, dominio público, nginx, TLS, o la
+# propia fuente del canal.
+cmd_streams_check() {
+  local user="${1:-}" pass="${2:-}" pick="${3:-}"
+  local port base code
+  port=$(get_current_port)
+  cd "$APP_DIR" || return 1
+
+  echo "============================================================"
+  echo "  TVLister 24/7 — Prueba de reproducción de canales"
+  echo "============================================================"
+
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${port}/api/health" 2>/dev/null || true)
+  if [ "$code" != "200" ]; then
+    echo "  [FALLA] El panel no responde en 127.0.0.1:${port} (HTTP: ${code:-sin respuesta})."
+    echo "          Sin panel arriba no hay lista ni HLS: ningún canal se reproduce."
+    echo "          -> systemctl status tvlister24-7   |   tvlister-admin restart"
+    echo "============================================================"
+    return 1
+  fi
+  echo "  [OK]    Panel arriba en 127.0.0.1:${port}"
+
+  base=$("$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb, db } from "./server/db.js";
+    initDb();
+    console.log(db.prepare("SELECT value FROM settings WHERE key = ?").get("public_stream_base")?.value || "");
+  ' 2>/dev/null | tail -1 || true)
+  if [ -n "$base" ]; then
+    echo "  [INFO]  Los enlaces de video salen por: ${base}"
+  else
+    echo "  [INFO]  Los enlaces de video salen por el dominio del panel"
+  fi
+
+  # --- Línea de prueba -----------------------------------------------------
+  if [ -z "$user" ] || [ -z "$pass" ]; then
+    local pair
+    pair=$("$NODE_BIN" --no-warnings --input-type=module -e '
+      import { initDb, db } from "./server/db.js";
+      initDb();
+      const l = db.prepare("SELECT username, password FROM lines WHERE status = ? ORDER BY id LIMIT 1").get("active");
+      if (l) console.log(`${l.username}\t${l.password}`);
+    ' 2>/dev/null | tail -1 || true)
+    [ -z "$user" ] && user=$(printf '%s' "$pair" | cut -f1)
+    [ -z "$pass" ] && pass=$(printf '%s' "$pair" | cut -f2)
+  fi
+  if [ -z "$user" ] || [ -z "$pass" ]; then
+    echo "  [FALLA] No hay ninguna línea activa: sin línea el panel no entrega lista ni canales."
+    echo "          -> crea una en el panel, o pasa usuario y contraseña:"
+    echo "             tvlister-admin streams-check USUARIO CONTRASEÑA [ID_CANAL]"
+    echo "============================================================"
+    return 1
+  fi
+  echo "  [INFO]  Línea de prueba: ${user}"
+
+  # --- 1. La lista que ve el cliente ---------------------------------------
+  local pl
+  pl=$(curl -s --max-time 25 "http://127.0.0.1:${port}/get.php?username=${user}&password=${pass}&type=m3u_plus&output=m3u8" 2>/dev/null || true)
+  local chans
+  chans=$(printf '%s\n' "$pl" | grep -c '^#EXTINF' || true)
+  chans=${chans:-0}
+  if [ "$chans" -eq 0 ]; then
+    echo "  [FALLA] get.php no devolvió ningún canal."
+    echo "          Respuesta del panel: $(printf '%s' "$pl" | head -c 300)"
+    echo "          Causas típicas: línea suspendida/expirada, contraseña mal, o"
+    echo "          catálogo vacío (tvlister-admin doctor, punto 3)."
+    echo "============================================================"
+    return 1
+  fi
+  echo "  [OK]    get.php entrega ${chans} canales a esta línea"
+
+  local churl
+  if [ -n "$pick" ]; then
+    churl=$(printf '%s\n' "$pl" | grep -E "/${pick}\.(m3u8|ts)" | head -1)
+    if [ -z "$churl" ]; then
+      echo "  [FALLA] El canal ${pick} no está en la lista de esa línea."
+      return 1
+    fi
+    echo "  [INFO]  Canal pedido: ${pick}"
+  else
+    churl=$(printf '%s\n' "$pl" | awk '/^https?:\/\// { print; exit }')
+    if [ -z "$churl" ]; then
+      churl=$(printf '%s\n' "$pl" | awk '/^#EXTINF/ { getline; if ($0 ~ /^https?:\/\//) { print; exit } }')
+    fi
+  fi
+  echo "  [INFO]  Primer enlace: ${churl}"
+
+  local chost
+  chost=$(printf '%s' "$churl" | sed -E 's#^https?://##; s#/.*$##')
+  if [ -n "$base" ]; then
+    local bhost
+    bhost=$(printf '%s' "$base" | sed -E 's#^https?://##; s#/.*$##')
+    if [ "$chost" = "$bhost" ]; then
+      echo "          Coincide con la base pública configurada."
+    else
+      echo "  [AVISO] El enlace NO usa la base pública (${bhost}): el panel está"
+      echo "          sirviéndolo con su propio dominio. Revisa public_stream_base."
+    fi
+  fi
+
+  # --- 2. Ese enlace, tal como lo pide un cliente --------------------------
+  local hdr body
+  hdr=$(mktemp); body=$(mktemp)
+  local info
+  local tmo=25 cerr emsg=""
+  case "$churl" in *.ts) tmo=6 ;; esac
+  cerr=$(mktemp)
+  info=$(curl -sS --max-time "$tmo" -D "$hdr" -o "$body" -w '%{http_code}|%{content_type}|%{size_download}' "$churl" 2>"$cerr" || true)
+  emsg=$(head -1 "$cerr" 2>/dev/null | sed 's/^curl: //' || true)
+  rm -f "$cerr"
+  local stype scode
+  scode=$(printf '%s' "$info" | awk -F'|' '{ print $1 }')
+  stype=$(printf '%s' "$info" | awk -F'|' '{ print $2 }')
+  local server_hdr
+  server_hdr=$(awk -F': ' 'tolower($1)=="server" { print $2; exit }' "$hdr" 2>/dev/null | tr -d '\r' || true)
+  local cfray
+  cfray=$(awk -F': ' 'tolower($1)=="cf-ray" { print $2; exit }' "$hdr" 2>/dev/null | tr -d '\r' || true)
+  local loc
+  loc=$(awk -F': ' 'tolower($1)=="location" { print $2; exit }' "$hdr" 2>/dev/null | tr -d '\r' || true)
+
+  if [ -n "$cfray" ]; then
+    echo "  [FALLA] Ese dominio de video está pasando por Cloudflare (cf-ray ${cfray})."
+    echo "          El proxy de Cloudflare no sirve para video continuo: corta,"
+    echo "          bufferiza y su contrato lo prohíbe. Pon el registro en GRIS."
+  fi
+  echo "  [INFO]  HTTP ${scode:-sin respuesta} · tipo: ${stype:-?} · servidor: ${server_hdr:-?}"
+
+  case "$scode" in
+    200) ;;
+    301|302|303|307|308)
+      echo "  [INFO]  Redirección a: ${loc:-?}"
+      echo "          (modo 302: el cliente acaba yendo directo a la fuente del canal)"
+      ;;
+    401|403)
+      echo "  [FALLA] Rechazado: la línea no tiene permiso sobre ese canal."
+      echo "          Respuesta: $(head -c 200 "$body" 2>/dev/null)"
+      ;;
+    404)
+      echo "  [FALLA] El canal no está al aire desde el panel."
+      echo "          Respuesta: $(head -c 200 "$body" 2>/dev/null)"
+      ;;
+    429)
+      echo "  [FALLA] Límite de conexiones de la línea alcanzado."
+      echo "          Respuesta: $(head -c 200 "$body" 2>/dev/null)"
+      ;;
+    502|503|504)
+      local sbody
+      sbody=$(head -c 200 "$body" 2>/dev/null | tr '\n' ' ')
+      echo "  [FALLA] Respondió ${scode}: ${sbody}"
+      if printf '%s' "$sbody" | grep -qi 'transmisi\|fuente\|source\|ffmpeg\|encoder'; then
+        echo "          El problema está en la FUENTE del canal: el servidor de origen no"
+        echo "          lo está entregando ahora mismo. Los demás canales no se afectan."
+        echo "          -> prueba con otro canal y revisa la fuente en el panel."
+      else
+        echo "          Si el panel tampoco abre en el navegador, nginx apunta a un puerto"
+        echo "          equivocado o el servicio está caído (tvlister-admin status)."
+      fi
+      ;;
+    000|"")
+      echo "  [FALLA] No se pudo conectar con ese enlace."
+      [ -n "$emsg" ] && echo "          curl: ${emsg}"
+      case "$emsg" in
+        *"Could not resolve"*)
+          echo "          El dominio del video no existe en el DNS (o no resuelve desde"
+          echo "          este servidor). Mientras eso pase, ningún cliente puede abrir"
+          echo "          los canales: la lista entrega enlaces a un dominio muerto."
+          echo "          -> vuelve al dominio del panel ya mismo:"
+          echo "             tvlister-admin cloudflare --clear && tvlister-admin restart" ;;
+        *"refused"*)
+          echo "          Nadie escucha en ese puerto: el proxy no está levantado o el"
+          echo "          enlace apunta a un puerto que el panel no usa." ;;
+        *certificate*|*SSL*|*ssl*)
+          echo "          El certificado del origen no es válido: el reproductor corta." ;;
+        *"timed out"*|*"Timeout"*)
+          echo "          Sin respuesta a tiempo: firewall o el origen no contesta." ;;
+        *)
+          echo "          Revisa DNS, firewall y TLS de ese dominio." ;;
+      esac
+      ;;
+    *)
+      echo "  [AVISO] Código HTTP inesperado: $(head -c 200 "$body" 2>/dev/null)"
+      ;;
+  esac
+
+  if [ "$scode" = "200" ]; then
+    if head -c 200 "$body" | grep -qi '<html\|<!doctype'; then
+      echo "  [FALLA] Devolvió una página HTML, no un video."
+      echo "          Suele ser el panel de Cloudflare, un 404 de nginx o un portal."
+      echo "          Título: $(grep -o -m1 '<title>[^<]*' "$body" 2>/dev/null | cut -c8-)"
+    elif grep -q '^#EXTM3U' "$body" 2>/dev/null; then
+      local segs
+      segs=$(grep -vc '^#' "$body" 2>/dev/null || true)
+      segs=${segs:-0}
+      echo "  [OK]    Playlist HLS válida (${segs} líneas de segmento)"
+      if [ "$segs" -eq 0 ] 2>/dev/null; then
+        echo "  [FALLA] La playlist está vacía: la fuente del canal no está entregando."
+        echo "          -> revisa la fuente en el panel y 'tvlister-admin logs'"
+      else
+        # --- 3. El primer segmento: donde suele morir la reproducción -----
+        local seg
+        seg=$(grep -v '^#' "$body" | grep -v '^$' | head -1)
+        local segurl
+        case "$seg" in
+          http*) segurl="$seg" ;;
+          /*) segurl="$(printf '%s' "$churl" | sed -E 's#^([a-z]+://[^/]+).*#\1#')${seg}" ;;
+          *) segurl="$(printf '%s' "$churl" | sed -E 's#/[^/]*$##')/${seg}" ;;
+        esac
+        local sinfo
+        sinfo=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}|%{content_type}|%{size_download}' "$segurl" 2>/dev/null || true)
+        local s_sin
+        s_sin=$(printf '%s' "$sinfo" | awk -F'|' '{ print $1 "/" $3 " B " $2 }')
+        echo "  [INFO]  Primer segmento: ${segurl}"
+        echo "          ${s_sin}"
+        case "$sinfo" in
+          200*) echo "  [OK]    El segmento llega completo: el canal se puede reproducir." ;;
+          *) echo "  [FALLA] El segmento no llega (${s_sin}): el reproductor se queda en negro." ;;
+        esac
+      fi
+    else
+      local bsize
+      bsize=$(wc -c < "$body" 2>/dev/null | tr -d ' ' || true)
+      if [ "${bsize:-0}" -gt 10000 ] 2>/dev/null; then
+        echo "  [OK]    Flujo MPEG-TS en crudo: ${bsize} bytes entregados en la prueba."
+        echo "          (canal directo, sin playlist: se ve, pero no permite pausa/atrás)"
+      else
+        echo "  [AVISO] Respuesta no reconocida como M3U8 ni como HTML:"
+        echo "          $(head -c 200 "$body" 2>/dev/null)"
+      fi
+    fi
+  fi
+
+  # --- 4. TLS, si la base es https -----------------------------------------
+  if [ -n "$base" ] && printf '%s' "$base" | grep -q '^https://'; then
+    local bhost2
+    bhost2=$(printf '%s' "$base" | sed -E 's#^https://##; s#/.*$##')
+    if ! getent hosts "$bhost2" >/dev/null 2>&1; then
+      echo "  [FALLA] ${bhost2} no resuelve en el DNS: el dominio de video no existe."
+      echo "          Es la causa más probable de que no se vea ningún canal."
+      echo "          -> tvlister-admin cloudflare --clear   (vuelve al dominio del panel)"
+    else
+    local endate
+    endate=$(echo | timeout 8 openssl s_client -servername "$bhost2" -connect "${bhost2}:443" 2>/dev/null \
+      | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || true)
+    if [ -n "$endate" ]; then
+      echo "  [OK]    TLS del dominio de video: certificado válido hasta ${endate}"
+    else
+      echo "  [FALLA] El dominio de video es https pero no hay certificado válido en el"
+      echo "          origen: los reproductores rechazan la conexión."
+      echo "          -> pon un Origin Certificate y ejecuta cloudflare ... --cert/--key,"
+      echo "             o usa http:// en la base pública."
+    fi
+    fi
+  fi
+
+  rm -f "$hdr" "$body"
+  echo "============================================================"
+  echo "  Si todo sale [OK] y el cliente sigue en negro, el problema está en el"
+  echo "  cliente o en su red (no en el servidor): comprueba DNS, firewall y el"
+  echo "  reproductor. Para un canal concreto repite con sus datos de línea."
+  echo "  Registro del panel: tvlister-admin logs"
+  echo "============================================================"
+}
+
 cmd_doctor() {
   local port ip
   port=$(get_current_port)
@@ -872,6 +1139,25 @@ Environment=TVLISTER_TRUSTED_PROXIES=$(echo $cf_v4 $cf_v6 | tr ' ' ',')
 EOF
   systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl restart tvlister24-7 >/dev/null 2>&1 || true
+
+  # --- Aviso: si el dominio de video no existe o no apunta aquí, los enlaces
+  #     quedan muertos y no se ve ningún canal. Mejor saberlo ahora. --------
+  if ! getent hosts "$stream_domain" >/dev/null 2>&1; then
+    echo ""
+    echo "⚠️  ${stream_domain} no resuelve en el DNS todavía."
+    echo "    Los enlaces de video apuntarán a un dominio que no existe y NO se"
+    echo "    verá ningún canal hasta que crees el registro A en Cloudflare."
+    echo "    Si te arrepientes: tvlister-admin cloudflare --clear"
+  else
+    local sip dip
+    sip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1 || true)
+    dip=$(getent ahostsv4 "$stream_domain" 2>/dev/null | awk 'NR==1{print $1}' || true)
+    if [ -n "$sip" ] && [ -n "$dip" ] && [ "$sip" != "$dip" ]; then
+      echo ""
+      echo "⚠️  ${stream_domain} resuelve a ${dip}, no a este servidor (${sip})."
+      echo "    Corrige el registro A/DNS, o los clientes no llegarán al video."
+    fi
+  fi
 
   # --- Base pública de streaming (siempre, haya o no nginx del sistema) ----
   cd "$APP_DIR"
@@ -1899,6 +2185,9 @@ case "$ACTION" in
   doctor)
     cmd_doctor
     ;;
+  streams-check | probar | reproduce)
+    cmd_streams_check "${2:-}" "${3:-}" "${4:-}"
+    ;;
   health | salud)
     cmd_health "${2:-}"
     ;;
@@ -2117,9 +2406,10 @@ case "$ACTION" in
     echo " 23) Afinar el HLS con lo de XUI.one (hls xui safe|full|off)"
     echo " 24) Salud del sistema 24/7 (health) + mantenimiento"
     echo " 25) Proxy inverso para Cloudflare: panel sí, streams directos (cloudflare)"
+    echo " 26) Probar la reproducción de un canal de punta a punta (streams-check)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-25]: " opt
+    read -r -p "Selecciona una opción [0-26]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -2151,6 +2441,7 @@ case "$ACTION" in
         if [ -z "$CF_STREAM" ]; then CF_STREAM="stream.${CF_DOM}"; fi
         cmd_cloudflare "$CF_DOM" "$CF_STREAM" || true
         ;;
+      26) "$0" streams-check ;;
       *) exit 0 ;;
     esac
     ;;

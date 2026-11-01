@@ -2323,3 +2323,39 @@ por eso `--check` decía «sin base pública» aunque el comando se hubiera ejec
 - No aborta a la primera consulta fallida (todas las llamadas de red llevan `|| true`; antes
   `set -e` cortaba el informe después del panel).
 - Reconoce los tres layouts de nginx y devuelve código 1 si falta algo.
+
+### v2.5.22: `streams-check` y avisos de DNS antes de romper el video
+
+`tvlister-admin streams-check [usuario] [contraseña] [id_canal]` (menú, opción 26)
+recorre la cadena real de reproducción:
+
+1. `/api/health` del panel en su puerto.
+2. `public_stream_base` configurada (o el dominio del panel si no hay).
+3. `get.php?type=m3u_plus&output=m3u8` con una línea activa: cuántos canales y qué
+   error devuelve el panel si la línea no vale (suspendida, expirada, clave mal,
+   catálogo vacío).
+4. Descarga el primer enlace de la lista **tal como lo pediría el cliente**: código
+   HTTP, tipo de contenido, cabeceras `server` y `cf-ray`.
+   - `cf-ray` presente ⇒ ese dominio de video va por Cloudflare (naranja): es un
+     fallo, el proxy no sirve para video continuo.
+   - `#EXTM3U` ⇒ cuenta segmentos y descarga el primero por su URL real (resuelve
+     rutas relativas), que es donde suelen morir los reproductores.
+   - Bloque de >10 KB que no es HTML ni M3U8 ⇒ se informa como MPEG-TS en crudo.
+   - HTML ⇒ portal/npágina de error, se muestra el `<title>`.
+5. Si la base es `https://`: primero DNS (`getent hosts`) y después caducidad del
+   certificado del origen con `openssl s_client`.
+6. Códigos interpretados: 401/403 permiso de línea, 404 canal fuera del aire, 429
+   límite de conexiones, 502/503/504 proxy o fuente (se distingue por el texto:
+   «sin transmisión activa» = fuente), 000 = DNS/firewall/TLS (se interpreta el
+   mensaje de `curl`).
+
+El tiempo de espera baja a 6 s cuando el enlace acaba en `.ts` (flujo continuo).
+
+`cmd_cloudflare` añade dos avisos antes de guardar `public_stream_base`:
+
+- el dominio de streams no resuelve en el DNS;
+- resuelve a una IP distinta de la del propio servidor.
+
+En ambos casos se indica cómo volver atrás (`cloudflare --clear`) para no dejar el
+panel entregando enlaces a un dominio muerto, que es la causa de «no se ve ningún
+canal» después de aplicar el proxy.
