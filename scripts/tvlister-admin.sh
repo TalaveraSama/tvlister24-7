@@ -375,9 +375,24 @@ EOF
       echo "   curl https://get.acme.sh | sh -s email=${email} && ~/.acme.sh/acme.sh --issue -d ${domain} --nginx"
     fi
   else
-    echo "ℹ️ /etc/nginx/sites-available no detectado (XUI.one usa su propio nginx interno en /home/xui/bin/nginx)."
-    echo "   Archivo generado en /root/tvlister247_${domain}.nginx.conf listo para incluir en tu proxy frontal."
-    cat > "/root/tvlister247_${domain}.nginx.conf" <<EOF
+    local xui_root=""
+    for cand in /home/xui /root/xui /opt/xui /home/xui.one; do
+      if [ -d "${cand}/bin/nginx" ]; then xui_root="$cand"; break; fi
+    done
+    echo "ℹ️  No hay certbot/nginx del sistema en esta máquina."
+    if [ -n "$xui_root" ]; then
+      echo "   Aquí manda el nginx interno de XUI.one (${xui_root}/bin/nginx)."
+      echo "   Si el dominio va por Cloudflare, lo más rápido y sin tocar apt es un"
+      echo "   Origin Certificate:"
+      echo "     Cloudflare -> SSL/TLS -> Origin Server -> Create Certificate"
+      echo "     (validez 15 años, no caduca, no hay que renovar)"
+      echo "   Guarda el .pem y el .key y aplica el proxy con:"
+      echo "     tvlister-admin cloudflare ${domain} stream.${domain} --cert /root/origin.pem --key /root/origin.key"
+      echo "   Eso mete los server blocks en ${xui_root}/bin/nginx/conf/servers con ese"
+      echo "   certificado, prueba con nginx -t y recarga."
+    else
+      echo "   Archivo generado en /root/tvlister247_${domain}.nginx.conf para tu proxy frontal."
+      cat > "/root/tvlister247_${domain}.nginx.conf" <<EOF
 server {
     listen 80;
     server_name ${domain};
@@ -389,83 +404,119 @@ server {
     }
 }
 EOF
+    fi
   fi
 }
 
 cmd_cf_check() {
   # Comprueba que el reparto quedó bien: panel por Cloudflare, streams directos.
   # Uso: tvlister-admin cloudflare --check [dominio_panel] [dominio_streams]
+  #
+  # Todo lo que consulta la red va con `|| true`: `set -e` abortaría el informe
+  # a la primera consulta fallida (era el motivo de que sólo saliera el panel).
   local panel="${1:-}"
   local stream="${2:-}"
   local fails=0
+  local origin_ip
   cd "$APP_DIR"
 
   echo "============================================================"
   echo "  Comprobación del proxy (Cloudflare / streams)"
   echo "============================================================"
 
-  # Base pública de streaming configurada en el panel
-  local base
+  # --- Base pública de streaming configurada en el panel -------------------
+  local base=""
   base=$("$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
     initDb();
     const r = db.prepare("SELECT value FROM settings WHERE key = ?").get("public_stream_base");
     console.log(r?.value || "");
-  ' 2>/dev/null | tail -1)
+  ' 2>/dev/null | tail -1 || true)
   if [ -n "$base" ]; then
     echo "  [OK]    Base pública de streaming: ${base}"
-    [ -z "$stream" ] && stream=$(echo "$base" | sed -E 's#^https?://##; s#/.*$##')
+    [ -z "$stream" ] && stream=$(printf '%s' "$base" | sed -E 's#^https?://##; s#/.*$##')
   else
     echo "  [AVISO] Sin base pública de streaming: los enlaces de video usan el dominio del panel"
     echo "          -> ejecuta: tvlister-admin cloudflare <dominio_panel> <dominio_streams>"
+    fails=$((fails + 1))
   fi
 
-  header_of() {
-    curl -sS -o /dev/null -D - --max-time 12 "https://$1/" 2>/dev/null | tr -d '\r'
+  # IP del propio servidor (para hablar con el origen sin pasar por Cloudflare)
+  origin_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1 || true)
+  [ -z "$origin_ip" ] && origin_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  [ -n "$origin_ip" ] && echo "  Origen         : ${origin_ip} (se consulta directo, sin Cloudflare)"
+
+  # --- Cabeceras de un dominio ---------------------------------------------
+  headers_of() {
+    curl -sS -o /dev/null -D - --max-time 12 "https://$1/" 2>/dev/null | tr -d '\r' || true
+  }
+  # Cabeceras del origen, forzando la IP del servidor con la cabecera Host
+  headers_from_origin() {
+    local host="$1"
+    [ -z "$origin_ip" ] && return 0
+    curl -sS -o /dev/null -D - --max-time 10 --resolve "${host}:443:${origin_ip}" "https://${host}/" 2>/dev/null | tr -d '\r' || true
+    return 0
   }
 
   check_host() {
     local host="$1" role="$2"
     [ -z "$host" ] && return 0
-    local hdrs server cfray ip
-    hdrs=$(header_of "$host")
+    local hdrs server cfray ip o_hdrs o_server o_cf ssl_state
+    hdrs=$(headers_of "$host")
     if [ -z "$hdrs" ]; then
-      echo "  [FALLA] ${role} https://${host} no responde (DNS o firewall)"
+      echo "  ${role}: https://${host}"
+      echo "         [FALLA] No responde (DNS, firewall o nginx sin ese server_name)"
       fails=$((fails + 1))
       return 0
     fi
-    # Sin `| head` en tuberías: con `set -o pipefail` el SIGPIPE de head
-    # abortaba la comprobación a mitad (exit 141).
     server=$(printf '%s\n' "$hdrs" | awk 'tolower($0) ~ /^server:/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
     cfray=$(printf '%s\n' "$hdrs" | grep -ci '^cf-ray:' || true)
-    ip=$(getent hosts "$host" 2>/dev/null | awk 'NR==1{print $1}')
+    ip=$(getent hosts "$host" 2>/dev/null | awk 'NR==1{print $1}' || true)
+
     echo "  ${role}: https://${host}"
-    echo "         IP resuelta : ${ip:-?}"
-    echo "         Servidor    : ${server:-?}$([ "$cfray" -gt 0 ] && echo '  (cf-ray presente = va por Cloudflare)')"
+    echo "         IP resuelta : ${ip:-?}  ·  Servidor: ${server:-?}"
     if [ "$cfray" -gt 0 ]; then
       if [ "$role" = "Streams" ]; then
-        echo "         [FALLA] Los streams están pasando por Cloudflare. Pon ese registro en"
-        echo "                 GRIS (DNS only). Con video continuo te pueden suspender el dominio."
+        echo "         [FALLA] Los streams están pasando por Cloudflare. Pon ese registro"
+        echo "                 en GRIS (DNS only): el video continuo no está permitido en"
+        echo "                 planes self-serve y te pueden suspender el dominio."
         fails=$((fails + 1))
       else
-        echo "         [OK]    El panel sí puede ir por Cloudflare."
+        echo "         [OK]    El panel va por Cloudflare."
       fi
     else
       if [ "$role" = "Streams" ]; then
         echo "         [OK]    Directo al servidor (sin Cloudflare), como debe ser."
       else
-        echo "         [AVISO] El panel no está pasando por Cloudflare (¿nube gris?)."
+        echo "         [AVISO] El panel NO está pasando por Cloudflare (nube gris)."
       fi
     fi
-    # Certificado
-    local cn_exp=""
-    cn_exp=$(timeout 8 openssl s_client -servername "$host" -connect "${host}:443" </dev/null 2>/dev/null \
-      | openssl x509 -noout -enddate 2>/dev/null \
-      | sed -n 's/^notAfter=//p') || true
-    if [ -n "$cn_exp" ]; then
-      echo "         Certificado : caduca ${cn_exp}"
+
+    # Origen: ¿nginx sirve ese dominio? (sin pasar por Cloudflare)
+    if [ -n "$origin_ip" ]; then
+      o_hdrs=$(headers_from_origin "$host")
+      if [ -z "$o_hdrs" ]; then
+        echo "         [FALLA] El origen (${origin_ip}:443) no responde para ${host}"
+        echo "                 -> falta el server block o nginx no recarga"
+        fails=$((fails + 1))
+      else
+        o_server=$(printf '%s\n' "$o_hdrs" | awk 'tolower($0) ~ /^server:/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
+        o_cf=$(printf '%s\n' "$o_hdrs" | grep -ci '^cf-ray:' || true)
+        if [ "$o_cf" -gt 0 ]; then
+          echo "         [AVISO] El origen contesta como Cloudflare: ¿${host} apunta a un proxy?"
+        else
+          echo "         [OK]    El origen (${origin_ip}) sirve ${host} directamente (${o_server:-nginx})."
+        fi
+      fi
+    fi
+
+    # Certificado que ve el usuario
+    ssl_state=$(timeout 8 openssl s_client -servername "$host" -connect "${host}:443" </dev/null 2>/dev/null \
+      | openssl x509 -noout -enddate 2>/dev/null | sed -n 's/^notAfter=//p' || true)
+    if [ -n "$ssl_state" ]; then
+      echo "         Certificado : caduca ${ssl_state}"
     else
-      echo "         Certificado : no se pudo leer (¿HTTP sin HTTPS?)"
+      echo "         Certificado : no se pudo leer"
     fi
   }
 
@@ -473,29 +524,48 @@ cmd_cf_check() {
   if [ -n "$stream" ] && [ "$stream" != "$panel" ]; then
     check_host "$stream" "Streams"
   else
-    echo "  [AVISO] No se indicó dominio de streams distinto del panel."
-  fi
-
-  # nginx: IP real del cliente detrás de Cloudflare
-  if [ -f /etc/nginx/conf.d/tvlister-cloudflare-realip.conf ]; then
-    echo "  [OK]    nginx toma la IP real (CF-Connecting-IP) de los rangos de Cloudflare"
-  elif [ -d /etc/nginx/sites-available ]; then
-    echo "  [AVISO] Falta /etc/nginx/conf.d/tvlister-cloudflare-realip.conf:"
-    echo "          todos los clientes se verían con IP de Cloudflare"
+    echo "  [AVISO] No hay dominio de streams distinto del panel: el video sale por el panel."
     fails=$((fails + 1))
   fi
 
-  # systemd: proxies de confianza para no aceptar cabeceras de cualquiera
+  # --- Piezas locales del proxy --------------------------------------------
+  local xui_found="" xui_has=""
+  for xr in /home/xui /root/xui /opt/xui /home/xui.one; do
+    if [ -d "${xr}/bin/nginx/conf/servers" ]; then
+      xui_found="$xr"
+      if [ -f "${xr}/bin/nginx/conf/servers/tvlister-panel.conf" ]; then xui_has="yes"; fi
+      break
+    fi
+  done
+
+  if [ -f /etc/nginx/conf.d/tvlister-cloudflare-realip.conf ]; then
+    echo "  [OK]    nginx (sistema): IP real del cliente desde los rangos de Cloudflare"
+  elif [ -f /etc/nginx/conf.d/tvlister247-panel.conf ]; then
+    echo "  [OK]    nginx del sistema (conf.d): server blocks de TVLister presentes"
+  elif [ -n "$xui_found" ]; then
+    if [ -n "$xui_has" ]; then
+      echo "  [OK]    nginx de XUI.one: server blocks en ${xui_found}/bin/nginx/conf/servers"
+    else
+      echo "  [AVISO] nginx de XUI.one (${xui_found}) sin los server blocks de TVLister"
+      echo "          -> ejecuta: tvlister-admin cloudflare <panel> <streams>"
+      fails=$((fails + 1))
+    fi
+  elif [ -d /etc/nginx/sites-available ]; then
+    echo "  [AVISO] Falta /etc/nginx/conf.d/tvlister-cloudflare-realip.conf"
+    echo "          (todos los clientes se verían con IP de Cloudflare)"
+    fails=$((fails + 1))
+  fi
+
   if [ -f /etc/systemd/system/tvlister24-7.service.d/cloudflare.conf ]; then
     echo "  [OK]    Proxies de confianza declarados en el servicio (anti-spoofing)"
   else
-    echo "  [AVISO] Sin drop-in de proxies de confianza: el panel sólo creerá las"
-    echo "          cabeceras de proxy si llegan de loopback o red privada"
+    echo "  [AVISO] Sin drop-in de proxies de confianza: el panel sólo cree las cabeceras"
+    echo "          de proxy si llegan de loopback o de la red privada"
   fi
 
   echo "============================================================"
   if [ "$fails" -gt 0 ]; then
-    echo "  ${fails} problema(s) que hay que corregir."
+    echo "  ${fails} punto(s) a corregir."
     return 1
   fi
   echo "  Todo en orden: panel por Cloudflare, video directo."
@@ -505,16 +575,24 @@ cmd_cf_check() {
 cmd_cloudflare() {
   # Proxy inverso delante del panel, con Cloudflare (o sin él).
   #
-  # Uso: tvlister-admin cloudflare <dominio_panel> [dominio_streams]
+  # Uso:
+  #   tvlister-admin cloudflare <dominio_panel> [dominio_streams]
+  #   tvlister-admin cloudflare <panel> <streams> --cert /ruta/cert.pem --key /ruta/key.pem
+  #   tvlister-admin cloudflare --check [panel] [streams]
+  #   tvlister-admin cloudflare --clear
   #
   # Regla de oro: por Cloudflare va el PANEL (HTML, API, WebSocket, VOD
   # pequeño). Los streams TS/HLS van por un subdominio SIN proxy (nube gris),
   # porque el tráfico de video continuo no está permitido en los planes
-  # self-serve de Cloudflare y además el proxy no está hecho para eso
-  # (cortes, buffering, límite de tiempo de respuesta).
+  # self-serve de Cloudflare y además el proxy no está hecho para eso.
+  #
+  # Detecta el nginx que haya: el del sistema (/etc/nginx) o el interno de
+  # XUI.one (/home/xui/bin/nginx/conf/servers + sbin/nginx -s reload).
   local domain="${1:-}"
   local stream_domain="${2:-}"
   local third="${3:-}"
+  local fourth="${4:-}"
+  local fifth="${5:-}"
   local port
   port=$(get_current_port)
 
@@ -535,14 +613,33 @@ cmd_cloudflare() {
     return 0
   fi
 
+  # Certificado propio (por ejemplo el Origin Certificate de Cloudflare):
+  #   tvlister-admin cloudflare panel.midominio.com stream.midominio.com \
+  #       --cert /root/cf-origin.pem --key /root/cf-origin.key
+  local cert_path="" key_path=""
+  if [ "$third" = "--cert" ]; then
+    cert_path="$fourth"
+    # admite "RUTA --key RUTA" o "RUTA RUTA"
+    if [ "$fifth" = "--key" ] || [ -z "$fifth" ]; then
+      key_path="${6:-}"
+    else
+      key_path="$fifth"
+    fi
+  fi
+  if [ -n "$cert_path" ] && { [ -z "$key_path" ] || [ ! -f "$key_path" ] || [ ! -f "$cert_path" ]; }; then
+    echo "[ERROR] Falta la clave o el archivo no existe: $key_path"
+    echo "Uso: tvlister-admin cloudflare <panel> <streams> --cert /ruta/cert.pem --key /ruta/key.pem"
+    return 1
+  fi
+
   if [ -z "$domain" ]; then
-    echo "Uso: tvlister-admin cloudflare <dominio_panel> [dominio_streams]"
+    echo "Uso: tvlister-admin cloudflare <dominio_panel> [dominio_streams] [--cert cert.pem --key key.pem]"
     echo "     tvlister-admin cloudflare --check [dominio_panel] [dominio_streams]"
     echo "     tvlister-admin cloudflare --clear"
     echo "Ej.:  tvlister-admin cloudflare tv.midominio.com stream.midominio.com"
     return 1
   fi
-  if [ -z "$stream_domain" ]; then
+  if [ -z "$stream_domain" ] || [ "$stream_domain" = "--cert" ]; then
     stream_domain="stream.${domain}"
   fi
 
@@ -561,16 +658,49 @@ cmd_cloudflare() {
     cf_v4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
   fi
 
-  if [ ! -d /etc/nginx/sites-available ]; then
-    echo "ℹ️  No hay nginx del sistema (/etc/nginx/sites-available)."
-    echo "   Se generan los archivos en /root para que los incluyas donde ya tengas tu proxy:"
-    echo "   - /root/tvlister247_panel_${domain}.conf"
-    echo "   - /root/tvlister247_streams_${stream_domain}.conf"
-    cat > "/root/tvlister247_panel_${domain}.conf" <<EOF
+  # --- Certificado: el pasado, el que ya use XUI.one o el de Let's Encrypt --
+  local ssl_block="" cert_src="ninguno (sólo HTTP)"
+  local xui_ssl=/home/xui/bin/nginx/conf/ssl.conf
+  if [ -n "$cert_path" ] && [ -f "$cert_path" ]; then
+    ssl_block="    ssl_certificate ${cert_path};
+    ssl_certificate_key ${key_path};"
+    cert_src="$cert_path"
+  elif [ -f "$xui_ssl" ]; then
+    local xcert xkey
+    xcert=$(awk '/^[[:space:]]*ssl_certificate[[:space:]]/ { print $2; exit }' "$xui_ssl" 2>/dev/null | tr -d ';' || true)
+    xkey=$(awk '/^[[:space:]]*ssl_certificate_key[[:space:]]/ { print $2; exit }' "$xui_ssl" 2>/dev/null | tr -d ';' || true)
+    if [ -n "$xcert" ] && [ -n "$xkey" ] && [ -f "$xcert" ] && [ -f "$xkey" ]; then
+      ssl_block="    ssl_certificate ${xcert};
+    ssl_certificate_key ${xkey};"
+      cert_src="${xcert} (el que ya usa XUI.one)"
+    fi
+  fi
+  if [ -z "$ssl_block" ] && [ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]; then
+    ssl_block="    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;"
+    cert_src="/etc/letsencrypt/live/${domain}"
+  fi
+  [ -n "$ssl_block" ] && echo "  Certificado               : ${cert_src}"
+  if [ -z "$ssl_block" ]; then
+    echo "  Certificado               : ninguno todavía (se genera sólo HTTP:80)"
+    echo "     Con Cloudflare en \"Full (strict)\" hace falta un certificado en el origen."
+    echo "     Lo más rápido: Cloudflare -> SSL/TLS -> Origin Server -> Create Certificate,"
+    echo "     pega el .pem y el .key en el servidor y repite con:"
+    echo "        tvlister-admin cloudflare ${domain} ${stream_domain} --cert /root/origin.pem --key /root/origin.key"
+  fi
+  echo ""
+
+  # --- Contenido de los dos server blocks ----------------------------------
+  build_panel_conf() {
+    cat <<EOF
+# TVLister 24/7 — panel. Va por Cloudflare (nube naranja).
+# Generado por: tvlister-admin cloudflare
 server {
     listen 80;
+    $( [ -n "$ssl_block" ] && echo "listen 443 ssl;" )
     server_name ${domain};
     client_max_body_size 250M;
+${ssl_block}
 
     location / {
         proxy_pass http://127.0.0.1:${port};
@@ -583,91 +713,27 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_buffering off;
         proxy_read_timeout 3600s;
-    }
-}
-EOF
-    cat > "/root/tvlister247_streams_${stream_domain}.conf" <<EOF
-# Subdominio SIN proxy de Cloudflare (nube gris): el video no pasa por su CDN.
-server {
-    listen 80;
-    server_name ${stream_domain};
-
-    proxy_buffering off;
-    proxy_cache off;
-    gzip off;
-    sendfile on;
-    tcp_nopush on;
-    chunked_transfer_encoding on;
-
-    location / {
-        proxy_pass http://127.0.0.1:${port};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
-        add_header Cache-Control "no-store" always;
     }
 }
 EOF
-    echo ""
-    echo "   Copia el contenido en tu nginx y recarga."
-  else
-    # --- IP real del cliente detrás de Cloudflare -------------------------
-    {
-      echo "# TVLister 24/7 — IP real del cliente detrás de Cloudflare"
-      echo "# Generado por: tvlister-admin cloudflare"
-      echo "# Sin esto, todos los clientes aparecen con la IP de Cloudflare y el"
-      echo "# bloqueo por IP de las líneas y el control de sharers no sirve."
-      for r in $cf_v4 $cf_v6; do echo "set_real_ip_from ${r};"; done
-      echo "real_ip_header CF-Connecting-IP;"
-      echo "real_ip_recursive on;"
-    } > /etc/nginx/conf.d/tvlister-cloudflare-realip.conf
+  }
 
-    # --- Panel: sí por Cloudflare ----------------------------------------
-    cat > "/etc/nginx/sites-available/tvlister247-panel.conf" <<EOF
-# Panel TVLister 24/7 — va por Cloudflare (nube naranja).
+  build_streams_conf() {
+    cat <<EOF
+# TVLister 24/7 — streams TS/HLS. Este subdominio va SIN proxy de Cloudflare
+# (nube GRIS). Nada de buffer ni compresión: mataría la latencia y el zapeo.
 server {
     listen 80;
-    server_name ${domain};
-    client_max_body_size 250M;
-
-    # El reproductor y la API necesitan conexiones largas (HLS, MNF, WebSocket).
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_buffering off;
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-
-    location / {
-        proxy_pass http://127.0.0.1:${port};
-    }
-}
-EOF
-
-    # --- Streams: nube gris (DNS only) ------------------------------------
-    cat > "/etc/nginx/sites-available/tvlister247-streams.conf" <<EOF
-# Streams TS/HLS — este subdominio va SIN proxy de Cloudflare (nube GRIS).
-# Todo lo que sea segmentos de video va aquí: así no depende de los límites y
-# el buffering de la CDN, y no incumple las condiciones del plan self-serve.
-server {
-    listen 80;
+    $( [ -n "$ssl_block" ] && echo "listen 443 ssl;" )
     server_name ${stream_domain};
+${ssl_block}
 
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-
-    # Streams: nada de buffer ni compresión (matarían la latencia y el zapeo).
     proxy_buffering off;
     proxy_cache off;
     gzip off;
@@ -677,7 +743,6 @@ server {
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
 
-    # Listas: siempre frescas. Segmentos: pueden cachearse un poco.
     location ~* \.m3u8\$ {
         proxy_pass http://127.0.0.1:${port};
         add_header Cache-Control "no-store" always;
@@ -692,70 +757,165 @@ server {
     }
 }
 EOF
+  }
 
-    ln -sf /etc/nginx/sites-available/tvlister247-panel.conf /etc/nginx/sites-enabled/tvlister247-panel.conf
-    ln -sf /etc/nginx/sites-available/tvlister247-streams.conf /etc/nginx/sites-enabled/tvlister247-streams.conf
-
-    if nginx -t >/dev/null 2>&1; then
-      systemctl reload nginx
-      echo "✅ Nginx recargado con el proxy del panel y el de streams."
-    else
-      echo "[WARN] nginx -t falló. Revisa /etc/nginx/sites-available/tvlister247-panel.conf"
-      nginx -t 2>&1 | tail -5
+  # Ruta del nginx interno de XUI.one (puede variar entre instalaciones)
+  local xui_root=""
+  for cand in /home/xui /root/xui /opt/xui /home/xui.one; do
+    if [ -d "${cand}/bin/nginx/conf/servers" ]; then xui_root="$cand"; break; fi
+  done
+  if [ -z "$xui_root" ] && command -v nginx >/dev/null 2>&1; then
+    local ngx_prefix
+    ngx_prefix=$(nginx -V 2>&1 | tr ' ' '\n' | sed -n 's/^--prefix=\(.*\)$/\1/p' | head -1)
+    if [ -n "$ngx_prefix" ] && [ -d "${ngx_prefix%/}/conf/servers" ]; then
+      xui_root="${ngx_prefix%/}"
+      xui_root="${xui_root%/bin/nginx}"
     fi
   fi
 
-  # --- Confiar en las cabeceras sólo si vienen de Cloudflare ---------------
+  local placed=""
+  if [ -n "$xui_root" ] && [ -d "${xui_root}/bin/nginx/conf/servers" ]; then
+    # ---- nginx interno de XUI.one ----------------------------------------
+    local xui_servers="${xui_root}/bin/nginx/conf/servers"
+    local xui_bin="${xui_root}/bin/nginx/sbin/nginx"
+    echo "  nginx detectado: XUI.one (${xui_servers})"
+    mkdir -p "${xui_servers}"
+    # Copia de seguridad de lo que hubiera de TVLister
+    for f in tvlister-panel.conf tvlister-streams.conf; do
+      [ -f "${xui_servers}/${f}" ] && cp "${xui_servers}/${f}" "${xui_servers}/${f}.bak.$(date +%s)"
+    done
+    build_panel_conf > "${xui_servers}/tvlister-panel.conf"
+    build_streams_conf > "${xui_servers}/tvlister-streams.conf"
+    placed="xui"
+    if [ -x "$xui_bin" ]; then
+      if "$xui_bin" -t >/tmp/tvlister-nginx-test.log 2>&1; then
+        "$xui_bin" -s reload >/dev/null 2>&1 && echo "✅ nginx de XUI.one recargado con los dos server blocks." \
+          || echo "⚠️  nginx -t pasó pero el reload falló; revisa 'sudo ${xui_bin} -s reload'"
+      else
+        echo "⚠️  nginx -t falló. NO se recargó y los server blocks nuevos quedan"
+        echo "    desactivados (.disabled) para que el nginx de XUI.one siga en pie:"
+        tail -5 /tmp/tvlister-nginx-test.log
+        for f in tvlister-panel.conf tvlister-streams.conf; do
+          [ -f "${xui_servers}/${f}" ] && mv -f "${xui_servers}/${f}" "${xui_servers}/${f}.disabled"
+        done
+        placed="xui-failed"
+      fi
+    else
+      echo "ℹ️  No encontré ${xui_bin}. Recarga a mano: sudo ${xui_root}/bin/nginx/sbin/nginx -s reload"
+    fi
+  elif [ -d /etc/nginx/conf.d ] && [ ! -d /etc/nginx/sites-available ]; then
+    # ---- nginx del sistema sin sites-available (RHEL, Alpine, etc.) ------
+    echo "  nginx detectado: del sistema (/etc/nginx/conf.d)"
+    {
+      echo "# TVLister 24/7 — IP real del cliente detrás de Cloudflare"
+      for r in $cf_v4 $cf_v6; do echo "set_real_ip_from ${r};"; done
+      echo "real_ip_header CF-Connecting-IP;"
+      echo "real_ip_recursive on;"
+    } > /etc/nginx/conf.d/tvlister-cloudflare-realip.conf
+    build_panel_conf > /etc/nginx/conf.d/tvlister247-panel.conf
+    build_streams_conf > /etc/nginx/conf.d/tvlister247-streams.conf
+    placed="system"
+    if nginx -t >/tmp/tvlister-nginx-test.log 2>&1; then
+      systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 || true
+      echo "✅ Nginx del sistema recargado."
+    else
+      echo "⚠️  nginx -t falló; se desactivan los sitios nuevos para no romper el nginx actual:"
+      tail -5 /tmp/tvlister-nginx-test.log
+      for f in tvlister247-panel.conf tvlister247-streams.conf; do
+        [ -f "/etc/nginx/conf.d/${f}" ] && mv -f "/etc/nginx/conf.d/${f}" "/etc/nginx/conf.d/${f}.disabled"
+      done
+      placed="system-failed"
+    fi
+  elif [ -d /etc/nginx/sites-available ]; then
+    # ---- nginx del sistema -----------------------------------------------
+    echo "  nginx detectado: del sistema (/etc/nginx)"
+    {
+      echo "# TVLister 24/7 — IP real del cliente detrás de Cloudflare"
+      echo "# Generado por: tvlister-admin cloudflare"
+      for r in $cf_v4 $cf_v6; do echo "set_real_ip_from ${r};"; done
+      echo "real_ip_header CF-Connecting-IP;"
+      echo "real_ip_recursive on;"
+    } > /etc/nginx/conf.d/tvlister-cloudflare-realip.conf
+    build_panel_conf > /etc/nginx/sites-available/tvlister247-panel.conf
+    build_streams_conf > /etc/nginx/sites-available/tvlister247-streams.conf
+    ln -sf /etc/nginx/sites-available/tvlister247-panel.conf /etc/nginx/sites-enabled/tvlister247-panel.conf
+    ln -sf /etc/nginx/sites-available/tvlister247-streams.conf /etc/nginx/sites-enabled/tvlister247-streams.conf
+    placed="system"
+    if nginx -t >/tmp/tvlister-nginx-test.log 2>&1; then
+      systemctl reload nginx && echo "✅ Nginx del sistema recargado." || echo "⚠️  nginx -t pasó pero falló el reload."
+    else
+      echo "⚠️  nginx -t falló; se desactivan los sitios nuevos para no romper el nginx actual:"
+      tail -5 /tmp/tvlister-nginx-test.log
+      rm -f /etc/nginx/sites-enabled/tvlister247-panel.conf /etc/nginx/sites-enabled/tvlister247-streams.conf
+      placed="system-failed"
+    fi
+  else
+    # ---- sin nginx que podamos tocar -------------------------------------
+    echo "ℹ️  No hay nginx del sistema ni el de XUI.one en las rutas conocidas."
+    echo "   Se generan los archivos para que los incluyas donde tengas tu proxy:"
+    build_panel_conf > "/root/tvlister247_panel_${domain}.conf"
+    build_streams_conf > "/root/tvlister247_streams_${stream_domain}.conf"
+    echo "   - /root/tvlister247_panel_${domain}.conf"
+    echo "   - /root/tvlister247_streams_${stream_domain}.conf"
+    echo "   Y añade en tu nginx (dentro del bloque http): include /root/tvlister247_*.conf;"
+    placed="root"
+  fi
+
+  # --- Proxies de confianza (IP real, anti-spoofing) -----------------------
   mkdir -p /etc/systemd/system/tvlister24-7.service.d
   cat > /etc/systemd/system/tvlister24-7.service.d/cloudflare.conf <<EOF
 [Service]
 # Cloudflare conecta desde sus propios rangos: se declaran como proxies de
 # confianza para que CF-Connecting-IP sea la IP real del cliente. Cualquier
-# otra conexión directa que mande esa cabecera se ignora (anti-spoofing).
+# otra conexión que mande esa cabecera se ignora.
 Environment=TVLISTER_TRUSTED_PROXIES=$(echo $cf_v4 $cf_v6 | tr ' ' ',')
 EOF
-  systemctl daemon-reload
+  systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl restart tvlister24-7 >/dev/null 2>&1 || true
 
-  # --- Los enlaces de video apuntan al subdominio sin Cloudflare ----------
-  if [ -d /etc/nginx/sites-available ]; then
-    cd "$APP_DIR"
-    STREAM_BASE="https://${stream_domain}" PANEL_DOMAIN="${domain}" "$NODE_BIN" --no-warnings --input-type=module -e '
-      import { initDb, db } from "./server/db.js";
-      initDb();
-      const base = String(process.env.STREAM_BASE || "").replace(/\/+$/, "");
-      db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .run("public_stream_base", base);
-      console.log("");
-      console.log("  Base pública de streaming: " + base);
-      console.log("  Las playlist, .m3u8 y .ts saldrán por ahí (sin Cloudflare).");
-      console.log("  El panel y su API siguen por " + (process.env.PANEL_DOMAIN || "el dominio del panel") + ".");
-      console.log("  Para volver atrás: tvlister-admin cloudflare --clear");
-    '
-  fi
+  # --- Base pública de streaming (siempre, haya o no nginx del sistema) ----
+  cd "$APP_DIR"
+  STREAM_BASE="https://${stream_domain}" PANEL_DOMAIN="${domain}" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb, db } from "./server/db.js";
+    initDb();
+    const base = String(process.env.STREAM_BASE || "").replace(/\/+$/, "");
+    db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run("public_stream_base", base);
+    console.log("");
+    console.log("  Base pública de streaming: " + base);
+    console.log("  Las playlist, .m3u8 y .ts saldrán por ahí (sin Cloudflare).");
+    console.log("  El panel y su API siguen por " + (process.env.PANEL_DOMAIN || "el dominio del panel") + ".");
+    console.log("  Para volver atrás: tvlister-admin cloudflare --clear");
+  ' || echo "⚠️  No se pudo guardar public_stream_base"
 
   echo ""
   echo "------------------------------------------------------------"
   echo "  En el panel de Cloudflare"
   echo "------------------------------------------------------------"
   echo "  1. DNS"
-  echo "       ${domain}        A  <IP del servidor>   NARANJA (proxied)"
-  echo "       ${stream_domain} A  <IP del servidor>   GRIS    (DNS only)"
+  echo "       ${domain}  A  <IP del servidor>   NARANJA (proxied)"
+  echo "       ${stream_domain}  A  <IP del servidor>   GRIS    (DNS only)"
   echo "     Los streams NO van por Cloudflare: no es un límite técnico que se"
   echo "     pueda sortear, es su política (tráfico de video = plan aparte)."
-  echo "     Si los pones en naranja, Cloudflare lo detecta y puede suspender el"
-  echo "     dominio; además el proxy corta conexiones largas y añade buffering."
-  echo "  2. SSL/TLS -> modo \"Full (strict)\" y un certificado real en el servidor:"
-  echo "       tvlister-admin setup-ssl ${domain} tu@correo.com"
-  echo "       tvlister-admin setup-ssl ${stream_domain} tu@correo.com"
+  echo "  2. SSL/TLS -> modo \"Full (strict)\" y un certificado real en el servidor."
+  echo "     Opción rápida sin tocar apt: Cloudflare -> SSL/TLS -> Origin Server ->"
+  echo "     Create Certificate, y luego:"
+  echo "       tvlister-admin cloudflare ${domain} ${stream_domain} --cert /root/origin.pem --key /root/origin.key"
   echo "  3. Caching -> Rule: si la ruta acaba en .m3u8 o .ts, \"Bypass cache\"."
   echo "  4. Rocket Loader: OFF (rompe el reproductor)."
   echo "  5. WebSockets: ON (lo usan MNF y la vista en vivo del panel)."
   echo ""
+  case "$placed" in
+    xui)     echo "  Server blocks instalados en ${xui_root}/bin/nginx/conf/servers" ;;
+    system)  echo "  Server blocks instalados en /etc/nginx" ;;
+    root)    echo "  Server blocks pendientes: inclúyelos en tu proxy frontal" ;;
+    *-failed)
+      echo "  ⚠️  Los server blocks NO quedaron activos (nginx -t falló)."
+      echo "     Corrige el error de arriba y vuelve a ejecutar el comando." ;;
+  esac
+  echo ""
   echo "  Comprueba después:"
-  echo "     curl -sI https://${domain}/ | head -1"
-  echo "     curl -sI https://${stream_domain}/ | head -1   (servidor: nginx)"
-  echo "     tvlister-admin health"
+  echo "     tvlister-admin cloudflare --check ${domain} ${stream_domain}"
   echo "============================================================"
 }
 
@@ -1743,7 +1903,8 @@ case "$ACTION" in
     cmd_health "${2:-}"
     ;;
   cloudflare | cf)
-    cmd_cloudflare "${2:-}" "${3:-}" "${4:-}"
+    shift
+    cmd_cloudflare "$@"
     ;;
   setup-ssl)
     cmd_setup_ssl "${2:-}" "${3:-}"

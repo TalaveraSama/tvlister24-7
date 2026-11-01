@@ -2288,3 +2288,38 @@ el drop-in de systemd con los proxies de confianza.
 - Streams con `cf-ray` → **FALLA** (registro en naranja: hay que pasarlo a gris) y código de salida 1.
 - Panel sin `cf-ray` → aviso (el panel no está usando Cloudflare).
 - Código 0 sólo si todo está como debe.
+
+### v2.5.21: nginx de XUI.one y certificado de origen
+
+El comando `cloudflare` busca el proxy en este orden:
+
+1. **XUI.one** — `<xui>/bin/nginx/conf/servers` (rutas probadas: `/home/xui`, `/root/xui`, `/opt/xui`,
+   `/home/xui.one`; también deduce el prefijo con `nginx -V`). Escribe ahí
+   `tvlister-panel.conf` y `tvlister-streams.conf`, guarda copia `.bak.<epoch>`, prueba con
+   `<xui>/bin/nginx/sbin/nginx -t` y recarga con `-s reload`.
+2. **nginx del sistema con `sites-available`** — sitios + `conf.d/tvlister-cloudflare-realip.conf`.
+3. **nginx del sistema sólo con `conf.d`** (RHEL, Alpine) — los server blocks van a
+   `/etc/nginx/conf.d/tvlister247-*.conf`.
+4. **Ninguno** — deja los archivos en `/root` y avisa.
+
+En los tres primeros casos, si `nginx -t` falla **no se recarga** y los archivos nuevos quedan como
+`.disabled` (o se retiran los enlaces), para no tumbar el panel ni el de XUI.one.
+
+Certificado:
+
+- Si existe `<xui>/bin/nginx/conf/ssl.conf`, se reutilizan sus `ssl_certificate` / `ssl_certificate_key`.
+- Si no, `cloudflare <panel> <streams> --cert /ruta/origin.pem --key /ruta/origin.key` genera
+  `listen 80` + `listen 443 ssl` con ese par.
+- `setup-ssl` en una máquina con XUI.one ya no genera un archivo inútil: indica el camino del
+  **Origin Certificate** de Cloudflare y el comando exacto.
+
+`public_stream_base` se guarda **siempre**, haya o no nginx que instalar (antes dependía del layout y
+por eso `--check` decía «sin base pública» aunque el comando se hubiera ejecutado).
+
+`--check` ahora:
+
+- Consulta el **origen** con `--resolve` a la IP del propio servidor: distingue "Cloudflare responde"
+  de "mi nginx sirve ese dominio".
+- No aborta a la primera consulta fallida (todas las llamadas de red llevan `|| true`; antes
+  `set -e` cortaba el informe después del panel).
+- Reconoce los tres layouts de nginx y devuelve código 1 si falta algo.
