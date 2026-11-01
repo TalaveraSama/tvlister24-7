@@ -450,6 +450,17 @@ function runInitDbBody() {
       updated_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS access_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      type TEXT NOT NULL DEFAULT 'admin',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      notes TEXT NOT NULL DEFAULT '',
+      uses INTEGER NOT NULL DEFAULT 0,
+      last_used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS wk2500_channels (
       catv_ch INTEGER PRIMARY KEY CHECK (catv_ch >= 2 AND catv_ch <= 125),
       freq_mhz REAL NOT NULL,

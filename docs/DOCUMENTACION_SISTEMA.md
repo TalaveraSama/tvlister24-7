@@ -2359,3 +2359,35 @@ El tiempo de espera baja a 6 s cuando el enlace acaba en `.ts` (flujo continuo).
 En ambos casos se indica cómo volver atrás (`cloudflare --clear`) para no dejar el
 panel entregando enlaces a un dominio muerto, que es la causa de «no se ve ningún
 canal» después de aplicar el proxy.
+
+### v2.5.23: códigos de acceso al panel (estilo XUI.one)
+
+Tabla nueva `access_codes (id, code UNIQUE NOCASE, type, enabled, notes, uses, last_used_at,
+created_at)`. Módulo `server/accessCodes.js`; se monta en `server/index.js` justo después del
+firewall, antes de todo el resto.
+
+Comportamiento:
+
+- **Con al menos un código activo**, toda petición al panel exige un código. Sin cookie válida
+  se devuelve la pantalla de entrada (HTML autocontenido, sin assets); las rutas `/api/*`
+  devuelven `401 {"accessCodeRequired":true}`.
+- **Exentas siempre** (los clientes IPTV no se ven afectados): `/get.php`, `/player_api.php`,
+  `/panel_api.php`, `/xmltv.php`, `/enigma2.php`, `/portal.php`, `/magLoad.php`,
+  `/server/load.php`, `/api/health`, `/api/auth/*`, `/api/webtv/*`, `/slates/*` y los prefijos
+  `/c/`, `/stalker_portal/`, `/live/`, `/movie/`, `/series/`, `/timeshift/`, `/mnf/`,
+  `/hls_proxy/`, `/hls_out/`, `/streaming/`.
+- **Sin códigos activos** el panel queda exactamente como antes.
+- Cookie `tvlister_access`: token HMAC (`signToken`, `scope=access_code`) con `HttpOnly`,
+  `SameSite=Lax`, `Secure` si la petición llega por https y 7 días de vida. Se valida contra la
+  lista de códigos activos, de modo que desactivar un código **revoca al instante**.
+- `?access=CODIGO` en la URL también entra (y guarda la cookie), útil para mandar el enlace.
+- Límite de 10 intentos por IP cada 5 minutos (respuesta 429 con la pantalla de espera).
+- Caché de 3 s de los códigos activos para no consultar la BD en cada asset.
+- Tipos: `admin`, `admin_api`, `reseller` (etiqueta organizativa; la puerta es la misma).
+
+API (sólo administradores): `GET/POST /api/access-codes`, `PUT/DELETE /api/access-codes/:id`,
+`POST /api/access-codes/logout` (borra la cookie del navegador actual).
+
+Consola: `tvlister-admin access-code [list|add|on|off|rm|url]` (menú, opción 27).
+Pantalla: **Access Codes** en el menú lateral, con tabla, buscador, paginación, alta/edición,
+activación instantánea y copia del enlace con el código.

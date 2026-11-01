@@ -115,6 +115,7 @@ import { flussonic2312Router } from './flussonic2312Manager.js';
 import { wk2500Router, resumeEnabledWk2500Channels, stopAllWk2500Workers } from './wk2500Manager.js';
 import { syncEpgSourceById, startEpgAutoSyncScheduler } from './epgSync.js';
 import { WebSocketServer } from 'ws';
+import { accessCodeMiddleware, accessCodesRouter } from './accessCodes.js';
 import {
   parseFlussonicConf,
   fetchFlussonicServerStreams,
@@ -171,6 +172,11 @@ app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Application-level firewall check
 app.use(firewallMiddleware);
+
+// Códigos de acceso al panel (estilo XUI.one): si hay alguno activo, el panel
+// queda detrás de una pantalla previa. Los endpoints IPTV nunca se cierran.
+app.use(accessCodeMiddleware);
+app.use(accessCodesRouter);
 
 // Serve uploaded offline loop images/videos for panel preview
 app.use('/slates', express.static(SLATES_DIR));

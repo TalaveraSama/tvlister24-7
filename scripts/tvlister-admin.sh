@@ -290,6 +290,157 @@ cmd_health() {
 # primer canal de la lista, descarga ese enlace y después el primer segmento.
 # Así se ve en qué eslabón se rompe: panel, dominio público, nginx, TLS, o la
 # propia fuente del canal.
+# ==================== CÓDIGOS DE ACCESO AL PANEL (estilo XUI.one) ==========
+# Uso:
+#   tvlister-admin access-code                 lista los códigos
+#   tvlister-admin access-code add <codigo> [admin|admin_api|reseller] [nota]
+#   tvlister-admin access-code on <codigo|id>
+#   tvlister-admin access-code off [codigo|id]   (sin argumento: apaga todos)
+#   tvlister-admin access-code rm <codigo|id>
+#   tvlister-admin access-code url <codigo>      enlace con el código incluido
+cmd_access_code() {
+  local action="${1:-list}" arg1="${2:-}" arg2="${3:-}" arg3="${4:-}"
+  cd "$APP_DIR" || return 1
+
+  case "$action" in
+    list | ls | "")
+      AC_ACTION="list" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { listAccessCodes } from "./server/accessCodes.js";
+        initDb();
+        const rows = listAccessCodes();
+        console.log("============================================================");
+        console.log("  Códigos de acceso al panel (estilo XUI.one)");
+        console.log("============================================================");
+        if (!rows.length) {
+          console.log("  No hay códigos: el panel está ABIERTO (solo el login lo protege).");
+          console.log("  Crea uno con:  tvlister-admin access-code add micodigo admin");
+          console.log("============================================================");
+          process.exit(0);
+        }
+        for (const r of rows) {
+          const estado = r.enabled ? "ON " : "OFF";
+          const usos = String(r.uses).padStart(4, " ");
+          const ultimo = r.last_used_at || "nunca";
+          console.log(`  [${estado}] #${String(r.id).padEnd(3)} ${r.code.padEnd(24)} ${(r.typeLabel || r.type).padEnd(11)} usos:${usos}  último: ${ultimo}`);
+          if (r.notes) console.log(`         nota: ${r.notes}`);
+        }
+        const activos = rows.filter((r) => r.enabled).length;
+        console.log("------------------------------------------------------------");
+        console.log(activos > 0
+          ? `  ${activos} código(s) activo(s): el panel pide código antes del login.`
+          : "  Ningún código activo: el panel está ABIERTO.");
+        console.log("  Se aplican al instante (no hace falta recargar nginx).");
+        console.log("============================================================");
+      '
+      ;;
+
+    add | crear)
+      if [ -z "$arg1" ]; then
+        echo "Uso: tvlister-admin access-code add <codigo> [admin|admin_api|reseller] [nota]"
+        return 1
+      fi
+      AC_CODE="$arg1" AC_TYPE="${arg2:-admin}" AC_NOTES="$arg3" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { createAccessCode } from "./server/accessCodes.js";
+        initDb();
+        const res = createAccessCode({
+          code: process.env.AC_CODE,
+          type: process.env.AC_TYPE || "admin",
+          notes: process.env.AC_NOTES || ""
+        });
+        if (res.error) {
+          console.error("❌ " + res.error);
+          process.exit(1);
+        }
+        console.log(`✅ Código creado (#${res.id}): ${res.code}`);
+        console.log("   Entra en:  /?access=" + encodeURIComponent(res.code));
+        console.log("   Ya está activo: el panel pide código antes del login.");
+      '
+      ;;
+
+    on | activar | enable)
+      if [ -z "$arg1" ]; then
+        echo "Uso: tvlister-admin access-code on <codigo|id>"
+        return 1
+      fi
+      AC_TARGET="$arg1" AC_ENABLED="1" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb, db } from "./server/db.js";
+        import { updateAccessCode } from "./server/accessCodes.js";
+        initDb();
+        const t = process.env.AC_TARGET;
+        const row = db.prepare("SELECT id, code FROM access_codes WHERE code = ? COLLATE NOCASE OR id = ?").get(t, Number(t) || -1);
+        if (!row) { console.error("❌ No existe el código " + t); process.exit(1); }
+        updateAccessCode(row.id, { enabled: process.env.AC_ENABLED === "1" });
+        console.log(`✅ ${row.code} ${process.env.AC_ENABLED === "1" ? "activado" : "desactivado"}.`);
+      '
+      ;;
+
+    off | desactivar | disable)
+      if [ -z "$arg1" ]; then
+        AC_ALL="1" "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb, db } from "./server/db.js";
+          import { invalidateAccessCodeCache } from "./server/accessCodes.js";
+          initDb();
+          db.prepare("UPDATE access_codes SET enabled = 0").run();
+          invalidateAccessCodeCache();
+          console.log("✅ Todos los códigos desactivados: el panel vuelve a estar abierto (solo login).");
+        '
+        return 0
+      fi
+      AC_TARGET="$arg1" AC_ENABLED="0" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb, db } from "./server/db.js";
+        import { updateAccessCode } from "./server/accessCodes.js";
+        initDb();
+        const t = process.env.AC_TARGET;
+        const row = db.prepare("SELECT id, code FROM access_codes WHERE code = ? COLLATE NOCASE OR id = ?").get(t, Number(t) || -1);
+        if (!row) { console.error("❌ No existe el código " + t); process.exit(1); }
+        updateAccessCode(row.id, { enabled: false });
+        console.log(`✅ ${row.code} desactivado.`);
+      '
+      ;;
+
+    rm | del | borrar)
+      if [ -z "$arg1" ]; then
+        echo "Uso: tvlister-admin access-code rm <codigo|id>"
+        return 1
+      fi
+      AC_TARGET="$arg1" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb, db } from "./server/db.js";
+        import { deleteAccessCode } from "./server/accessCodes.js";
+        initDb();
+        const t = process.env.AC_TARGET;
+        const row = db.prepare("SELECT id, code FROM access_codes WHERE code = ? COLLATE NOCASE OR id = ?").get(t, Number(t) || -1);
+        if (!row) { console.error("❌ No existe el código " + t); process.exit(1); }
+        deleteAccessCode(row.id);
+        console.log(`✅ ${row.code} eliminado.`);
+      '
+      ;;
+
+    url | enlace)
+      if [ -z "$arg1" ]; then
+        echo "Uso: tvlister-admin access-code url <codigo>"
+        return 1
+      fi
+      local ip port
+      ip=$(get_server_ip); port=$(get_current_port)
+      echo "  http://${ip}:${port}/?access=$arg1"
+      echo "  (con dominio y HTTPS, cambia el host por el del panel)"
+      ;;
+
+    *)
+      echo "Uso:"
+      echo "  tvlister-admin access-code                    lista los códigos"
+      echo "  tvlister-admin access-code add <codigo> [admin|admin_api|reseller] [nota]"
+      echo "  tvlister-admin access-code on  <codigo|id>    activa"
+      echo "  tvlister-admin access-code off [codigo|id]    desactiva (sin argumento: todos)"
+      echo "  tvlister-admin access-code rm  <codigo|id>    elimina"
+      echo "  tvlister-admin access-code url <codigo>       enlace con el código"
+      return 1
+      ;;
+  esac
+}
+
 cmd_streams_check() {
   local user="${1:-}" pass="${2:-}" pick="${3:-}"
   local port base code
@@ -1199,6 +1350,9 @@ EOF
       echo "  ⚠️  Los server blocks NO quedaron activos (nginx -t falló)."
       echo "     Corrige el error de arriba y vuelve a ejecutar el comando." ;;
   esac
+  echo ""
+  echo "  Protege además la entrada al panel con un código (estilo XUI.one):"
+  echo "     tvlister-admin access-code add mipanel admin"
   echo ""
   echo "  Comprueba después:"
   echo "     tvlister-admin cloudflare --check ${domain} ${stream_domain}"
@@ -2185,6 +2339,10 @@ case "$ACTION" in
   doctor)
     cmd_doctor
     ;;
+  access-code | access-codes | codigo | codigos)
+    shift
+    cmd_access_code "${1:-list}" "${2:-}" "${3:-}" "${4:-}"
+    ;;
   streams-check | probar | reproduce)
     cmd_streams_check "${2:-}" "${3:-}" "${4:-}"
     ;;
@@ -2407,9 +2565,10 @@ case "$ACTION" in
     echo " 24) Salud del sistema 24/7 (health) + mantenimiento"
     echo " 25) Proxy inverso para Cloudflare: panel sí, streams directos (cloudflare)"
     echo " 26) Probar la reproducción de un canal de punta a punta (streams-check)"
+    echo " 27) Códigos de acceso al panel, estilo XUI.one (access-code)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-26]: " opt
+    read -r -p "Selecciona una opción [0-27]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -2442,6 +2601,7 @@ case "$ACTION" in
         cmd_cloudflare "$CF_DOM" "$CF_STREAM" || true
         ;;
       26) "$0" streams-check ;;
+      27) cmd_access_code "list" "" "" "" ;;
       *) exit 0 ;;
     esac
     ;;
