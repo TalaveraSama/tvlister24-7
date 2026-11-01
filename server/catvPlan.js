@@ -106,6 +106,11 @@ export function getTvStandard(id) {
 // Plan EIA-542 (STD cable): canales 2–125, 6 MHz, video = borde inferior + 1.25
 // ---------------------------------------------------------------------------
 const US_CABLE_BANDS = [
+  // Canal 1: 44–50 MHz, video 45.25. En EE. UU. esa banda está asignada a
+  // servicios móviles/radioastronomía y en el cable queda pegada al camino de
+  // retorno (5–42 MHz): se permite porque el operador lo pidió, pero el panel
+  // avisa de la incompatibilidad de sintonía en muchos televisores.
+  { from: 1, to: 1, base: 44, label: 'Banda I (1) — 44–50 MHz' },
   { from: 2, to: 4, base: 54, label: 'VHF Bajo (2–4)' },
   { from: 5, to: 6, base: 76, label: 'VHF Bajo (5–6)' },
   { from: 7, to: 13, base: 174, label: 'VHF Alto (7–13)' },
@@ -138,7 +143,7 @@ const EU_BY_CH = new Map(EU_PLAN.map((e) => [e.ch, e]));
 
 /**
  * Frecuencia de video del canal CATV según el estándar.
- * @param {number} catvCh número de canal (2..125)
+ * @param {number} catvCh número de canal (1..125; el 1 sólo en familia US)
  * @param {string} standardId id de TV_STANDARDS
  * @param {number|null} overrideMhz frecuencia de video forzada por el operador
  */
@@ -179,7 +184,7 @@ export function getCatvChannelInfo(catvCh, standardId = DEFAULT_TV_STANDARD, ove
       bandLabel = band.label;
     } else {
       freqMhz = 0;
-      bandLabel = 'Canal fuera del plan (2–125)';
+      bandLabel = 'Canal fuera del plan (1–125)';
     }
   }
 

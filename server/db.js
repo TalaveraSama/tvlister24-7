@@ -462,7 +462,7 @@ function runInitDbBody() {
     );
 
     CREATE TABLE IF NOT EXISTS wk2500_channels (
-      catv_ch INTEGER PRIMARY KEY CHECK (catv_ch >= 2 AND catv_ch <= 125),
+      catv_ch INTEGER PRIMARY KEY CHECK (catv_ch >= 1 AND catv_ch <= 125),
       freq_mhz REAL NOT NULL,
       band_label TEXT NOT NULL DEFAULT '',
       stream_id INTEGER DEFAULT NULL,
@@ -480,6 +480,50 @@ function runInitDbBody() {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // ---- Migración: permitir el canal 1 (portadora de 44–50 MHz) -------------
+  // SQLite no deja alterar un CHECK, así que la tabla se reconstruye con los
+  // mismos datos. Sólo ocurre una vez, en bases creadas antes de la v1.2.x.
+  try {
+    const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='wk2500_channels'").get()?.sql || '';
+    if (ddl && /catv_ch\s*>=\s*2/.test(ddl)) {
+      const cols = db.prepare('PRAGMA table_info(wk2500_channels)').all().map((c) => c.name);
+      const list = cols.join(', ');
+      db.exec('PRAGMA foreign_keys = OFF;');
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        db.exec(`CREATE TABLE wk2500_channels_new (
+          catv_ch INTEGER PRIMARY KEY CHECK (catv_ch >= 1 AND catv_ch <= 125),
+          freq_mhz REAL NOT NULL,
+          band_label TEXT NOT NULL DEFAULT '',
+          stream_id INTEGER DEFAULT NULL,
+          custom_name TEXT NOT NULL DEFAULT '',
+          custom_source_url TEXT NOT NULL DEFAULT '',
+          unit_id INTEGER DEFAULT NULL,
+          udp_host TEXT NOT NULL DEFAULT '',
+          udp_port INTEGER NOT NULL DEFAULT 5002,
+          local_interface_ip TEXT NOT NULL DEFAULT '',
+          ttl INTEGER NOT NULL DEFAULT 16,
+          output_mode TEXT NOT NULL DEFAULT 'direct_spts',
+          muxrate_kbps INTEGER NOT NULL DEFAULT 0,
+          service_id INTEGER NOT NULL DEFAULT 1,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );`);
+        db.exec(`INSERT INTO wk2500_channels_new (${list}) SELECT ${list} FROM wk2500_channels;`);
+        db.exec('DROP TABLE wk2500_channels;');
+        db.exec('ALTER TABLE wk2500_channels_new RENAME TO wk2500_channels;');
+        db.exec('COMMIT;');
+      } catch (err) {
+        db.exec('ROLLBACK;');
+        throw err;
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON;');
+      }
+    }
+  } catch (err) {
+    console.error('[db] No se pudo habilitar el canal 1:', err?.message || err);
+  }
 
   const ensureColumn = (table, column, def) => {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);

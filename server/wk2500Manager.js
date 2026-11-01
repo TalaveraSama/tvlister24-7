@@ -31,7 +31,7 @@ import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 
 export const wk2500Router = express.Router();
 
-// Active 24/7 UDP workers keyed by CATV channel number (2..125)
+// Active 24/7 UDP workers keyed by CATV channel number (1..125)
 const udpWorkers = new Map();
 
 /**
@@ -96,7 +96,7 @@ export function computeDefaultUdpAddress(catvCh, ipMode = 'multicast', destIp = 
 
 export function ensureCatvSlotsInitialized() {
   const count = db.prepare('SELECT COUNT(*) as c FROM wk2500_channels').get()?.c || 0;
-  if (count >= 124) return;
+  if (count >= CATV_TOTAL_SLOTS) return;
 
   withSqliteBusyRetry(() => {
     db.exec('BEGIN IMMEDIATE;');
@@ -106,7 +106,7 @@ export function ensureCatvSlotsInitialized() {
            catv_ch, freq_mhz, band_label, udp_host, udp_port, ttl, output_mode, service_id, enabled
          ) VALUES (?, ?, ?, ?, ?, 16, 'direct_spts', ?, 0)`
       );
-      for (let ch = 2; ch <= 125; ch++) {
+      for (let ch = CATV_MIN_CH; ch <= CATV_MAX_CH; ch++) {
         const info = getCatvStdChannelInfo(ch);
         const addr = computeDefaultUdpAddress(ch, 'multicast', '239.25.0.0', 5000);
         ins.run(ch, info.freq_mhz, info.band_label, addr.udp_host, addr.udp_port, ch);
@@ -128,21 +128,21 @@ export const WK2500_OUTPUT_MODES = ['direct_spts', 'copy_mp2_leveled', 'copy_aac
 
 /**
  * Modelos reales de modulador WK2500: cambian sólo la CANTIDAD de canales de
- * salida que puede generar cada equipo, no la grilla CATV (siempre 2..125).
+ * salida que puede generar cada equipo, no la grilla CATV (siempre 1..125).
  *   WK2500-32  -> 32 canales   (p. ej. CH 2..33)
  *   WK2500-64  -> 64 canales   (p. ej. CH 2..65)
- *   WK2500-125 -> 124 canales  (CH 2..125, grilla completa)
+ *   WK2500-125 -> 125 canales  (CH 1..125, grilla completa)
  */
 export const WK2500_MODELS = [
   { id: 'wk2500_32', label: 'WK2500 · 32 canales', channels: 32, hint: '32 salidas RF (suele cubrir CH 2–33)' },
   { id: 'wk2500_64', label: 'WK2500 · 64 canales', channels: 64, hint: '64 salidas RF (suele cubrir CH 2–65)' },
-  { id: 'wk2500_125', label: 'WK2500 · 125 canales', channels: 125, hint: 'Grilla completa CH 2–125' }
+  { id: 'wk2500_125', label: 'WK2500 · 125 canales', channels: 125, hint: 'Grilla completa CH 1–125' }
 ];
 export const WK2500_MODEL_CHANNELS = WK2500_MODELS.map((m) => m.channels);
 
-export const CATV_MIN_CH = 2;
+export const CATV_MIN_CH = 1;
 export const CATV_MAX_CH = 125;
-export const CATV_TOTAL_SLOTS = CATV_MAX_CH - CATV_MIN_CH + 1; // 124
+export const CATV_TOTAL_SLOTS = CATV_MAX_CH - CATV_MIN_CH + 1; // 125 (incluye el CH 1)
 
 function modelInfoFor(modelChannels) {
   const n = Number(modelChannels);
@@ -1745,7 +1745,7 @@ function sequentialRanges(units, startCh = CATV_MIN_CH) {
   });
 }
 
-// ==================== API ROUTES: PLAN CATV 2..125, MNF TRUNK SYNC & WK2500 UDP ENGINE ====================
+// ==================== API ROUTES: PLAN CATV 1..125, MNF TRUNK SYNC & WK2500 UDP ENGINE ====================
 
 wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
   ensureCatvSlotsInitialized();
@@ -2462,8 +2462,8 @@ wk2500Router.post('/api/wk2500/assign-stream-channel', requireAuth, requireAdmin
     target_catv_ch === null || target_catv_ch === '' || Number(target_catv_ch) === 0
       ? null
       : Number(target_catv_ch);
-  if (targetCh !== null && (targetCh < 2 || targetCh > 125)) {
-    return res.status(400).json({ error: 'El número de canal CATV debe estar entre 2 y 125.' });
+  if (targetCh !== null && (targetCh < CATV_MIN_CH || targetCh > CATV_MAX_CH)) {
+    return res.status(400).json({ error: `El número de canal CATV debe estar entre ${CATV_MIN_CH} y ${CATV_MAX_CH}.` });
   }
 
   const prevSlots = db.prepare('SELECT * FROM wk2500_channels WHERE stream_id = ?').all(sid);
@@ -2546,7 +2546,7 @@ wk2500Router.post('/api/wk2500/swap-or-move', requireAuth, requireAdmin, (req, r
   const fromCh = Number(req.body?.from_ch);
   const toCh = Number(req.body?.to_ch);
   if (fromCh < 2 || fromCh > 125 || toCh < 2 || toCh > 125 || fromCh === toCh) {
-    return res.status(400).json({ error: 'Indica dos canales CATV válidos y distintos entre 2 y 125.' });
+    return res.status(400).json({ error: `Indica dos canales CATV válidos y distintos entre ${CATV_MIN_CH} y ${CATV_MAX_CH}.` });
   }
 
   const slotA = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(fromCh);
@@ -2754,15 +2754,15 @@ wk2500Router.post('/api/wk2500/mnf-trunks/sync', requireAuth, requireAdmin, asyn
         ).run(name, parsedOrigin.origin, username, password, syncedStreamIds.length);
       }
 
-      // Auto-assign sequentially into CATV channels 2..125 if requested
+      // Auto-assign sequentially into CATV channels 1..125 if requested
       if (auto_assign_catv) {
-        const startCh = Math.min(125, Math.max(2, Number(start_catv_ch) || 2));
+        const startCh = Math.min(CATV_MAX_CH, Math.max(CATV_MIN_CH, Number(start_catv_ch) || CATV_MIN_CH));
         const updSlot = db.prepare(
           "UPDATE wk2500_channels SET stream_id = ?, updated_at = datetime('now') WHERE catv_ch = ?"
         );
         let cursorCh = startCh;
         for (const sid of syncedStreamIds) {
-          if (cursorCh > 125) break;
+          if (cursorCh > CATV_MAX_CH) break;
           updSlot.run(sid, cursorCh);
           cursorCh += 1;
         }
@@ -2785,7 +2785,7 @@ wk2500Router.post('/api/wk2500/mnf-trunks/sync', requireAuth, requireAdmin, asyn
   });
 });
 
-// Bulk-configure UDP addressing & auto-assign channels across CATV 2..125 (supports Multicast or Unicast per WK2500 range!)
+// Bulk-configure UDP addressing & auto-assign channels across CATV 1..125 (supports Multicast or Unicast per WK2500 range!)
 wk2500Router.post('/api/wk2500/bulk-configure', requireAuth, requireAdmin, (req, res) => {
   ensureCatvSlotsInitialized();
   const {
@@ -2913,11 +2913,11 @@ wk2500Router.post('/api/wk2500/bulk-configure', requireAuth, requireAdmin, (req,
   res.json({ ok: true, updatedRange: `${fromCh}–${toCh}` });
 });
 
-// Update single CATV channel (2..125)
+// Update single CATV channel (1..125)
 wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req, res) => {
   ensureCatvSlotsInitialized();
   const ch = Number(req.params.catvCh);
-  if (ch < 2 || ch > 125) return res.status(400).json({ error: 'El canal CATV debe estar entre 2 y 125.' });
+  if (ch < CATV_MIN_CH || ch > CATV_MAX_CH) return res.status(400).json({ error: `El canal CATV debe estar entre ${CATV_MIN_CH} y ${CATV_MAX_CH}.` });
 
   const existing = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(ch);
   if (!existing) return res.status(404).json({ error: 'Slot CATV no encontrado.' });
@@ -3072,7 +3072,7 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
   res.json({ ok: true });
 });
 
-// ==================== NOMBRES DE CANAL (CH 2..125) =========================
+// ==================== NOMBRES DE CANAL (CH 1..125) =========================
 // La lista ordenada del operador vive en server/catvChannelNames.js. Aquí se
 // previsualiza el cambio y se aplica al rótulo de cada portadora
 // (custom_name), que es lo que sale en el CSV de la página CANALES.
@@ -3121,7 +3121,7 @@ wk2500Router.post('/api/wk2500/channel-names', requireAuth, requireAdmin, (req, 
     ok: true,
     updated,
     total: rows.length,
-    message: `Nombres aplicados a ${rows.length} portadoras (CH 2 al 125).`,
+    message: `Nombres aplicados a ${rows.length} portadoras (CH 1 al 125).`,
     note:
       'En los moduladores: descarga el CSV de la página CANALES de cada equipo y vuelve a importarlo para que ' +
       'cambien los rótulos. El plan y las frecuencias no se tocan.'
@@ -3185,17 +3185,17 @@ wk2500Router.post('/api/wk2500/udp-engine', requireAuth, requireAdmin, async (re
   const engine = String(b.engine || '').trim().toLowerCase() === 'flussonic' ? 'flussonic' : 'local';
   const targets = [];
   if (b.all === true) {
-    for (let ch = 2; ch <= 125; ch += 1) targets.push(ch);
+    for (let ch = CATV_MIN_CH; ch <= CATV_MAX_CH; ch += 1) targets.push(ch);
   } else if (b.catv_ch !== undefined && b.catv_ch !== null && b.catv_ch !== '') {
     targets.push(Number(b.catv_ch));
   } else if (b.ch_start !== undefined) {
-    const from = Math.max(2, Number(b.ch_start) || 2);
-    const to = Math.min(125, Number(b.ch_end) || 125);
+    const from = Math.max(CATV_MIN_CH, Number(b.ch_start) || CATV_MIN_CH);
+    const to = Math.min(CATV_MAX_CH, Number(b.ch_end) || CATV_MAX_CH);
     for (let ch = from; ch <= to; ch += 1) targets.push(ch);
   }
   if (!targets.length) return res.status(400).json({ error: 'Indica catv_ch, un rango (ch_start/ch_end) o all: true.' });
-  const bad = targets.find((ch) => !Number.isInteger(ch) || ch < 2 || ch > 125);
-  if (bad !== undefined) return res.status(400).json({ error: `Canal CATV inválido: ${bad} (2..125).` });
+  const bad = targets.find((ch) => !Number.isInteger(ch) || ch < CATV_MIN_CH || ch > CATV_MAX_CH);
+  if (bad !== undefined) return res.status(400).json({ error: `Canal CATV inválido: ${bad} (1..125).` });
 
   if (engine === 'flussonic') {
     let servers = [];
@@ -3304,7 +3304,7 @@ wk2500Router.post('/api/wk2500/flussonic-udp/sync', requireAuth, requireAdmin, a
 // Quitar de Flussonic la salida UDP de un canal (sin tocar el motor local).
 wk2500Router.post('/api/wk2500/flussonic-udp/remove', requireAuth, requireAdmin, async (req, res) => {
   const ch = Number((req.body || {}).catv_ch);
-  if (!Number.isInteger(ch) || ch < 2 || ch > 125) return res.status(400).json({ error: 'catv_ch inválido (2..125).' });
+  if (!Number.isInteger(ch) || ch < CATV_MIN_CH || ch > CATV_MAX_CH) return res.status(400).json({ error: `catv_ch inválido (${CATV_MIN_CH}..${CATV_MAX_CH}).` });
   const slot = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(ch);
   if (!slot) return res.status(404).json({ error: 'Slot CATV no encontrado.' });
   try {
@@ -3320,7 +3320,7 @@ wk2500Router.post('/api/wk2500/flussonic-udp/remove', requireAuth, requireAdmin,
   }
 });
 
-// Start / Stop single or all assigned CATV channels (2..125)
+// Start / Stop single or all assigned CATV channels (1..125)
 wk2500Router.post('/api/wk2500/control', requireAuth, requireAdmin, (req, res) => {
   ensureCatvSlotsInitialized();
   const { action = 'start_all', catv_ch = null, ch_start = 2, ch_end = 125 } = req.body || {};

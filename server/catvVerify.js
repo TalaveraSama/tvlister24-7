@@ -254,6 +254,25 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
       );
     }
 
+    // ---- 2b. Aviso del canal 1 -------------------------------------------
+    // La portadora 1 (44–50 MHz) no se usa para difusión en EE. UU.: esa banda
+    // está asignada a servicios móviles y, en el cable, queda pegada al camino
+    // de retorno (5–42 MHz). Emitir ahí funciona si el modulador lo acepta,
+    // pero hay televisores que no sintonizan el canal 1.
+    const ch1 = carriers.filter((c) => Number(c.catv_ch) === 1);
+    if (ch1.length) {
+      const c1 = ch1[0];
+      add(
+        'ch1',
+        'warn',
+        false,
+        'El canal 1 emite en 45.25 MHz (44–50 MHz)',
+        `${c1.freq_mhz} MHz vídeo / ${Number(c1.freq_mhz) ? (Number(c1.freq_mhz) + 4.5).toFixed(2) : '—'} MHz audio (NTSC-M). ` +
+          'Banda compartida con servicios móviles y pegada al retorno del cable (5–42 MHz): puede meter ruido al upstream ' +
+          'y muchos televisores/decos no sintonizan el canal 1. Si algún abonado no lo ve, usa el 28 (MAS TV. LOCAL) o el 125.'
+      );
+    }
+
     // ---- 3. Emisión real --------------------------------------------------
     // Se cuenta como entrega real si salieron paquetes en la muestra (aunque el
     // worker esté reconectando en ese instante).

@@ -1,4 +1,4 @@
-// ==================== NOMBRES DE LOS CANALES ANALÓGICOS (CH 2..125) =========
+// ==================== NOMBRES DE LOS CANALES ANALÓGICOS (CH 1..125) =========
 // Lista ordenada del operador. Se aplica al rótulo de cada portadora del plan
 // CATV (wk2500_channels.custom_name) y sale en el CSV de "página CANALES" que
 // se importa en los moduladores.
@@ -7,6 +7,8 @@
 // pon "" (o bórralo del objeto).
 
 export const ANALOG_CHANNEL_NAMES = {
+  // Canal 1 (44–50 MHz). Nombre de trabajo: cámbialo por el que uses.
+  1: 'CANAL 1',
   2: 'NACIONAL',
   3: 'TELEMUNDO',
   4: 'NACIONAL',
@@ -133,7 +135,7 @@ export const ANALOG_CHANNEL_NAMES = {
   125: 'Ometepe TV'
 };
 
-export const ANALOG_FIRST_CH = 2;
+export const ANALOG_FIRST_CH = 1;
 export const ANALOG_LAST_CH = 125;
 
 /** Filas { catv_ch, name } ordenadas, sin huecos. */

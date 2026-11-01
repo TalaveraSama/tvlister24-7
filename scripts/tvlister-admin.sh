@@ -1801,7 +1801,7 @@ cmd_catv() {
             ;;
         esac
       done
-      from="${from:-2}"
+      from="${from:-1}"
       to="${to:-125}"
       CATV_APPLY="$apply" CATV_FORCE="$force" CATV_FROM="$from" CATV_TO="$to" \
         "$NODE_BIN" --no-warnings --input-type=module -e '
@@ -1811,7 +1811,7 @@ cmd_catv() {
         ensureCatvSlotsInitialized();
         const apply = process.env.CATV_APPLY === "1";
         const force = process.env.CATV_FORCE === "1";
-        const from = Math.max(2, Number(process.env.CATV_FROM) || 2);
+        const from = Math.max(1, Number(process.env.CATV_FROM) || 1);
         const to = Math.min(125, Number(process.env.CATV_TO) || 125);
 
         const units = db.prepare("SELECT * FROM wk2500_units WHERE enabled = 1 ORDER BY id ASC").all();
@@ -2131,7 +2131,7 @@ cmd_catv() {
     names | nombres)
       # Uso: tvlister-admin catv names [--apply] [archivo]
       #
-      # Aplica la lista ordenada de nombres a las portadoras 2..125. Sin
+      # Aplica la lista ordenada de nombres a las portadoras 1..125. Sin
       # --apply sólo muestra qué cambiaría. El archivo opcional es una lista
       # "CH<TAB>NOMBRE" (o "CH,NOMBRE") para usar la tuya en vez de la incluida.
       local apply="0" file="" a3
@@ -2180,7 +2180,7 @@ cmd_catv() {
         const changes = rows.filter((r) => String(slots.get(r.catv_ch)?.custom_name || "") !== r.name);
 
         console.log("============================================================");
-        console.log("  Nombres de las portadoras analógicas (CH 2 al 125)");
+        console.log("  Nombres de las portadoras analógicas (CH 1 al 125)");
         console.log("============================================================");
         for (const r of rows) {
           const cur = String(slots.get(r.catv_ch)?.custom_name || "");

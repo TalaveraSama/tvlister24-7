@@ -1,7 +1,9 @@
-# Lista ordenada de canales analogicos del operador (portadoras CH 2 al 125)
+# Lista ordenada de canales analogicos del operador (portadoras CH 1 al 125)
 # Formato: CH<TAB>NOMBRE  —  editable. Se aplica con:
 #   tvlister-admin catv names --apply /opt/tvlister24-7/docs/canales_analogos_2_125.txt
 # Sin ruta se usa la lista incluida en el codigo (server/catvChannelNames.js).
+# CH 1 = 45.25 MHz (44-50 MHz): banda compartida, muchos TVs no lo sintonizan.
+1	CANAL 1
 2	NACIONAL
 3	TELEMUNDO
 4	NACIONAL

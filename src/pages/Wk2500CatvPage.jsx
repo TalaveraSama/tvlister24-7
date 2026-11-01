@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
 
-const CATV_NUMBERS = Array.from({ length: 124 }, (_, idx) => idx + 2);
+const CATV_NUMBERS = Array.from({ length: 125 }, (_, idx) => idx + 1); // CH 1..125
 
 export default function Wk2500CatvPage({ setActiveTab }) {
   const [plan, setPlan] = useState(null);
@@ -63,7 +63,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
 
   // Bulk WK2500 UDP Configurator Form
   const [bulkForm, setBulkForm] = useState({
-    ch_start: 2,
+    ch_start: 1,
     ch_end: 125,
     ip_mode: 'multicast',
     dest_ip: '239.25.0.0',
@@ -86,7 +86,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   const [quickForm, setQuickForm] = useState({
     model_channels: 32,
     count: 4,
-    start_ch: 2,
+    start_ch: 1,
     ip_mode: 'unicast',
     dest_ip: '192.168.25.10',
     base_port: 5000,
@@ -460,7 +460,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     try {
       const res = await apiFetch('/api/wk2500/units/auto-distribute', {
         method: 'POST',
-        body: JSON.stringify({ start_ch: 2 })
+        body: JSON.stringify({ start_ch: 1 })
       });
       await loadPlan(true);
       showToast(`📐 ${res.message}`);
@@ -941,7 +941,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
               <label className="text-[10px] text-slate-400 block mb-0.5">Desde CH</label>
               <input
                 type="number"
-                min={2}
+                min={1}
                 max={125}
                 value={quickForm.start_ch}
                 onChange={(e) => setQuickForm({ ...quickForm, start_ch: Number(e.target.value) })}
@@ -1361,12 +1361,12 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         </div>
       )}
 
-      {/* ── Lista de nombres CH 2..125 ─────────────────────────────────── */}
+      {/* ── Lista de nombres CH 1..125 ─────────────────────────────────── */}
       <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/30 p-4 space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
             <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-            Nombres de las portadoras (CH 2 al 125)
+            Nombres de las portadoras (CH 1 al 125)
           </h2>
           <div className="flex items-center gap-2">
             <button
@@ -1458,7 +1458,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Desde CH</label>
             <input
               type="number"
-              min={2}
+              min={1}
               max={125}
               value={udpEngine.form.from}
               onChange={(e) => setUdpEngine({ ...udpEngine, form: { ...udpEngine.form, from: Number(e.target.value) } })}
@@ -1469,7 +1469,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Hasta CH</label>
             <input
               type="number"
-              min={2}
+              min={1}
               max={125}
               value={udpEngine.form.to}
               onChange={(e) => setUdpEngine({ ...udpEngine, form: { ...udpEngine.form, to: Number(e.target.value) } })}
@@ -1589,7 +1589,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
             <input
               type="number"
-              min={2}
+              min={1}
               max={125}
               value={bulkForm.ch_start}
               onChange={(e) => setBulkForm({ ...bulkForm, ch_start: Number(e.target.value) })}
@@ -1598,7 +1598,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             />
             <input
               type="number"
-              min={2}
+              min={1}
               max={125}
               value={bulkForm.ch_end}
               onChange={(e) => setBulkForm({ ...bulkForm, ch_end: Number(e.target.value) })}
@@ -1660,7 +1660,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       {/* Main Selector & Per-Channel Activation Workspace */}
       <div className="rounded-2xl bg-[#0e1526] border border-slate-800 p-4 space-y-3.5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-800 pb-3">
-          {/* Switch between RF Grid (CH 2..125) and Stream-Centric Picker ("Elegir por Mis Canales -> CH 2, CH 3...") */}
+          {/* Switch between RF Grid (CH 1..125) and Stream-Centric Picker ("Elegir por Mis Canales -> CH 2, CH 3...") */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
@@ -2541,7 +2541,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                   <label className="mb-1 block text-[11px] text-slate-300">Canal inicial</label>
                   <input
                     type="number"
-                    min={2}
+                    min={1}
                     max={125}
                     value={modalUnit.form.ch_start}
                     onChange={(e) => {
@@ -2562,7 +2562,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                   <label className="mb-1 block text-[11px] text-slate-300">Canal final</label>
                   <input
                     type="number"
-                    min={2}
+                    min={1}
                     max={125}
                     value={modalUnit.form.ch_end}
                     onChange={(e) => setUnitModal({ ...modalUnit, form: { ...modalUnit.form, ch_end: Number(e.target.value) } })}

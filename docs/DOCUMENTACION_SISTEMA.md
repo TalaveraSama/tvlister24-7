@@ -2461,3 +2461,26 @@ CSV: `export-table?format=channel` (columna `Nombre_Canal` de la página CANALES
   *Aplicar lista*.
 - Tras aplicarlo hay que reimportar en cada modulador el CSV de la página CANALES para que
   cambien los rótulos en pantalla; el plan RF y las entradas UDP no se modifican.
+
+### v2.5.27: el canal 1 (grilla 1..125)
+
+La grilla CATV pasa de 2–125 a **1–125** (125 portadoras).
+
+- `catvPlan.js`: nueva banda `{ from: 1, to: 1, base: 44 }` en la familia US (`ntsc_m`, `ntsc_j`,
+  `pal_m`, `pal_n`) → **45.25 MHz vídeo / 49.75 MHz audio**. La familia europea sigue
+  empezando en 2 (no existe E1 en el plan CCIR).
+- `db.js`: `CHECK (catv_ch >= 1 AND catv_ch <= 125)` y **migración automática** de las bases
+  existentes: SQLite no permite alterar un CHECK, así que se reconstruye `wk2500_channels`
+  (create new + insert select + drop + rename) dentro de una transacción, con `PRAGMA
+  foreign_keys = OFF`, sólo si el DDL guardado contiene `catv_ch >= 2`. Idempotente.
+- `wk2500Manager.js`: `CATV_MIN_CH = 1`, `CATV_TOTAL_SLOTS = 125`; `ensureCatvSlotsInitialized`
+  crea desde `CATV_MIN_CH`; todas las validaciones usan las constantes en vez de 2/125
+  (canal suelto, swap/move, bulk, udp-engine, nombres); `quick_setup` y el auto-asignado
+  arrancan en `CATV_MIN_CH`.
+- `catvVerify.js`: comprobación `ch1` de nivel *warn* — recuerda que 44–50 MHz está compartida
+  con servicios móviles y pegada al retorno del cable (5–42 MHz), y que muchos televisores no
+  sintonizan el canal 1.
+- `catvChannelNames.js` + `docs/canales_analogos_2_125.txt`: 125 entradas; el CH 1 arranca como
+  «CANAL 1» (editable).
+- Consola: `catv fill` reparte desde el 1 por defecto. UI: `CATV_NUMBERS` 1..125 e inputs con
+  `min={1}`.
