@@ -102,6 +102,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   const [quickBusy, setQuickBusy] = useState(false);
 
   // Motor UDP de la salida CATV: TVLister (local, por defecto) o Flussonic (API)
+  // Lista de nombres de las portadoras (CH 2..125)
+  const [names, setNames] = useState({ preview: null, summary: '', busy: false });
+
   const [udpEngine, setUdpEngine] = useState({
     channels: [],
     servers: [],
@@ -126,6 +129,35 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       }));
     } catch {
       /* si todavía no hay plan CATV no se muestra el bloque */
+    }
+  };
+
+  const handlePreviewNames = async () => {
+    setNames((prev) => ({ ...prev, busy: true }));
+    try {
+      const r = await apiFetch('/api/wk2500/channel-names');
+      setNames({
+        busy: false,
+        preview: r.rows,
+        summary: `${r.total} portadoras en la lista · ${r.changed} por cambiar${
+          r.changed === 0 ? ' (ya están todos aplicados)' : ''
+        }`
+      });
+    } catch (err) {
+      setNames((prev) => ({ ...prev, busy: false }));
+      setErrorNotice(err.message);
+    }
+  };
+
+  const handleApplyNames = async () => {
+    setNames((prev) => ({ ...prev, busy: true }));
+    try {
+      const r = await apiFetch('/api/wk2500/channel-names', { method: 'POST', body: JSON.stringify({}) });
+      setNames({ busy: false, preview: null, summary: '✅ ' + (r.message || 'Nombres aplicados.') + ' ' + (r.note || '') });
+      await loadPlan(true);
+    } catch (err) {
+      setNames((prev) => ({ ...prev, busy: false }));
+      setErrorNotice(err.message);
     }
   };
 
@@ -1328,6 +1360,57 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           ⚠️ {errorNotice}
         </div>
       )}
+
+      {/* ── Lista de nombres CH 2..125 ─────────────────────────────────── */}
+      <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/30 p-4 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
+            <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+            Nombres de las portadoras (CH 2 al 125)
+          </h2>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handlePreviewNames}
+              disabled={names.busy}
+              className="px-2.5 py-1 rounded-lg bg-slate-700/60 hover:bg-slate-600/70 border border-slate-600 text-slate-200 text-[11px] font-bold disabled:opacity-40"
+            >
+              {names.busy ? '...' : 'Ver cambios'}
+            </button>
+            <button
+              type="button"
+              onClick={handleApplyNames}
+              disabled={names.busy}
+              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold disabled:opacity-40"
+            >
+              Aplicar lista
+            </button>
+          </div>
+        </div>
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Lista ordenada del operador para los canales analógicos. Se aplica al rótulo de cada
+          portadora y sale en el CSV de la página <strong className="text-slate-200">CANALES</strong> del
+          modulador. No cambia frecuencias, ni UDP, ni el stream asignado.
+        </p>
+        {names.summary && (
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">
+            {names.summary}
+          </div>
+        )}
+        {names.preview && names.preview.length > 0 && (
+          <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-700/60 bg-[#0b1120] p-2 text-[11px] font-mono">
+            {names.preview.map((r) => (
+              <div key={r.catv_ch} className="flex gap-2 py-0.5">
+                <span className="w-12 shrink-0 text-slate-500">CH{r.catv_ch}</span>
+                <span className="flex-1 truncate text-slate-200">{r.name}</span>
+                {r.current && r.current !== r.name && (
+                  <span className="truncate text-rose-300/80 line-through">{r.current}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* ── Motor UDP: TVLister o Flussonic 23.12 ─────────────────────── */}
       <div className="rounded-2xl bg-[#0e1526] border border-cyan-500/35 p-4 space-y-3">

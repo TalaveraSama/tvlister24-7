@@ -2128,6 +2128,92 @@ cmd_catv() {
         console.log("============================================================");
       '
       ;;
+    names | nombres)
+      # Uso: tvlister-admin catv names [--apply] [archivo]
+      #
+      # Aplica la lista ordenada de nombres a las portadoras 2..125. Sin
+      # --apply sólo muestra qué cambiaría. El archivo opcional es una lista
+      # "CH<TAB>NOMBRE" (o "CH,NOMBRE") para usar la tuya en vez de la incluida.
+      local apply="0" file="" a3
+      for a3 in "${@:2}"; do
+        case "$a3" in
+          --apply|-a) apply="1" ;;
+          --*) ;;
+          *) file="$a3" ;;
+        esac
+      done
+      NAMES_APPLY="$apply" NAMES_FILE="$file" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import fs from "node:fs";
+        import { initDb, db, withSqliteBusyRetry } from "./server/db.js";
+        import { analogChannelNameRows } from "./server/catvChannelNames.js";
+        initDb();
+
+        const file = String(process.env.NAMES_FILE || "").trim();
+        let rows = analogChannelNameRows();
+        if (file) {
+          if (!fs.existsSync(file)) {
+            console.error("❌ No encuentro el archivo " + file);
+            process.exit(1);
+          }
+          const text = fs.readFileSync(file, "utf8");
+          rows = [];
+          for (const line of text.split(/\r?\n/)) {
+            const t = line.trim();
+            if (!t || t.startsWith("#")) continue;
+            const m = t.match(/^(?:ch\s*)?(\d{1,3})\s*[\t,;|]\s*(.+)$/i);
+            if (!m) continue;
+            const ch = Number(m[1]);
+            if (ch < 2 || ch > 125) continue;
+            rows.push({ catv_ch: ch, name: m[2].trim() });
+          }
+          rows.sort((a, b) => a.catv_ch - b.catv_ch);
+          if (!rows.length) {
+            console.error("❌ El archivo no tiene líneas válidas. Formato:  CH<TAB>NOMBRE");
+            process.exit(1);
+          }
+        }
+
+        const slots = new Map(
+          db.prepare("SELECT catv_ch, custom_name, stream_id, custom_source_url FROM wk2500_channels").all()
+            .map((r) => [Number(r.catv_ch), r])
+        );
+        const changes = rows.filter((r) => String(slots.get(r.catv_ch)?.custom_name || "") !== r.name);
+
+        console.log("============================================================");
+        console.log("  Nombres de las portadoras analógicas (CH 2 al 125)");
+        console.log("============================================================");
+        for (const r of rows) {
+          const cur = String(slots.get(r.catv_ch)?.custom_name || "");
+          const mark = cur === r.name ? "  " : "->";
+          const ch = ("CH " + r.catv_ch).padEnd(6);
+          const before = cur && cur !== r.name ? cur.slice(0, 26).padEnd(28) : "".padEnd(28);
+          console.log("  " + mark + " " + ch + r.name.padEnd(30) + (cur !== r.name ? before : ""));
+        }
+        console.log("------------------------------------------------------------");
+        console.log("  " + rows.length + " portadoras en la lista · " + changes.length + " por cambiar");
+        if (!changes.length) {
+          console.log("  Ya están todos aplicados.");
+        } else if (String(process.env.NAMES_APPLY) !== "1") {
+          console.log("  Vista previa. Para aplicarlo:");
+          console.log("     tvlister-admin catv names --apply");
+        }
+
+        if (String(process.env.NAMES_APPLY) === "1" && changes.length) {
+          withSqliteBusyRetry(() => {
+            const stmt = db.prepare("UPDATE wk2500_channels SET custom_name = ?, updated_at = datetime(\x27now\x27) WHERE catv_ch = ?");
+            for (const r of rows) stmt.run(r.name, r.catv_ch);
+          });
+          console.log("");
+          console.log("✅ Nombres aplicados a " + rows.length + " portadoras.");
+          console.log("   En los moduladores: descarga el CSV de la página CANALES de cada");
+          console.log("   equipo (CATV WK2500 → plantilla CSV) y vuelve a importarlo para");
+          console.log("   que cambien los rótulos. Frecuencias y UDP no se tocan.");
+          console.log("   Los canales ya asignados conservan su stream.");
+        }
+        console.log("============================================================");
+      '
+      ;;
+
     udp-engine | udp | motor)
       # Uso: tvlister-admin catv udp-engine              (estado)
       #      tvlister-admin catv udp-engine local [canal|rango|all]
@@ -2802,6 +2888,7 @@ case "$ACTION" in
     echo " 21) Medir el UDP real que llega (Mbps, duplicados, desbalance) (catv watch)"
     echo " 22) Dejar la salida UDP constante, sin picos (catv steady)"
     echo " 22b) Elegir quién genera el UDP: TVLister o Flussonic 23.12 (catv udp-engine)"
+    echo " 22c) Aplicar la lista ordenada de nombres CH 2-125 (catv names)"
     echo " 23) Afinar el HLS con lo de XUI.one (hls xui safe|full|off)"
     echo " 24) Salud del sistema 24/7 (health) + mantenimiento"
     echo " 25) Proxy inverso para Cloudflare: panel sí, streams directos (cloudflare)"

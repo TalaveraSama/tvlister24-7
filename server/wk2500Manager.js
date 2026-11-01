@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process';
 import express from 'express';
 import { db, withSqliteBusyRetry } from './db.js';
 import { buildTemplate, renderTemplate, templateSummary, parseCsv } from './catvCsvTemplate.js';
+import { analogChannelNameRows } from './catvChannelNames.js';
 import { verifyCatv, setCatvWorkerSnapshot } from './catvVerify.js';
 import { requireAuth, requireAdmin } from './auth.js';
 import { MnfToTsRemuxer } from './mnfProtocol.js';
@@ -3069,6 +3070,62 @@ wk2500Router.put('/api/wk2500/channels/:catvCh', requireAuth, requireAdmin, (req
   }
 
   res.json({ ok: true });
+});
+
+// ==================== NOMBRES DE CANAL (CH 2..125) =========================
+// La lista ordenada del operador vive en server/catvChannelNames.js. Aquí se
+// previsualiza el cambio y se aplica al rótulo de cada portadora
+// (custom_name), que es lo que sale en el CSV de la página CANALES.
+
+wk2500Router.get('/api/wk2500/channel-names', requireAuth, requireAdmin, (_req, res) => {
+  ensureCatvSlotsInitialized();
+  const wanted = analogChannelNameRows();
+  const slots = new Map(
+    db.prepare('SELECT catv_ch, custom_name, stream_id, custom_source_url FROM wk2500_channels').all().map((r) => [Number(r.catv_ch), r])
+  );
+  const rows = wanted.map((w) => {
+    const cur = slots.get(w.catv_ch);
+    const current = String(cur?.custom_name || '');
+    return {
+      catv_ch: w.catv_ch,
+      name: w.name,
+      current,
+      changed: current !== w.name,
+      assigned: Boolean(cur?.stream_id || cur?.custom_source_url)
+    };
+  });
+  res.json({
+    total: rows.length,
+    changed: rows.filter((r) => r.changed).length,
+    missing: rows.filter((r) => r.missing).length,
+    rows
+  });
+});
+
+wk2500Router.post('/api/wk2500/channel-names', requireAuth, requireAdmin, (req, res) => {
+  ensureCatvSlotsInitialized();
+  const rows = analogChannelNameRows();
+  if (!rows.length) return res.status(400).json({ error: 'La lista de nombres está vacía.' });
+
+  let updated = 0;
+  withSqliteBusyRetry(() => {
+    const stmt = db.prepare(
+      "UPDATE wk2500_channels SET custom_name = ?, updated_at = datetime('now') WHERE catv_ch = ?"
+    );
+    for (const r of rows) {
+      const info = stmt.run(r.name, r.catv_ch);
+      updated += Number(info.changes) || 0;
+    }
+  });
+  res.json({
+    ok: true,
+    updated,
+    total: rows.length,
+    message: `Nombres aplicados a ${rows.length} portadoras (CH 2 al 125).`,
+    note:
+      'En los moduladores: descarga el CSV de la página CANALES de cada equipo y vuelve a importarlo para que ' +
+      'cambien los rótulos. El plan y las frecuencias no se tocan.'
+  });
 });
 
 // ==================== MOTOR UDP: TVLister o Flussonic (API) =================

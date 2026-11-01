@@ -2442,3 +2442,22 @@ deja `status='delegated'` (o `'error'` con el motivo) y reaplica cada 120 s;
 `udp_engine` y `flussonic_stream` (409 si el stream ya está ocupado). Consola:
 `catv udp-engine [status|local|flussonic|sync] [canal|rango|all] [stream]`. UI: tarjeta «Motor
 UDP» en CATV WK2500 con contadores, selector y botón de reaplicado.
+
+### v2.5.26: nombres de las portadoras analógicas (CH 2..125)
+
+Lista ordenada del operador en `server/catvChannelNames.js` (`ANALOG_CHANNEL_NAMES`, 124
+entradas sin huecos) y su copia editable en `docs/canales_analogos_2_125.txt`
+(`CH<TAB>NOMBRE`). Se aplica a `wk2500_channels.custom_name`, que es el rótulo que usan los
+CSV: `export-table?format=channel` (columna `Nombre_Canal` de la página CANALES) y
+`format=input`. No toca `freq_mhz`, `udp_host`, `udp_port`, `pkt_size`, `ttl` ni `stream_id`.
+
+- Consola: `catv names [--apply] [archivo]`. Sin `--apply` muestra la vista previa marcando
+  con `->` lo que cambia y con el nombre viejo al lado; con `--apply` escribe los 124 rótulos
+  (idempotente). Un archivo propio puede traer un subconjunto (sólo esos canales) y admite
+  separador tabulador, coma, punto y coma o barra vertical, con prefijo `CH` opcional.
+- API: `GET /api/wk2500/channel-names` (prevuelo con `current`, `changed`, `assigned`) y
+  `POST /api/wk2500/channel-names` (aplica). Sólo administradores.
+- UI: tarjeta «Nombres de las portadoras (CH 2 al 125)» en CATV WK2500 con *Ver cambios* y
+  *Aplicar lista*.
+- Tras aplicarlo hay que reimportar en cada modulador el CSV de la página CANALES para que
+  cambien los rótulos en pantalla; el plan RF y las entradas UDP no se modifican.
