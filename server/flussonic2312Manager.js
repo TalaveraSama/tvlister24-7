@@ -17,7 +17,7 @@ export const flussonic2312Router = express.Router();
 // Ephemeral in-memory store for 1-line SSH local push scripts (for NATed local Flussonic servers)
 const localPushJobs = new Map();
 
-function normalizeBaseUrl(raw = '') {
+export function normalizeBaseUrl(raw = '') {
   let clean = String(raw || '').trim();
   if (!clean) return '';
   // Remove hash fragments or pasted web UI / API suffixes (e.g. http://ip:8080/admin/#/streams)
@@ -508,7 +508,7 @@ async function fetchViaHeadendBridge(bridgeNode, url, options = {}, timeoutMs = 
   }
 }
 
-async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 8000, bridgeNode = null) {
+export async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 8000, bridgeNode = null) {
   if (bridgeNode) {
     return fetchViaHeadendBridge(bridgeNode, url, options, timeoutMs);
   }

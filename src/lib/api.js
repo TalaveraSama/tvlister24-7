@@ -28,6 +28,14 @@ export async function apiFetch(path, options = {}) {
   const data = contentType.includes('application/json') ? await res.json() : await res.text();
 
   if (!res.ok) {
+    // El panel está cerrado con código de acceso y esta sesión no lo tiene
+    // (cookie caducada, otro navegador...). Recargar muestra la pantalla del código.
+    if (res.status === 401 && typeof data === 'object' && data?.accessCodeRequired) {
+      if (typeof window !== 'undefined') {
+        window.location.replace('/');
+        return new Promise(() => {});
+      }
+    }
     const errMsg = typeof data === 'object' && data?.error ? data.error : `Error HTTP ${res.status}`;
     throw new Error(errMsg);
   }

@@ -515,6 +515,14 @@ function runInitDbBody() {
   ensureColumn('streams', 'headend_interlaced', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'headend_audio_in', "TEXT DEFAULT ''");
   ensureColumn('streams', 'original_source_url', "TEXT DEFAULT ''");
+  // Quién genera el UDP hacia el modulador: 'local' (TVLister) o 'flussonic'
+  // (el stream de Flussonic empuja por su API). Por defecto, local: lo de siempre.
+  ensureColumn('wk2500_channels', 'udp_engine', "TEXT NOT NULL DEFAULT 'local'");
+  ensureColumn('wk2500_channels', 'flussonic_stream', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('wk2500_channels', 'flussonic_server_id', 'INTEGER');
+  // Última salida UDP escrita en Flussonic, para poder retirarla al cambiar
+  // de puerto o volver al motor local sin tocar las demás salidas del stream.
+  ensureColumn('wk2500_channels', 'flussonic_output_url', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('streams', 'flussonic_server_id', 'INTEGER');
   ensureColumn('streams', 'flussonic_stream_name', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');

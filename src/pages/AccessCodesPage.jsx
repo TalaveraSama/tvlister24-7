@@ -39,6 +39,7 @@ function Modal({ title, children, onClose }) {
 
 export default function AccessCodesPage() {
   const [codes, setCodes] = useState([]);
+  const [gate, setGate] = useState({ forced: false, gated: false, total: 0, active: 0, uiCreate: false });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -56,6 +57,7 @@ export default function AccessCodesPage() {
     try {
       const res = await apiFetch('/api/access-codes');
       setCodes(res.codes || []);
+      if (res.state) setGate(res.state);
       setError('');
     } catch (err) {
       setError(err.message || 'No se pudieron cargar los códigos.');
@@ -178,26 +180,39 @@ export default function AccessCodesPage() {
             Llave previa al login del panel, como en XUI.one.
           </p>
         </div>
-        <button
-          onClick={openCreate}
-          className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
-        >
-          <Plus size={16} /> Add Code
-        </button>
+        {gate.uiCreate ? (
+          <button
+            onClick={openCreate}
+            className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
+          >
+            <Plus size={16} /> Add Code
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 rounded-md border border-slate-600 bg-slate-800/60 px-3 py-2 font-mono text-xs text-slate-300">
+            <KeyRound size={14} className="text-sky-400" />
+            tvlister-admin access-code add micodigo admin
+          </div>
+        )}
       </div>
 
       {/* Aviso */}
       <div className="rounded-md border border-slate-600/70 bg-slate-700/40 px-5 py-4 text-sm text-slate-200">
-        {activeCount > 0 ? (
+        {gate.gated ? (
           <>
-            Los códigos protegen el panel: quien no tenga uno <strong>no llega ni a la pantalla de
-            entrada</strong>. Los clientes IPTV (get.php, player_api.php, HLS, MAG) siguen funcionando
-            igual, nunca piden código. Se aplican al instante, sin recargar el servidor web.
+            El panel está <strong>cerrado</strong>: quien no tenga un código no llega ni a la pantalla de
+            entrada. Los códigos se crean <strong>sólo desde la terminal del servidor</strong>
+            (<code className="rounded bg-slate-800 px-1 py-0.5 text-[11px] text-sky-300">tvlister-admin
+            access-code add micodigo admin</code>). Los clientes IPTV (get.php, player_api.php, HLS,
+            MAG) siguen funcionando igual: nunca piden código.
           </>
         ) : (
           <>
             Ahora mismo el panel está <strong>abierto</strong>: cualquiera que conozca la dirección ve el
-            login. Crea un código para poner una llave delante.
+            login. Ciérralo desde la terminal con{' '}
+            <code className="rounded bg-slate-800 px-1 py-0.5 text-[11px] text-sky-300">
+              tvlister-admin access-code close
+            </code>{' '}
+            y crea después tu código.
           </>
         )}
       </div>
@@ -379,6 +394,8 @@ export default function AccessCodesPage() {
           <pre className="mt-2 overflow-x-auto rounded bg-[#0b1120] p-3 text-xs text-slate-300">
 {`tvlister-admin access-code list
 tvlister-admin access-code add miclave admin
+tvlister-admin access-code close      # exige código siempre
+tvlister-admin access-code open       # quita el cierre
 tvlister-admin access-code off        # apaga todos`}
           </pre>
         </div>

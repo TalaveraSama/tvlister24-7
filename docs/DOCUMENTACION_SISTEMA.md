@@ -2409,3 +2409,36 @@ playlist. Bucle de hasta 4 niveles:
 Motivo: con la v2.5.22, ante una fuente que devuelve playlist maestra → variante → segmento, el
 comando tomaba la variante como «segmento» (939 B, `application/vnd.apple.mpegurl`) y daba
 `[OK]` sin haber comprobado ningún byte de vídeo.
+
+### v2.5.25: candado del panel y motor UDP delegable a Flussonic
+
+**Candado del panel.** Ajuste `panel_gate_required` (settings). `accessCodesEnabled()` pasa a
+devolver `true` si existe algún código activo **o** si el candado está forzado, así que se puede
+dejar el panel invisible antes de crear el primer código. La pantalla de entrada, cuando no hay
+ninguno, muestra el comando exacto de terminal. `/api/auth/*` deja de estar exento: sin la cookie
+del código, `POST /api/auth/login` devuelve `401 {"accessCodeRequired":true}` (antes se podía
+obtener token con un `curl` saltando la puerta). Crear códigos desde el panel devuelve `403`
+salvo que se active `access_code_ui_create=1`. Consola: `access-code close|open`. En la SPA,
+`apiFetch` recarga la página ante un 401 con `accessCodeRequired` (cookie caducada).
+
+**Motor UDP.** Columna `wk2500_channels.udp_engine` (`local` por defecto — comportamiento
+histórico intacto — o `flussonic`), más `flussonic_stream`, `flussonic_server_id` y
+`flussonic_output_url` (última salida escrita, para poder sustituirla). Módulo
+`server/flussonicUdp.js`:
+
+- `buildFlussonicUdpOutputUrl(slot)` replica la URL del motor local (`udp://`/`rtp://` con
+  `pkt_size`, `ttl`, `localaddr`).
+- `applyFlussonicUdp` / `removeFlussonicUdp`: `PATCH` a `/streamer/api/v3/streams/<name>`;
+  si el servidor no admite PATCH (400/404/405/422/5xx) hace `GET` + `PUT` con una lista blanca
+  de campos escribibles (nunca `stats`/`status`). Conserva las salidas ajenas y sustituye la
+  propia gracias a `flussonic_output_url`.
+- `syncFlussonicUdpOutputs`: reconcilia todos los canales en ese modo y detecta dos canales CATV
+  apuntando al mismo stream (un stream = una salida UDP); en ese caso informa y no escribe.
+
+`startWk2500ChannelWorker` bifurca: con `udp_engine='flussonic'` no abre socket ni lanza ffmpeg,
+deja `status='delegated'` (o `'error'` con el motivo) y reaplica cada 120 s;
+`stopWk2500ChannelWorker` retira la salida del stream. API: `GET/POST /api/wk2500/udp-engine`,
+`POST /api/wk2500/flussonic-udp/{sync,remove}`; `PUT /api/wk2500/channels/:ch` acepta
+`udp_engine` y `flussonic_stream` (409 si el stream ya está ocupado). Consola:
+`catv udp-engine [status|local|flussonic|sync] [canal|rango|all] [stream]`. UI: tarjeta «Motor
+UDP» en CATV WK2500 con contadores, selector y botón de reaplicado.

@@ -101,10 +101,78 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   });
   const [quickBusy, setQuickBusy] = useState(false);
 
+  // Motor UDP de la salida CATV: TVLister (local, por defecto) o Flussonic (API)
+  const [udpEngine, setUdpEngine] = useState({
+    channels: [],
+    servers: [],
+    busy: false,
+    lastMessage: '',
+    form: { engine: 'local', from: 2, to: 125, stream: '' }
+  });
+
   const showToast = (msg) => {
     setErrorNotice('');
     setNotice(msg);
     setTimeout(() => setNotice(''), 9000);
+  };
+
+  const loadUdpEngine = async () => {
+    try {
+      const res = await apiFetch('/api/wk2500/udp-engine');
+      setUdpEngine((prev) => ({
+        ...prev,
+        channels: res.channels || [],
+        servers: res.servers || []
+      }));
+    } catch {
+      /* si todavía no hay plan CATV no se muestra el bloque */
+    }
+  };
+
+  const handleApplyUdpEngine = async () => {
+    const { engine, from, to, stream } = udpEngine.form;
+    setUdpEngine((prev) => ({ ...prev, busy: true }));
+    try {
+      const res = await apiFetch('/api/wk2500/udp-engine', {
+        method: 'POST',
+        body: JSON.stringify({
+          engine,
+          ch_start: Number(from),
+          ch_end: Number(to),
+          flussonic_stream: stream ? stream.trim() : undefined
+        })
+      });
+      setUdpEngine((prev) => ({ ...prev, busy: false, lastMessage: res.message || 'Aplicado.' }));
+      if (res.skipped?.length) {
+        setWarningNotice(
+          `Sin cambiar ${res.skipped.length} canal(es): ` +
+            res.skipped.slice(0, 4).map((x) => `CH${x.catv_ch} (${x.reason})`).join(' · ')
+        );
+      }
+      await loadPlan(true);
+      await loadUdpEngine();
+    } catch (err) {
+      setUdpEngine((prev) => ({ ...prev, busy: false }));
+      setErrorNotice(err.message);
+    }
+  };
+
+  const handleSyncFlussonicUdp = async () => {
+    setUdpEngine((prev) => ({ ...prev, busy: true }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-udp/sync', { method: 'POST', body: JSON.stringify({}) });
+      setUdpEngine((prev) => ({
+        ...prev,
+        busy: false,
+        lastMessage:
+          `Flussonic: ${r.applied} salida(s) aplicada(s), ${r.unchanged} ya estaban, ${r.failed} con error.` +
+          (r.failed ? ' · ' + (r.results || []).filter((x) => !x.ok).slice(0, 3).map((x) => `CH${x.catv_ch}: ${x.error}`).join(' | ') : '')
+      }));
+      await loadUdpEngine();
+    } catch (err) {
+      setUdpEngine((prev) => ({ ...prev, busy: false }));
+      setErrorNotice(err.message);
+    }
   };
 
   const loadPlan = async (silent = false) => {
@@ -1260,6 +1328,125 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           ⚠️ {errorNotice}
         </div>
       )}
+
+      {/* ── Motor UDP: TVLister o Flussonic 23.12 ─────────────────────── */}
+      <div className="rounded-2xl bg-[#0e1526] border border-cyan-500/35 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
+            <Network className="w-4 h-4 text-cyan-400" />
+            Motor UDP: quién empuja el TS a los moduladores
+          </h2>
+          <div className="flex items-center gap-2 text-[10px]">
+            <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-bold">
+              TVLister: {udpEngine.channels.filter((c) => (c.engine || 'local') === 'local').length}
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 font-bold">
+              Flussonic: {udpEngine.channels.filter((c) => c.engine === 'flussonic').length}
+            </span>
+          </div>
+        </div>
+
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Por defecto el UDP lo genera <strong className="text-slate-200">TVLister</strong> (socket propio o ffmpeg),
+          exactamente como hasta ahora. Si eliges <strong className="text-indigo-300">Flussonic 23.12</strong>, ese
+          stream empuja el MPEG-TS a la misma IP/puerto del modulador y TVLister deja de abrir sockets para esos
+          canales: sólo configura y vigila la salida por la API de Flussonic.
+        </p>
+
+        {!udpEngine.servers.length && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+            No hay ningún servidor Flussonic dado de alta. Añádelo en «Flussonic 23.12» para poder usar ese motor.
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 text-xs items-end">
+          <div className="sm:col-span-2">
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Motor</label>
+            <select
+              value={udpEngine.form.engine}
+              onChange={(e) => setUdpEngine({ ...udpEngine, form: { ...udpEngine.form, engine: e.target.value } })}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+            >
+              <option value="local">TVLister (socket/ffmpeg propio)</option>
+              <option value="flussonic">Flussonic 23.12 (salida UDP por API)</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Desde CH</label>
+            <input
+              type="number"
+              min={2}
+              max={125}
+              value={udpEngine.form.from}
+              onChange={(e) => setUdpEngine({ ...udpEngine, form: { ...udpEngine.form, from: Number(e.target.value) } })}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-cyan-300 font-bold"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Hasta CH</label>
+            <input
+              type="number"
+              min={2}
+              max={125}
+              value={udpEngine.form.to}
+              onChange={(e) => setUdpEngine({ ...udpEngine, form: { ...udpEngine.form, to: Number(e.target.value) } })}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-cyan-300 font-bold"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleApplyUdpEngine}
+            disabled={udpEngine.busy}
+            className="px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white font-bold"
+          >
+            {udpEngine.busy ? 'Aplicando...' : 'Aplicar'}
+          </button>
+        </div>
+
+        {udpEngine.form.engine === 'flussonic' && (
+          <input
+            value={udpEngine.form.stream}
+            onChange={(e) => setUdpEngine({ ...udpEngine, form: { ...udpEngine.form, stream: e.target.value } })}
+            placeholder="Nombre del stream en Flussonic (vacío = el del canal del panel)"
+            className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-slate-200 text-xs"
+          />
+        )}
+
+        {udpEngine.lastMessage && (
+          <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-[11px] text-cyan-200">
+            {udpEngine.lastMessage}
+          </div>
+        )}
+
+        {udpEngine.channels.some((c) => c.engine === 'flussonic') && (
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">Delegados:</span>
+            {udpEngine.channels
+              .filter((c) => c.engine === 'flussonic')
+              .slice(0, 14)
+              .map((c) => (
+                <span
+                  key={c.catv_ch}
+                  title={`${c.udp_host}:${c.udp_port} · stream ${c.stream_for_flussonic || '(sin nombre)'}`}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                    c.live_status === 'error'
+                      ? 'bg-rose-500/15 text-rose-300'
+                      : 'bg-indigo-500/15 text-indigo-300'
+                  }`}
+                >
+                  CH{c.catv_ch}
+                </span>
+              ))}
+            <button
+              type="button"
+              onClick={handleSyncFlussonicUdp}
+              className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/40 text-indigo-200 text-[11px] font-bold"
+            >
+              <RefreshCw className="w-3 h-3" /> Reaplicar en Flussonic
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Collapsible / Compact MNF Trunk & Bulk UDP Addressing Cards */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">

@@ -49,7 +49,8 @@ const EXEMPT_PREFIXES = [
   '/hls_out/',
   '/streaming/',
   '/api/webtv/',
-  '/api/auth/',
+  // OJO: /api/auth/ NO va exento. Si el login por API quedara abierto, el código
+  // se saltaría con un curl y no protegería nada: la puerta es previa al login.
   '/api/portal',
   '/slates/'
 ];
@@ -72,8 +73,51 @@ function getEnabledCache() {
   return cache;
 }
 
+function getSetting(key) {
+  try {
+    return String(db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value || '');
+  } catch {
+    return '';
+  }
+}
+
+export function setPanelSetting(key, value) {
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, String(value));
+  invalidateAccessCodeCache();
+}
+
+/** El panel exige código siempre, aunque todavía no se haya creado ninguno. */
+export function panelGateForced() {
+  return getSetting('panel_gate_required') === '1';
+}
+
+/**
+ * ¿Hay que pedir código para entrar?
+ *  - porque existe al menos uno activo, o
+ *  - porque el panel está cerrado a propósito (panel_gate_required=1).
+ * El segundo caso es el que permite dejar el panel invisible antes de crear el
+ * primer código: nadie entra hasta que se cree uno desde la terminal.
+ */
 export function accessCodesEnabled() {
-  return getEnabledCache().count > 0;
+  return getEnabledCache().count > 0 || panelGateForced();
+}
+
+/** ¿Se pueden crear códigos desde el panel? Por defecto NO: sólo desde terminal. */
+export function panelCodeCreationAllowed() {
+  return getSetting('access_code_ui_create') === '1';
+}
+
+export function panelGateState() {
+  const codes = db.prepare('SELECT COUNT(*) AS total, SUM(enabled) AS activos FROM access_codes').get();
+  return {
+    forced: panelGateForced(),
+    gated: accessCodesEnabled(),
+    total: Number(codes?.total || 0),
+    active: Number(codes?.activos || 0),
+    uiCreate: panelCodeCreationAllowed()
+  };
 }
 
 // --- CRUD ------------------------------------------------------------------
@@ -238,7 +282,7 @@ function esc(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-function renderGate({ error = '', next = '/', retry = 0 }) {
+function renderGate({ error = '', next = '/', retry = 0, noCodes = false }) {
   const msg = retry
     ? `Demasiados intentos. Espera ${retry} segundos.`
     : error || '';
@@ -271,6 +315,8 @@ function renderGate({ error = '', next = '/', retry = 0 }) {
   .err{margin:0 0 16px;padding:10px 12px;border-radius:8px;background:rgba(244,63,94,.12);
        border:1px solid rgba(244,63,94,.35);color:#fda4af;font-size:12.5px}
   .foot{margin-top:18px;font-size:11px;color:#64748b;text-align:center;line-height:1.5}
+  .foot code{display:inline-block;margin-top:6px;padding:4px 7px;border-radius:6px;
+       background:#0a1120;border:1px solid #24314a;color:#93c5fd;font-size:10.5px}
 </style>
 </head>
 <body>
@@ -282,7 +328,11 @@ function renderGate({ error = '', next = '/', retry = 0 }) {
     <input id="code" name="code" type="password" autocomplete="current-password" autofocus required />
     <input type="hidden" name="next" value="${esc(next)}" />
     <button type="submit">Entrar</button>
-    <div class="foot">El código se recuerda 7 días en este navegador.</div>
+    <div class="foot">${
+      noCodes
+        ? 'Todavía no hay ningún código creado. Se crean en el servidor:<br><code>tvlister-admin access-code add micodigo admin</code>'
+        : 'El código se recuerda 7 días en este navegador.'
+    }</div>
   </form>
 </body>
 </html>`;
@@ -312,7 +362,10 @@ export function accessCodeMiddleware(req, res, next) {
     });
   }
 
-  res.status(200).type('html').send(renderGate({ next: safeNext(req.originalUrl || '/') }));
+  res
+    .status(200)
+    .type('html')
+    .send(renderGate({ next: safeNext(req.originalUrl || '/'), noCodes: getEnabledCache().count === 0 }));
 }
 
 // --- Router: canje del código y administración -----------------------------
@@ -346,10 +399,21 @@ accessCodesRouter.get('/access', (req, res) => {
 
 // Estado para la pantalla del panel (sólo administradores)
 accessCodesRouter.get('/api/access-codes', requireAuth, requireAdmin, (_req, res) => {
-  res.json({ codes: listAccessCodes(), types: ACCESS_TYPES });
+  res.json({
+    codes: listAccessCodes(),
+    types: ACCESS_TYPES,
+    state: panelGateState()
+  });
 });
 
 accessCodesRouter.post('/api/access-codes', requireAuth, requireAdmin, (req, res) => {
+  if (!panelCodeCreationAllowed()) {
+    return res.status(403).json({
+      error:
+        'Los códigos de acceso se crean sólo desde la terminal del servidor: ' +
+        'tvlister-admin access-code add <codigo> [admin|admin_api|reseller] [nota]'
+    });
+  }
   const result = createAccessCode(req.body || {});
   if (result.error) return res.status(400).json({ error: result.error });
   res.json({ ok: true, ...result });

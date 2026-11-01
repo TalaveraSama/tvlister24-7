@@ -305,10 +305,13 @@ cmd_access_code() {
   case "$action" in
     list | ls | "")
       AC_ACTION="list" "$NODE_BIN" --no-warnings --input-type=module -e '
-        import { initDb } from "./server/db.js";
+        import { initDb, db } from "./server/db.js";
         import { listAccessCodes } from "./server/accessCodes.js";
         initDb();
         const rows = listAccessCodes();
+        const state = {
+          get: (k) => db.prepare("SELECT value FROM settings WHERE key = ?").get(k)
+        };
         console.log("============================================================");
         console.log("  Códigos de acceso al panel (estilo XUI.one)");
         console.log("============================================================");
@@ -326,10 +329,18 @@ cmd_access_code() {
           if (r.notes) console.log(`         nota: ${r.notes}`);
         }
         const activos = rows.filter((r) => r.enabled).length;
+        const forzado = String(state.get("panel_gate_required")?.value || "") === "1";
         console.log("------------------------------------------------------------");
-        console.log(activos > 0
-          ? `  ${activos} código(s) activo(s): el panel pide código antes del login.`
-          : "  Ningún código activo: el panel está ABIERTO.");
+        if (activos > 0) {
+          console.log(`  ${activos} código(s) activo(s): el panel pide código antes del login.`);
+        } else if (forzado) {
+          console.log("  Panel CERRADO (sin códigos): nadie puede entrar hasta que crees uno.");
+          console.log("  Crea el primero con:  tvlister-admin access-code add micodigo admin");
+        } else {
+          console.log("  Ningún código activo: el panel está ABIERTO (solo el login lo protege).");
+          console.log("  Ciérralo con:         tvlister-admin access-code close");
+        }
+        console.log(`  Alta de códigos desde el panel: ${String(state.get("access_code_ui_create")?.value || "") === "1" ? "PERMITIDA" : "NO (sólo terminal)"}`);
         console.log("  Se aplican al instante (no hace falta recargar nginx).");
         console.log("============================================================");
       '
@@ -342,7 +353,7 @@ cmd_access_code() {
       fi
       AC_CODE="$arg1" AC_TYPE="${arg2:-admin}" AC_NOTES="$arg3" "$NODE_BIN" --no-warnings --input-type=module -e '
         import { initDb } from "./server/db.js";
-        import { createAccessCode } from "./server/accessCodes.js";
+        import { createAccessCode, setPanelSetting } from "./server/accessCodes.js";
         initDb();
         const res = createAccessCode({
           code: process.env.AC_CODE,
@@ -353,6 +364,7 @@ cmd_access_code() {
           console.error("❌ " + res.error);
           process.exit(1);
         }
+        setPanelSetting("panel_gate_required", "1");
         console.log(`✅ Código creado (#${res.id}): ${res.code}`);
         console.log("   Entra en:  /?access=" + encodeURIComponent(res.code));
         console.log("   Ya está activo: el panel pide código antes del login.");
@@ -417,6 +429,36 @@ cmd_access_code() {
       '
       ;;
 
+    close | cerrar | lock)
+      AC_VAL="1" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { setPanelSetting, panelGateState } from "./server/accessCodes.js";
+        initDb();
+        setPanelSetting("panel_gate_required", process.env.AC_VAL || "1");
+        const st = panelGateState();
+        console.log("🔒 Panel cerrado: sin código de acceso no se ve ni la pantalla de login.");
+        if (!st.active) {
+          console.log("   Todavía no hay ningún código activo. Crea el primero AHORA:");
+          console.log("     tvlister-admin access-code add micodigo admin");
+          console.log("   (hasta entonces nadie puede entrar, ni tú: se abre con)");
+          console.log("     tvlister-admin access-code open");
+        }
+      '
+      ;;
+
+    open | abrir | unlock)
+      AC_VAL="0" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { setPanelSetting, panelGateState } from "./server/accessCodes.js";
+        initDb();
+        setPanelSetting("panel_gate_required", process.env.AC_VAL || "0");
+        const st = panelGateState();
+        console.log(st.active
+          ? "✅ Candado forzado desactivado. Siguen mandando los códigos activos (" + st.active + ")."
+          : "🔓 Panel abierto: vuelve a verse el login normal, sin código.");
+      '
+      ;;
+
     url | enlace)
       if [ -z "$arg1" ]; then
         echo "Uso: tvlister-admin access-code url <codigo>"
@@ -435,6 +477,8 @@ cmd_access_code() {
       echo "  tvlister-admin access-code on  <codigo|id>    activa"
       echo "  tvlister-admin access-code off [codigo|id]    desactiva (sin argumento: todos)"
       echo "  tvlister-admin access-code rm  <codigo|id>    elimina"
+      echo "  tvlister-admin access-code close              cierra el panel (exige código siempre)"
+      echo "  tvlister-admin access-code open               quita el cierre forzado"
       echo "  tvlister-admin access-code url <codigo>       enlace con el código"
       return 1
       ;;
@@ -2084,6 +2128,141 @@ cmd_catv() {
         console.log("============================================================");
       '
       ;;
+    udp-engine | udp | motor)
+      # Uso: tvlister-admin catv udp-engine              (estado)
+      #      tvlister-admin catv udp-engine local [canal|rango|all]
+      #      tvlister-admin catv udp-engine flussonic [canal|rango|all] [stream]
+      #      tvlister-admin catv udp-engine sync          (reaplica en Flussonic)
+      #
+      # Quién genera el MPEG-TS hacia el modulador:
+      #   local     = TVLister (socket propio / ffmpeg)   ← por defecto, lo de siempre
+      #   flussonic = el stream de Flussonic 23.12, por su API
+      local action="${2:-status}" target="${3:-all}" stream="${4:-}"
+      case "$action" in
+        status | "")
+          "$NODE_BIN" --no-warnings --input-type=module -e '
+            import { initDb, db } from "./server/db.js";
+            import { listFlussonicServers } from "./server/flussonicUdp.js";
+            initDb();
+            const rows = db.prepare(
+              `SELECT w.catv_ch, w.udp_host, w.udp_port, w.enabled, w.udp_engine, w.flussonic_stream,
+                      s.name AS stream_name, s.flussonic_stream_name AS mapped
+                 FROM wk2500_channels w LEFT JOIN streams s ON s.id = w.stream_id
+                WHERE w.stream_id IS NOT NULL OR w.custom_source_url <> \x27\x27
+                ORDER BY w.catv_ch ASC`
+            ).all();
+            const servers = listFlussonicServers();
+            console.log("============================================================");
+            console.log("  Motor UDP de la salida CATV");
+            console.log("============================================================");
+            const local = rows.filter((r) => (r.udp_engine || "local") === "local");
+            const flu = rows.filter((r) => r.udp_engine === "flussonic");
+            console.log("  TVLister (local) : " + local.length + " canal(es)");
+            console.log("  Flussonic (API)  : " + flu.length + " canal(es)");
+            console.log("  Servidores Flussonic: " + (servers.length ? servers.map((s) => `#${s.id} ${s.name} <${s.base_url}>`).join(" · ") : "ninguno"));
+            if (flu.length) {
+              console.log("");
+              console.log("  Canales delegados a Flussonic:");
+              for (const r of flu) {
+                const name = r.flussonic_stream || r.mapped || "(sin stream)";
+                console.log("   CH" + String(r.catv_ch).padEnd(4) + (r.udp_host + ":" + r.udp_port).padEnd(22) +
+                  " stream: " + name.padEnd(22) + (r.enabled ? "ON" : "off") + "  " + (r.stream_name || ""));
+              }
+            }
+            console.log("");
+            console.log("  Cambiar uno:   tvlister-admin catv udp-engine flussonic 12 mi_stream");
+            console.log("  Un rango:      tvlister-admin catv udp-engine flussonic 2-33");
+            console.log("  Volver a local: tvlister-admin catv udp-engine local 12");
+            console.log("  Reaplicar todo: tvlister-admin catv udp-engine sync");
+            console.log("============================================================");
+          '
+          ;;
+
+        sync | apply | reaplicar)
+          CATV_CH="$target" "$NODE_BIN" --no-warnings --input-type=module -e '
+            import { initDb } from "./server/db.js";
+            import { syncFlussonicUdpOutputs } from "./server/flussonicUdp.js";
+            initDb();
+            const only = process.env.CATV_CH && process.env.CATV_CH !== "all" ? Number(process.env.CATV_CH) : null;
+            const r = await syncFlussonicUdpOutputs({ onlyCatvCh: only });
+            if (!r.total) {
+              console.log("  No hay canales en modo Flussonic. Nada que reaplicar.");
+              process.exit(0);
+            }
+            console.log("============================================================");
+            console.log("  Salidas UDP empujadas a Flussonic");
+            console.log("============================================================");
+            for (const x of r.results) {
+              console.log("  " + (x.ok ? (x.already ? "[=] " : "[OK]") : "[!!]") +
+                " CH" + String(x.catv_ch).padEnd(4) +
+                (x.url || "").padEnd(46) + (x.ok ? (x.already ? "ya estaba" : x.method || "") : (x.error || "")));
+            }
+            console.log("------------------------------------------------------------");
+            console.log(`  ${r.applied} aplicadas · ${r.unchanged} sin cambios · ${r.failed} con error`);
+            console.log("============================================================");
+            process.exit(r.failed ? 1 : 0);
+          '
+          ;;
+
+        local | flussonic)
+          ENGINE="$action" TARGET="$target" FSTREAM="$stream" "$NODE_BIN" --no-warnings --input-type=module -e '
+            import { initDb, db, withSqliteBusyRetry } from "./server/db.js";
+            initDb();
+            const engine = process.env.ENGINE;
+            const target = String(process.env.TARGET || "all");
+            const forcedStream = String(process.env.FSTREAM || "").trim();
+            let channels = [];
+            if (target === "all") {
+              channels = db.prepare("SELECT catv_ch FROM wk2500_channels WHERE stream_id IS NOT NULL OR custom_source_url <> \x27\x27 ORDER BY catv_ch").all().map((r) => r.catv_ch);
+            } else if (/^\d+-\d+$/.test(target)) {
+              const [a, b] = target.split("-").map(Number);
+              for (let ch = Math.max(2, a); ch <= Math.min(125, b); ch += 1) channels.push(ch);
+            } else {
+              channels.push(Number(target));
+            }
+            if (engine === "flussonic") {
+              const servers = db.prepare("SELECT id, name FROM flussonic_servers ORDER BY id").all();
+              if (!servers.length) {
+                console.error("❌ No hay servidores Flussonic dados de alta (sección Flussonic 23.12).");
+                console.error("   El UDP sigue saliendo por TVLister: no se cambió nada.");
+                process.exit(1);
+              }
+            }
+            let done = 0;
+            const skipped = [];
+            for (const ch of channels) {
+              const slot = db.prepare("SELECT * FROM wk2500_channels WHERE catv_ch = ?").get(ch);
+              if (!slot) { skipped.push(`CH${ch} sin slot`); continue; }
+              let name = forcedStream;
+              if (!name) {
+                name = slot.flussonic_stream || "";
+                if (!name && slot.stream_id) {
+                  name = db.prepare("SELECT flussonic_stream_name FROM streams WHERE id = ?").get(slot.stream_id)?.flussonic_stream_name || "";
+                }
+              }
+              if (engine === "flussonic" && !name) {
+                skipped.push(`CH${ch} sin stream de Flussonic`);
+                continue;
+              }
+              withSqliteBusyRetry(() => {
+                db.prepare("UPDATE wk2500_channels SET udp_engine = ?, flussonic_stream = COALESCE(NULLIF(?, \x27\x27), flussonic_stream), updated_at = datetime(\x27now\x27) WHERE catv_ch = ?")
+                  .run(engine, name, ch);
+              });
+              done += 1;
+            }
+            console.log(`✅ ${done} canal(es) en modo ${engine === "flussonic" ? "Flussonic 23.12 (API)" : "TVLister (local)"}.`);
+            if (skipped.length) {
+              console.log("   Sin cambiar: " + skipped.slice(0, 8).join(" · ") + (skipped.length > 8 ? ` (+${skipped.length - 8})` : ""));
+            }
+            console.log("   Reinicia la salida para aplicarlo:  tvlister-admin restart");
+            if (engine === "flussonic") console.log("   Luego verifica:                     tvlister-admin catv udp-engine sync");
+          '
+          ;;
+
+        *) echo "Uso: tvlister-admin catv udp-engine [status|local|flussonic|sync] [canal|rango|all] [stream_flussonic]" ;;
+      esac
+      ;;
+
     steady)
       # Comprueba (y si se pide, aplica) que la salida UDP salga CONSTANTE:
       # cada canal por FFmpeg con -re, y opcionalmente con muxrate (CBR).
@@ -2622,6 +2801,7 @@ case "$ACTION" in
     echo " 20) Asignar canales del panel a las portadoras CATV (catv fill)"
     echo " 21) Medir el UDP real que llega (Mbps, duplicados, desbalance) (catv watch)"
     echo " 22) Dejar la salida UDP constante, sin picos (catv steady)"
+    echo " 22b) Elegir quién genera el UDP: TVLister o Flussonic 23.12 (catv udp-engine)"
     echo " 23) Afinar el HLS con lo de XUI.one (hls xui safe|full|off)"
     echo " 24) Salud del sistema 24/7 (health) + mantenimiento"
     echo " 25) Proxy inverso para Cloudflare: panel sí, streams directos (cloudflare)"
