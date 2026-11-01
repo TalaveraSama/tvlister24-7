@@ -46,6 +46,31 @@ export default function WebTvPortal({ onBackToAdmin }) {
 
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
+  // Para que la lista y el reproductor vayan juntos: el reproductor queda
+  // fijo arriba en el móvil y la lista se desplaza solo por dentro.
+  const listRef = useRef(null);
+  const activeItemRef = useRef(null);
+  const headerRef = useRef(null);
+  // Alto real de la barra superior. Antes se suponían 57 px fijos: en cuanto la
+  // barra ocupa dos líneas (móvil, o escritorio estrecho), la lista quedaba más
+  // alta que la pantalla y había que "bajar desde arriba" para ver el video.
+  const [headerHeight, setHeaderHeight] = useState(57);
+
+  /**
+   * Al elegir un canal, en móvil el reproductor está arriba: si por lo que sea
+   * la página quedó desplazada (navegador sin `dvh`, rotación de pantalla), se
+   * vuelve al video. El usuario no debe "subir" para volver a ver el canal.
+   */
+  const selectItem = (it) => {
+    setSelected(it);
+    try {
+      if (window.matchMedia?.('(max-width: 1023px)').matches) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    } catch {
+      /* sin scroll programático: no es crítico */
+    }
+  };
 
   const handleLogin = async (e) => {
     if (e) e.preventDefault();
@@ -130,6 +155,41 @@ export default function WebTvPortal({ onBackToAdmin }) {
     const timer = setInterval(sendPing, 10000);
     return () => clearInterval(timer);
   }, [loggedLine, selected]);
+
+  /**
+   * Alto real de la barra superior (se recalcula si cambia de tamaño).
+   * La lista se limita con este valor en vez de con un "57 px" fijo.
+   */
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return undefined;
+    const sync = () => setHeaderHeight(el.offsetHeight || 57);
+    sync();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [loggedLine]);
+
+  /**
+   * Mantiene el canal activo a la vista DENTRO de la lista.
+   * Se ajusta el scroll del contenedor a mano (no `scrollIntoView`) para no
+   * arrastrar la página: el reproductor no se mueve cuando cambias de canal.
+   */
+  useEffect(() => {
+    const box = listRef.current;
+    const item = activeItemRef.current;
+    if (!box || !item) return;
+    const top = item.offsetTop;
+    const bottom = top + item.offsetHeight;
+    const visibleTop = box.scrollTop;
+    const visibleBottom = visibleTop + box.clientHeight;
+    if (top < visibleTop || bottom > visibleBottom) {
+      // Se centra el canal activo: al abrir el portal o al cambiar de canal, la
+      // lista aparece ya en el canal que se está viendo, no en el principio.
+      box.scrollTop = Math.max(0, top - Math.round((box.clientHeight - item.offsetHeight) / 2));
+    }
+  }, [selected?.uid, section, search]);
 
   // Attach Video / HLS
   useEffect(() => {
@@ -334,9 +394,12 @@ export default function WebTvPortal({ onBackToAdmin }) {
   });
 
   return (
-    <div className="min-h-screen bg-[#070b13] text-slate-100 flex flex-col">
+    <div className="min-h-[100dvh] lg:min-h-screen h-[100dvh] lg:h-auto overflow-hidden lg:overflow-visible bg-[#070b13] text-slate-100 flex flex-col">
       {/* Topbar */}
-      <header className="px-5 py-3 bg-[#0d1322] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+      <header
+        ref={headerRef}
+        className="shrink-0 px-4 sm:px-5 py-2.5 sm:py-3 bg-[#0d1322] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3"
+      >
         <div className="flex items-center gap-3">
           <button
             onClick={onBackToAdmin}
@@ -373,10 +436,17 @@ export default function WebTvPortal({ onBackToAdmin }) {
         </div>
       </header>
 
-      {/* Main Split View */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12">
-        {/* Left Channel List */}
-        <div className="lg:col-span-4 xl:col-span-3 border-r border-slate-800 bg-[#0b101d] flex flex-col max-h-[calc(100vh-57px)]">
+      {/* Main Split View
+          Móvil  : reproductor arriba (fijo, sin scroll) + lista abajo que se
+                   desplaza por dentro. Así al cambiar de canal el video y la
+                   lista se mueven en conjunto y no hay que subir/bajar la página.
+          Escritorio: lista a la izquierda y reproductor a la derecha, igual que antes. */}
+      <div className="flex-1 min-h-0 flex flex-col lg:grid lg:grid-cols-12">
+        {/* Lista de canales (abajo en móvil, izquierda en escritorio) */}
+        <div
+          className="order-2 flex-1 min-h-0 lg:order-none lg:col-span-4 xl:col-span-3 lg:flex-none flex flex-col border-t lg:border-t-0 lg:border-r border-slate-800 bg-[#0b101d]"
+          style={{ maxHeight: `calc(100dvh - ${headerHeight}px)` }}
+        >
           <div className="p-3 space-y-2.5 border-b border-slate-800">
             <div className="relative">
               <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
@@ -411,14 +481,18 @@ export default function WebTvPortal({ onBackToAdmin }) {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto divide-y divide-slate-800/50">
+          <div
+            ref={listRef}
+            className="relative flex-1 min-h-0 overflow-y-auto overscroll-contain [-webkit-overflow-scrolling:touch] divide-y divide-slate-800/50"
+          >
             {unifiedItems.map((it) => {
               const active = selected?.uid === it.uid;
               const isFav = favorites.includes(it.uid);
               return (
                 <div
                   key={it.uid}
-                  onClick={() => setSelected(it)}
+                  ref={active ? activeItemRef : null}
+                  onClick={() => selectItem(it)}
                   className={`p-3 flex items-center justify-between gap-2.5 cursor-pointer transition ${
                     active ? 'bg-indigo-600/20 border-l-4 border-indigo-500' : 'hover:bg-slate-800/40'
                   }`}
@@ -461,9 +535,9 @@ export default function WebTvPortal({ onBackToAdmin }) {
           </div>
         </div>
 
-        {/* Right Video Player Stage */}
-        <div className="lg:col-span-8 xl:col-span-9 p-5 flex flex-col justify-between bg-[#070b13]">
-          <div className="space-y-4">
+        {/* Reproductor (arriba en móvil, derecha en escritorio) */}
+        <div className="order-1 shrink-0 max-h-[62dvh] lg:max-h-none overflow-y-auto lg:overflow-visible overscroll-contain lg:order-none lg:col-span-8 xl:col-span-9 p-3 sm:p-5 flex flex-col justify-between bg-[#070b13]">
+          <div className="space-y-3 sm:space-y-4">
             {/* Active OSD Messages from Admin */}
             {catalog.osdMessages?.map((m) => (
               <div
@@ -489,7 +563,8 @@ export default function WebTvPortal({ onBackToAdmin }) {
               ) : (
                 <div className="w-full h-full flex flex-col items-center justify-center text-slate-500 text-sm">
                   <Play className="w-10 h-10 mb-2 opacity-50" />
-                  Selecciona un canal o película a la izquierda
+                  <span className="hidden lg:inline">Selecciona un canal o película a la izquierda</span>
+                  <span className="lg:hidden">Toca un canal en la lista de abajo</span>
                 </div>
               )}
             </div>

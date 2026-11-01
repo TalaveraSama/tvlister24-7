@@ -2192,3 +2192,32 @@ Devolvía `db: 'wal_ok'` fijo. Ahora comprueba de verdad el diario y una consult
 { "status": "ok", "db": "ok_wal", "rssMb": 412, "ffmpeg": true,
   "stability": { "running": true, "restartedHls": 0, "restartedCatv": 0 } }
 ```
+---
+
+## 8.42 Portal WebTV: reproductor y lista sincronizados
+
+El portal (`src/pages/WebTvPortal.jsx`) tenía la lista de canales con una altura fija
+`calc(100vh - 57px)`, suponiendo que la barra superior medía 57 px. En pantallas estrechas esa barra
+ocupa dos líneas, la lista salía más alta que la ventana y **empujaba el reproductor fuera de vista**:
+al cambiar de canal había que subir y bajar la página.
+
+### Cómo está ahora
+
+| Zona | Móvil (< `lg`) | Escritorio (≥ `lg`) |
+| --- | --- | --- |
+| Contenedor raíz | `h-[100dvh] overflow-hidden` (la página no se desplaza) | `h-auto`, flujo normal |
+| Reproductor | `order-1`, `shrink-0`, `max-h-[62dvh]`, con scroll propio si hace falta | columna derecha (`lg:col-span-8`) |
+| Lista | `order-2`, `flex-1 min-h-0`, scroll **interno** (`overscroll-contain`) | columna izquierda, mismo scroll interno |
+
+- El alto disponible se calcula con el **alto real** de la barra (`ResizeObserver` → `headerHeight`),
+  no con un número fijo.
+- La lista se limita con `style={{ maxHeight: calc(100dvh - headerHeight) }}`.
+- `useEffect` sobre `selected?.uid | section | search` ajusta **a mano** el `scrollTop` del contenedor
+  (no `scrollIntoView`, que arrastraría la página) para dejar el canal activo a la vista, centrado.
+- En móvil, `selectItem()` devuelve la página arriba (`window.scrollTo`) si un navegador sin `dvh`
+  dejó el documento desplazado.
+
+### Verificación rápida
+
+Con el portal abierto en el teléfono: elegir un canal del final de la lista, comprobar que el video
+sigue visible arriba y que al reabrir el portal la lista aparece en ese canal, no al principio.
