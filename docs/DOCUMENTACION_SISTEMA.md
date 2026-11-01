@@ -2484,3 +2484,27 @@ La grilla CATV pasa de 2–125 a **1–125** (125 portadoras).
   «CANAL 1» (editable).
 - Consola: `catv fill` reparte desde el 1 por defecto. UI: `CATV_NUMBERS` 1..125 e inputs con
   `min={1}`.
+
+### v2.5.28: puerto de salida de los streams y comando `streams-port`
+
+Los enlaces de video se construyen en `getStreamBaseUrl(req)` (`server/iptvApi.js`): si existe el
+ajuste `public_stream_base` se usa tal cual; si no, `getBaseUrl(req)` devuelve
+`${x-forwarded-proto || req.protocol}://${x-forwarded-host || req.headers.host}`, es decir **el
+mismo host y puerto de la petición**. Por eso:
+
+- por `http://dominio/` los enlaces salen por **80** (sin `:80`);
+- por `https://dominio/` por **443**;
+- por `http://IP:8095/` por **8095**.
+
+El server block del panel (`location /`) ya reenvía `/live/`, `/hls_proxy/`, `.m3u8` y `.ts`, así
+que el video funciona por el 80/443 sin configuración extra.
+
+Comando nuevo: `tvlister-admin streams-port [80|443|8095|auto] [dominio]` (menú, opción 28).
+Escribe/borra `public_stream_base` con el esquema correspondiente y omite `:80`/`:443` en el
+enlace. Sin argumentos muestra el estado y una tabla de qué puerto resulta en cada caso; con
+`auto` borra el ajuste. Valida el dominio y avisa de los requisitos de cada puerto (server block,
+registro A, gris en Cloudflare para video, certificado para 443, firewall para puertos altos).
+
+`cloudflare --check` ahora: imprime el **puerto de salida** de los streams y avisa si no es
+80/443; y comprueba el dominio de streams con **su** esquema y puerto reales (`headers_of` y
+`headers_from_origin` reciben la URL completa en vez de forzar `https://`).

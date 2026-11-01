@@ -298,6 +298,131 @@ cmd_health() {
 #   tvlister-admin access-code off [codigo|id]   (sin argumento: apaga todos)
 #   tvlister-admin access-code rm <codigo|id>
 #   tvlister-admin access-code url <codigo>      enlace con el código incluido
+# ==================== PUERTO DE SALIDA DE LOS STREAMS ======================
+# Uso:
+#   tvlister-admin streams-port                 estado actual y por qué
+#   tvlister-admin streams-port 80  [dominio]   enlaces por  http://dominio
+#   tvlister-admin streams-port 443 [dominio]   enlaces por  https://dominio
+#   tvlister-admin streams-port 8095 [dominio]  enlaces por  http://dominio:8095
+#   tvlister-admin streams-port auto            sigue el host de la petición
+#
+# Los enlaces que se entregan en get.php/player_api.php salen por el MISMO
+# host y puerto con el que el cliente pidió la lista (o por lo que diga el
+# ajuste public_stream_base). Este comando fija ese ajuste.
+cmd_streams_port() {
+  local want="${1:-status}" domain="${2:-}"
+  local port
+  port=$(get_current_port)
+  cd "$APP_DIR" || return 1
+
+  SP_WANT="$want" SP_DOMAIN="$domain" SP_MAINPORT="$port" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb, db } from "./server/db.js";
+    initDb();
+
+    const want = String(process.env.SP_WANT || "status").trim().toLowerCase();
+    const givenDomain = String(process.env.SP_DOMAIN || "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+    const mainPort = Number(process.env.SP_MAINPORT) || 8095;
+
+    const get = (k) => String(db.prepare("SELECT value FROM settings WHERE key = ?").get(k)?.value || "").trim();
+    const set = (k, v) => db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v);
+    const del = (k) => db.prepare("DELETE FROM settings WHERE key = ?").run(k);
+
+    const current = get("public_stream_base");
+    const panelDomain = get("panel_domain");
+
+    const showPort = (base) => {
+      const m = String(base).match(/^([a-z]+):\/\/([^/:]+)(?::(\d+))?/i);
+      if (!m) return null;
+      const scheme = m[1].toLowerCase();
+      const host = m[2];
+      const explicit = m[3] ? Number(m[3]) : null;
+      const port = explicit || (scheme === "https" ? 443 : 80);
+      return { scheme, host, port, explicit, implicit: explicit === null };
+    };
+
+    if (want === "status" || want === "") {
+      console.log("============================================================");
+      console.log("  Puerto por donde salen los streams");
+      console.log("============================================================");
+      if (current) {
+        const p = showPort(current);
+        console.log("  Base pública fija : " + current);
+        console.log("  Puerto            : " + (p ? p.port + (p.implicit ? " (" + p.scheme + " por defecto, sin :" + p.port + " en el enlace)" : "") : "?"));
+        console.log("  Todos los enlaces de video (playlist, .m3u8, .ts, VOD) usan esa base,");
+        console.log("  sin importar por qué puerto entre el cliente.");
+      } else {
+        console.log("  Sin base fija: los enlaces salen por el MISMO host y puerto de la petición.");
+        console.log("");
+        console.log("   el cliente abre                       los enlaces salen por");
+        console.log("   ------------------------------------  --------------------------------");
+        console.log("   http://DOMINIO/            (80)       http://DOMINIO/...            (80)");
+        console.log("   https://DOMINIO/           (443)      https://DOMINIO/...           (443)");
+        console.log("   http://IP:" + mainPort + "/            (8095)     http://IP:" + mainPort + "/...         (8095)");
+        console.log("");
+        console.log("  O sea: si entra por el dominio sin puerto, ya sale por el 80.");
+      }
+      console.log("");
+      console.log("  Fijarlo a un puerto concreto:");
+      console.log("     tvlister-admin streams-port 80  midominio.com      # el más común");
+      console.log("     tvlister-admin streams-port 443 midominio.com");
+      console.log("     tvlister-admin streams-port 8095 midominio.com");
+      console.log("     tvlister-admin streams-port auto                  # quitar la fijación");
+      console.log("============================================================");
+      process.exit(0);
+    }
+
+    if (want === "auto" || want === "clear" || want === "off") {
+      del("public_stream_base");
+      console.log("✅ Sin base fija: los enlaces vuelven a seguir el host y puerto de la petición.");
+      console.log("   (por el dominio sin puerto → 80; por https → 443; por IP:" + mainPort + " → " + mainPort + ")");
+      process.exit(0);
+    }
+
+    const num = Number(want);
+    if (![80, 443, 8095, 8080, 8880, 2052].includes(num) && !(num >= 1 && num <= 65535)) {
+      console.error("❌ Puerto no válido: " + want);
+      process.exit(1);
+    }
+
+    let host = givenDomain;
+    if (!host) {
+      const base = current ? showPort(current) : null;
+      host = base?.host || panelDomain || "";
+    }
+    if (!host) {
+      console.error("❌ Falta el dominio. Uso: tvlister-admin streams-port " + num + " midominio.com");
+      console.error("   (o define antes el dominio del panel con: tvlister-admin cloudflare <panel> [streams])");
+      process.exit(1);
+    }
+
+    const scheme = num === 443 ? "https" : "http";
+    const base = num === 80 || num === 443 ? scheme + "://" + host : scheme + "://" + host + ":" + num;
+    set("public_stream_base", base);
+
+    console.log("✅ Base pública de streaming: " + base);
+    console.log("   Todos los enlaces de video saldrán por el puerto " + num + ".");
+    console.log("");
+    if (num === 80) {
+      console.log("   Requisitos en el puerto 80:");
+      console.log("     · Un server block que atienda " + host + " y haga proxy a 127.0.0.1:" + mainPort + ".");
+      console.log("       (lo crea: tvlister-admin cloudflare " + host + " " + host + ")");
+      console.log("     · Ese nombre debe resolver al servidor (registro A) y NO estar en naranja en");
+      console.log("       Cloudflare si se usa para video: el proxy de Cloudflare no sirve para");
+      console.log("       streaming continuo. Déjalo en GRIS.");
+    } else if (num === 443) {
+      console.log("   Requisitos en el 443: server block con certificado válido para " + host + ".");
+      console.log("     (Origin Certificate de Cloudflare + cloudflare ... --cert/--key, o Let\u2019s Encrypt)");
+    } else {
+      console.log("   El puerto " + num + " debe estar abierto en el firewall y ser alcanzable desde");
+      console.log("   los clientes. Muchos reproductores y algunas redes bloquean puertos altos.");
+      console.log("     tvlister-admin add-port " + num + "   # si el panel debe atenderlo él mismo");
+    }
+    console.log("");
+    console.log("   Aplica al instante (se lee de la base en cada petición). Comprueba con:");
+    console.log("     tvlister-admin streams-check");
+  '
+}
+
 cmd_access_code() {
   local action="${1:-list}" arg1="${2:-}" arg2="${3:-}" arg3="${4:-}"
   cd "$APP_DIR" || return 1
@@ -957,6 +1082,19 @@ cmd_cf_check() {
   ' 2>/dev/null | tail -1 || true)
   if [ -n "$base" ]; then
     echo "  [OK]    Base pública de streaming: ${base}"
+    local bscheme bport bnums
+    bscheme=$(printf '%s' "$base" | sed -E 's#^([a-z]+)://.*#\1#')
+    bport=$(printf '%s' "$base" | sed -E 's#^[a-z]+://[^/:]+:([0-9]+).*#\1#')
+    case "$bport" in
+      "$base") bport="" ;;  # no había :puerto
+    esac
+    [ -z "$bport" ] && [ "$bscheme" = "https" ] && bport=443
+    [ -z "$bport" ] && bport=80
+    echo "          Puerto de salida de los streams: ${bport} (${bscheme})"
+    if [ "$bport" != "80" ] && [ "$bport" != "443" ]; then
+      echo "          [AVISO] Puerto no estándar: algunos reproductores y redes lo bloquean."
+      echo "                  Para usar el 80: tvlister-admin streams-port 80 stream_dominio"
+    fi
     [ -z "$stream" ] && stream=$(printf '%s' "$base" | sed -E 's#^https?://##; s#/.*$##')
   else
     echo "  [AVISO] Sin base pública de streaming: los enlaces de video usan el dominio del panel"
@@ -969,25 +1107,31 @@ cmd_cf_check() {
   [ -z "$origin_ip" ] && origin_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
   [ -n "$origin_ip" ] && echo "  Origen         : ${origin_ip} (se consulta directo, sin Cloudflare)"
 
-  # --- Cabeceras de un dominio ---------------------------------------------
+  # --- Cabeceras de una URL completa ---------------------------------------
   headers_of() {
-    curl -sS -o /dev/null -D - --max-time 12 "https://$1/" 2>/dev/null | tr -d '\r' || true
+    curl -sS -o /dev/null -D - --max-time 12 "$1/" 2>/dev/null | tr -d '\r' || true
   }
-  # Cabeceras del origen, forzando la IP del servidor con la cabecera Host
+  # Cabeceras del origen, forzando la IP del servidor con --resolve
   headers_from_origin() {
-    local host="$1"
+    local url="$1"
     [ -z "$origin_ip" ] && return 0
-    curl -sS -o /dev/null -D - --max-time 10 --resolve "${host}:443:${origin_ip}" "https://${host}/" 2>/dev/null | tr -d '\r' || true
+    local h p
+    h=$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')
+    p=$(printf '%s' "$url" | sed -E 's#^[a-z]+://[^/:]+:([0-9]+).*#\1#')
+    [ "$p" = "$url" ] && p=""
+    [ -z "$p" ] && { case "$url" in https://*) p=443 ;; *) p=80 ;; esac; }
+    curl -sS -o /dev/null -D - --max-time 10 --resolve "${h}:${p}:${origin_ip}" "${url}/" 2>/dev/null | tr -d '\r' || true
     return 0
   }
 
   check_host() {
-    local host="$1" role="$2"
+    local host="$1" role="$2" url="${3:-}"
     [ -z "$host" ] && return 0
+    [ -z "$url" ] && url="https://${host}"
     local hdrs server cfray ip o_hdrs o_server o_cf ssl_state
-    hdrs=$(headers_of "$host")
+    hdrs=$(headers_of "$url")
     if [ -z "$hdrs" ]; then
-      echo "  ${role}: https://${host}"
+      echo "  ${role}: ${url}"
       echo "         [FALLA] No responde (DNS, firewall o nginx sin ese server_name)"
       fails=$((fails + 1))
       return 0
@@ -996,7 +1140,7 @@ cmd_cf_check() {
     cfray=$(printf '%s\n' "$hdrs" | grep -ci '^cf-ray:' || true)
     ip=$(getent hosts "$host" 2>/dev/null | awk 'NR==1{print $1}' || true)
 
-    echo "  ${role}: https://${host}"
+    echo "  ${role}: ${url}"
     echo "         IP resuelta : ${ip:-?}  ·  Servidor: ${server:-?}"
     if [ "$cfray" -gt 0 ]; then
       if [ "$role" = "Streams" ]; then
@@ -1017,7 +1161,7 @@ cmd_cf_check() {
 
     # Origen: ¿nginx sirve ese dominio? (sin pasar por Cloudflare)
     if [ -n "$origin_ip" ]; then
-      o_hdrs=$(headers_from_origin "$host")
+      o_hdrs=$(headers_from_origin "$url")
       if [ -z "$o_hdrs" ]; then
         echo "         [FALLA] El origen (${origin_ip}:443) no responde para ${host}"
         echo "                 -> falta el server block o nginx no recarga"
@@ -1044,8 +1188,27 @@ cmd_cf_check() {
   }
 
   check_host "$panel" "Panel"
+
+  # Qué URL usa el video: la base pública si está fijada (respetando su esquema y
+  # su puerto) o, si no, el dominio de streams por https.
+  local stream_url=""
+  if [ -n "$base" ]; then
+    stream_url=$(printf '%s' "$base" | sed -E 's#/+$##')
+    stream=$(printf '%s' "$stream_url" | sed -E 's#^[a-z]+://##; s#/.*$##; s#:[0-9]+$##')
+  fi
   if [ -n "$stream" ] && [ "$stream" != "$panel" ]; then
-    check_host "$stream" "Streams"
+    check_host "$stream" "Streams" "${stream_url:-}"
+  elif [ "$stream" = "$panel" ]; then
+    echo "  Streams: ${stream_url:-https://$panel}"
+    echo "         El video sale por el MISMO dominio del panel."
+    if [ -n "$stream_url" ]; then
+      local sp
+      sp=$(printf '%s' "$stream_url" | sed -E 's#^[a-z]+://[^/:]+:([0-9]+).*#\1#')
+      [ "$sp" = "$stream_url" ] && sp=""
+      [ -z "$sp" ] && { case "$stream_url" in https://*) sp=443 ;; *) sp=80 ;; esac; }
+      echo "         Puerto ${sp}. Si ese dominio está en naranja en Cloudflare, el video"
+      echo "         pasaría por su proxy: déjalo en GRIS o usa un subdominio aparte."
+    fi
   else
     echo "  [AVISO] No hay dominio de streams distinto del panel: el video sale por el panel."
     fails=$((fails + 1))
@@ -2665,6 +2828,10 @@ case "$ACTION" in
   doctor)
     cmd_doctor
     ;;
+  streams-port | puerto-streams | stream-port)
+    shift
+    cmd_streams_port "${1:-status}" "${2:-}"
+    ;;
   access-code | access-codes | codigo | codigos)
     shift
     cmd_access_code "${1:-list}" "${2:-}" "${3:-}" "${4:-}"
@@ -2894,9 +3061,10 @@ case "$ACTION" in
     echo " 25) Proxy inverso para Cloudflare: panel sí, streams directos (cloudflare)"
     echo " 26) Probar la reproducción de un canal de punta a punta (streams-check)"
     echo " 27) Códigos de acceso al panel, estilo XUI.one (access-code)"
+    echo " 28) Elegir el puerto de salida de los streams: 80 / 443 / 8095 (streams-port)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-27]: " opt
+    read -r -p "Selecciona una opción [0-28]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -2930,6 +3098,7 @@ case "$ACTION" in
         ;;
       26) "$0" streams-check ;;
       27) cmd_access_code "list" "" "" "" ;;
+      28) "$0" streams-port ;;
       *) exit 0 ;;
     esac
     ;;
