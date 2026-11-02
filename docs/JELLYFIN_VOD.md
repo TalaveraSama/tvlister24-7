@@ -208,8 +208,9 @@ servidor o el firewall está cortando los puertos `111`/`2049`.
 
 1. Modal **Jellyfin** → bloque **«Disco de Jellyfin en este servidor (NFS / SMB)»**.
 2. Elige el protocolo y escribe el host y la carpeta:
-   - **NFS**: host `192.168.1.50` + carpeta exportada `/srv/media`.
-   - **SMB**: host `192.168.1.50` + recurso `Media` + usuario y contraseña.
+   - **NFS**: host `192.168.1.50` + carpeta exportada `/mnt/Storage1/movie` (o pulsa **«Ver carpetas
+     compartidas»** y elige una de la lista).
+   - **SMB**: host `192.168.1.50` + recurso `jellyfin` + usuario y contraseña.
 3. **Probar sin dejar nada** monta el recurso en una carpeta temporal, cuenta los vídeos y lo
    desmonta. Si ahí ya salen los vídeos, el usuario/clave/ruta son correctos.
 4. **Montar y usar Create Symlink** hace el montaje definitivo en `/mnt/jellyfin-<host>` (o el punto
