@@ -80,6 +80,9 @@ una licencia Widevine por sí mismo, y quien diga lo contrario está vendiendo h
 ## 3. Qué recomiendo para tu caso (CATV + IPTV, 125 canales)
 
 **Fase 1 — hoy, gratis:** AES-128 emitido por el panel en todos los canales que salgan por HLS.
+Ya es un solo comando: `tvlister-admin drm protect-all` (plan) y `--apply`, más `drm push-all` para
+que Flussonic empiece a cifrar. El plan dice canal por canal qué entra y qué no, y excluye por
+defecto los canales que alimentan el UDP de CATV y los que empaqueta el FFmpeg de TVLister.
 Cubre el 100% de tus clientes (tu APK, TiviMate, Smarters, TV boxes, WebTV). Coste 0, sin terceros,
 con rotación cada 10 min, revocación por línea y auditoría. Ya está funcionando.
 

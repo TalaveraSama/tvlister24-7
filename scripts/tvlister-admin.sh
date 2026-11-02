@@ -473,13 +473,21 @@ cmd_streams_port() {
 #
 # <canal> puede ser el ID numérico o el nombre exacto del canal.
 cmd_drm() {
-  local sub="${1:-list}" target="${2:-}" extra="${3:-}"
+  local sub="${1:-list}" target="" extra="" flags=""
+  shift 2>/dev/null || true
+  # Los argumentos con -- son opciones (--apply, --include-catv); el resto, el canal.
+  for a in "$@"; do
+    case "$a" in
+      --*) flags="$flags $a" ;;
+      *) [ -z "$target" ] && target="$a" || extra="$a" ;;
+    esac
+  done
   cd "$APP_DIR" || return 1
   local fallback_host fallback_base
   fallback_host=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$fallback_host" ] && fallback_host="127.0.0.1"
   fallback_base="http://${fallback_host}:$(get_current_port)"
-  DRM_SUB="$sub" DRM_TARGET="$target" DRM_EXTRA="$extra" DRM_BASE="$fallback_base" "$NODE_BIN" --no-warnings --input-type=module -e '
+  DRM_SUB="$sub" DRM_TARGET="$target" DRM_EXTRA="$extra" DRM_FLAGS="$flags" DRM_BASE="$fallback_base" "$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
     import { deriveKey, getDrmRow, getDrmSettings } from "./server/drm.js";
     initDb();
@@ -487,6 +495,7 @@ cmd_drm() {
     const sub = String(process.env.DRM_SUB || "list").toLowerCase();
     const target = String(process.env.DRM_TARGET || "").trim();
     const extra = String(process.env.DRM_EXTRA || "").trim();
+    const flags = String(process.env.DRM_FLAGS || "");
     const base = (() => {
       const row = db.prepare("SELECT value FROM settings WHERE key = ?").get("public_stream_base");
       if (row && /^https?:\/\//i.test(String(row.value || ""))) return String(row.value).replace(/\/+$/, "");
@@ -661,6 +670,87 @@ cmd_drm() {
       console.log("   CAS nuevo  : " + base + "/drm/cas/" + casToken);
       console.log("   clave nueva: " + base + "/drm/key/" + keyToken);
       console.log("   Actualiza la línea drm de Flussonic con el CAS nuevo.");
+    } else if (sub === "protect-all" || sub === "proteger-todo" || sub === "bulk") {
+      const includeCatv = /--include-catv/.test(flags);
+      const apply = /--apply/.test(flags);
+      const { planBulkProtect, applyBulkProtect } = await import("./server/drm.js");
+      const plan = planBulkProtect({ includeCatv });
+      console.log("============================================================");
+      console.log("  Fase 1 — AES-128 del panel en los canales HLS");
+      console.log("============================================================");
+      console.log("  Canales totales     : " + plan.totals.streams);
+      console.log("  Se pueden cifrar    : " + plan.totals.eligible);
+      console.log("  Ya protegidos       : " + plan.totals.already);
+      console.log("  Se quedan fuera     : " + plan.totals.skipped);
+      console.log("");
+      if (plan.eligible.length) {
+        console.log("  SE CIFRAN (Flussonic empaqueta):");
+        for (const s of plan.eligible) {
+          console.log("   #" + String(s.id).padEnd(5) + s.name.padEnd(28) + "-> " + s.flussonic_stream +
+            (s.catv_channels.length ? "  [CATV CH " + s.catv_channels.join(",") + "]" : ""));
+        }
+        console.log("");
+      }
+      if (plan.skipped.length) {
+        console.log("  SE QUEDAN FUERA (y por qué):");
+        for (const s of plan.skipped) console.log("   #" + String(s.id).padEnd(5) + s.name.padEnd(28) + s.reason);
+        console.log("");
+      }
+      if (!apply) {
+        console.log("  Nada cambiado. Para aplicarlo:");
+        console.log("     tvlister-admin drm protect-all --apply");
+        console.log("  Si quieres incluir los canales que alimentan el UDP de CATV");
+        console.log("  (NO recomendado, el UDP puede verse afectado):");
+        console.log("     tvlister-admin drm protect-all --apply --include-catv");
+        console.log("============================================================");
+        process.exit(0);
+      }
+      const result = applyBulkProtect({ includeCatv });
+      console.log("✅ Activado AES-128 en " + result.applied.length + " canales del panel.");
+      if (result.applied.length) {
+        console.log("");
+        console.log("   Falta que Flussonic cifre: pega el bloque de cada canal o usa");
+        console.log("     tvlister-admin drm push-all        (vista previa no: envía de verdad)");
+        console.log("   Bloque de ejemplo para un canal:");
+        const first = result.applied[0];
+        const row = getDrmRow(first.id);
+        console.log("     stream " + first.flussonic_stream + " {");
+        console.log("       drm aes128 keyserver=" + base + "/drm/cas/" + row.cas_token);
+        console.log("     }");
+      }
+      console.log("============================================================");
+    } else if (sub === "push-all") {
+      const { pushDrmToFlussonic } = await import("./server/drm.js");
+      const rows = db.prepare(
+        "SELECT d.stream_id, d.flussonic_stream, s.name AS sn, s.flussonic_stream_name FROM drm_streams d " +
+        "LEFT JOIN streams s ON s.id = d.stream_id WHERE d.enabled = 1 AND d.mode IN (?,?) ORDER BY d.stream_id"
+      ).all("aes128", "sample_aes");
+      if (rows.length === 0) {
+        console.log("  No hay canales protegidos todavía. Primero: tvlister-admin drm protect-all --apply");
+        process.exit(0);
+      }
+      console.log("  Enviando el bloque drm a Flussonic para " + rows.length + " canales...");
+      console.log("  Servidor: el marcado como principal (is_main). Flussonic debe ser accesible desde aquí.");
+      console.log("");
+      let ok = 0;
+      for (const r of rows) {
+        const name = r.flussonic_stream || r.flussonic_stream_name || "";
+        if (!name) {
+          console.log("  [--] " + String(r.sn || ("#" + r.stream_id)).padEnd(28) + " sin nombre de stream en Flussonic");
+          continue;
+        }
+        try {
+          await pushDrmToFlussonic({ id: r.stream_id, streamName: name, action: "apply", base });
+          ok++;
+          console.log("  [OK] " + String(r.sn || ("#" + r.stream_id)).padEnd(28) + name);
+        } catch (err) {
+          console.log("  [!!] " + String(r.sn || ("#" + r.stream_id)).padEnd(28) + (err.message || "error") +
+            (err.detail ? " -> " + String(err.detail).slice(0, 120) : ""));
+        }
+      }
+      console.log("");
+      console.log("  Enviados " + ok + "/" + rows.length + ". Comprueba en Flussonic que cada stream tiene su bloque drm.");
+      if (ok === 0) process.exit(1);
     } else if (sub === "log") {
       const limit = Number(target) > 0 ? Math.min(Number(target), 200) : 25;
       const rows = db.prepare("SELECT * FROM drm_key_log ORDER BY id DESC LIMIT ?").all(limit);
@@ -3103,7 +3193,7 @@ case "$ACTION" in
     ;;
   drm | claves | cas)
     shift
-    cmd_drm "${1:-list}" "${2:-}" "${3:-}"
+    cmd_drm "$@"
     ;;
   access-code | access-codes | codigo | codigos)
     shift

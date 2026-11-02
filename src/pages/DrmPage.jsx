@@ -69,6 +69,9 @@ export default function DrmPage() {
   const [err, setErr] = useState('');
   const [testResult, setTestResult] = useState(null);
   const [flussonicPreview, setFlussonicPreview] = useState(null);
+  const [bulk, setBulk] = useState(null);
+  const [bulkBusy, setBulkBusy] = useState('');
+  const [bulkResult, setBulkResult] = useState(null);
 
   const flash = (msg) => {
     setNotice(msg);
@@ -211,6 +214,57 @@ export default function DrmPage() {
     }
   };
 
+  const loadBulkPlan = async (includeCatv = false) => {
+    setBulkBusy('plan');
+    try {
+      const res = await apiFetch(`/api/drm/bulk/plan${includeCatv ? '?includeCatv=1' : ''}`);
+      setBulk(res);
+    } catch (e) {
+      fail(e.message);
+    } finally {
+      setBulkBusy('');
+    }
+  };
+
+  const applyBulk = async (includeCatv = false) => {
+    setBulkBusy('apply');
+    try {
+      const res = await apiFetch('/api/drm/bulk/apply', {
+        method: 'POST',
+        body: JSON.stringify({ includeCatv })
+      });
+      setBulkResult(res);
+      flash(`AES-128 activado en ${res.applied?.length || 0} canales del panel.`);
+      await loadBulkPlan(includeCatv);
+      await load();
+    } catch (e) {
+      fail(e.message);
+    } finally {
+      setBulkBusy('');
+    }
+  };
+
+  const pushAll = async (action = 'apply') => {
+    setBulkBusy('push');
+    try {
+      const res = await apiFetch('/api/drm/bulk/push', {
+        method: 'POST',
+        body: JSON.stringify({ action })
+      });
+      setBulkResult(res);
+      flash(
+        action === 'remove'
+          ? `DRM quitado de ${res.sent} streams en Flussonic.`
+          : `Bloque drm enviado a Flussonic: ${res.sent}/${res.total}.`
+      );
+      await load();
+    } catch (e) {
+      fail(e.message);
+    } finally {
+      setBulkBusy('');
+    }
+  };
+
   const saveSettings = async (patch) => {
     setBusy('settings');
     try {
@@ -342,6 +396,99 @@ export default function DrmPage() {
 
         {notice && <div className="mt-3 text-[11px] text-emerald-300 flex items-center gap-1.5"><Check size={12} /> {notice}</div>}
         {err && <div className="mt-3 text-[11px] text-rose-300 flex items-center gap-1.5"><AlertTriangle size={12} /> {err}</div>}
+      </div>
+
+      {/* Fase 1: proteger todos los canales HLS */}
+      <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/25 p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-white flex items-center gap-2">
+              <Zap className="w-4 h-4 text-emerald-400" /> Fase 1 · AES-128 del panel en todos los canales HLS
+            </h2>
+            <p className="text-[11px] text-slate-400 mt-1 max-w-3xl leading-relaxed">
+              Un clic para proteger todo lo que empaqueta Flussonic: claves del propio panel, rotación cada 10 minutos y
+              revocación por línea. Los canales que empaqueta el FFmpeg de TVLister quedan fuera (su línea de argumentos
+              no se toca) y los que alimentan el UDP de CATV también, salvo que lo pidas expresamente.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => loadBulkPlan(false)}
+              disabled={bulkBusy === 'plan'}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold disabled:opacity-60"
+            >
+              {bulkBusy === 'plan' ? <Loader2 size={12} className="animate-spin" /> : <Radio size={12} />} Ver qué se cifra
+            </button>
+            <button
+              onClick={() => applyBulk(false)}
+              disabled={bulkBusy === 'apply'}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold disabled:opacity-60"
+            >
+              {bulkBusy === 'apply' ? <Loader2 size={12} className="animate-spin" /> : <Lock size={12} />} Proteger todos
+            </button>
+            <button
+              onClick={() => pushAll('apply')}
+              disabled={bulkBusy === 'push'}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold disabled:opacity-60"
+            >
+              {bulkBusy === 'push' ? <Loader2 size={12} className="animate-spin" /> : <Server size={12} />} Enviar a
+              Flussonic
+            </button>
+          </div>
+        </div>
+
+        {bulk && (
+          <div className="mt-3 grid gap-3 lg:grid-cols-3 text-[11px]">
+            <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
+              <div className="text-[10px] uppercase text-slate-500 mb-1">Se cifran ({bulk.totals.eligible})</div>
+              <div className="space-y-1 max-h-40 overflow-auto">
+                {bulk.eligible.map((s) => (
+                  <div key={s.id} className="flex items-center justify-between gap-2">
+                    <span className="text-slate-200 truncate">{s.name}</span>
+                    <span className="text-[9px] font-mono text-cyan-300">{s.flussonic_stream}</span>
+                  </div>
+                ))}
+                {bulk.eligible.length === 0 && <div className="text-slate-500">Nada pendiente</div>}
+              </div>
+            </div>
+            <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
+              <div className="text-[10px] uppercase text-slate-500 mb-1">Ya protegidos ({bulk.totals.already})</div>
+              <div className="space-y-1 max-h-40 overflow-auto text-slate-400">
+                {bulk.already.map((s) => (
+                  <div key={s.id} className="truncate">
+                    {s.name}
+                  </div>
+                ))}
+                {bulk.already.length === 0 && <div className="text-slate-500">—</div>}
+              </div>
+            </div>
+            <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
+              <div className="text-[10px] uppercase text-slate-500 mb-1">Quedan fuera ({bulk.totals.skipped})</div>
+              <div className="space-y-1 max-h-40 overflow-auto">
+                {bulk.skipped.map((s) => (
+                  <div key={s.id} className="text-amber-300/90">
+                    <b className="text-slate-300">{s.name}:</b> {s.reason}
+                  </div>
+                ))}
+                {bulk.skipped.length === 0 && <div className="text-slate-500">—</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {bulkResult?.results && (
+          <div className="mt-3 rounded-xl bg-[#090e1a] border border-slate-800 p-3 text-[10px] space-y-1 max-h-40 overflow-auto">
+            <div className="text-slate-400">
+              Enviados {bulkResult.sent}/{bulkResult.total} a Flussonic
+            </div>
+            {bulkResult.results.map((r) => (
+              <div key={r.id} className={r.ok ? 'text-emerald-300' : 'text-rose-300'}>
+                {r.ok ? 'OK' : 'FALLO'} · {r.name} {r.stream ? `→ ${r.stream}` : ''}{' '}
+                {r.error ? `— ${r.error}` : ''}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

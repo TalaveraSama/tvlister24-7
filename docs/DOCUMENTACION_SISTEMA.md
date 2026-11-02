@@ -2625,3 +2625,31 @@ Documento de referencia: `docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`.
   `requireAdmin` por ruta (un `router.use()` bloqueaba también `/api/auth/login`, detectado y
   corregido). Las rutas de jugador (`/drm/key`, `/drm/clearkey`, `/drm/license`, `/drm/cas`) siguen
   abiertas porque se autentican por token propio.
+
+### v2.6.3: Fase 1 en un paso — `drm protect-all` (AES-128 del panel)
+
+`planBulkProtect()` / `applyBulkProtect()` en `server/drm.js` clasifican todos los canales:
+
+| Caso | Decisión |
+| --- | --- |
+| Lo empaqueta **Flussonic** (TVLister le hace de proxy HLS) | **Se cifra** con el CAS del panel (AES-128) |
+| `headend_node_id` (nodo cabecera Astra) | fuera: lo empaqueta el nodo |
+| `stream_mode = transcode` (FFmpeg de TVLister) | fuera: exigiría `-hls_key_info_file` en la línea de argumentos de FFmpeg (no se toca) |
+| Fuente local (`/ruta`), MNF, canal detenido | fuera |
+| Canal CATV con `udp_engine='flussonic'` y el mismo `flussonic_stream` | **fuera por defecto** (el UDP no debe verse afectado); `--include-catv` lo fuerza |
+| Sin nombre de stream deducible | fuera (se deduce de `/stream/index.m3u8`) |
+
+El nombre de stream en Flussonic se deduce de la URL (`/<stream>/index.m3u8|mono|master`) o se toma
+de `streams.flussonic_stream_name` / `drm_streams.flussonic_stream`.
+
+API: `GET /api/drm/bulk/plan[?includeCatv=1]`, `POST /api/drm/bulk/apply` (`{includeCatv, onlyIds}`),
+`POST /api/drm/bulk/push` (`{action: apply|remove}` → envía el bloque `drm` de todos los canales
+protegidos al Flussonic principal por API v3). Panel: tarjeta «Fase 1» en *DRM & Claves*.
+
+CLI: `tvlister-admin drm protect-all [--apply] [--include-catv]` y `tvlister-admin drm push-all`.
+`push-all` informa por canal y falla con el motivo real (por ejemplo, si no hay servidor Flussonic
+configurado) en vez de dar por hecho que se aplicó.
+
+Además, `X-Key-Url` del CAS usa ahora la base que ven los **clientes** (`public_stream_base`, luego
+`panel_domain`) y no la que usó Flussonic para llamar: si Flussonic llama por `127.0.0.1`, antes se
+devolvía una URL de clave inalcanzable desde fuera.

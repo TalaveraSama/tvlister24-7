@@ -151,9 +151,28 @@ function publicBaseFor(req) {
   return getConfiguredStreamBase() || getBaseUrl(req);
 }
 
+/** Base que deben usar los CLIENTES (no la que usó Flussonic para llamarnos). */
+function clientBaseFor(req) {
+  const configured = getConfiguredStreamBase();
+  if (configured) return configured;
+  // Sin public_stream_base, el CAS puede haberse llamado por 127.0.0.1/LAN: eso
+  // no sirve fuera. Se prefiere el dominio del panel si está guardado.
+  const panelDomain = String(
+    db.prepare("SELECT value FROM settings WHERE key = 'panel_domain'").get()?.value || ''
+  )
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
+  const reqBase = getBaseUrl(req);
+  const reqHost = reqBase.replace(/^https?:\/\//i, '').split('/')[0];
+  const isLoopback = /^(127\.|localhost|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(reqHost);
+  if (panelDomain) return `http://${panelDomain}`;
+  if (isLoopback) return reqBase; // último recurso: avisado en el panel
+  return reqBase;
+}
+
 function buildKeyUrl(req, row) {
-  const base = publicBaseFor(req);
-  return `${base}/drm/key/${row.key_token}`;
+  return `${clientBaseFor(req)}/drm/key/${row.key_token}`;
 }
 
 /** Token firmado de una línea, para poder exigir sesión al pedir la clave. */
@@ -659,20 +678,21 @@ async function fetchRemoteStream(srv, streamName) {
   return { conn, streamName, remote: json.stream || json, headers };
 }
 
-drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
+/**
+ * Empuja (o quita) el bloque `drm` de un canal en Flussonic.
+ * action: preview | apply | remove. Devuelve lo que se enviaría o se envió.
+ */
+export async function pushDrmToFlussonic({ id, streamName, action = 'preview', serverId, base }) {
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
   const row = getDrmRow(id);
-  if (!stream || !row) return res.status(404).json({ error: 'Canal sin DRM configurado' });
+  if (!stream || !row) throw new Error('Canal sin DRM configurado');
 
-  const streamName = String(req.body?.flussonicStream || row.flussonic_stream || stream.flussonic_stream_name || '').trim();
-  if (!streamName) return res.status(400).json({ error: 'Indica el nombre del stream en Flussonic' });
+  const name = String(streamName || row.flussonic_stream || stream.flussonic_stream_name || '').trim();
+  if (!name) throw new Error('Indica el nombre del stream en Flussonic');
 
-  const action = String(req.body?.action || 'preview'); // preview | apply | remove
-  const srv = await flussonicServerRow(req.body?.serverId);
-
-  try {
-    const { conn, remote, headers } = await fetchRemoteStream(srv, streamName);
+  const srv = await flussonicServerRow(serverId);
+  {
+    const { conn, remote, headers } = await fetchRemoteStream(srv, name);
     const payload = pickWritableStreamFields(remote);
 
     if (action === 'remove') {
@@ -681,7 +701,7 @@ drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin,
       const mode = row.mode === 'widevine' ? 'widevine' : row.mode === 'sample_aes' ? 'sample_aes' : 'aes128';
       payload.drm = {
         type: mode,
-        keyserver: mode === 'widevine' ? row.license_url : `${publicBaseFor(req)}/drm/cas/${row.cas_token}`
+        keyserver: mode === 'widevine' ? row.license_url : `${base}/drm/cas/${row.cas_token}`
       };
       if (mode === 'widevine') {
         if (row.cenc_aes_key) payload.drm.aes_key = row.cenc_aes_key;
@@ -691,19 +711,19 @@ drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin,
     }
 
     if (action === 'preview') {
-      return res.json({
+      return {
         ok: true,
         action,
         server: { id: srv?.id, name: srv?.name, base: conn.effectiveBase },
-        stream: streamName,
+        stream: name,
         current: remote.drm || null,
         will_send: payload,
         note:
           'Vista previa: no se ha cambiado nada en Flussonic. Revisa que inputs/transcoder/dvr coincidan con tu configuración actual y pulsa Aplicar.'
-      });
+      };
     }
 
-    const encName = streamName.split('/').map((p) => encodeURIComponent(p)).join('/');
+    const encName = name.split('/').map((p) => encodeURIComponent(p)).join('/');
     const reqHeaders = { ...headers, 'Content-Type': 'application/json' };
     if (reqHeaders.Authorization && reqHeaders.Authorization.startsWith('Cluster ')) {
       const { buildFlussonicClusterAuthHeader } = await import('./flussonic2312Manager.js');
@@ -719,19 +739,222 @@ drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin,
     );
     const text = await putRes.text().catch(() => '');
     if (!putRes.ok) {
-      return res.status(502).json({
-        error: `Flussonic rechazó el cambio (HTTP ${putRes.status})`,
-        detail: text.slice(0, 500),
-        will_send: payload
-      });
+      const err = new Error(`Flussonic rechazó el cambio (HTTP ${putRes.status})`);
+      err.detail = text.slice(0, 500);
+      err.willSend = payload;
+      throw err;
     }
-    db.prepare('UPDATE drm_streams SET flussonic_stream = ?, updated_at = ? WHERE stream_id = ?').run(
-      streamName,
-      nowIso(),
-      id
-    );
-    return res.json({ ok: true, action, server: conn.effectiveBase, stream: streamName, applied: payload });
-  } catch (err) {
-    return res.status(502).json({ error: err.message });
+    db.prepare('UPDATE drm_streams SET flussonic_stream = ?, updated_at = ? WHERE stream_id = ?').run(name, nowIso(), id);
+    return { ok: true, action, server: conn.effectiveBase, stream: name, applied: payload };
   }
+}
+
+drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const result = await pushDrmToFlussonic({
+      id,
+      streamName: req.body?.flussonicStream,
+      action: String(req.body?.action || 'preview'),
+      serverId: req.body?.serverId,
+      base: publicBaseFor(req)
+    });
+    return res.json(result);
+  } catch (err) {
+    if (err.message === 'Canal sin DRM configurado') return res.status(404).json({ error: err.message });
+    if (err.message.startsWith('Indica el nombre')) return res.status(400).json({ error: err.message });
+    return res.status(502).json({ error: err.message, detail: err.detail, will_send: err.willSend });
+  }
+});
+
+// ==================== FASE 1: PROTEGER TODOS LOS CANALES HLS ================
+//
+// Sólo se pueden cifrar los canales que **empaqueta Flussonic** (TVLister les
+// hace de proxy HLS). Los que empaqueta el FFmpeg de TVLister necesitarían
+// `-hls_key_info_file` en la línea de argumentos, y esa línea no se toca.
+// Los que alimentan el UDP de CATV desde Flussonic se excluyen por defecto:
+// el usuario exige que el UDP no se vea afectado.
+
+function flussonicNameFromUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    const parts = u.pathname.split('/').filter(Boolean);
+    const file = parts[parts.length - 1] || '';
+    if (!/\.m3u8?$/i.test(file)) return '';
+    // /stream/index.m3u8 · /stream/mono.m3u8 · /stream/master.m3u8
+    if (/^(index|master|mono|playlist|multibitrate)/i.test(file) && parts.length >= 2) {
+      return parts[parts.length - 2];
+    }
+    return file.replace(/\.m3u8?$/i, '');
+  } catch {
+    return '';
+  }
+}
+
+function catvChannelsUsingFlussonicStream(name) {
+  if (!name) return [];
+  return db
+    .prepare(
+      "SELECT catv_ch FROM wk2500_channels WHERE udp_engine = 'flussonic' AND flussonic_stream = ?"
+    )
+    .all(String(name))
+    .map((r) => r.catv_ch);
+}
+
+/**
+ * Clasifica todos los canales en «se puede cifrar con el CAS del panel» y
+ * «no se puede / no conviene», con el motivo exacto de cada exclusión.
+ * No modifica nada: es la vista previa.
+ */
+export function planBulkProtect({ includeCatv = false, includeTranscode = false } = {}) {
+  const streams = db.prepare('SELECT * FROM streams ORDER BY id').all();
+  const rows = new Map(db.prepare('SELECT * FROM drm_streams').all().map((r) => [r.stream_id, r]));
+
+  const eligible = [];
+  const skipped = [];
+  const already = [];
+
+  for (const s of streams) {
+    const row = rows.get(s.id) || null;
+    const name = row?.flussonic_stream || s.flussonic_stream_name || flussonicNameFromUrl(s.source_url);
+    const mode = String(s.stream_mode || 'direct');
+
+    if (row?.enabled && row.mode === 'aes128') {
+      already.push({ id: s.id, name: s.name, flussonic_stream: name });
+      continue;
+    }
+
+    const skip = (reason) => skipped.push({ id: s.id, name: s.name, reason });
+
+    if (s.status === 'stopped') {
+      skip('Canal detenido');
+      continue;
+    }
+    if (s.headend_node_id) {
+      skip('Lo empaqueta el nodo cabecera (Astra), no Flussonic');
+      continue;
+    }
+    if (mode === 'transcode' && !includeTranscode) {
+      skip('TVLister lo empaqueta con su FFmpeg (cifrarlo exigiría tocar los argumentos de FFmpeg)');
+      continue;
+    }
+    if (String(s.source_url || '').startsWith('/')) {
+      skip('Archivo local en disco');
+      continue;
+    }
+    if (/^mnfs?:\/\//i.test(String(s.source_url || ''))) {
+      skip('Fuente MNF (la empaqueta TVLister)');
+      continue;
+    }
+    if (!name) {
+      skip('No se pudo deducir el nombre del stream en Flussonic (indícalo a mano)');
+      continue;
+    }
+    const catv = catvChannelsUsingFlussonicStream(name);
+    if (catv.length > 0 && !includeCatv) {
+      skip(`Lo usa el UDP de CATV (CH ${catv.join(', ')}): cifrarlo podría afectar la salida analógica`);
+      continue;
+    }
+
+    eligible.push({
+      id: s.id,
+      name: s.name,
+      flussonic_stream: name,
+      mode,
+      source_url: s.source_url,
+      catv_channels: catv
+    });
+  }
+
+  return {
+    totals: {
+      streams: streams.length,
+      eligible: eligible.length,
+      already: already.length,
+      skipped: skipped.length
+    },
+    eligible,
+    already,
+    skipped,
+    notes: [
+      'Sólo los canales que empaqueta Flussonic pueden cifrarse con el CAS del panel.',
+      'Los que empaqueta el FFmpeg de TVLister quedan fuera: su línea de argumentos no se toca.',
+      'Los canales que alimentan el UDP de CATV desde Flussonic se excluyen por defecto.',
+      'Aplicar aquí sólo prepara el panel (claves, tokens, modo AES-128). Para que Flussonic cifre hay que enviarle el bloque drm (botón / --push).'
+    ],
+    catvExcludable: skipped.filter((s) => s.reason.includes('CATV')).length
+  };
+}
+
+/** Aplica el plan: activa AES-128 en los canales elegibles del panel. */
+export function applyBulkProtect({ includeCatv = false, includeTranscode = false, onlyIds = null } = {}) {
+  const plan = planBulkProtect({ includeCatv, includeTranscode });
+  const targets = plan.eligible.filter((s) => !onlyIds || onlyIds.includes(s.id));
+  const applied = [];
+  for (const item of targets) {
+    const row = ensureRow(item.id);
+    const masterKey = row.master_key || randomHex(32);
+    const casToken = row.cas_token || randomToken(24);
+    const keyToken = row.key_token || randomToken(24);
+    db.prepare(
+      `UPDATE drm_streams SET enabled = 1, mode = 'aes128', master_key = ?, cas_token = ?, key_token = ?,
+         flussonic_stream = ?, updated_at = ? WHERE stream_id = ?`
+    ).run(masterKey, casToken, keyToken, item.flussonic_stream, nowIso(), item.id);
+    applied.push({ id: item.id, name: item.name, flussonic_stream: item.flussonic_stream });
+  }
+  return { applied, plan };
+}
+
+drmAdminRouter.get('/api/drm/bulk/plan', requireAuth, requireAdmin, (req, res) => {
+  const includeCatv = String(req.query.includeCatv || '') === '1';
+  res.json({ ...planBulkProtect({ includeCatv }), base: publicBaseFor(req), drmEnabled: getDrmSettings().enabled });
+});
+
+drmAdminRouter.post('/api/drm/bulk/apply', requireAuth, requireAdmin, (req, res) => {
+  const includeCatv = Boolean(req.body?.includeCatv);
+  const onlyIds = Array.isArray(req.body?.onlyIds) && req.body.onlyIds.length ? req.body.onlyIds.map(Number) : null;
+  const result = applyBulkProtect({ includeCatv, onlyIds });
+  res.json({
+    ok: true,
+    applied: result.applied,
+    skipped: result.plan.skipped,
+    base: publicBaseFor(req),
+    next: 'Envía el bloque drm a Flussonic (botón «Aplicar a Flussonic» por canal o tvlister-admin drm push-all)'
+  });
+});
+
+/** Envía el bloque `drm` de TODOS los canales protegidos a Flussonic. */
+drmAdminRouter.post('/api/drm/bulk/push', requireAuth, requireAdmin, async (req, res) => {
+  const action = String(req.body?.action || 'apply'); // apply | remove
+  const base = publicBaseFor(req);
+  const rows = db
+    .prepare(
+      `SELECT d.stream_id, d.flussonic_stream, s.name AS stream_name, s.flussonic_stream_name
+       FROM drm_streams d LEFT JOIN streams s ON s.id = d.stream_id
+       WHERE d.enabled = 1 AND d.mode IN ('aes128','sample_aes') ORDER BY d.stream_id`
+    )
+    .all();
+
+  const results = [];
+  for (const row of rows) {
+    const name = row.flussonic_stream || row.flussonic_stream_name || '';
+    if (!name) {
+      results.push({ id: row.stream_id, name: row.stream_name, ok: false, error: 'sin nombre de stream en Flussonic' });
+      continue;
+    }
+    try {
+      const r = await pushDrmToFlussonic({ id: row.stream_id, streamName: name, action, base });
+      results.push({ id: row.stream_id, name: row.stream_name, stream: r.stream, ok: true });
+    } catch (err) {
+      results.push({ id: row.stream_id, name: row.stream_name, ok: false, error: err.message, detail: err.detail });
+    }
+  }
+  res.json({
+    ok: results.every((r) => r.ok),
+    action,
+    total: results.length,
+    sent: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    results
+  });
 });
