@@ -229,7 +229,13 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
       setDevicesState({
         loading: false,
         list: d.devices || [],
-        meta: { ...d.line, mode: d.mode, allowed: d.line?.allowed ?? d.line?.device_limit_effective }
+        meta: {
+          ...d.line,
+          mode: d.mode,
+          allowed: d.line?.allowed ?? d.line?.device_limit_effective,
+          live_connections: d.live_connections ?? 0,
+          max_connections: d.max_connections ?? d.line?.max_connections
+        }
       });
     } catch (err) {
       setDevicesState({ loading: false, list: [], meta: null });
@@ -244,7 +250,13 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
       setDevicesState({
         loading: false,
         list: d.devices || [],
-        meta: { ...d.line, mode: d.mode, allowed: d.line?.allowed ?? d.line?.device_limit_effective }
+        meta: {
+          ...d.line,
+          mode: d.mode,
+          allowed: d.line?.allowed ?? d.line?.device_limit_effective,
+          live_connections: d.live_connections ?? 0,
+          max_connections: d.max_connections ?? d.line?.max_connections
+        }
       });
     } catch {
       /* polling silencioso */
@@ -1128,6 +1140,8 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
               const allowed = meta.allowed || meta.device_limit_effective || meta.max_connections || 1;
               const mode = meta.mode || registry?.mode || 'monitor';
               const overLimit = active.length > allowed;
+              const live = Number(meta.live_connections) || 0;
+              const maxConns = Number(meta.max_connections) || 1;
               return (
                 <>
                   <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
@@ -1137,10 +1151,19 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                         {lineInfo?.username || 'la línea'}
                       </h3>
                       <p className="text-xs text-slate-400 mt-0.5">
+                        <span
+                          className={
+                            live >= maxConns ? 'text-rose-300 font-semibold' : 'text-emerald-300 font-semibold'
+                          }
+                        >
+                          {live} de {maxConns}
+                        </span>{' '}
+                        conexión(es) en uso
+                        <span className="text-slate-600"> • </span>
                         <span className={overLimit ? 'text-amber-300 font-semibold' : 'text-white font-semibold'}>
                           {active.length}
                         </span>{' '}
-                        aparato(s) de {allowed} permitido(s) • modo{' '}
+                        aparato(s) registrado(s) • modo{' '}
                         <span
                           className={
                             mode === 'enforce'
@@ -1154,8 +1177,9 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                         </span>
                       </p>
                       <p className="text-[10px] text-slate-500 mt-1">
-                        Un aparato = un equipo. Las peticiones del reproductor interno (ExoPlayer, Lavf, VLC…) no
-                        cuentan como aparatos distintos.
+                        Sólo se corta al entrar cuando las <span className="text-slate-300">conexiones en uso</span>{' '}
+                        están llenas; tener aparatos registrados de antes no ocupa cupo ni bloquea a nadie. Un aparato
+                        = un equipo (las peticiones del reproductor interno, ExoPlayer/Lavf/VLC, no cuentan aparte).
                       </p>
                     </div>
                     <button onClick={() => setDevicesLineId(null)} className="text-slate-400 hover:text-white">

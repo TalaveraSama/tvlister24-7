@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { db } from './db.js';
 import { signToken, verifyToken } from './auth.js';
+import { liveConnectionCount } from './deviceRegistry.js';
 
 /**
  * Registro de dispositivos por línea (anti-compartición de cuentas).
@@ -88,7 +89,10 @@ export function registerDevice(line, payload = {}, ip = '') {
   if (!deviceId) {
     return { ok: false, code: 400, error: 'device_invalid', message: 'device_id inválido (8–128 caracteres alfanuméricos)' };
   }
-  const limit = Number(line.device_limit) > 0 ? Number(line.device_limit) : 1;
+  // Sin cupo propio, el tope son las conexiones de la línea (no 1 fijo: una
+  // línea de 5 conexiones bloqueaba el segundo aparato al vincular).
+  const limit =
+    Number(line.device_limit) > 0 ? Number(line.device_limit) : Math.max(1, Number(line.max_connections) || 1);
   const existing = db
     .prepare('SELECT * FROM line_devices WHERE line_id = ? AND device_id = ?')
     .get(line.id, deviceId);
@@ -110,12 +114,20 @@ export function registerDevice(line, payload = {}, ip = '') {
     existing.status = 'active';
   }
 
-  if (!existing && activeDeviceCount(line.id) >= limit) {
+  // Se bloquea por el cupo de **conexiones en uso**, no por los aparatos que se
+  // apuntaron alguna vez: con el televisor apagado el aparato sigue registrado
+  // pero no ocupa conexión, y antes eso dejaba fuera al aparato nuevo aunque la
+  // línea estuviera sin reproducir.
+  const maxConns = Math.max(1, Number(line.max_connections) || 1);
+  const live = liveConnectionCount(line.id);
+  if (!existing && live >= maxConns) {
     return {
       ok: false,
       code: 403,
-      error: 'device_limit',
-      message: `Esta línea ya está vinculada a ${limit} aparato(s).`
+      error: 'connection_limit',
+      message:
+        `Esta línea admite ${maxConns} conexión(es) y ahora mismo están todas en uso (${live}). ` +
+        'Cierra la reproducción en otro aparato o espera a que se libere una.'
     };
   }
 

@@ -6,6 +6,14 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 🎬 **Jellyfin → VOD con «Create Symlink»**: el panel importa tu catálogo de Jellyfin (películas, otros VOD y series con episodios) y, como XUI.one, **crea enlaces simbólicos** a los archivos que ya tienes en el disco: no copia, no mueve y no recodifica nada. Botón *Jellyfin* en **VOD y Series**; en terminal: `tvlister-admin jellyfin`. Guía: **[`docs/JELLYFIN_VOD.md`](docs/JELLYFIN_VOD.md)**.
 
+🚦 **El aviso «tu cuenta ya está en uso en otro aparato» se acabó con la línea vacía (v2.6.23)**: el
+cupo lo llenan **sólo las conexiones que están reproduciendo**. Los aparatos ya registrados (el
+televisor apagado de ayer) no ocupan hueco: un equipo nuevo entra, se apunta y reproduce mientras
+quede una conexión libre, y el rechazo sólo aparece cuando la línea tiene agotadas sus
+`max_connections` conexiones activas. Además, las conexiones sin latido caducan a los **2 minutos**
+(antes las MPEG-TS duraban 15) y al reiniciar el panel se borran las conexiones fantasma heredadas.
+El panel muestra «N de M conexión(es) en uso» y `tvlister-admin devices` lo mismo.
+
 🗄️ **Jellyfin en otro servidor: monta su disco y «Create Symlink» funciona de verdad (v2.6.22)**: si
 Jellyfin no está en la máquina del panel no hay archivo que enlazar. El panel monta su carpeta por
 **NFS o SMB** (desde el modal o con `tvlister-admin jellyfin mount`), deja la línea en `/etc/fstab`
@@ -39,15 +47,15 @@ curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download
 Para fijar una versión concreta (recomendado en producción) y el puerto:
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.22/install.sh \
-  | sudo bash -s -- --tag v2.6.22 --port 8095
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.23/install.sh \
+  | sudo bash -s -- --tag v2.6.23 --port 8095
 ```
 
 Si un release no tiene el paquete adjunto (o su descarga falla), el instalador usa el árbol del tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.22/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.22
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.23/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.23
 ```
 
 También puedes instalarlo desde la consola del propio servidor:

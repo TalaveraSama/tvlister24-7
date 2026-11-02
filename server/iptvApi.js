@@ -125,6 +125,9 @@ export function authenticateLine(username, password, req = null) {
   // Registro de aparatos por MAC: el equipo se apunta solo en la primera
   // conexión y, si la línea ya tiene su cupo lleno, se rechaza (sólo en modo
   // `enforce`; por defecto `monitor` únicamente apunta y avisa).
+  // `active_cons` que se le contesta a la app tiene que ser el de conexiones
+  // vivas: hay reproductores que comparan ese número con `max_connections` y,
+  // si sale lleno, muestran «tu cuenta ya está en uso en otro aparato».
   const registry = resolveDeviceForLine(line, req, { ip: clientIp });
   if (!registry.ok) {
     return {
@@ -403,6 +406,12 @@ const PRUNE_INTERVAL_MS = 30_000;
  * clientes eso son cientos de DELETE/escaneos por segundo que bloquean el
  * event loop de Node y provocan tirones en la reproducción.
  */
+// Una conexión viva late cada 30 s (manifiesto/segmento HLS o el latido del
+// socket MPEG-TS). Con 2 minutos sin latido se da por muerta: antes las de
+// MPEG-TS aguantaban 15 minutos ocupando el cupo, y el cliente veía «cuenta en
+// uso en otro aparato» sin que hubiera nadie reproduciendo.
+const CONNECTION_STALE_SECONDS = 120;
+
 export function pruneStaleConnections(force = false) {
   const now = Date.now();
   if (!force && now - lastPruneAt < PRUNE_INTERVAL_MS) return;
@@ -410,11 +419,30 @@ export function pruneStaleConnections(force = false) {
   try {
     db.prepare(
       `DELETE FROM active_connections
-       WHERE (protocol IN ('HLS', 'WebTV') AND datetime(last_ping_at) < datetime('now', '-90 seconds'))
-          OR datetime(last_ping_at) < datetime('now', '-15 minutes')`
-    ).run();
+       WHERE datetime(last_ping_at) < datetime('now', ?)`
+    ).run(`-${CONNECTION_STALE_SECONDS} seconds`);
   } catch {
     // ignore SQLite busy race
+  }
+}
+
+/**
+ * Conexiones vivas de una línea. Se depura primero y se cuenta sólo lo que ha
+ * latido hace menos de 2 minutos, así una sesión que se cortó no ocupa hueco.
+ */
+export function countLiveConnections(lineId) {
+  // Aquí se depura siempre (una sentencia con índice): si se dejara al throttle
+  // de 30 s, el panel seguiría enseñando sesiones fantasma al abrir la lista.
+  pruneStaleConnections(true);
+  try {
+    return db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM active_connections
+          WHERE line_id = ? AND datetime(last_ping_at) >= datetime('now', ?)`
+      )
+      .get(Number(lineId), `-${CONNECTION_STALE_SECONDS} seconds`).c;
+  } catch {
+    return 0;
   }
 }
 
@@ -528,9 +556,14 @@ export function recordConnection(req, line, targetType, targetId, targetName, pr
     return { allowed: true, connId: existing.id };
   }
 
+  // Sólo cuentan las conexiones vivas: una fila vieja (cliente que se fue sin
+  // cerrar) no debe ocupar el cupo de quien sí está viendo.
   const activeCount = db
-    .prepare('SELECT COUNT(*) as c FROM active_connections WHERE line_id = ?')
-    .get(line.id).c;
+    .prepare(
+      `SELECT COUNT(*) as c FROM active_connections
+        WHERE line_id = ? AND datetime(last_ping_at) >= datetime('now', ?)`
+    )
+    .get(line.id, `-${CONNECTION_STALE_SECONDS} seconds`).c;
 
   if (activeCount >= line.max_connections) {
     const sameIpOldest = db
@@ -835,7 +868,7 @@ const handlePlayerApi = (req, res) => {
   const baseUrl = getStreamBaseUrl(req);
   const parsedUrl = new URL(baseUrl);
   const { categories, streams, channels247, vodItems, seriesItems } = getAllowedContentForLine(line);
-  const activeConns = db.prepare('SELECT COUNT(*) as c FROM active_connections WHERE line_id = ?').get(line.id).c;
+  const activeConns = countLiveConnections(line.id);
 
   if (!action) {
     return res.json({
@@ -896,7 +929,9 @@ const handlePlayerApi = (req, res) => {
       token_ttl_seconds: reg.expires_in,
       device_limit: reg.limit,
       device_lock: Number(line.device_lock) === 1,
-      active_cons: String(activeDeviceCount(line.id)),
+      // Lo que la app compara con `max_connections`: conexiones vivas, no
+      // aparatos apuntados (si no, la app pinta «cuenta en uso en otro aparato»).
+      active_cons: String(countLiveConnections(line.id)),
       max_connections: String(line.max_connections)
     });
   }
@@ -910,9 +945,7 @@ const handlePlayerApi = (req, res) => {
       return res.status(403).json({ auth: 0, error: 'device_revoked', message: 'Aparato desvinculado. Contacta con tu proveedor.' });
     }
     touchDeviceByToken(token, clientIp);
-    const activeConns = db
-      .prepare('SELECT COUNT(*) as c FROM active_connections WHERE line_id = ?')
-      .get(line.id).c;
+    const activeConns = countLiveConnections(line.id);
     return res.json({
       auth: 1,
       status: line.status,

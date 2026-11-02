@@ -316,6 +316,35 @@ export function deviceLimitFor(line) {
   return Math.max(1, Math.min(20, explicit || conns));
 }
 
+/**
+ * Conexiones **vivas** de la línea (los reproductores abiertos ahora mismo).
+ *
+ * Es distinto de `activeDeviceCount`, que cuenta los equipos que alguna vez se
+ * registraron: un televisor apagado sigue siendo un aparato registrado, pero ya
+ * no ocupa una conexión. El cupo que ve el cliente al entrar es este.
+ */
+const LIVE_WINDOW_SECONDS = 120; // 4 latidos perdidos (el latido va cada 30 s)
+
+export function liveConnectionCount(lineId) {
+  try {
+    return db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM active_connections
+          WHERE line_id = ?
+            AND datetime(last_ping_at) >= datetime('now', ?)`
+      )
+      .get(Number(lineId), `-${LIVE_WINDOW_SECONDS} seconds`).c;
+  } catch {
+    return 0;
+  }
+}
+
+/** Hueco libre de conexión para un aparato nuevo. */
+export function hasFreeConnectionSlot(line) {
+  const maxConns = Math.max(1, Number(line?.max_connections) || 1);
+  return liveConnectionCount(line?.id) < maxConns;
+}
+
 export function activeDeviceCount(lineId) {
   return db
     .prepare(
@@ -334,6 +363,9 @@ export function activeDeviceCount(lineId) {
 let cache = new Map();
 let cachedVersion = '';
 const CACHE_MS = 60_000;
+// Los rechazos por cupo se recuerdan muy poco: el hueco se libera al cerrar la
+// reproducción y el cliente reintenta enseguida.
+const BLOCK_CACHE_MS = 5_000;
 
 export function clearRegistryCache() {
   cache = new Map();
@@ -472,7 +504,7 @@ export function resolveDeviceForLine(line, req, { ip = '', touch = true } = {}) 
   const key = deviceKeyOf(info);
   const cacheKey = `${mode}:${line.id}:${key}`;
   const cached = cache.get(cacheKey);
-  if (cached && Date.now() - cached.at < CACHE_MS) {
+  if (cached && Date.now() - cached.at < (cached.ttl || CACHE_MS)) {
     if (touch && cached.rowId) touchSeen(cached.rowId, ip);
     return { ...cached.result, cached: true };
   }
@@ -507,27 +539,45 @@ export function resolveDeviceForLine(line, req, { ip = '', touch = true } = {}) 
 
   const active = activeDeviceCount(line.id);
   const isNew = !existing || existing.status !== 'active';
+  // El cupo que corta es el de **conexiones en uso**, no el de equipos que
+  // alguna vez se registraron: mientras quede un hueco, un aparato nuevo entra
+  // y se apunta. Antes, con dos equipos apuntados y nadie viendo nada, el
+  // tercero se quedaba fuera con «cuenta en uso en otro aparato».
+  const maxConns = Math.max(1, Number(line.max_connections) || 1);
+  const live = liveConnectionCount(line.id);
+  const slotsBusy = live >= maxConns;
 
-  if (isNew && active >= limit) {
+  if (isNew && slotsBusy) {
     const result = {
       ok: mode !== 'enforce',
       mode,
       wouldBlock: true,
-      error: 'device_limit',
+      error: 'connection_limit',
       code: 403,
+      liveConnections: live,
+      maxConnections: maxConns,
+      devicesRegistered: active,
+      deviceLimit: limit,
       message:
-        `Esta línea admite ${limit} aparato(s) y ya hay ${active} registrados. ` +
-        'Libera un aparato desde el panel o pide un plan con más conexiones.'
+        `Esta línea admite ${maxConns} conexión(es) y ahora mismo están todas en uso (${live}). ` +
+        'Cierra la reproducción en otro aparato o espera a que se libere una.'
     };
     // En monitor se registra igual para poder verlo en el panel, pero se avisa.
     if (mode === 'monitor') {
       // Se apunta como «pendiente»: se ve en el panel, pero no ocupa cupo ni
       // pasa a estar permitido al cambiar a modo bloquear.
       const row = upsertDevice(line, info, key, ip, { status: 'pending' });
-      cache.set(cacheKey, { at: Date.now(), result: { ...result, device: publicDevice(row) }, rowId: row.id });
+      cache.set(cacheKey, {
+        at: Date.now(),
+        ttl: BLOCK_CACHE_MS,
+        result: { ...result, device: publicDevice(row) },
+        rowId: row.id
+      });
       return { ...result, device: publicDevice(row) };
     }
-    cache.set(cacheKey, { at: Date.now(), result, rowId: existing?.id || null });
+    // Un «sin hueco» se recuerda sólo unos segundos: en cuanto el cliente cierra
+    // la reproducción en otro aparato, el siguiente intento debe entrar.
+    cache.set(cacheKey, { at: Date.now(), ttl: BLOCK_CACHE_MS, result, rowId: existing?.id || null });
     return result;
   }
 
@@ -740,11 +790,19 @@ export function registryOverview() {
        HAVING devices > COALESCE(NULLIF(l.device_limit, 0), l.max_connections)`
     )
     .all();
+  // Conexiones vivas (lo que de verdad ocupa cupo al entrar).
+  const conns = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM active_connections
+        WHERE datetime(last_ping_at) >= datetime('now', ?)`
+    )
+    .get(`-${LIVE_WINDOW_SECONDS} seconds`);
   return {
     mode: getRegistryMode(),
     devices: Number(totals.devices) || 0,
     active: Number(totals.active) || 0,
     auto: Number(totals.auto) || 0,
+    connections: Number(conns?.c) || 0,
     byType,
     linesOverLimit: over
   };

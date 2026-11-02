@@ -500,7 +500,7 @@ cmd_devices() {
   DEV_SUB="$sub" DEV_TARGET="$target" DEV_EXTRA="$extra" DEV_FLAGS="$flags" \
     "$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
-    import { setRegistryMode, registryOverview, getRegistryMode, bumpRegistryVersion, dedupeLineDevices, dedupeAllDevices } from "./server/deviceRegistry.js";
+    import { setRegistryMode, registryOverview, getRegistryMode, bumpRegistryVersion, dedupeLineDevices, dedupeAllDevices, liveConnectionCount } from "./server/deviceRegistry.js";
     initDb();
 
     const sub = String(process.env.DEV_SUB || "list").toLowerCase();
@@ -526,7 +526,7 @@ cmd_devices() {
       console.log("  " + "=".repeat(58));
       line("Modo", o.mode === "enforce" ? "BLOQUEAR (corta al que pase del cupo)" : o.mode === "monitor" ? "SÓLO REGISTRAR (no corta)" : "APAGADO (no se registra nada)");
       line("Aparatos registrados", String(o.devices));
-      line("Activos ahora", String(o.active));
+      line("Conexiones en uso", String(o.connections) + " (es lo que corta al entrar)");
       line("Registrados solos", String(o.auto));
       if (o.byType.length) {
         console.log("");
@@ -535,10 +535,12 @@ cmd_devices() {
       }
       if (o.linesOverLimit.length) {
         console.log("");
-        console.log("  ⚠ Líneas con más aparatos que su cupo:");
+        // Informativo: con el criterio actual lo que corta es el número de
+        // conexiones en uso, no los aparatos apuntados.
+        console.log("  ℹ Líneas con más aparatos apuntados que su cupo (no corta por sí solo):");
         for (const l of o.linesOverLimit) {
           const cupo = Number(l.device_limit) || Number(l.max_connections) || 1;
-          console.log("    " + String(l.username).padEnd(22) + l.devices + " aparatos / " + cupo + " permitidos");
+          console.log("    " + String(l.username).padEnd(22) + l.devices + " aparatos apuntados / " + cupo + " conexiones");
         }
       }
       if (!o.devices) console.log("\n  Todavía no hay aparatos. En cuanto un cliente abra su lista M3U o su app, entra solo.");
@@ -580,10 +582,11 @@ cmd_devices() {
       const cupo = Number(l.device_limit) > 0 ? Number(l.device_limit) : Number(l.max_connections) || 1;
       const rows = db.prepare("SELECT * FROM line_devices WHERE line_id = ? ORDER BY status ASC, last_seen DESC").all(l.id);
       const active = rows.filter((r) => r.status === "active" && Number(r.blocked) !== 1).length;
+      const live = liveConnectionCount(l.id);
       console.log("");
       console.log("  Línea: " + l.username + "   (modo global: " + getRegistryMode() + ")");
-      line("Cupo", cupo + " aparato(s)" + (Number(l.device_limit) > 0 ? " (propio de la línea)" : " (máx. conexiones)"));
-      line("Registrados", active + " activos / " + rows.length + " filas");
+      line("Conexiones en uso", live + " / " + (Number(l.max_connections) || 1) + " (corta sólo cuando se llenan)");
+      line("Aparatos registrados", active + " activos / " + rows.length + " filas (no ocupan cupo si no están viendo)");
       console.log("");
       if (!rows.length) {
         console.log("  Sin aparatos todavía.");

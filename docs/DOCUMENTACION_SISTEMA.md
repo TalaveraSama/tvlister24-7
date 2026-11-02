@@ -2947,3 +2947,44 @@ API del panel (`requireAuth`; el modo exige `requireAdmin`):
 CLI: `tvlister-admin devices [list | mode off|monitor|enforce | line <usuario> | block <usuario> <mac> | allow <usuario> <mac> | reset <usuario> | undrm [--apply]]`.
 El límite de conexiones simultáneas (`max_connections` y la tabla `active_connections`) sigue
 funcionando igual y es independiente de este registro.
+
+### v2.6.23: el cupo que corta son las conexiones en uso, no los aparatos apuntados
+
+El registro por MAC (v2.6.15) servía para saber **en qué aparatos vive una línea**, pero se estaba
+usando también como puerta: en modo `enforce`, un aparato nuevo se rechazaba cuando el número de
+equipos apuntados llegaba al cupo, aunque **no hubiera nadie reproduciendo**. De ahí el aviso de las
+apps («tu cuenta ya está en uso en otro aparato») con la lista de reproducciones vacía.
+
+La regla ahora es una sola, y es la del contrato comercial: **la línea admite `max_connections`
+reproducciones a la vez**. Tener equipos apuntados no consume cupo; el que sobra sólo se queda fuera
+cuando todas las conexiones están ocupadas.
+
+| Concepto | Dónde se calcula | Qué significa |
+| --- | --- | --- |
+| Aparatos registrados | `activeDeviceCount()` (`line_devices` activos) | equipos que alguna vez entraron; se ven en el panel, **no ocupan cupo** |
+| Conexiones en uso | `liveConnectionCount()` / `countLiveConnections()` | filas de `active_connections` con latido en los **últimos 120 s**; **esto es lo que llena el cupo** |
+| Corte al entrar | `resolveDeviceForLine()` / `registerDevice()` | `403 connection_limit` sólo si `conexiones vivas >= max_connections` |
+
+Detalles que cambian el comportamiento en producción:
+
+- **Caducidad única de 120 s** para cualquier protocolo (`CONNECTION_STALE_SECONDS`): antes las
+  conexiones MPEG-TS aguantaban **15 minutos** sin latido y las HLS 90 s, así que un televisor
+  apagado seguía ocupando hueco.
+- **Purga al arrancar**: las filas de `active_connections` del proceso anterior se borran en el
+  arranque (`[TVLister] N conexión(es) fantasma liberadas al arrancar`); ningún reinicio deja el cupo
+  ocupado por sockets que ya no existen.
+- **`active_cons` = conexiones vivas** tanto en el login de `player_api.php` como en
+  `action=register_device` (antes el segundo devolvía el número de aparatos apuntados, y muchas apps
+  lo comparan con `max_connections` para pintar «cuenta en uso»).
+- **Caché de rechazo de 5 s** (`BLOCK_CACHE_MS`) frente a los 60 s del resto: al cerrar la
+  reproducción en otro aparato, el siguiente intento entra casi de inmediato.
+- **Cupo propio `device_limit`**: se sigue mostrando en el panel y en `tvlister-admin devices line`,
+  pero ya no corta al entrar; el corte depende sólo de las conexiones activas.
+- **Panel y CLI lo dicen claro**: el modal *aparatos* de la línea muestra «**N de M conexión(es) en
+  uso**» (verde/rojo) junto a «X aparato(s) registrado(s)», y `tvlister-admin devices` muestra
+  «Conexiones en uso (es lo que corta al entrar)». La lista de «líneas con más aparatos que su cupo»
+  pasa a ser informativa.
+
+Compatibilidad: el modo por defecto del registro sigue siendo `monitor` (sólo registra), la lista
+M3U, `/live/:usuario/:clave/…`, `/player_api.php`, MAG/Stalker y Enigma2 no cambian, y el tope de
+conexiones simultáneas se sigue aplicando en `recordConnection` como siempre.

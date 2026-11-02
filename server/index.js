@@ -120,6 +120,7 @@ import {
   setDeviceStatus,
   setRegistryMode,
   bumpRegistryVersion,
+  liveConnectionCount,
   dedupeLineDevices,
   dedupeAllDevices
 } from './deviceRegistry.js';
@@ -216,6 +217,16 @@ const HOST = '0.0.0.0';
 const isProd = process.env.NODE_ENV === 'production';
 
 initDb();
+
+// Al arrancar no queda ningún socket abierto: las filas de `active_connections`
+// que dejó el proceso anterior son fantasmas que ocupaban cupo (y hacían que el
+// cliente viera «cuenta en uso en otro aparato» sin nadie reproduciendo).
+try {
+  const zombies = db.prepare('DELETE FROM active_connections').run().changes;
+  if (zombies) console.log(`[TVLister] ${zombies} conexión(es) fantasma liberadas al arrancar`);
+} catch {
+  /* base bloqueada: el barrido periódico las quitará */
+}
 
 const app = express();
 app.set('trust proxy', true);
@@ -3369,6 +3380,10 @@ app.get('/api/lines/:id/devices', requireAuth, (req, res) => {
       device_lock: Number(line.device_lock) === 1,
       allowed: deviceLimitFor(line)
     },
+    // `live_connections` es lo que ocupa cupo: el corte sólo salta cuando llega
+    // a `max_connections`, no por tener aparatos registrados de antes.
+    live_connections: liveConnectionCount(line.id),
+    max_connections: Number(line.max_connections) || 1,
     mode: getRegistryMode(),
     devices: listLineDevices(line.id).map(publicDevice)
   });
