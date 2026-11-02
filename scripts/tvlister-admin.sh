@@ -1611,6 +1611,31 @@ cmd_cf_check() {
   return 0
 }
 
+# Declara los rangos de Cloudflare como proxies de confianza para que el panel
+# reciba la IP real del cliente (CF-Connecting-IP) y no la de Cloudflare. Sin
+# esto, TODOS los clientes parecen venir de unas pocas IPs de Cloudflare: los
+# límites por IP (intentos de contraseña, anti-compartición) se aplicarían a
+# todos a la vez y se bloquearía a gente que no ha hecho nada.
+ensure_cf_trusted_proxies() {
+  local service="${SERVICE_NAME:-tvlister24-7}"
+  local cf_v4 cf_v6
+  cf_v4=$(curl -fsS --max-time 8 https://www.cloudflare.com/ips-v4 2>/dev/null | tr '\n' ' ' || true)
+  cf_v6=$(curl -fsS --max-time 8 https://www.cloudflare.com/ips-v6 2>/dev/null | tr '\n' ' ' || true)
+  if [ -z "$cf_v4" ]; then
+    cf_v4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+  fi
+  mkdir -p "/etc/systemd/system/${service}.service.d"
+  cat > "/etc/systemd/system/${service}.service.d/cloudflare.conf" <<EOF
+[Service]
+# Cloudflare conecta desde sus propios rangos: se declaran como proxies de
+# confianza para que CF-Connecting-IP sea la IP real del cliente. Cualquier
+# otra conexión que mande esa cabecera se ignora.
+Environment=TVLISTER_TRUSTED_PROXIES=$(echo $cf_v4 $cf_v6 | tr ' ' ',')
+EOF
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo "✅ Proxies de confianza de Cloudflare declarados en ${service}.service"
+}
+
 cmd_cloudflare() {
   # Proxy inverso delante del panel, con Cloudflare (o sin él).
   #
@@ -1901,16 +1926,8 @@ EOF
   fi
 
   # --- Proxies de confianza (IP real, anti-spoofing) -----------------------
-  mkdir -p /etc/systemd/system/tvlister24-7.service.d
-  cat > /etc/systemd/system/tvlister24-7.service.d/cloudflare.conf <<EOF
-[Service]
-# Cloudflare conecta desde sus propios rangos: se declaran como proxies de
-# confianza para que CF-Connecting-IP sea la IP real del cliente. Cualquier
-# otra conexión que mande esa cabecera se ignora.
-Environment=TVLISTER_TRUSTED_PROXIES=$(echo $cf_v4 $cf_v6 | tr ' ' ',')
-EOF
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl restart tvlister24-7 >/dev/null 2>&1 || true
+  ensure_cf_trusted_proxies
+  systemctl restart "${SERVICE_NAME:-tvlister24-7}" >/dev/null 2>&1 || true
 
   # --- Aviso: si el dominio de video no existe o no apunta aquí, los enlaces
   #     quedan muertos y no se ve ningún canal. Mejor saberlo ahora. --------
@@ -3251,6 +3268,104 @@ case "$ACTION" in
     systemctl restart "$SERVICE_NAME"
     echo "✅ Servicio reiniciado con el nuevo puerto activo."
     ;;
+  dominios)
+    # tvlister-admin dominios                        → estado + comprobación
+    # tvlister-admin dominios <panel> <streams>      → guardar los dos dominios
+    #
+    # El panel puede ir por Cloudflare (naranja); el video NO: sale por su
+    # propio subdominio en nube GRIS. Este comando guarda los ajustes y luego
+    # comprueba DNS, certificado y quién atiende cada nombre, desde el servidor.
+    cd "$APP_DIR"
+    D_PANEL="${2:-}" D_STREAM="${3:-}"
+    D_PANEL="$D_PANEL" D_STREAM="$D_STREAM" "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { initDb } from "./server/db.js";
+      import { getDomains, setDomains, checkDomains } from "./server/domains.js";
+      initDb();
+      const panel = (process.env.D_PANEL || "").trim();
+      const streams = (process.env.D_STREAM || "").trim();
+      if (panel || streams) {
+        if (!panel || !streams) {
+          console.error("Uso: tvlister-admin dominios <dominio_panel> <dominio_video>");
+          console.error("Ej.:  tvlister-admin dominios tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz");
+          process.exit(1);
+        }
+        try {
+          const saved = setDomains({ panelDomain: panel, streamDomain: streams });
+          console.log("✅ Guardado:");
+          console.log("   Panel (Cloudflare) : " + saved.panelDomain);
+          console.log("   Video (directo)    : " + saved.publicStreamBase);
+          console.log("");
+        } catch (err) {
+          console.error("❌ " + err.message);
+          process.exit(1);
+        }
+      }
+      const cur = getDomains();
+      if (!cur.panelDomain && !cur.streamDomain) {
+        console.log("Sin dominios configurados todavía.");
+        console.log("Uso: tvlister-admin dominios <dominio_panel> <dominio_video>");
+        process.exit(1);
+      }
+      console.log("Comprobando desde este servidor (lo que verán los clientes)…");
+      console.log("");
+      const res = await checkDomains();
+      const line = (e) => {
+        if (!e) return;
+        const role = e.role === "panel" ? "PANEL (puede ir por Cloudflare)" : "VIDEO (nube gris)";
+        console.log((e.ok ? "  [OK]   " : "  [FALLA] ") + e.host + "  —  " + role);
+        if (e.dns?.ipv4?.length) console.log("          DNS  : " + e.dns.ipv4.join(", "));
+        if (e.certificate?.ok) {
+          console.log("          Cert : " + e.certificate.subject + " · vence " + String(e.certificate.validTo).slice(0,10) + " (" + e.certificate.daysLeft + " días)" + (e.certificate.coversHost ? "" : " · NO CUBRE ESTE DOMINIO"));
+        } else if (e.certificate) {
+          console.log("          Cert : " + (e.certificate.error || "no se pudo leer"));
+        }
+        if (e.http?.ok) {
+          console.log("          HTTP : " + e.http.status + " · " + (e.http.server || "?") + (e.http.viaCloudflare ? " · por Cloudflare" : " · directo"));
+        }
+        for (const p of e.problems) console.log("          ✖ " + p);
+        for (const w of e.warnings) console.log("          ⚠ " + w);
+      };
+      line(res.panel);
+      line(res.streams);
+      console.log("");
+      if (res.ok) {
+        console.log("✅ Todo correcto: panel por Cloudflare y video directo, con certificado válido.");
+      } else {
+        console.log("⚠️  " + res.problems.length + " punto(s) a corregir:");
+        for (const p of res.problems) console.log("   · " + p);
+        console.log("");
+        console.log("   Recordatorio:");
+        console.log("   · DNS: A de " + (cur.panelDomain || "<panel>") + " a la IP del servidor, nube NARANJA.");
+        console.log("   · DNS: A de " + (cur.streamDomain || "<video>") + " a la MISMA IP, nube GRIS (DNS only).");
+        console.log("   · Certificado en el origen que cubra los dos nombres:");
+        console.log("       certbot certonly --standalone -d " + (cur.panelDomain || "panel") + " -d " + (cur.streamDomain || "video"));
+        console.log("     y luego:  tvlister-admin tls  (para que el panel lo use)  o  tvlister-admin cloudflare <panel> <video>");
+        process.exitCode = 1;
+      }
+    '
+    # Si el panel está detrás de Cloudflare, el panel necesita conocer sus rangos
+    # para ver la IP real de cada cliente. Se detecta por la cabecera cf-ray.
+    PANEL_HOST="${2:-}"
+    if [ -z "$PANEL_HOST" ]; then
+      PANEL_HOST=$(cd "$APP_DIR" && "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb } from "./server/db.js";
+        import { getDomains } from "./server/domains.js";
+        initDb();
+        console.log(getDomains().panelDomain || "");
+      ' 2>/dev/null | tail -1)
+    fi
+    if [ -n "$PANEL_HOST" ] && curl -sS -o /dev/null -D - --max-time 10 "https://${PANEL_HOST}/" 2>/dev/null | grep -qi '^cf-ray:'; then
+      if [ ! -f "/etc/systemd/system/${SERVICE_NAME:-tvlister24-7}.service.d/cloudflare.conf" ]; then
+        ensure_cf_trusted_proxies
+        systemctl restart "${SERVICE_NAME:-tvlister24-7}" >/dev/null 2>&1 || true
+        echo "   (servicio reiniciado para aplicar la IP real de los clientes)"
+      else
+        echo "✅ Proxies de confianza de Cloudflare ya declarados"
+      fi
+    elif [ -n "$PANEL_HOST" ]; then
+      echo "ℹ️  ${PANEL_HOST} no responde como Cloudflare: no hace falta configurar sus rangos."
+    fi
+    ;;
   tls)
     # tvlister-admin tls                      → estado del certificado y puertos
     # tvlister-admin tls <cert> <key>         → fijar rutas y reabrir puertos
@@ -3495,9 +3610,10 @@ case "$ACTION" in
     echo " 27) Códigos de acceso al panel, estilo XUI.one (access-code)"
     echo " 28) Elegir el puerto de salida de los streams: 80 / 443 / 8095 (streams-port)"
     echo " 29) DRM / claves: cifrar canales con el CAS de TVLister (drm)"
+    echo " 30) Dominios públicos: panel (Cloudflare) y video (directo) (dominios)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-29]: " opt
+    read -r -p "Selecciona una opción [0-30]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -3533,6 +3649,7 @@ case "$ACTION" in
       27) cmd_access_code "list" "" "" "" ;;
       28) "$0" streams-port ;;
       29) "$0" drm ;;
+      30) "$0" dominios ;;
       *) exit 0 ;;
     esac
     ;;

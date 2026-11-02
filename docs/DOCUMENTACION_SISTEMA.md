@@ -2757,3 +2757,26 @@ certificado el puerto HTTPS no se abre y se explica por qué.
 **6. UI.** Pestaña *Multi-Puertos HTTPS/HTTP*: selector de protocolo, botones `:443 HTTPS` y
 `:80 HTTPS+HTTP`, tarjeta del certificado (dominio, caducidad, fuente, dominios sin cubrir) y botón
 «Reabrir puertos TLS» para recargar tras renovar.
+
+### v2.6.7: dominios del panel y del video
+
+**1. Ajustes.** `panel_domain`, `stream_domain` y `public_stream_base` se guardan juntos desde
+*Multi-Puertos HTTPS/HTTP → Dominios públicos* o `tvlister-admin dominios <panel> <video>`. La base
+pública se deriva como `https://<video>` (puerto implícito) y se valida contra el dominio de video.
+
+**2. `server/domains.js`.** `getDomains()` / `setDomains()` con validación de host; `checkHost()`
+resuelve DNS (`dns.promises`), inspecciona el certificado del 443 (SNI, SAN con comodines,
+vencimiento, confianza) y hace una petición HTTP para leer `server` y `cf-ray`; `checkDomains()`
+cruza los dos nombres con su papel (`panel` puede ir por Cloudflare, `streams` no) y devuelve
+`problems`/`warnings` accionables.
+
+**3. API.** `GET /api/domains`, `POST /api/domains` (`{panelDomain, streamDomain, publicStreamBase?,
+openPorts?}`; con `openPorts` abre 443 HTTPS y 80 HTTPS+HTTP) y `GET /api/domains/check`.
+
+**4. IP real detrás de Cloudflare.** Si al guardar se detecta `cf-ray`, el CLI escribe el drop-in
+`TVLISTER_TRUSTED_PROXIES` con los rangos de Cloudflare (`ensure_cf_trusted_proxies`, compartido con
+`cloudflare`) y reinicia el servicio. Sin esto, los límites por IP se aplican a todos los clientes a
+la vez porque todos parecen Cloudflare.
+
+**5. UI.** Tarjeta con los dos campos, «Guardar y abrir 80/443» y «Comprobar», con el resultado por
+dominio: DNS, certificado, HTTP y la etiqueta CLOUDFLARE cuando el video está mal proxificado.

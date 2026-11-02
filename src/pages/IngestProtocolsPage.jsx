@@ -105,6 +105,10 @@ export default function IngestProtocolsPage() {
   const [newPortScheme, setNewPortScheme] = useState('https');
   const [portBusy, setPortBusy] = useState(false);
   const [tlsInfo, setTlsInfo] = useState(null);
+  const [domains, setDomains] = useState({ panelDomain: '', streamDomain: '', publicStreamBase: '' });
+  const [domainForm, setDomainForm] = useState({ panelDomain: '', streamDomain: '' });
+  const [domainCheck, setDomainCheck] = useState(null);
+  const [domainBusy, setDomainBusy] = useState(false);
   const [tlsForm, setTlsForm] = useState({ certPath: '', keyPath: '' });
   const [tlsBusy, setTlsBusy] = useState(false);
 
@@ -144,6 +148,9 @@ export default function IngestProtocolsPage() {
         setTlsInfo(tlsState);
         setTlsForm({ certPath: tlsState.certPath || '', keyPath: tlsState.keyPath || '' });
       }
+      const doms = await apiFetch('/api/domains');
+      setDomains(doms);
+      setDomainForm({ panelDomain: doms.panelDomain || '', streamDomain: doms.streamDomain || '' });
     } catch (err) {
       console.error(err);
     }
@@ -275,6 +282,54 @@ export default function IngestProtocolsPage() {
   useEffect(() => {
     handleResolveM4f();
   }, []);
+
+  const loadDomains = async () => {
+    try {
+      const d = await apiFetch('/api/domains');
+      setDomains(d);
+      setDomainForm({ panelDomain: d.panelDomain || '', streamDomain: d.streamDomain || '' });
+    } catch {
+      /* sin datos: la tarjeta queda vacía */
+    }
+  };
+
+  const saveDomains = async () => {
+    setDomainBusy(true);
+    try {
+      const saved = await apiFetch('/api/domains', {
+        method: 'POST',
+        body: JSON.stringify({
+          panelDomain: domainForm.panelDomain,
+          streamDomain: domainForm.streamDomain,
+          openPorts: true
+        })
+      });
+      setDomains(saved);
+      if (saved.ports) setPortsData(saved.ports);
+      notify(`Dominios guardados: panel ${saved.panelDomain || '—'} · video ${saved.publicStreamBase || '—'}`);
+      await loadTls(true);
+    } catch (err) {
+      notify(err.message, 'err');
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const runDomainCheck = async () => {
+    setDomainBusy(true);
+    setDomainCheck({ loading: true });
+    try {
+      const res = await apiFetch('/api/domains/check');
+      setDomainCheck(res);
+      if (res.ok) notify('Dominios correctos: panel por Cloudflare y video directo.');
+      else notify(`${res.problems.length} problema(s) en los dominios.`, 'err');
+    } catch (err) {
+      notify(err.message, 'err');
+      setDomainCheck(null);
+    } finally {
+      setDomainBusy(false);
+    }
+  };
 
   const loadTls = async (refresh = false) => {
     try {
@@ -1078,6 +1133,125 @@ export default function IngestProtocolsPage() {
                 rechazan HTTP) funcionan igual que los que usan 8080/8880, compartiendo las mismas
                 líneas y conexiones.
               </p>
+            </div>
+
+            {/* Dominios públicos */}
+            <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-4 space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <ShieldCheck className="w-4 h-4 text-indigo-300 mt-0.5" />
+                  <div>
+                    <div className="text-sm font-bold text-white">Dominios públicos: panel y video</div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      El panel va por Cloudflare (nube <strong className="text-amber-300">naranja</strong>).
+                      El video sale por su propio subdominio en nube{' '}
+                      <strong className="text-slate-200">gris</strong> (DNS only): el HLS continuo no puede
+                      pasar por el proxy.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={runDomainCheck}
+                    disabled={domainBusy}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Activity className={`w-3.5 h-3.5 ${domainBusy ? 'animate-pulse' : ''}`} /> Comprobar
+                  </button>
+                  <button
+                    onClick={saveDomains}
+                    disabled={domainBusy || !domainForm.panelDomain || !domainForm.streamDomain}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"
+                  >
+                    <Check className="w-3.5 h-3.5" /> Guardar y abrir 80/443
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-amber-300/90 font-semibold mb-1">
+                    PANEL (por Cloudflare · naranja)
+                  </label>
+                  <input
+                    value={domainForm.panelDomain}
+                    onChange={(e) => setDomainForm({ ...domainForm, panelDomain: e.target.value })}
+                    placeholder="tvadmin.alphadigitalnic.xyz"
+                    className="w-full px-3 py-2 rounded-lg bg-[#090d16] border border-slate-800 text-[11px] font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-emerald-300/90 font-semibold mb-1">
+                    VIDEO (directo · nube gris)
+                  </label>
+                  <input
+                    value={domainForm.streamDomain}
+                    onChange={(e) => setDomainForm({ ...domainForm, streamDomain: e.target.value })}
+                    placeholder="live-stream.alphadigitalnic.xyz"
+                    className="w-full px-3 py-2 rounded-lg bg-[#090d16] border border-slate-800 text-[11px] font-mono text-white"
+                  />
+                </div>
+              </div>
+
+              {(domains.publicStreamBase || domains.streamPort) && (
+                <div className="text-[10px] text-slate-500 font-mono">
+                  Base pública actual: {domains.publicStreamBase || '—'}
+                  {domains.streamPort ? ` · puerto ${domains.streamPort}` : ''}
+                </div>
+              )}
+
+              {domainCheck && !domainCheck.loading && (
+                <div className="space-y-2">
+                  {[
+                    { role: 'panel', label: 'Panel', data: domainCheck.panel },
+                    { role: 'streams', label: 'Video', data: domainCheck.streams }
+                  ].map(({ label, data }) =>
+                    data ? (
+                      <div
+                        key={label}
+                        className={`rounded-lg border p-2.5 text-[11px] ${
+                          data.ok ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-rose-500/40 bg-rose-500/5'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-white">{data.host}</span>
+                          <span className="text-slate-500">·</span>
+                          <span className={data.ok ? 'text-emerald-300' : 'text-rose-300'}>{label}</span>
+                          {data.http?.viaCloudflare && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[9px] font-bold">
+                              CLOUDFLARE
+                            </span>
+                          )}
+                          {data.certificate?.ok && (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 text-[9px]">
+                              cert {data.certificate.daysLeft}d
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-slate-400 mt-0.5 font-mono text-[10px]">
+                          {data.dns?.ipv4?.length ? `DNS ${data.dns.ipv4.join(', ')}` : 'DNS sin IPv4'}
+                          {data.http?.ok ? ` · HTTP ${data.http.status} ${data.http.server || ''}` : ''}
+                        </div>
+                        {data.problems?.map((p) => (
+                          <div key={p} className="text-rose-300 mt-1">
+                            ✖ {p}
+                          </div>
+                        ))}
+                        {data.warnings?.map((w) => (
+                          <div key={w} className="text-amber-300 mt-1">
+                            ⚠ {w}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null
+                  )}
+                  {domainCheck.ok && (
+                    <div className="text-[11px] text-emerald-300">
+                      ✔ Panel por Cloudflare y video directo, con certificado válido en los dos.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Certificado TLS */}

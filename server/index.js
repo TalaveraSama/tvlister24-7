@@ -151,6 +151,7 @@ import {
   rebindAllPorts
 } from './multiPortManager.js';
 import { tlsStatus, setTlsPaths, invalidateTlsCache } from './tlsManager.js';
+import { getDomains, setDomains, checkDomains } from './domains.js';
 import {
   buildFullBackupObject,
   createServerSnapshot,
@@ -4123,6 +4124,38 @@ app.post('/api/ports', requireAuth, requireAdmin, async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// Dominios públicos: panel (puede ir por Cloudflare) y video (directo).
+app.get('/api/domains', requireAuth, (req, res) => {
+  res.json(getDomains());
+});
+
+app.post('/api/domains', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const saved = setDomains({
+      panelDomain: req.body?.panelDomain,
+      streamDomain: req.body?.streamDomain,
+      publicStreamBase: req.body?.publicStreamBase
+    });
+    let ports = null;
+    if (req.body?.openPorts) {
+      // Los dos puertos estándar del panel: 443 con TLS y 80 con redirección.
+      await addExtraPort(443, 'https');
+      ports = await addExtraPort(80, 'both');
+    }
+    res.json({ ...saved, ports });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/domains/check', requireAuth, async (req, res) => {
+  try {
+    res.json(await checkDomains());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
