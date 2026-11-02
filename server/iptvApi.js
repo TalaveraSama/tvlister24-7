@@ -24,6 +24,14 @@ import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import { resolveIpGeoSync } from './geoIspResolver.js';
 import { ensureSlateManifestForStream, pipeSlateContinuousMpegTs } from './offlineSlateEngine.js';
+import {
+  isJellyfinRelaySource,
+  isJellyfinStreamSource,
+  isLegacyJellyfinDirectUrl,
+  jellyfinItemIdFromSource,
+  legacyJellyfinItemId,
+  jellyfinStreamUrl
+} from './jellyfin.js';
 import { resolvePublicPosterUrl, normalizeXuiOrTmdbImageUrl, verifyLocalPosterPath } from './vodSyncTmdb.js';
 import {
   computeChannel247LiveState,
@@ -1888,6 +1896,118 @@ iptvRouter.get(/^\/([^/]+)\/([^/]+)\/(\d+(?:\.(?:ts|m3u8))?)$/i, (req, res) => {
 
 // 5. Movie VOD Delivery (/movie/:username/:password/:vodSpec)
 // VOD / series con enlace firmado para la WebTV (sin credenciales ni origen real)
+/**
+ * Retransmite el vídeo de Jellyfin por el propio panel.
+ *
+ * Jellyfin en otra máquina: el cliente no puede ir directo a él (y no debe ver
+ * la API Key). El panel pide el archivo con `static=true` y reenvía el `Range`
+ * tal cual, así el *seek* del reproductor funciona igual que con un archivo en
+ * disco.
+ */
+async function serveJellyfinRelay(req, res, source, { upstreamName = '' } = {}) {
+  const itemId = isJellyfinStreamSource(source) ? jellyfinItemIdFromSource(source) : legacyJellyfinItemId(source);
+  if (!itemId) return res.status(404).send('Elemento de Jellyfin no válido');
+
+  let upstreamUrl;
+  try {
+    upstreamUrl = jellyfinStreamUrl(itemId);
+  } catch (err) {
+    return res.status(502).send(`Jellyfin no está disponible: ${err.message}`);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  // Sólo se corta la descarga si el cliente se va ANTES de terminar: `req`/`res`
+  // emiten 'close' también al completarse, y abortar ahí cortaría las descargas
+  // largas a medias.
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+
+  const headers = {};
+  if (req.headers.range) headers.Range = String(req.headers.range);
+  if (req.headers['if-range']) headers['If-Range'] = String(req.headers['if-range']);
+
+  let upstream;
+  try {
+    upstream = await fetch(upstreamUrl, { headers, method: req.method === 'HEAD' ? 'HEAD' : 'GET', signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timer);
+    return res
+      .status(502)
+      .send(
+        err.name === 'AbortError'
+          ? 'Jellyfin tardó demasiado en responder'
+          : 'No se pudo conectar con el servidor de Jellyfin'
+      );
+  }
+  clearTimeout(timer);
+  if (req.socket) req.socket.setTimeout(0);
+
+  // 416 lo manda Jellyfin cuando el rango pedido no cabe: se reenvía tal cual
+  // para que el reproductor sepa el tamaño real.
+  if (upstream.status === 416) {
+    const cr = upstream.headers.get('content-range');
+    res.writeHead(416, { 'Accept-Ranges': 'bytes', ...(cr ? { 'Content-Range': cr } : {}) });
+    return res.end();
+  }
+  if (!upstream.ok && upstream.status !== 206) {
+    const detail =
+      upstream.status === 401 || upstream.status === 403
+        ? 'API Key de Jellyfin rechazada'
+        : `Jellyfin respondió HTTP ${upstream.status}`;
+    return res.status(upstream.status === 404 ? 404 : 502).send(detail);
+  }
+
+  const ext = String(upstreamName || '').toLowerCase();
+  let contentType = upstream.headers.get('content-type') || '';
+  if (!contentType || contentType.includes('octet-stream')) {
+    contentType =
+      /\.(mkv)$/.test(ext)
+        ? 'video/x-matroska'
+        : /\.(mp4|m4v)$/.test(ext)
+          ? 'video/mp4'
+          : /\.(webm)$/.test(ext)
+            ? 'video/webm'
+            : /\.(avi)$/.test(ext)
+              ? 'video/x-msvideo'
+              : /\.(mov)$/.test(ext)
+                ? 'video/quicktime'
+                : /\.(ts|m2ts)$/.test(ext)
+                  ? 'video/mp2t'
+                  : 'video/mp4';
+  }
+
+  const outHeaders = {
+    'Content-Type': contentType,
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'no-store'
+  };
+  for (const name of ['content-length', 'content-range']) {
+    const value = upstream.headers.get(name);
+    if (value) outHeaders[name === 'content-length' ? 'Content-Length' : 'Content-Range'] = value;
+  }
+  res.writeHead(upstream.status, outHeaders);
+  if (req.method === 'HEAD' || !upstream.body) return res.end();
+
+  const stream = Readable.fromWeb(upstream.body);
+  stream.on('error', () => {
+    try {
+      res.destroy();
+    } catch {
+      /* el cliente ya cerró */
+    }
+  });
+  res.on('close', () => {
+    try {
+      stream.destroy();
+    } catch {
+      /* nada que liberar */
+    }
+  });
+  return stream.pipe(res);
+}
+
 async function serveVodForLine(req, res, line, vodId) {
   const vod = db.prepare('SELECT * FROM vod_items WHERE id = ?').get(Number(vodId));
   if (!vod) return res.status(404).send('VOD no encontrado');
@@ -1898,6 +2018,9 @@ async function serveVodForLine(req, res, line, vodId) {
   if (!conn.allowed) return res.status(429).send(conn.error);
   if (edgeTarget) return res.redirect(302, edgeTarget.url);
   if (vod.source_url.startsWith('/')) return serveLocalMediaFileWithRange(req, res, vod.source_url, conn.connId);
+  if (isJellyfinRelaySource(vod.source_url)) {
+    return serveJellyfinRelay(req, res, vod.source_url, { upstreamName: `.${vod.container_ext || ''}` });
+  }
   return res.redirect(302, vod.source_url);
 }
 
@@ -1917,6 +2040,9 @@ async function serveEpisodeForLine(req, res, line, epId) {
   if (!conn.allowed) return res.status(429).send(conn.error);
   if (edgeTarget) return res.redirect(302, edgeTarget.url);
   if (ep.source_url.startsWith('/')) return serveLocalMediaFileWithRange(req, res, ep.source_url, conn.connId);
+  if (isJellyfinRelaySource(ep.source_url)) {
+    return serveJellyfinRelay(req, res, ep.source_url, { upstreamName: `.${ep.container_ext || ''}` });
+  }
   return res.redirect(302, ep.source_url);
 }
 
@@ -2387,6 +2513,19 @@ iptvRouter.get('/api/admin/preview/stream', async (req, res) => {
   // 2. Local disk media file (VOD movie / series episode / 24-7 file)
   if (rawUrl.startsWith('/') && fs.existsSync(rawUrl)) {
     return serveLocalMediaFileWithRange(req, res, rawUrl, null);
+  }
+
+  // 2b. VOD servido desde Jellyfin (otra máquina): se retransmite por el panel
+  if (isLegacyJellyfinDirectUrl(rawUrl) || isJellyfinStreamSource(rawUrl)) {
+    let upstreamName = '';
+    if (sid > 0) {
+      const row =
+        kind === 'series'
+          ? db.prepare('SELECT container_ext FROM series_episodes WHERE id = ?').get(sid)
+          : db.prepare('SELECT container_ext FROM vod_items WHERE id = ?').get(sid);
+      upstreamName = `.${String(row?.container_ext || '').trim()}`;
+    }
+    return serveJellyfinRelay(req, res, rawUrl, { upstreamName });
   }
 
   // 3. Expand Flussonic m4f://, MNF mnf://, or HTTP(S) (including 127.0.0.1:18888 RTMP Ingest!)

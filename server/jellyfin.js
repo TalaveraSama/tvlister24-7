@@ -335,6 +335,67 @@ function resolveLocalMediaPath(jellyfinPath) {
 }
 
 // ---------------------------------------------------------------------------
+// Jellyfin en otro servidor: el panel retransmite el vídeo
+// ---------------------------------------------------------------------------
+//
+// Si los archivos NO están en el disco del panel (Jellyfin en otra máquina o en
+// un contenedor sin el disco montado) no se puede crear un enlace: se guarda una
+// fuente `jellyfin://<Id>` y el panel hace de intermediario con la API Key, que
+// nunca sale al cliente.
+
+const JELLYFIN_SOURCE_PREFIX = 'jellyfin://';
+
+export function buildJellyfinStreamSource(itemId) {
+  return `${JELLYFIN_SOURCE_PREFIX}${encodeURIComponent(String(itemId || ''))}`;
+}
+
+export function isJellyfinStreamSource(source) {
+  return String(source || '').startsWith(JELLYFIN_SOURCE_PREFIX);
+}
+
+export function jellyfinItemIdFromSource(source) {
+  if (!isJellyfinStreamSource(source)) return '';
+  try {
+    return decodeURIComponent(String(source).slice(JELLYFIN_SOURCE_PREFIX.length));
+  } catch {
+    return '';
+  }
+}
+
+/** URL real de Jellyfin (sólo para el servidor: lleva la API Key). */
+export function jellyfinStreamUrl(itemId, { static: staticStream = true } = {}) {
+  const cfg = getJellyfinConfig();
+  if (!cfg.url) throw new Error('Falta la URL de Jellyfin.');
+  const key = getApiKey();
+  if (!key) throw new Error('Falta la API Key de Jellyfin.');
+  const qs = staticStream ? `?static=true&api_key=${encodeURIComponent(key)}` : `?api_key=${encodeURIComponent(key)}`;
+  return `${cfg.url}/Videos/${encodeURIComponent(String(itemId))}/stream${qs}`;
+}
+
+/**
+ * Enlaces guardados por versiones anteriores: era la URL completa de Jellyfin
+ * con la `api_key` dentro. Se siguen sirviendo (por el relé) para no romper
+ * nada, y la clave deja de salir al cliente.
+ */
+export function isLegacyJellyfinDirectUrl(source) {
+  const raw = String(source || '');
+  if (!/^https?:\/\//i.test(raw)) return false;
+  if (!/\/Videos\/[^/]+\/stream/i.test(raw)) return false;
+  const base = getJellyfinConfig().url;
+  return Boolean(base) && raw.startsWith(base);
+}
+
+export function legacyJellyfinItemId(source) {
+  const m = /\/Videos\/([^/?#]+)\/stream/i.exec(String(source || ''));
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+/** ¿La fuente de este VOD/episodio se sirve a través del panel desde Jellyfin? */
+export function isJellyfinRelaySource(source) {
+  return isJellyfinStreamSource(source) || isLegacyJellyfinDirectUrl(source);
+}
+
+// --------------------------------------------------------------------------- 
 // Crear el enlace («Create Symlink» de XUI.one)
 // ---------------------------------------------------------------------------
 
@@ -756,6 +817,14 @@ export async function previewJellyfinImport({ libraryIds = [], contentMode = 'au
     .sort((a, b) => b.missing - a.missing)
     .slice(0, 6);
   preview.needsMapping = preview.unreachable > 0 && preview.forbidden < preview.unreachable;
+  // Nada accesible y nada «sin permiso» = Jellyfin está en otra máquina (o el
+  // disco no está montado aquí). En ese caso la salida es retransmitir.
+  preview.remoteServer = preview.unreachable > 0 && preview.reachable === 0 && preview.forbidden === 0;
+  if (preview.remoteServer) {
+    preview.hint =
+      'Jellyfin está en otro servidor: los archivos no están en este disco, así que no se pueden enlazar. ' +
+      'Activa «Servir desde Jellyfin» y el panel retransmitirá el vídeo (la API Key no sale al cliente).';
+  }
   return preview;
 }
 
@@ -1156,6 +1225,7 @@ export async function importFromJellyfin({
     episodesExisting: 0,
     symlinks: 0,
     directUrls: 0,
+    relayed: 0,
     skippedNoFile: 0,
     images: 0,
     tmdbEnriched: 0,
@@ -1190,6 +1260,11 @@ export async function importFromJellyfin({
 
   const buildSource = ({ item, path: filePath, title, year, kind, containerExt }) => {
     const local = filePath ? resolveLocalMediaPath(filePath) : '';
+    if (createSymlink && !local && useDirect) {
+      // Jellyfin está en otra máquina: no hay archivo que enlazar, pero el
+      // panel puede retransmitirlo. Se usa el relé en vez de descartarlo.
+      return { source: buildJellyfinStreamSource(item.Id), symlink: '', reason: '', relay: true };
+    }
     if (createSymlink) {
       if (!local) return { source: '', symlink: '', reason: 'archivo_no_accesible' };
       const link = createMediaSymlink({
@@ -1204,9 +1279,9 @@ export async function importFromJellyfin({
     }
     if (local) return { source: local, symlink: '', reason: '' };
     if (useDirect) {
-      const base = cfg.url || '';
-      const url = `${base}/Videos/${encodeURIComponent(item.Id)}/stream?static=true&api_key=${encodeURIComponent(getApiKey())}`;
-      return { source: url, symlink: '', reason: '' };
+      // Se guarda un marcador, no la URL con la clave: el panel retransmite y
+      // la API Key no viaja nunca al reproductor del cliente.
+      return { source: buildJellyfinStreamSource(item.Id), symlink: '', reason: '', relay: true };
     }
     return { source: '', symlink: '', reason: 'archivo_no_accesible' };
   };
@@ -1255,6 +1330,7 @@ export async function importFromJellyfin({
           const newId = Number(info.lastInsertRowid);
           stats.moviesAdded += 1;
           if (src.symlink) stats.symlinks += 1;
+          else if (src.relay) stats.relayed += 1;
           else stats.directUrls += 1;
           newVodIds.push(newId);
         } catch (err) {
@@ -1335,6 +1411,7 @@ export async function importFromJellyfin({
             );
             stats.episodesAdded += 1;
             if (src.symlink) stats.symlinks += 1;
+            else if (src.relay) stats.relayed += 1;
             else stats.directUrls += 1;
           }
         } catch (err) {
@@ -1389,6 +1466,11 @@ export async function importFromJellyfin({
       }
     }
     summary.unreachableReasons = reasons;
+    if (!reasons.forbidden && stats.relayed === 0 && stats.symlinks === 0 && stats.directUrls === 0) {
+      summary.hint =
+        'Jellyfin está en otro servidor y no se activó «Servir desde Jellyfin»: los archivos no están en este disco. ' +
+        'Actívalo para retransmitirlos por el panel, o monta el disco de Jellyfin aquí (NFS/SMB) para poder crear enlaces.';
+    }
     if (reasons.forbidden > 0) {
       summary.hint =
         'Hay archivos que existen pero el panel no puede leerlos. Ajusta propietario/permisos (chown al usuario del servicio o chmod 644).';

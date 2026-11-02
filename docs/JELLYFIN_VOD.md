@@ -122,6 +122,61 @@ Contadores de la importación: `moviesAdded`, `moviesExisting`, `seriesAdded`, `
 
 ---
 
+## 3b. Jellyfin en **otro** servidor
+
+Si Jellyfin no está en la misma máquina que el panel (o su disco no está montado aquí), **no se
+puede crear un enlace**: no hay archivo local al que apuntar. Hay dos caminos:
+
+### A) Servir desde Jellyfin (recomendado si no quieres montar discos)
+
+1. En el modal, marca **«Servir desde Jellyfin»** (o pulsa el botón que aparece cuando la vista
+   previa detecta que estás en otro servidor).
+2. Pulsa **Importar**.
+
+Qué hace el panel:
+
+- Guarda la fuente como `jellyfin://<Id>` — **nunca** la URL con la API Key.
+- Cuando un cliente pide `/movie/usuario/clave/1`, el panel pide el archivo a Jellyfin con
+  `static=true`, **reenvía el `Range`** y devuelve `206 Partial Content`, igual que con un archivo en
+  disco. El *seek* y el currículum de la reproducción funcionan.
+- La **API Key no sale nunca** al reproductor (ni en la URL ni en cabeceras) y Jellyfin no tiene por
+  qué ser accesible desde Internet: sólo desde el panel.
+- El panel hace de intermediario: **todo el tráfico de vídeo pasa por él** (cuenta ancho de banda del
+  VPS y consume conexiones de Jellyfin según su propio límite).
+
+### B) Montar el disco de Jellyfin aquí (para usar «Create Symlink» de verdad)
+
+Si el disco está accesible por red, móntalo y el panel crea enlaces como con XUI.one (no hay
+retransmisión, el vídeo sale directo del disco):
+
+```bash
+# NFS (servidor Jellyfin: /etc/exports -> /srv/media 192.168.1.0/24(ro,sync))
+sudo apt install -y nfs-common
+sudo mkdir -p /mnt/jellyfin
+sudo mount -t nfs 192.168.1.50:/srv/media /mnt/jellyfin
+echo '192.168.1.50:/srv/media /mnt/jellyfin nfs ro,hard,_netdev 0 0' | sudo tee -a /etc/fstab
+
+# o SMB/CIFS (servidor Windows/NAS)
+sudo apt install -y cifs-utils
+sudo mount -t cifs //192.168.1.50/media /mnt/jellyfin -o ro,username=USUARIO,uid=$(id -u tvlister),gid=$(id -g tvlister)
+```
+
+Luego, en el modal, escribe la equivalencia (`/Media => /mnt/jellyfin`) o usa **«Buscar la carpeta
+real»**, y deja **«Create Symlink»** marcado. El servicio debe poder leer los archivos (el `uid`/`gid`
+del montaje o `chmod` en el origen).
+
+### Qué opción elegir
+
+| | Servir desde Jellyfin | Montar el disco + Create Symlink |
+| --- | --- | --- |
+| Coste de CPU del panel | mínimo (sólo copia bytes) | mínimo |
+| Ancho de banda del panel | **todo el vídeo pasa por él** | ninguno |
+| Requiere montar nada | no | sí (NFS/SMB) |
+| Enlaces en la carpeta VOD | no | sí (como XUI.one) |
+| Si Jellyfin se cae | el VOD deja de verse | sigue viéndose (archivo directo) |
+
+---
+
 ## 4. Reproducción
 
 El reproductor y las apps Xtream no cambian: `source_url` es la ruta del enlace dentro del servidor y
@@ -193,6 +248,8 @@ acepta `Authorization: MediaBrowser Token="…"`).
 | Síntoma | Causa y solución |
 |---|---|
 | «Jellyfin rechazó la API Key (HTTP 401)» | Clave mal copiada o revocada: crear una nueva en Jellyfin |
+| Todos los archivos «no accesibles» y Jellyfin está en otra máquina | Marca **«Servir desde Jellyfin»** y vuelve a importar (o monta el disco, ver 3b) |
+| Un vídeo da 502 al reproducir | El panel no alcanza Jellyfin en ese momento: comprueba `curl http://IP_JELLYFIN:8096/System/Info` desde el servidor del panel |
 | «No se pudo conectar con Jellyfin» | URL, puerto (8096) o firewall; probar con `curl http://IP:8096/System/Info` |
 | Vista previa con muchos «no accesibles» | Jellyfin usa otra ruta (Docker): pulsa **«Buscar la carpeta real»** o escribe la carpeta en *«Carpeta real de los vídeos»* |
 | «sin permiso» en la vista previa | El panel no puede leer los archivos: `chown`/`chmod` con el usuario del servicio |

@@ -31,15 +31,15 @@ curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download
 Para fijar una versión concreta (recomendado en producción) y el puerto:
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.18/install.sh \
-  | sudo bash -s -- --tag v2.6.18 --port 8095
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.19/install.sh \
+  | sudo bash -s -- --tag v2.6.19 --port 8095
 ```
 
 Si un release no tiene el paquete adjunto (o su descarga falla), el instalador usa el árbol del tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.18/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.18
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.19/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.19
 ```
 
 También puedes instalarlo desde la consola del propio servidor:

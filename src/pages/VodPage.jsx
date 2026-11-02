@@ -627,6 +627,7 @@ export default function VodPage({ onPreview }) {
         text:
           `Importado: ${st.moviesAdded} películas, ${st.seriesAdded} series y ${st.episodesAdded} episodios. ` +
           `${st.symlinks} enlaces creados en ${jellyfinForm.symlinkDir || jellyfinCfg.symlinkDir}` +
+          (st.relayed ? `, ${st.relayed} retransmitidas desde Jellyfin` : '') +
           (st.directUrls ? `, ${st.directUrls} por URL de Jellyfin` : '') +
           (st.detectedPaths?.length ? ` Rutas detectadas: ${st.detectedPaths.map((r) => `${r.from} → ${r.to}`).join(', ')}.` : '') +
           (st.skippedNoFile ? `. ${st.skippedNoFile} sin archivo accesible${st.hint ? `: ${st.hint}` : ' (revisa el mapa de rutas)'}` : '') +
@@ -803,6 +804,11 @@ export default function VodPage({ onPreview }) {
                     {v.source_provider === 'jellyfin' && (
                       <div className="px-2 py-0.5 rounded bg-sky-600/90 text-white text-[10px] font-bold flex items-center gap-1">
                         <Server className="w-3 h-3" /> Jellyfin
+                      </div>
+                    )}
+                    {String(v.source_url || '').startsWith('jellyfin://') && (
+                      <div className="px-2 py-0.5 rounded bg-cyan-700/90 text-white text-[10px] font-bold flex items-center gap-1">
+                        <PlugZap className="w-3 h-3" /> Remoto
                       </div>
                     )}
                   </div>
@@ -1216,7 +1222,9 @@ export default function VodPage({ onPreview }) {
                     className="w-4 h-4 mt-0.5 accent-sky-500"
                   />
                   <span className="text-slate-300">
-                    Si el archivo no está en este servidor, usar la URL de Jellyfin (Jellyfin en otra máquina)
+                    <span className="text-white font-semibold">Servir desde Jellyfin</span> — si el archivo no está en
+                    este servidor (Jellyfin en otra máquina), el panel retransmite el vídeo. La API Key nunca sale al
+                    cliente y el *seek* funciona igual.
                   </span>
                 </label>
               </div>
@@ -1261,6 +1269,37 @@ export default function VodPage({ onPreview }) {
                       ))}
                     </div>
                   )}
+                  {jellyfinPreview.remoteServer && (
+                    <div className="p-2.5 rounded-lg bg-sky-500/10 border border-sky-500/30 space-y-2">
+                      <p className="text-[11px] text-sky-200">
+                        <span className="font-semibold">Jellyfin está en otro servidor.</span> Estos archivos no están en
+                        el disco del panel, así que no se pueden enlazar. Con «Servir desde Jellyfin» el panel
+                        retransmite el vídeo y todo funciona igual en las apps.
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => {
+                            setJellyfinForm((prev) => ({
+                              ...prev,
+                              directFallback: true,
+                              createSymlink: false
+                            }));
+                            setJellyfinMsg({
+                              ok: true,
+                              text: 'Listo: se servirá desde Jellyfin. Pulsa «Importar».'
+                            });
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 font-semibold border border-sky-500/40"
+                        >
+                          <PlugZap className="w-3.5 h-3.5" /> Servir desde Jellyfin
+                        </button>
+                        <span className="text-[10px] text-slate-400">
+                          O monta el disco de Jellyfin aquí (NFS/SMB) y podrás usar «Create Symlink».
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
                   {jellyfinPreview.unreachable > 0 && (
                     <div className="space-y-2 pt-1 border-t border-slate-800">
                       <p className="text-[10px] text-amber-300/90">
