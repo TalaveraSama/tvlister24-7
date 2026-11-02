@@ -492,12 +492,15 @@ cmd_devices() {
   shift 2>/dev/null || true
   local flags=""
   for a in "$@"; do case "$a" in --*) flags="$flags $a" ;; esac; done
+  # `tvlister-admin devices dedupe --dry-run`: el flag no es el nombre de la línea.
+  case "$target" in --*) flags="$flags $target"; target="" ;; esac
+  case "$extra" in --*) flags="$flags $extra"; extra="" ;; esac
   cd "$APP_DIR" || return 1
 
   DEV_SUB="$sub" DEV_TARGET="$target" DEV_EXTRA="$extra" DEV_FLAGS="$flags" \
     "$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
-    import { setRegistryMode, registryOverview, getRegistryMode, bumpRegistryVersion } from "./server/deviceRegistry.js";
+    import { setRegistryMode, registryOverview, getRegistryMode, bumpRegistryVersion, dedupeLineDevices, dedupeAllDevices } from "./server/deviceRegistry.js";
     initDb();
 
     const sub = String(process.env.DEV_SUB || "list").toLowerCase();
@@ -605,6 +608,23 @@ cmd_devices() {
       console.log("  Bloquear: tvlister-admin devices block " + l.username + " <mac>");
       console.log("  Liberar : tvlister-admin devices allow " + l.username + " <mac>");
       console.log("");
+      return;
+    }
+
+    if (sub === "dedupe" || sub === "depurar" || sub === "duplicados") {
+      // Junta los aparatos duplicados: antes, cada User-Agent del mismo
+      // televisor (API, reproductor, manifiesto…) gastaba un hueco del cupo.
+      const dryRun = flags.includes("--dry-run");
+      if (target) {
+        const l = findLine(target);
+        if (!l) { console.error("❌ No existe la línea \"" + target + "\"."); process.exit(1); }
+        const r = dedupeLineDevices(l.id, { dryRun });
+        console.log("  " + (dryRun ? "Se quitarían" : "Quitados") + " " + r.removed + " aparato(s) duplicado(s) de \"" + l.username + "\".");
+      } else {
+        const r = dedupeAllDevices({ dryRun });
+        console.log("  " + (dryRun ? "Se quitarían" : "Quitados") + " " + r.removed + " aparato(s) duplicado(s) en " + r.lines + " línea(s).");
+      }
+      if (dryRun) console.log("     (simulación: nada se ha borrado; quita --dry-run para aplicarlo)");
       return;
     }
 

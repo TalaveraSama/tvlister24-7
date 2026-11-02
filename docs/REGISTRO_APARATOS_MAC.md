@@ -52,11 +52,27 @@ versión del registro en la tabla `settings`).
    | URL / cuerpo | `?mac=…`, `mac=…` |
 
 2. **Huella** si no hay MAC: `fp:<24 hex>` calculada con serial + modelo + `X-User-Agent` +
-   `User-Agent`. Es estable para el mismo aparato y la misma versión de la app. Si el cliente
-   actualiza la app y cambia su `User-Agent`, aparecerá como un aparato nuevo (el panel lo marca
-   como `AUTO` y se puede borrar la fila vieja).
+   `User-Agent`, **sin números de versión**: actualizar la app o cambiar de build no crea un
+   aparato nuevo. El panel lo marca como `AUTO` y se puede borrar la fila si hiciera falta.
+
+   **El reproductor interno no es un aparato.** Cuando la app reproduce, no usa su propio
+   `User-Agent` sino el del motor de vídeo (`ExoPlayer`/Media3, `Lavf`/FFmpeg, `AppleCoreMedia`,
+   `libVLC`, `stagefright`, `mpv`, `hls.js`…) o el de una librería HTTP (`okhttp`, `Dalvik`,
+   `curl`…). Esas peticiones **no registran aparato**: un televisor es un aparato, no tres.
+   Sin esto, un solo equipo gastaba varios huecos del cupo (API + manifiesto + segmentos) y la
+   línea se llenaba con dos televisores aunque tuviera 5 conexiones.
 
 Las MACs de relleno (`00:00:00:…`, `FF:FF:FF:…`) se descartan: no identifican a nadie.
+
+### Si el cupo ya está lleno con filas antiguas
+
+Antes de la v2.6.17 el registro podía apuntar el mismo equipo varias veces. Se juntan con:
+
+- el botón **«Depurar duplicados»** del modal de aparatos de la línea, o
+- `tvlister-admin devices dedupe [usuario] [--dry-run]`, o
+- simplemente **cambiando el modo a BLOQUEAR** (el panel depura solo antes de empezar a cortar).
+
+Se conserva la fila más antigua y nunca se toca una fila bloqueada a mano ni una con MAC distinta.
 
 ---
 
@@ -97,6 +113,15 @@ El límite de conexiones simultáneas (`max_connections` / tabla `active_connect
 **independiente** y sigue funcionando como siempre: una cosa es «cuántos canales a la vez» y otra
 «en cuántos aparatos».
 
+Comprobación rápida de que el cupo cuenta equipos y no peticiones (línea de 5 conexiones):
+
+```bash
+# 5 equipos distintos → 5 filas activas; el 6.º recibe auth:0
+tvlister-admin devices line CLIENTE
+#   Cupo      5 aparato(s) (máx. conexiones)
+#   Registrados 5 activos / 5 filas
+```
+
 ---
 
 ## 5. Panel
@@ -107,13 +132,21 @@ En **Usuarios y Dispositivos**:
   cuántos se registraron solos, el reparto por tipo, las líneas por encima del cupo y un aviso en
   rojo si queda algún canal con DRM antiguo en Flussonic.
 * En cada línea, el botón de aparato abre el detalle: MAC, tipo, marca/modelo, sistema,
-  reproductor, IP, última vez visto, veces visto y el `User-Agent` completo.
+  reproductor, IP, última vez visto, veces visto y el `User-Agent` completo. Arriba del listado
+  están el **cupo** de la línea, los tres botones de modo y **«Depurar duplicados»**.
 * Acciones: **Bloquear** (corta la sesión y no vuelve a entrar), **Permitir**, **Borrar** (limpia
   la fila, se vuelve a registrar al conectar) y **Limpiar todos** (olvida la línea entera).
 * **Alta manual**: reservar una MAC antes de que el cliente encienda el equipo. Al conectar, esa
   fila aprende tipo, marca, modelo, sistema y reproductor.
 
 ## 6. Terminal
+
+```bash
+tvlister-admin devices dedupe            # junta duplicados de todas las líneas
+tvlister-admin devices dedupe CLIENTE    # sólo una línea
+tvlister-admin devices dedupe --dry-run  # enseña cuántos quitaría, sin borrar
+```
+
 
 ```bash
 tvlister-admin devices                       # resumen: modo, aparatos, por tipo, líneas sobre cupo
@@ -146,6 +179,7 @@ Todas requieren sesión (`Authorization: Bearer …`); las que cambian el modo, 
 | `POST /api/lines/:id/devices/:deviceId/allow` | — | `{ ok }` |
 | `DELETE /api/lines/:id/devices/:deviceId` | — | `{ ok, removed }` |
 | `POST /api/lines/:id/devices/reset` | — | `{ ok, revoked }` |
+| `POST /api/lines/:id/devices/dedupe` | `{ "dryRun": true }` (opcional) | `{ ok, removed, devices[] }` |
 | `POST /api/devices/undrm` | `{ "action": "preview" }` o `"apply"` | `{ ok, action, total, cleaned, results[] }` |
 
 `:deviceId` es la MAC o el `device_id` (`fp:…`) tal como vienen en el listado.

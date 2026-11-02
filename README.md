@@ -8,7 +8,7 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 🔐 **Protección sin cifrado — registro de aparatos por MAC**: el DRM se ha **retirado** (v2.6.15).
 Cada aparato que se conecta se auto-registra con su MAC (o una huella estable si la app no la
-envía), el panel identifica tipo, marca, modelo, sistema y reproductor, y la línea admite tantos
+envía; el reproductor interno no cuenta como aparato, así una línea de 5 conexiones admite 5 equipos), el panel identifica tipo, marca, modelo, sistema y reproductor, y la línea admite tantos
 aparatos como conexiones tenga (`max_connections`, o un `device_limit` propio). El que sobra se
 rechaza con `403` en modo *bloquear*; por defecto sólo se registra. Funciona con lista M3U, apps
 Xtream/XUI, MAG/Stalker y Enigma2 **sin tocar la app**. En el panel: botón *aparatos* de cada línea;
@@ -31,15 +31,15 @@ curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download
 Para fijar una versión concreta (recomendado en producción) y el puerto:
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.16/install.sh \
-  | sudo bash -s -- --tag v2.6.16 --port 8095
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.17/install.sh \
+  | sudo bash -s -- --tag v2.6.17 --port 8095
 ```
 
 Si un release no tiene el paquete adjunto (o su descarga falla), el instalador usa el árbol del tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.16/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.16
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.17/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.17
 ```
 
 También puedes instalarlo desde la consola del propio servidor:

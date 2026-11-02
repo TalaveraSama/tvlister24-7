@@ -136,6 +136,64 @@ const PLAYER_PATTERNS = [
   [/fire ?tv|aft[bmst]/i, 'Fire TV']
 ];
 
+/**
+ * Motores de reproducción. Cuando la app pide el vídeo, no lo hace con su
+ * propio User-Agent sino con el del reproductor interno (`ExoPlayer`, `Lavf`,
+ * `AppleCoreMedia`, `libVLC`…). Esos User-Agent NO identifican un aparato: si
+ * se contaran, un solo televisor ocuparía 3 o 4 huecos del cupo (una petición
+ * de la API, el manifiesto HLS y cada segmento pueden venir distintos) y la
+ * línea se llenaría con dos equipos aunque tenga 5 conexiones.
+ */
+const MEDIA_ENGINE_PATTERNS = [
+  /exoplayer|media3|androidx\.media/i,
+  /^lavf\/|^lavc\/|libavformat|ffmpeg/i,
+  /applecoremedia|coremedia|avplayer/i,
+  /libvlc|^vlc\/|videolan/i,
+  /stagefright|awesomeplayer|nuplayer/i,
+  /^mpv\b|mpv\/|mplayer/i,
+  /gstreamer|qtmultimedia|avfoundation/i,
+  /ijkplayer|ijkmediaplayer|libijk/i,
+  /shaka ?player|dash\.js|hls\.js|video\.js|jw ?player|bitmovin|theoplayer|clappr|plyr/i,
+  /^curl\/|^wget\/|python-requests|go-http-client|node-fetch|axios\//i
+];
+
+/**
+ * Huella estable sin MAC. Se limpia el User-Agent de versiones, compilaciones y
+ * tokens aleatorios: así una actualización de la app (o un «/1.2.3» distinto en
+ * cada petición) no crea un aparato nuevo.
+ */
+function coarseUaForFingerprint(ua) {
+  return String(ua || '')
+    .toLowerCase()
+    .replace(/[0-9]+(\.[0-9]+)+/g, '') // 2.18.1, 4.9.0
+    .replace(/\b[0-9a-f]{8,}\b/g, '') // ids/hashes
+    .replace(/\b\d+\b/g, '') // números sueltos (versiones de build)
+    .replace(/[^a-z./;()\s-]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+/**
+ * Cliente sin identidad propia: motor de vídeo o librería HTTP. Una petición
+ * así no distingue un televisor de otro (ni de sí mismo en otra petición).
+ */
+function isGenericClientUa(ua = '') {
+  const text = String(ua || '').trim();
+  if (!text) return true;
+  if (isMediaEngineUserAgent(text)) return true;
+  return /^(okhttp|dart|dalvik|java|apache-httpclient|httpclient|curl|wget|python|node-fetch|axios|go-http-client|undici|reqwest|libwww|postman)/i.test(
+    text
+  );
+}
+
+/** ¿La petición viene de un motor de reproducción (no de la app)? */
+export function isMediaEngineUserAgent(ua = '') {
+  const text = String(ua || '').trim();
+  if (!text) return false;
+  return MEDIA_ENGINE_PATTERNS.some((re) => re.test(text));
+}
+
 const TYPE_PATTERNS = [
   [/^(tivimate|iptv smarters|xc ?iptv|iptv extreme|ott navigator|perfect player|gse smart iptv|kodi|vlc|reproductor propio)$/i, 'app'],
   [/^(mag\/stalker)$/i, 'stb'],
@@ -228,7 +286,9 @@ export function identifyRequest(req) {
   // es siempre preferible (y el panel lo dice en la interfaz).
   const fingerprint = crypto
     .createHash('sha256')
-    .update(`${stalker.serial}|${model}|${xua}|${ua}`)
+    .update(
+      `${stalker.serial}|${model}|${coarseUaForFingerprint(xua)}|${coarseUaForFingerprint(ua)}`
+    )
     .digest('hex')
     .slice(0, 24);
 
@@ -402,6 +462,13 @@ export function resolveDeviceForLine(line, req, { ip = '', touch = true } = {}) 
   // (todos los clientes anónimos acabarían compartiendo la misma huella y se
   // bloquearían entre ellos).
   if (!info.mac && !info.ua) return { ok: true, mode, skipped: true, reason: 'sin_datos' };
+  // El vídeo lo pide el reproductor interno (ExoPlayer, Lavf, libVLC…), no la
+  // app: ese User-Agent no identifica a nadie. Si se registrara, un solo
+  // televisor ocuparía varios huecos del cupo (API + manifiesto + segmentos) y
+  // la línea se llenaría con dos equipos aunque tenga 5 conexiones.
+  if (!info.mac && isMediaEngineUserAgent(info.ua) && !info.serial) {
+    return { ok: true, mode, skipped: true, reason: 'reproductor' };
+  }
   const key = deviceKeyOf(info);
   const cacheKey = `${mode}:${line.id}:${key}`;
   const cached = cache.get(cacheKey);
@@ -464,6 +531,15 @@ export function resolveDeviceForLine(line, req, { ip = '', touch = true } = {}) 
     return result;
   }
 
+  // Si el aparato existía pero había quedado «pendiente» (se registró cuando el
+  // cupo estaba lleno), al haber sitio vuelve a contar como activo. Antes se
+  // quedaba pendiente para siempre y el cliente seguía viéndose fuera del cupo.
+  if (existing && existing.status !== 'active') {
+    db.prepare("UPDATE line_devices SET status = 'active', revoked_at = NULL, revoked_by = '' WHERE id = ?").run(
+      existing.id
+    );
+  }
+
   // Siempre se pasa por upsert: si el aparato ya estaba, se completan sus datos
   // (una MAC reservada a mano acaba de aprender tipo/marca/modelo al conectar).
   const row = upsertDevice(line, info, key, ip);
@@ -518,6 +594,68 @@ export function listLineDevices(lineId) {
   return db
     .prepare('SELECT * FROM line_devices WHERE line_id = ? ORDER BY status ASC, last_seen DESC')
     .all(Number(lineId));
+}
+
+/**
+ * Depura aparatos duplicados de una línea.
+ *
+ * Antes de este arreglo, cada User-Agent distinto del mismo televisor
+ * (`okhttp` para la API, `ExoPlayer` para el vídeo, `Lavf` para otro canal…)
+ * creaba un «aparato» más y gastaba el cupo. Aquí se juntan esas filas:
+ *   - mismo MAC (no vacío)            → se queda la más antigua;
+ *   - sin MAC: mismo IP y misma familia de app/UA → se queda la más antigua.
+ * Nunca se borra una fila bloqueada a mano ni una con MAC distinta.
+ */
+export function dedupeLineDevices(lineId, { dryRun = false } = {}) {
+  const rows = db
+    .prepare('SELECT * FROM line_devices WHERE line_id = ? ORDER BY id ASC')
+    .all(Number(lineId));
+  const keep = new Map();
+  const remove = [];
+  for (const row of rows) {
+    if (Number(row.blocked) === 1 || row.revoked_by === 'panel') continue;
+    const mac = String(row.mac || '').trim();
+    const ip = String(row.last_ip || '').trim();
+    const ua = String(row.user_agent || '').trim();
+    // Con MAC manda la MAC. Sin MAC:
+    //   - si el UA es de un reproductor o de un cliente HTTP genérico
+    //     (okhttp, Dalvik, ExoPlayer, Lavf…) no identifica a nadie: todas las
+    //     filas de la misma IP son el mismo equipo;
+    //   - si es una app con nombre (TiviMate, XCIPTV…), la app sí identifica.
+    const key = mac
+      ? `mac:${mac}`
+      : isGenericClientUa(ua)
+        ? ip
+          ? `ip:${ip}`
+          : `gen:${coarseUaForFingerprint(ua)}`
+        : `app:${coarseUaForFingerprint(ua)}`;
+    if (!mac && !ip && !coarseUaForFingerprint(ua)) continue;
+    if (!keep.has(key)) {
+      keep.set(key, row);
+      continue;
+    }
+    // Se conserva la fila más antigua y se le suman los avistamientos.
+    const main = keep.get(key);
+    if (!dryRun) {
+      db.prepare('UPDATE line_devices SET seen_count = seen_count + ?, last_seen = ? WHERE id = ?').run(
+        Number(row.seen_count) || 0,
+        row.last_seen || main.last_seen,
+        main.id
+      );
+      db.prepare('DELETE FROM line_devices WHERE id = ?').run(row.id);
+    }
+    remove.push({ id: row.id, device_id: row.device_id, kept: main.id });
+  }
+  if (!dryRun && remove.length) bumpRegistryVersion();
+  return { line_id: Number(lineId), removed: remove.length, details: remove };
+}
+
+/** Depura todas las líneas (se usa al activar el modo BLOQUEAR). */
+export function dedupeAllDevices(options = {}) {
+  const lines = db.prepare('SELECT id FROM lines').all();
+  let removed = 0;
+  for (const l of lines) removed += dedupeLineDevices(l.id, options).removed;
+  return { lines: lines.length, removed };
 }
 
 /** Alta manual (por si el aparato no manda MAC y hay que fijarlo a mano). */

@@ -119,7 +119,9 @@ import {
   resetLineDevices,
   setDeviceStatus,
   setRegistryMode,
-  bumpRegistryVersion
+  bumpRegistryVersion,
+  dedupeLineDevices,
+  dedupeAllDevices
 } from './deviceRegistry.js';
 import {
   getJellyfinConfig,
@@ -3249,6 +3251,18 @@ app.post('/api/lines/:id/device-lock', requireAuth, (req, res) => {
 });
 
 // Cupo de aparatos de la línea. 0 = usar `max_connections`.
+// Junta los aparatos duplicados de la línea (mismo equipo con varios UA).
+app.post('/api/lines/:id/devices/dedupe', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  try {
+    const result = dedupeLineDevices(line.id, { dryRun: Boolean(req.body?.dryRun) });
+    res.json({ ok: true, ...result, devices: listLineDevices(line.id).map(publicDevice) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.post('/api/lines/:id/devices/limit', requireAuth, (req, res) => {
   const line = loadLineForAdmin(req, res);
   if (!line) return;
@@ -3334,7 +3348,11 @@ app.post('/api/devices/undrm', requireAuth, requireAdmin, async (req, res) => {
 app.post('/api/devices/registry', requireAuth, requireAdmin, (req, res) => {
   try {
     const mode = setRegistryMode(req.body?.mode);
-    res.json({ ok: true, mode });
+    // Al pasar a BLOQUEAR se juntan los aparatos duplicados que dejó el registro
+    // antiguo (mismo televisor apuntado varias veces por sus distintos
+    // User-Agent). Así el cupo cuenta equipos reales, no peticiones.
+    const cleaned = mode === 'enforce' ? dedupeAllDevices() : { removed: 0, lines: 0 };
+    res.json({ ok: true, mode, deduped: cleaned.removed });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

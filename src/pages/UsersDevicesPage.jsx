@@ -270,6 +270,24 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
     await loadLinesOnly();
   };
 
+  // Junta los aparatos duplicados del mismo equipo (la API, el reproductor y
+  // los segmentos llegan con User-Agent distinto y antes gastaban varios cupos).
+  const dedupeDevices = async () => {
+    if (!devicesLineId) return;
+    try {
+      const r = await apiFetch(`/api/lines/${devicesLineId}/devices/dedupe`, { method: 'POST' });
+      await refreshDevices();
+      await loadLinesOnly();
+      window.alert(
+        r.removed > 0
+          ? `Se juntaron ${r.removed} aparato(s) duplicado(s). Ahora el cupo cuenta equipos reales.`
+          : 'No había aparatos duplicados en esta línea.'
+      );
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
   const blockDevice = async (deviceId) => {
     if (!devicesLineId) return;
     if (!window.confirm(`¿Bloquear el aparato "${deviceId}"? Se le corta la sesión y no podrá volver a conectar.`))
@@ -1135,6 +1153,10 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                           {mode === 'enforce' ? 'BLOQUEAR' : mode === 'monitor' ? 'SÓLO REGISTRAR' : 'APAGADO'}
                         </span>
                       </p>
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        Un aparato = un equipo. Las peticiones del reproductor interno (ExoPlayer, Lavf, VLC…) no
+                        cuentan como aparatos distintos.
+                      </p>
                     </div>
                     <button onClick={() => setDevicesLineId(null)} className="text-slate-400 hover:text-white">
                       <X className="w-5 h-5" />
@@ -1159,6 +1181,13 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                             : `0 = usar las conexiones de la línea (${meta.max_connections || 1})`}
                         </span>
                       </div>
+                      <button
+                        onClick={dedupeDevices}
+                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold border border-slate-700"
+                        title="Junta los aparatos duplicados del mismo equipo (API + reproductor + segmentos) para que no gasten varios cupos"
+                      >
+                        Depurar duplicados
+                      </button>
                       <div className="ml-auto flex items-center gap-2">
                         {['off', 'monitor', 'enforce'].map((m) => (
                           <button
