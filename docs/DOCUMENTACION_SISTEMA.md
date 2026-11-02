@@ -2870,3 +2870,13 @@ sigue usando `--webroot`, así que no necesita el 80 libre. `docs/DOMINIOS_PANEL
 sección que responde a «¿pongo el video en naranja o en el 8443?»: no, el proxy de Cloudflare no
 sirve para video continuo en planes self-serve (ToS 2.8), el puerto es irrelevante en nube gris y los
 productos válidos para eso son Stream o Spectrum.
+
+### v2.6.13: el Flussonic troncal no se toca (solo origen)
+
+`flussonic_servers.origin_only` (y `servers.origin_only`) marca el Flussonic que alimenta a varios
+paneles. `resolveFlussonicTarget()` en `server/drm.js` elige el destino en este orden: servidor
+indicado → `streams.flussonic_server_id` → único registrado / único que emite → error si hay varios
+sin asignar; y `assertWritableFlussonic()` bloquea cualquier escritura sobre un troncal con
+`code = 'ORIGIN_ONLY'` (HTTP 409 en la API). `planBulkProtect()` excluye los canales del troncal, y
+el CLI añade `drm servers` y `drm troncal <id> [off]`. La UI de Flussonic 23.12 permite marcarlo y
+muestra la etiqueta TRONCAL.

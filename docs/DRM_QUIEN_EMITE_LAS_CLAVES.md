@@ -107,6 +107,46 @@ Por qué:
 pública en la lista). Si el panel no es alcanzable desde ese Flussonic, el cifrado no arranca y el
 HLS sale en negro.
 
+## 2b-bis. El troncal se marca y queda bloqueado
+
+Tu caso concreto: **`69.30.212.194:2086` no es solo tu origen**, también alimenta a otro panel
+Flussonic que es de otro cliente. Enviarle un bloque `drm` no rompería solo tu servicio: cifraría
+también la salida del otro cliente.
+
+Por eso el panel distingue dos papeles:
+
+| Rol | Qué es | ¿Se le escribe? |
+| --- | --- | --- |
+| **TRONCAL** (`origin_only = 1`) | Recibe los canales y sirve a varios paneles (el tuyo y los de otros clientes) | **Nunca**: ni DRM, ni salidas, ni cambios por API |
+| **Emisor** | El que empaqueta el HLS de *tus* clientes | Sí: aquí va el `drm aes128 keyserver=TVLister` |
+
+### Cómo marcarlo
+
+Desde el panel: *Flussonic 23.12* → selecciona el servidor → **Marcar como troncal** (aparece la
+etiqueta `TRONCAL` junto a su nombre).
+
+Desde terminal:
+
+```bash
+sudo tvlister-admin drm servers          # id, rol y canales asignados de cada Flussonic
+sudo tvlister-admin drm troncal 1        # el #1 pasa a TRONCAL (solo origen)
+sudo tvlister-admin drm troncal 1 off    # vuelve a ser emisor
+```
+
+### Qué cambia cuando está marcado
+
+1. `drm push-all` y el botón *Aplicar a Flussonic* **se niegan** con
+   `«Troncal …» está marcado como TRONCAL (solo origen): no se le escribe DRM.` (HTTP 409 `ORIGIN_ONLY`).
+2. `drm protect-all` **excluye del plan** los canales que viven en ese servidor, con el motivo escrito.
+3. El destino ya no es «el nodo principal» a ciegas: se usa el **servidor del canal**
+   (`streams.flussonic_server_id`). Si hay varios Flussonic y el canal no dice a cuál pertenece, el
+   panel **no adivina**: pide asignarlo antes de enviar nada.
+4. Si solo hay un Flussonic emisor registrado, los canales sin servidor asignado van a ese; nunca a un
+   troncal.
+
+> El bloqueo es de escritura por API. El troncal **sigue alimentando tu panel** con normalidad: leer
+> de él no cambia nada.
+
 ## 2c. Qué protege el panel de lo que publica (y qué no)
 
 TVLister no cifra porque **no empaqueta**: reenvía el HLS de Flussonic o redirige a él. Lo que hace

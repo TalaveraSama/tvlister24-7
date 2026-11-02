@@ -947,8 +947,8 @@ flussonic2312Router.post('/api/flussonic-2312/servers', requireAuth, requireAdmi
     .prepare(
       `INSERT INTO flussonic_servers (
          name, base_url, username, password, api_token, version,
-         astra_url, astra_auth, default_pull_protocol, default_transcode_mode
-       ) VALUES (?, ?, ?, ?, ?, '23.12', ?, ?, ?, ?)`
+         astra_url, astra_auth, default_pull_protocol, default_transcode_mode, origin_only
+       ) VALUES (?, ?, ?, ?, ?, '23.12', ?, ?, ?, ?, ?)`
     )
     .run(
       String(b.name).trim(),
@@ -959,7 +959,8 @@ flussonic2312Router.post('/api/flussonic-2312/servers', requireAuth, requireAdmi
       String(b.astra_url || 'http://192.168.88.10:8000').trim(),
       String(b.astra_auth || '').trim(),
       String(b.default_pull_protocol || 'mpegts'),
-      String(b.default_transcode_mode || 'copy_pure')
+      String(b.default_transcode_mode || 'copy_pure'),
+      b.origin_only ? 1 : 0
     );
 
   const created = db.prepare('SELECT * FROM flussonic_servers WHERE id = ?').get(Number(info.lastInsertRowid));
@@ -978,7 +979,8 @@ flussonic2312Router.put('/api/flussonic-2312/servers/:id', requireAuth, requireA
   db.prepare(
     `UPDATE flussonic_servers
      SET name = ?, base_url = ?, username = ?, password = ?, api_token = ?,
-         astra_url = ?, astra_auth = ?, default_pull_protocol = ?, default_transcode_mode = ?
+         astra_url = ?, astra_auth = ?, default_pull_protocol = ?, default_transcode_mode = ?,
+         origin_only = ?
      WHERE id = ?`
   ).run(
     b.name !== undefined ? String(b.name).trim() : existing.name,
@@ -990,6 +992,8 @@ flussonic2312Router.put('/api/flussonic-2312/servers/:id', requireAuth, requireA
     b.astra_auth !== undefined ? String(b.astra_auth).trim() : existing.astra_auth,
     b.default_pull_protocol !== undefined ? String(b.default_pull_protocol) : existing.default_pull_protocol,
     b.default_transcode_mode !== undefined ? String(b.default_transcode_mode) : existing.default_transcode_mode,
+    // El troncal no se toca: se marca y queda protegido de cualquier escritura.
+    b.origin_only !== undefined ? (b.origin_only ? 1 : 0) : Number(existing.origin_only) === 1 ? 1 : 0,
     id
   );
 

@@ -567,6 +567,11 @@ function runInitDbBody() {
   // de puerto o volver al motor local sin tocar las demás salidas del stream.
   ensureColumn('wk2500_channels', 'flussonic_output_url', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('streams', 'flussonic_server_id', 'INTEGER');
+  // El Flussonic troncal (el que recibe los canales y alimenta a VARIOS paneles)
+  // no se toca nunca: no se le manda DRM, ni se le cambian salidas. Si el panel
+  // le escribe `drm`, cifraría también la salida del otro cliente.
+  ensureColumn('flussonic_servers', 'origin_only', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('servers', 'origin_only', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'flussonic_stream_name', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
 

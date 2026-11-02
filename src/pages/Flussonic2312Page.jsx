@@ -254,6 +254,37 @@ export default function Flussonic2312Page({ onPreview }) {
     await loadServersAndHosts();
   };
 
+  // Marcar/desmarcar un Flussonic como TRONCAL (solo origen).
+  // El troncal alimenta a varios paneles: nunca se le escribe DRM ni salidas.
+  const handleToggleOriginOnly = async () => {
+    if (!selectedServer) return;
+    const willBeTroncal = Number(selectedServer.origin_only) !== 1;
+    if (
+      willBeTroncal &&
+      !window.confirm(
+        `Marcar "${selectedServer.name}" como TRONCAL (solo origen):\n\n` +
+          'El panel no le enviará DRM ni le cambiará salidas, porque ese servidor también ' +
+          'sirve a otros paneles. ¿Continuar?'
+      )
+    ) {
+      return;
+    }
+    try {
+      await apiFetch(`/api/flussonic-2312/servers/${selectedServer.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ origin_only: willBeTroncal })
+      });
+      await loadServersAndHosts();
+      setNotice(
+        willBeTroncal
+          ? 'Servidor marcado como troncal: no se le enviará DRM.'
+          : 'Servidor marcado como emisor: puede recibir DRM.'
+      );
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
   const handleTestFlussonicConnection = async () => {
     const cleanOut = String(flussonicOutUrl || selectedServer?.base_url || '').trim();
     if (!cleanOut || cleanOut === 'http://') {
@@ -747,6 +778,11 @@ export default function Flussonic2312Page({ onPreview }) {
               }`}
             >
               {srv.name} (v{srv.version || '23.12'})
+              {Number(srv.origin_only) === 1 && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-500/25 text-amber-200 text-[9px] font-bold align-middle">
+                  TRONCAL
+                </span>
+              )}
             </button>
           ))}
           <button
@@ -1321,9 +1357,19 @@ export default function Flussonic2312Page({ onPreview }) {
                   <div className="text-xl font-bold text-indigo-300 font-mono mt-0.5">
                     {selectedServer.linked_streams_count || 0}
                   </div>
-                  <div className="text-[11px] text-slate-400 mt-1">
+                  <div className="text-[11px] text-slate-400 mt-1 space-x-2">
                     <button onClick={handleDeleteServer} className="text-rose-400 hover:underline">
                       Desvincular servidor
+                    </button>
+                    <button
+                      onClick={handleToggleOriginOnly}
+                      className={
+                        Number(selectedServer.origin_only) === 1
+                          ? 'text-emerald-300 hover:underline'
+                          : 'text-amber-300 hover:underline'
+                      }
+                    >
+                      {Number(selectedServer.origin_only) === 1 ? 'Dejar de ser troncal' : 'Marcar como troncal'}
                     </button>
                   </div>
                 </div>

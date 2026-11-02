@@ -498,6 +498,10 @@ cmd_drm() {
   fallback_host=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$fallback_host" ] && fallback_host="127.0.0.1"
   fallback_base="http://${fallback_host}:$(get_current_port)"
+  # `drm troncal <id> off` llega como argumento suelto, no como --opción.
+  case "${extra,,}" in
+    off | no | emisor) flags="$flags --off" ;;
+  esac
   DRM_SUB="$sub" DRM_TARGET="$target" DRM_EXTRA="$extra" DRM_FLAGS="$flags" DRM_BASE="$fallback_base" "$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
     import { deriveKey, getDrmRow, getDrmSettings } from "./server/drm.js";
@@ -741,27 +745,101 @@ cmd_drm() {
         process.exit(0);
       }
       console.log("  Enviando el bloque drm a Flussonic para " + rows.length + " canales...");
-      console.log("  Servidor: el marcado como principal (is_main). Flussonic debe ser accesible desde aquí.");
+      console.log("  Destino: el Flussonic de cada canal (streams.flussonic_server_id).");
+      console.log("           Los marcados como troncal (solo origen) NO se tocan.");
       console.log("");
       let ok = 0;
+      let blocked = 0;
       for (const r of rows) {
         const name = r.flussonic_stream || r.flussonic_stream_name || "";
+        const label = String(r.sn || ("#" + r.stream_id)).padEnd(28);
         if (!name) {
-          console.log("  [--] " + String(r.sn || ("#" + r.stream_id)).padEnd(28) + " sin nombre de stream en Flussonic");
+          console.log("  [--] " + label + " sin nombre de stream en Flussonic");
           continue;
         }
         try {
-          await pushDrmToFlussonic({ id: r.stream_id, streamName: name, action: "apply", base });
+          const res = await pushDrmToFlussonic({ id: r.stream_id, streamName: name, action: "apply", base });
           ok++;
-          console.log("  [OK] " + String(r.sn || ("#" + r.stream_id)).padEnd(28) + name);
+          console.log("  [OK] " + label + name + "  -> " + (res.server_name || res.server));
         } catch (err) {
-          console.log("  [!!] " + String(r.sn || ("#" + r.stream_id)).padEnd(28) + (err.message || "error") +
+          if (err.code === "ORIGIN_ONLY") blocked++;
+          console.log("  [!!] " + label + (err.message || "error") +
             (err.detail ? " -> " + String(err.detail).slice(0, 120) : ""));
         }
       }
       console.log("");
       console.log("  Enviados " + ok + "/" + rows.length + ". Comprueba en Flussonic que cada stream tiene su bloque drm.");
+      if (blocked > 0) {
+        console.log("  " + blocked + " canal(es) apuntaban al troncal: revisa a qué Flussonic pertenecen antes de cifrar.");
+      }
       if (ok === 0) process.exit(1);
+    } else if (sub === "servers" || sub === "troncal" || sub === "origen") {
+      const listServers = () => {
+        const rows = db
+          .prepare(
+            "SELECT f.id, f.name, f.base_url, f.origin_only, " +
+              "(SELECT COUNT(*) FROM streams s WHERE s.flussonic_server_id = f.id) AS n " +
+              "FROM flussonic_servers f ORDER BY f.id"
+          )
+          .all();
+        if (!rows.length) {
+          console.log("  No hay servidores Flussonic registrados.");
+          return;
+        }
+        console.log("  ID   ROL        CANALES  SERVIDOR");
+        for (const r of rows) {
+          console.log(
+            "  " + String(r.id).padEnd(5) +
+            (Number(r.origin_only) === 1 ? "TRONCAL  " : "emisor   ") +
+            String(r.n).padEnd(9) +
+            r.name + "  (" + r.base_url + ")"
+          );
+        }
+      };
+      if (sub === "servers") {
+        console.log("============================================================");
+        console.log("  Flussonic registrados: rol y canales asignados");
+        console.log("============================================================");
+        listServers();
+        console.log("");
+        console.log("  El TRONCAL es el que recibe los canales y sirve a varios paneles:");
+        console.log("  nunca se le escribe DRM ni salidas. Marcarlo con:");
+        console.log("     tvlister-admin drm troncal <id>");
+        console.log("  Un emisor vuelve a ser escribible con:");
+        console.log("     tvlister-admin drm troncal <id> off");
+        process.exit(0);
+      }
+      const id = Number(target);
+      if (!Number.isInteger(id) || id <= 0) {
+        console.error("Uso: tvlister-admin drm troncal <id> [on|off]");
+        console.error("     tvlister-admin drm servers    (ver los ids)");
+        process.exit(1);
+      }
+      const srv = db.prepare("SELECT * FROM flussonic_servers WHERE id = ?").get(id);
+      if (!srv) {
+        console.error("❌ No existe el servidor Flussonic #" + id + ". Míralos con: tvlister-admin drm servers");
+        process.exit(1);
+      }
+      const on = !/--off\b/.test(flags);
+      db.prepare("UPDATE flussonic_servers SET origin_only = ? WHERE id = ?").run(on ? 1 : 0, id);
+      console.log(
+        on
+          ? "✅ «" + srv.name + "» marcado como TRONCAL (solo origen). No se le escribirá DRM."
+          : "✅ «" + srv.name + "» marcado como EMISOR: se le puede enviar DRM."
+      );
+      if (on) {
+        const affected = db
+          .prepare(
+            "SELECT COUNT(*) AS c FROM drm_streams d JOIN streams s ON s.id = d.stream_id " +
+              "WHERE s.flussonic_server_id = ? AND d.enabled = 1"
+          )
+          .get(id);
+        if (Number(affected?.c) > 0) {
+          console.log("   Aviso: " + affected.c + " canal(es) de ese servidor tienen DRM activado en el panel.");
+          console.log("   Están protegidos por partes, pero el bloque drm NO se enviará al troncal.");
+          console.log("   Revisa a qué Flussonic pertenecen: tvlister-admin drm list");
+        }
+      }
     } else if (sub === "log") {
       const limit = Number(target) > 0 ? Math.min(Number(target), 200) : 25;
       const rows = db.prepare("SELECT * FROM drm_key_log ORDER BY id DESC LIMIT ?").all(limit);

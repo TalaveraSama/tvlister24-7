@@ -649,14 +649,66 @@ function pickWritableStreamFields(remote) {
   return out;
 }
 
-async function flussonicServerRow(serverId) {
+/**
+ * Servidor Flussonic al que se le escribe el bloque `drm`.
+ *
+ * Orden: el que se indique, el del propio canal (`streams.flussonic_server_id`)
+ * y, si no hay ninguno, el único registrado. Nunca se elige «el principal» a
+ * ciegas: en una cadena troncal → emisor eso acabaría escribiendo en el troncal,
+ * que alimenta también a otros paneles.
+ */
+function resolveFlussonicTarget({ serverId = null, streamId = null } = {}) {
+  const pick = (table, id) => db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(Number(id)) || null;
+
   if (serverId) {
-    const srv = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(serverId));
-    if (srv) return srv;
+    const srv = pick('flussonic_servers', serverId) || pick('servers', serverId);
+    if (!srv) throw new Error(`No existe el servidor Flussonic #${serverId}.`);
+    return { srv, source: 'indicado' };
   }
+
+  if (streamId) {
+    const st = db
+      .prepare('SELECT flussonic_server_id, flussonic_stream_name FROM streams WHERE id = ?')
+      .get(Number(streamId));
+    if (st?.flussonic_server_id) {
+      const srv = pick('flussonic_servers', st.flussonic_server_id);
+      if (srv) return { srv, source: 'el del canal' };
+    }
+  }
+
+  const all = db.prepare('SELECT * FROM flussonic_servers ORDER BY id ASC').all();
+  if (all.length === 1) return { srv: all[0], source: 'el único registrado' };
+  if (all.length > 1) {
+    const emitters = all.filter((x) => Number(x.origin_only) !== 1);
+    if (emitters.length === 1) return { srv: emitters[0], source: 'el único que emite' };
+    const names = all
+      .map((x) => `#${x.id} ${x.name}${Number(x.origin_only) === 1 ? ' (troncal)' : ''}`)
+      .join(', ');
+    throw new Error(
+      `Hay varios Flussonic registrados (${names}). Indica a cuál pertenece el canal (campo flussonic_server_id) antes de enviar DRM.`
+    );
+  }
+
+  // Compatibilidad: paneles donde el nodo está en `servers`.
   const main = db.prepare('SELECT * FROM servers WHERE is_main = 1').get();
-  if (main) return main;
-  return db.prepare('SELECT * FROM servers').get() || null;
+  const fallback = main || db.prepare('SELECT * FROM servers ORDER BY id ASC').get() || null;
+  return fallback ? { srv: fallback, source: 'nodo principal' } : { srv: null, source: '' };
+}
+
+/**
+ * Se niega a escribir DRM en un Flussonic marcado como troncal: ese servidor
+ * alimenta a varios paneles y cifrar su salida afectaría a los demás clientes.
+ */
+function assertWritableFlussonic(srv) {
+  if (!srv) return;
+  if (Number(srv.origin_only) === 1) {
+    const err = new Error(
+      `«${srv.name}» está marcado como TRONCAL (solo origen): no se le escribe DRM. ` +
+        'Ese Flussonic también sirve a otros paneles; cifra en el que empaqueta el HLS de tus clientes.'
+    );
+    err.code = 'ORIGIN_ONLY';
+    throw err;
+  }
 }
 
 async function fetchRemoteStream(srv, streamName) {
@@ -690,7 +742,11 @@ export async function pushDrmToFlussonic({ id, streamName, action = 'preview', s
   const name = String(streamName || row.flussonic_stream || stream.flussonic_stream_name || '').trim();
   if (!name) throw new Error('Indica el nombre del stream en Flussonic');
 
-  const srv = await flussonicServerRow(serverId);
+  const { srv, source: serverSource } = resolveFlussonicTarget({ serverId, streamId: id });
+  assertWritableFlussonic(srv);
+  if (!srv) {
+    throw new Error('No hay ningún Flussonic registrado. Añádelo en Flussonic 23.12 → Servidores.');
+  }
   {
     const { conn, remote, headers } = await fetchRemoteStream(srv, name);
     const payload = pickWritableStreamFields(remote);
@@ -714,7 +770,7 @@ export async function pushDrmToFlussonic({ id, streamName, action = 'preview', s
       return {
         ok: true,
         action,
-        server: { id: srv?.id, name: srv?.name, base: conn.effectiveBase },
+        server: { id: srv?.id, name: srv?.name, base: conn.effectiveBase, origin_only: Number(srv?.origin_only) === 1, chosen_by: serverSource },
         stream: name,
         current: remote.drm || null,
         will_send: payload,
@@ -745,9 +801,20 @@ export async function pushDrmToFlussonic({ id, streamName, action = 'preview', s
       throw err;
     }
     db.prepare('UPDATE drm_streams SET flussonic_stream = ?, updated_at = ? WHERE stream_id = ?').run(name, nowIso(), id);
-    return { ok: true, action, server: conn.effectiveBase, stream: name, applied: payload };
+    return {
+      ok: true,
+      action,
+      server: conn.effectiveBase,
+      server_id: srv?.id || null,
+      server_name: srv?.name || '',
+      chosen_by: serverSource,
+      stream: name,
+      applied: payload
+    };
   }
 }
+
+export { resolveFlussonicTarget };
 
 drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
@@ -763,6 +830,8 @@ drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin,
   } catch (err) {
     if (err.message === 'Canal sin DRM configurado') return res.status(404).json({ error: err.message });
     if (err.message.startsWith('Indica el nombre')) return res.status(400).json({ error: err.message });
+    // 409: el destino existe pero no se le puede escribir (troncal de solo origen).
+    if (err.code === 'ORIGIN_ONLY') return res.status(409).json({ error: err.message, code: err.code });
     return res.status(502).json({ error: err.message, detail: err.detail, will_send: err.willSend });
   }
 });
@@ -856,13 +925,23 @@ export function planBulkProtect({ includeCatv = false, includeTranscode = false 
       continue;
     }
 
+    // El troncal (solo origen) alimenta a varios paneles: no se le escribe DRM.
+    if (s.flussonic_server_id) {
+      const srv = db.prepare('SELECT * FROM flussonic_servers WHERE id = ?').get(Number(s.flussonic_server_id));
+      if (srv && Number(srv.origin_only) === 1) {
+        skip(`Está en «${srv.name}», marcado como troncal: ese Flussonic sirve a otros paneles`);
+        continue;
+      }
+    }
+
     eligible.push({
       id: s.id,
       name: s.name,
       flussonic_stream: name,
       mode,
       source_url: s.source_url,
-      catv_channels: catv
+      catv_channels: catv,
+      flussonic_server_id: s.flussonic_server_id || null
     });
   }
 
@@ -944,9 +1023,23 @@ drmAdminRouter.post('/api/drm/bulk/push', requireAuth, requireAdmin, async (req,
     }
     try {
       const r = await pushDrmToFlussonic({ id: row.stream_id, streamName: name, action, base });
-      results.push({ id: row.stream_id, name: row.stream_name, stream: r.stream, ok: true });
+      results.push({
+        id: row.stream_id,
+        name: row.stream_name,
+        stream: r.stream,
+        server: r.server,
+        server_name: r.server_name,
+        ok: true
+      });
     } catch (err) {
-      results.push({ id: row.stream_id, name: row.stream_name, ok: false, error: err.message, detail: err.detail });
+      results.push({
+        id: row.stream_id,
+        name: row.stream_name,
+        ok: false,
+        error: err.message,
+        code: err.code,
+        detail: err.detail
+      });
     }
   }
   res.json({
