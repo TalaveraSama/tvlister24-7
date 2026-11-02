@@ -105,6 +105,29 @@ function cleanRemote(value) {
   return raw;
 }
 
+/** Acepta `Media`, `/Media`, `//host/Media` o `\\\\host\\Media` y deja el recurso. */
+function cleanSmbShare(value, host) {
+  let share = cleanRemote(value).replace(/\\/g, '/');
+  if (share.startsWith('//')) {
+    const parts = share.slice(2).split('/').filter(Boolean);
+    if (parts.length && parts[0].toLowerCase() === String(host || '').toLowerCase()) parts.shift();
+    share = parts.join('/');
+  }
+  share = share.replace(/^\/+/, '').replace(/\/+$/, '');
+  if (!share) throw new Error('Falta el recurso compartido de SMB (por ejemplo «Media»).');
+  return share;
+}
+
+/** El punto de montaje lo escribe el administrador: se valida lo mínimo. */
+function cleanMountPoint(value) {
+  const point = String(value || '').trim();
+  if (!point) return '';
+  if (!point.startsWith('/')) throw new Error('El punto de montaje debe ser una ruta absoluta.');
+  const normalized = path.resolve(point);
+  if (normalized === '/') throw new Error('No se puede usar «/» como punto de montaje.');
+  return normalized;
+}
+
 function defaultMountPoint(_protocol, host) {
   return path.join(MOUNT_BASE, `jellyfin-${safeHost(host) || 'jellyfin'}`);
 }
@@ -143,8 +166,8 @@ export function buildMountSpec(params = {}) {
   const protocol = normalizeProtocol(params.protocol);
   const host = String(params.host || '').trim();
   if (!host) throw new Error('Falta el host del servidor de archivos (IP o nombre).');
-  const remotePath = cleanRemote(params.remotePath);
-  const mountPoint = String(params.mountPoint || '').trim() || defaultMountPoint(protocol, host, remotePath);
+  const remotePath = protocol === 'smb' ? cleanSmbShare(params.remotePath, host) : cleanRemote(params.remotePath);
+  const mountPoint = cleanMountPoint(params.mountPoint) || defaultMountPoint(protocol, host, remotePath);
 
   if (protocol === 'nfs') {
     const exportPath = remotePath.startsWith('/') ? remotePath : `/${remotePath}`;
@@ -160,7 +183,7 @@ export function buildMountSpec(params = {}) {
     };
   }
 
-  const share = remotePath.replace(/^\/+/, '');
+  const share = remotePath;
   const user = String(params.user || '').trim();
   const password = params.password === undefined ? '' : String(params.password);
   const credentialPath = path.join(CRED_DIR, `tvlister-cifs-${safeHost(host)}.cred`);
@@ -511,6 +534,11 @@ export function remountJellyfinShare() {
   if (isMounted(config.mountPoint)) {
     // Con un NAS que se reinició, el montaje viejo queda colgado: se rehace.
     runUmount(config.mountPoint);
+  }
+  if (config.protocol === 'smb' && config.credentialPath && !fs.existsSync(config.credentialPath)) {
+    throw new Error(
+      `Falta el archivo de credenciales ${config.credentialPath}: vuelve a montar indicando la contraseña (el panel no la guarda).`
+    );
   }
   const options = String(config.options || '').replace(/,?credentials=[^,]+/g, '');
   const spec = {
