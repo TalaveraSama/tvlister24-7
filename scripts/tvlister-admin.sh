@@ -3677,6 +3677,79 @@ case "$ACTION" in
       console.log("   • Carátulas TMDB descargadas    :", st.tmdbEnriched);
     '
     ;;
+  jellyfin)
+    # Catálogo de Jellyfin + «Create Symlink» (equivalente al de XUI.one).
+    # Uso: tvlister-admin jellyfin [status|test|import|symlinks]
+    jf_sub="${2:-status}"
+    cd "$APP_DIR"
+    case "$jf_sub" in
+      status)
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { db, initDb } from "./server/db.js";
+          import { getJellyfinConfig, listBrokenSymlinks } from "./server/jellyfin.js";
+          initDb();
+          const cfg = getJellyfinConfig();
+          console.log("Servidor      :", cfg.url || "(sin configurar)");
+          console.log("API Key       :", cfg.apiKeyMasked || "(sin configurar)");
+          console.log("Carpeta VOD   :", cfg.symlinkDir);
+          console.log("Mapa de rutas :", cfg.pathMap.length ? cfg.pathMap.map((r) => r.from + " => " + r.to).join(", ") : "(sin mapa)");
+          console.log("Bibliotecas   :", cfg.libraries.length ? cfg.libraries.join(", ") : "(todas)");
+          const movies = db.prepare("SELECT COUNT(*) c FROM vod_items WHERE source_provider = ?").get("jellyfin").c;
+          const links = db.prepare("SELECT COUNT(*) c FROM vod_items WHERE symlink_path IS NOT NULL AND symlink_path <> ?").get("").c;
+          const series = db.prepare("SELECT COUNT(*) c FROM series WHERE external_id IS NOT NULL AND external_id <> ?").get("").c;
+          const eps = db.prepare("SELECT COUNT(*) c FROM series_episodes WHERE symlink_path IS NOT NULL AND symlink_path <> ?").get("").c;
+          console.log("Importado     :", movies, "películas,", series, "series,", eps, "episodios con enlace,", links, "enlaces de películas");
+          const broken = listBrokenSymlinks();
+          console.log("Enlaces rotos :", broken.length);
+          for (const b of broken.slice(0, 20)) console.log("   x", b.path, "->", b.target);
+          if (cfg.lastImport && cfg.lastImport.at) console.log("Última importación:", cfg.lastImport.at);
+        '
+        ;;
+      test)
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb } from "./server/db.js";
+          import { testJellyfinConnection, listJellyfinLibraries } from "./server/jellyfin.js";
+          initDb();
+          const info = await testJellyfinConnection();
+          console.log("Conectado a", info.serverName, "(Jellyfin", info.version + ")");
+          const libs = await listJellyfinLibraries();
+          for (const lib of libs) console.log("   -", lib.name, "[" + (lib.collectionType || "?") + "]", lib.id);
+        '
+        ;;
+      import)
+        JF_LIBS="${3:-}" "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { db, initDb } from "./server/db.js";
+          import { importFromJellyfin } from "./server/jellyfin.js";
+          initDb();
+          const only = String(process.env.JF_LIBS || "").trim();
+          const libraryIds = only && only !== "all" ? only.split(",").map((x) => x.trim()).filter(Boolean) : [];
+          const st = await importFromJellyfin({ libraryIds, contentMode: "auto", createSymlink: true, useLibraryAsCategory: true, autoTmdb: false });
+          db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+          console.log("Importación terminada");
+          console.log("   - Películas nuevas / existentes :", st.moviesAdded, "/", st.moviesExisting);
+          console.log("   - Series nuevas / existentes    :", st.seriesAdded, "/", st.seriesExisting);
+          console.log("   - Episodios nuevos / existentes :", st.episodesAdded, "/", st.episodesExisting);
+          console.log("   - Enlaces creados               :", st.symlinks);
+          console.log("   - Sin archivo accesible         :", st.skippedNoFile);
+          for (const e of st.errors.slice(0, 20)) console.log("   x", e.title || e.id || "", e.error || e);
+        '
+        ;;
+      symlinks | enlaces)
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { db, initDb } from "./server/db.js";
+          import { rebuildAllSymlinks } from "./server/jellyfin.js";
+          initDb();
+          const st = rebuildAllSymlinks();
+          db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+          console.log("Enlaces revisados:", st.total, "| creados/rehechos:", st.linked, "| fallidos:", st.failed);
+          for (const d of st.details.filter((x) => x.status === "failed").slice(0, 20)) console.log("   x", d.title, d.error || "");
+        '
+        ;;
+      *)
+        echo "Uso: tvlister-admin jellyfin [status|test|import [ids]|symlinks]"
+        ;;
+    esac
+    ;;
   catv)
     shift
     cmd_catv "$@"

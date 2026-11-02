@@ -17,7 +17,11 @@ import {
   RefreshCw,
   CheckCircle2,
   HardDrive,
-  ArrowUpLeft
+  ArrowUpLeft,
+  Server,
+  Link2,
+  PlugZap,
+  Check
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -48,6 +52,10 @@ const EMPTY_SERIES = {
   release_year: 2025,
   rating: 8.5
 };
+
+function DownloadCloudIcon({ busy }) {
+  return busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />;
+}
 
 export default function VodPage({ onPreview }) {
   const [subTab, setSubTab] = useState('movies'); // 'movies' | 'series'
@@ -109,6 +117,35 @@ export default function VodPage({ onPreview }) {
   const [folderBusy, setFolderBusy] = useState(false);
   const [folderMsg, setFolderMsg] = useState(null);
 
+  // Jellyfin (VOD y series con «Create Symlink», como XUI.one)
+  const [jellyfinModalOpen, setJellyfinModalOpen] = useState(false);
+  const [jellyfinCfg, setJellyfinCfg] = useState({
+    url: '',
+    configured: false,
+    apiKeyMasked: '',
+    symlinkDir: '',
+    pathMap: [],
+    libraries: [],
+    directFallback: false,
+    lastImport: {}
+  });
+  const [jellyfinForm, setJellyfinForm] = useState({
+    url: '',
+    apiKey: '',
+    symlinkDir: '',
+    pathMapText: '',
+    contentMode: 'auto',
+    createSymlink: true,
+    useLibraryAsCategory: true,
+    autoTmdb: false,
+    directFallback: false
+  });
+  const [jellyfinLibraries, setJellyfinLibraries] = useState([]);
+  const [jellyfinSelected, setJellyfinSelected] = useState([]);
+  const [jellyfinPreview, setJellyfinPreview] = useState(null);
+  const [jellyfinBusy, setJellyfinBusy] = useState('');
+  const [jellyfinMsg, setJellyfinMsg] = useState(null);
+
   const loadAll = async () => {
     const [v, c, sr] = await Promise.all([
       apiFetch('/api/vod'),
@@ -130,6 +167,16 @@ export default function VodPage({ onPreview }) {
       setTmdbCfg(cfg);
       setTmdbLangInput(cfg.language || 'es-MX');
       setWatchFolders(wf);
+      const jf = await apiFetch('/api/jellyfin/config');
+      setJellyfinCfg(jf);
+      setJellyfinForm((prev) => ({
+        ...prev,
+        url: jf.url || '',
+        symlinkDir: jf.symlinkDir || '',
+        pathMapText: (jf.pathMap || []).map((r) => `${r.from} => ${r.to}`).join('\n'),
+        directFallback: Boolean(jf.directFallback)
+      }));
+      setJellyfinSelected(jf.libraries || []);
     } catch {
       // reseller role may not access admin-only endpoints
     }
@@ -434,6 +481,133 @@ export default function VodPage({ onPreview }) {
     loadAll();
   };
 
+  // ==================== JELLYFIN ====================
+  const parsePathMapText = (text) =>
+    String(text || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [from, to] = line.split('=>').map((x) => (x || '').trim());
+        return { from: from || '', to: to || '' };
+      })
+      .filter((r) => r.from && r.to);
+
+  const saveJellyfinSettings = async (testConnection = false) => {
+    setJellyfinBusy('config');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          url: jellyfinForm.url,
+          apiKey: jellyfinForm.apiKey,
+          symlinkDir: jellyfinForm.symlinkDir,
+          pathMap: parsePathMapText(jellyfinForm.pathMapText),
+          directFallback: jellyfinForm.directFallback,
+          testConnection
+        })
+      });
+      setJellyfinCfg(res);
+      setJellyfinForm((prev) => ({ ...prev, apiKey: '', url: res.url || prev.url, symlinkDir: res.symlinkDir || prev.symlinkDir }));
+      if (res.test) {
+        setJellyfinMsg({
+          ok: true,
+          text: `Conectado a «${res.test.serverName}» (Jellyfin ${res.test.version}).`
+        });
+      } else {
+        setJellyfinMsg({ ok: true, text: 'Configuración guardada.' });
+      }
+      if (res.configured) await loadJellyfinLibraries();
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJellyfinBusy('');
+    }
+  };
+
+  const loadJellyfinLibraries = async () => {
+    try {
+      const res = await apiFetch('/api/jellyfin/libraries');
+      setJellyfinLibraries(res.libraries || []);
+      const saved = res.selected || [];
+      setJellyfinSelected(saved.length ? saved : (res.libraries || []).map((l) => l.id));
+      return res.libraries || [];
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+      return [];
+    }
+  };
+
+  const openJellyfinModal = async () => {
+    setJellyfinMsg(null);
+    setJellyfinPreview(null);
+    setJellyfinModalOpen(true);
+    if (jellyfinCfg.configured) await loadJellyfinLibraries();
+  };
+
+  const previewJellyfin = async () => {
+    setJellyfinBusy('preview');
+    setJellyfinMsg(null);
+    setJellyfinPreview(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/preview', {
+        method: 'POST',
+        body: JSON.stringify({ libraryIds: jellyfinSelected, contentMode: jellyfinForm.contentMode })
+      });
+      setJellyfinPreview(res);
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJellyfinBusy('');
+    }
+  };
+
+  const importJellyfin = async () => {
+    setJellyfinBusy('import');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/import', {
+        method: 'POST',
+        body: JSON.stringify({
+          libraryIds: jellyfinSelected,
+          contentMode: jellyfinForm.contentMode,
+          createSymlink: jellyfinForm.createSymlink,
+          symlinkDir: jellyfinForm.symlinkDir,
+          useLibraryAsCategory: jellyfinForm.useLibraryAsCategory,
+          autoTmdb: jellyfinForm.autoTmdb,
+          directFallback: jellyfinForm.directFallback
+        })
+      });
+      const st = res.stats;
+      setJellyfinMsg({
+        ok: true,
+        text:
+          `Importado: ${st.moviesAdded} películas, ${st.seriesAdded} series y ${st.episodesAdded} episodios. ` +
+          `${st.symlinks} enlaces creados en ${jellyfinForm.symlinkDir || jellyfinCfg.symlinkDir}` +
+          (st.directUrls ? `, ${st.directUrls} por URL de Jellyfin` : '') +
+          (st.skippedNoFile ? `. ${st.skippedNoFile} sin archivo accesible (revisa el mapa de rutas)` : '') +
+          (st.errors?.length ? `. ${st.errors.length} con error.` : '.')
+      });
+      setJellyfinPreview(null);
+      await loadAll();
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJellyfinBusy('');
+    }
+  };
+
+  const createSymlinkForItem = async (vodId) => {
+    try {
+      const res = await apiFetch(`/api/vod/${vodId}/symlink`, { method: 'POST' });
+      await loadAll();
+      setJellyfinMsg({ ok: true, text: `Enlace creado: ${res.source_url}` });
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
   const filteredMovies = items.filter((v) =>
     !searchFilter ||
     v.title?.toLowerCase().includes(searchFilter.toLowerCase()) ||
@@ -501,6 +675,19 @@ export default function VodPage({ onPreview }) {
           </button>
 
           <button
+            onClick={openJellyfinModal}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/30 text-sky-300 border border-sky-500/30 text-xs font-semibold transition"
+            title="Importar películas y series desde Jellyfin creando enlaces simbólicos (como el «Create Symlink» de XUI.one)"
+          >
+            <Server className="w-4 h-4" />
+            Jellyfin
+            <span
+              className={`w-2 h-2 rounded-full ${jellyfinCfg.configured ? 'bg-emerald-400' : 'bg-slate-500'}`}
+              title={jellyfinCfg.configured ? 'Jellyfin conectado' : 'Jellyfin sin configurar'}
+            />
+          </button>
+
+          <button
             onClick={() => {
               setTmdbMsg(null);
               setTmdbModalOpen(true);
@@ -564,11 +751,18 @@ export default function VodPage({ onPreview }) {
                   <div className="absolute bottom-2.5 left-2.5 px-2 py-0.5 rounded bg-indigo-600/90 text-white text-[10px] font-bold uppercase">
                     {v.container_ext} • {v.release_year}
                   </div>
-                  {v.source_url?.startsWith('/') && (
-                    <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-emerald-600/90 text-white text-[10px] font-bold flex items-center gap-1">
-                      <HardDrive className="w-3 h-3" /> Disco
-                    </div>
-                  )}
+                  <div className="absolute top-2.5 left-2.5 flex flex-col items-start gap-1">
+                    {v.source_url?.startsWith('/') && (
+                      <div className="px-2 py-0.5 rounded bg-emerald-600/90 text-white text-[10px] font-bold flex items-center gap-1">
+                        <HardDrive className="w-3 h-3" /> {v.symlink_path ? 'Symlink' : 'Disco'}
+                      </div>
+                    )}
+                    {v.source_provider === 'jellyfin' && (
+                      <div className="px-2 py-0.5 rounded bg-sky-600/90 text-white text-[10px] font-bold flex items-center gap-1">
+                        <Server className="w-3 h-3" /> Jellyfin
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="p-3.5">
@@ -599,6 +793,15 @@ export default function VodPage({ onPreview }) {
                   >
                     <Play className="w-3.5 h-3.5" />
                   </button>
+                  {v.source_url?.startsWith('/') && !v.symlink_path && (
+                    <button
+                      onClick={() => createSymlinkForItem(v.id)}
+                      className="p-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/30 text-sky-300"
+                      title="Crear symlink en la carpeta VOD (como XUI.one)"
+                    >
+                      <Link2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   <button
                     onClick={() => openEdit(v)}
                     className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
@@ -704,6 +907,324 @@ export default function VodPage({ onPreview }) {
       )}
 
       {/* ==================== MODAL: SINCRONIZAR CARPETA LOCAL (WATCH FOLDER) ==================== */}
+      {/* ==================== JELLYFIN (VOD + SERIES CON SYMLINK) ==================== */}
+      {jellyfinModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-3xl rounded-2xl bg-[#0e1526] border border-slate-800 overflow-hidden shadow-2xl">
+            <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Server className="w-4 h-4 text-sky-400" /> Jellyfin — películas y series
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Como el <span className="text-sky-300 font-semibold">Create Symlink</span> de XUI.one: no se copia
+                  nada, se enlaza el archivo que ya tienes en el disco.
+                </p>
+              </div>
+              <button onClick={() => setJellyfinModalOpen(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
+              {/* Conexión */}
+              <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3">
+                <div className="flex items-center gap-2">
+                  <PlugZap className="w-4 h-4 text-sky-400" />
+                  <span className="font-semibold text-white">Conexión con Jellyfin</span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
+                      jellyfinCfg.configured
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {jellyfinCfg.configured ? 'Conectado' : 'Sin configurar'}
+                  </span>
+                  {jellyfinCfg.apiKeyMasked && (
+                    <span className="text-[10px] text-slate-500 font-mono">clave {jellyfinCfg.apiKeyMasked}</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="space-y-1">
+                    <span className="text-slate-400">URL del servidor</span>
+                    <input
+                      value={jellyfinForm.url}
+                      onChange={(e) => setJellyfinForm({ ...jellyfinForm, url: e.target.value })}
+                      placeholder="http://192.168.1.20:8096"
+                      className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-slate-400">
+                      API Key {jellyfinCfg.apiKeyMasked ? '(vacío = mantener la guardada)' : ''}
+                    </span>
+                    <input
+                      value={jellyfinForm.apiKey}
+                      onChange={(e) => setJellyfinForm({ ...jellyfinForm, apiKey: e.target.value })}
+                      placeholder="Panel de Jellyfin → Administración → API Keys"
+                      className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                    />
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => saveJellyfinSettings(true)}
+                    disabled={jellyfinBusy === 'config'}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 font-semibold disabled:opacity-50"
+                  >
+                    <Check className="w-3.5 h-3.5" /> Probar y guardar
+                  </button>
+                  {jellyfinCfg.configured && (
+                    <button
+                      onClick={loadJellyfinLibraries}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Bibliotecas
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Carpetas y rutas */}
+              <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3">
+                <div className="flex items-center gap-2">
+                  <HardDrive className="w-4 h-4 text-emerald-400" />
+                  <span className="font-semibold text-white">Carpeta de enlaces y rutas</span>
+                </div>
+                <label className="space-y-1 block">
+                  <span className="text-slate-400">Carpeta VOD donde se crean los symlinks</span>
+                  <input
+                    value={jellyfinForm.symlinkDir}
+                    onChange={(e) => setJellyfinForm({ ...jellyfinForm, symlinkDir: e.target.value })}
+                    placeholder="/opt/tvlister24-7/vod"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                  />
+                </label>
+                <label className="space-y-1 block">
+                  <span className="text-slate-400">
+                    Equivalencias de ruta (una por línea, <span className="font-mono">ruta_en_jellyfin =&gt; ruta_en_este_servidor</span>)
+                  </span>
+                  <textarea
+                    value={jellyfinForm.pathMapText}
+                    onChange={(e) => setJellyfinForm({ ...jellyfinForm, pathMapText: e.target.value })}
+                    rows={3}
+                    placeholder={"/media/peliculas => /mnt/peliculas\n/media/series => /mnt/series"}
+                    className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                  />
+                </label>
+                <p className="text-[10px] text-slate-500">
+                  Sólo hace falta si Jellyfin ve el disco con otro prefijo (docker, otro montaje…). Si el archivo ya
+                  está accesible con la ruta que devuelve Jellyfin, déjalo vacío.
+                </p>
+              </div>
+
+              {/* Bibliotecas */}
+              <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-white">Bibliotecas de Jellyfin</span>
+                  <button onClick={loadJellyfinLibraries} className="text-slate-400 hover:text-white">
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                {jellyfinLibraries.length === 0 ? (
+                  <p className="text-slate-500">
+                    Guarda la conexión para ver tus bibliotecas de películas y series.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {jellyfinLibraries.map((lib) => {
+                      const checked = jellyfinSelected.includes(lib.id);
+                      return (
+                        <label
+                          key={lib.id}
+                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border cursor-pointer ${
+                            checked
+                              ? 'bg-sky-500/10 border-sky-500/40 text-sky-200'
+                              : 'bg-[#0e1526] border-slate-800 text-slate-300'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) =>
+                              setJellyfinSelected((prev) =>
+                                e.target.checked ? [...new Set([...prev, lib.id])] : prev.filter((id) => id !== lib.id)
+                              )
+                            }
+                            className="w-3.5 h-3.5 accent-sky-500"
+                          />
+                          <span className="truncate">{lib.name}</span>
+                          <span className="ml-auto text-[10px] text-slate-500 uppercase">
+                            {lib.collectionType || '—'}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-[10px] text-slate-500">
+                  Se importan películas de las bibliotecas de tipo movies y series (con sus episodios) de las de tipo
+                  tvshows.
+                </p>
+              </div>
+
+              {/* Opciones */}
+              <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3">
+                <span className="font-semibold text-white">Qué importar</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {[
+                    { id: 'auto', label: 'Películas y series' },
+                    { id: 'movies', label: 'Sólo películas' },
+                    { id: 'series', label: 'Sólo series' }
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      onClick={() => setJellyfinForm({ ...jellyfinForm, contentMode: opt.id })}
+                      className={`px-2.5 py-1 rounded-lg font-semibold border ${
+                        jellyfinForm.contentMode === opt.id
+                          ? 'bg-sky-500/20 text-sky-200 border-sky-500/40'
+                          : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={jellyfinForm.createSymlink}
+                    onChange={(e) => setJellyfinForm({ ...jellyfinForm, createSymlink: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 accent-sky-500"
+                  />
+                  <span>
+                    <span className="text-white font-semibold">Create Symlink</span>
+                    <span className="text-slate-400">
+                      {' '}
+                      — crea un enlace en la carpeta VOD y lo usa como fuente (no se copia ni se mueve el archivo).
+                      Es lo que hace XUI.one con las películas.
+                    </span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={jellyfinForm.useLibraryAsCategory}
+                    onChange={(e) => setJellyfinForm({ ...jellyfinForm, useLibraryAsCategory: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 accent-sky-500"
+                  />
+                  <span className="text-slate-300">
+                    Crear una categoría por biblioteca (<span className="font-mono">Jellyfin · Películas</span>)
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={jellyfinForm.autoTmdb}
+                    onChange={(e) => setJellyfinForm({ ...jellyfinForm, autoTmdb: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 accent-sky-500"
+                  />
+                  <span className="text-slate-300">
+                    Completar carátulas que falten con TMDB{' '}
+                    <span className={tmdbCfg.configured ? 'text-emerald-300' : 'text-amber-300'}>
+                      ({tmdbCfg.configured ? 'TMDB conectado' : 'TMDB sin configurar'})
+                    </span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={jellyfinForm.directFallback}
+                    onChange={(e) => setJellyfinForm({ ...jellyfinForm, directFallback: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 accent-sky-500"
+                  />
+                  <span className="text-slate-300">
+                    Si el archivo no está en este servidor, usar la URL de Jellyfin (Jellyfin en otra máquina)
+                  </span>
+                </label>
+              </div>
+
+              {jellyfinMsg && (
+                <div
+                  className={`p-3 rounded-xl border text-[11px] ${
+                    jellyfinMsg.ok
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+                      : 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                  }`}
+                >
+                  {jellyfinMsg.text}
+                </div>
+              )}
+
+              {jellyfinPreview && (
+                <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 space-y-2">
+                  <div className="flex flex-wrap items-center gap-3 text-slate-300">
+                    <span>
+                      <span className="text-white font-bold">{jellyfinPreview.movies}</span> películas
+                    </span>
+                    <span>
+                      <span className="text-white font-bold">{jellyfinPreview.series}</span> series (
+                      {jellyfinPreview.episodes} episodios)
+                    </span>
+                    <span className="text-emerald-300">{jellyfinPreview.reachable} archivos accesibles</span>
+                    {jellyfinPreview.unreachable > 0 && (
+                      <span className="text-amber-300">{jellyfinPreview.unreachable} no accesibles</span>
+                    )}
+                  </div>
+                  {jellyfinPreview.sample?.length > 0 && (
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {jellyfinPreview.sample.map((it, idx) => (
+                        <div key={idx} className="flex items-center gap-2 text-[10px]">
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${it.reachable ? 'bg-emerald-400' : 'bg-amber-400'}`}
+                          />
+                          <span className="text-slate-300 truncate">{it.title}</span>
+                          <span className="text-slate-600 font-mono truncate ml-auto max-w-[45%]">{it.path}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {jellyfinPreview.unreachable > 0 && (
+                    <p className="text-[10px] text-amber-300/90">
+                      Los archivos «no accesibles» no se pueden enlazar: añade una equivalencia de ruta o activa la
+                      opción de usar la URL de Jellyfin.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 bg-[#131c31] border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[10px] text-slate-500 max-w-md">
+                Los enlaces apuntan al archivo original: si mueves o borras el archivo, el episodio o la película deja
+                de verse. Se puede rehacer con <span className="font-mono">tvlister-admin jellyfin symlinks</span>.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={previewJellyfin}
+                  disabled={!jellyfinCfg.configured || jellyfinBusy === 'preview'}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold disabled:opacity-40"
+                >
+                  <Search className="w-3.5 h-3.5" /> Ver qué hay
+                </button>
+                <button
+                  onClick={importJellyfin}
+                  disabled={!jellyfinCfg.configured || jellyfinBusy === 'import'}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold disabled:opacity-40"
+                >
+                  <DownloadCloudIcon busy={jellyfinBusy === 'import'} /> Importar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {folderModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
           <div className="w-full max-w-3xl rounded-2xl bg-[#0e1526] border border-slate-800 overflow-hidden">

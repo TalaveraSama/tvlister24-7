@@ -121,6 +121,20 @@ import {
   setRegistryMode,
   bumpRegistryVersion
 } from './deviceRegistry.js';
+import {
+  getJellyfinConfig,
+  saveJellyfinConfig,
+  testJellyfinConnection,
+  listJellyfinLibraries,
+  previewJellyfinImport,
+  importFromJellyfin,
+  createSymlinkForVod,
+  createSymlinkForEpisode,
+  rebuildAllSymlinks,
+  listBrokenSymlinks,
+  cleanupVodSymlink,
+  cleanupEpisodeSymlink
+} from './jellyfin.js';
 import { computeRecommendation, applyRecommendation } from './tune.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
@@ -2623,8 +2637,9 @@ app.put('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
 });
 
 app.delete('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
+  const removedLink = cleanupVodSymlink(req.params.id);
   db.prepare('DELETE FROM vod_items WHERE id = ?').run(Number(req.params.id));
-  res.json({ ok: true });
+  res.json({ ok: true, symlink_removed: removedLink });
 });
 
 // ==================== LOCAL WATCH FOLDERS & TMDB (themoviedb.org) ====================
@@ -2696,6 +2711,149 @@ app.post('/api/tmdb/enrich-missing', requireAuth, requireAdmin, async (req, res)
   } catch (err) {
     res.status(400).json({ error: err.message || 'Error sincronizando carátulas con TMDB' });
   }
+});
+
+// ==================== JELLYFIN (VOD y series con enlaces simbólicos) ====================
+app.get('/api/jellyfin/config', requireAuth, requireAdmin, (req, res) => {
+  res.json(getJellyfinConfig());
+});
+
+app.post('/api/jellyfin/config', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const saved = saveJellyfinConfig({
+      url: b.url,
+      apiKey: b.apiKey,
+      symlinkDir: b.symlinkDir,
+      pathMap: b.pathMap,
+      directFallback: b.directFallback
+    });
+    let test = null;
+    if (b.testConnection && saved.configured) {
+      try {
+        test = await testJellyfinConnection();
+      } catch (err) {
+        return res.status(400).json({ error: err.message, ...saved });
+      }
+    }
+    res.json({ ok: true, test, ...saved });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo guardar la configuración de Jellyfin' });
+  }
+});
+
+app.post('/api/jellyfin/test', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const info = await testJellyfinConnection();
+    const libraries = await listJellyfinLibraries();
+    res.json({ ok: true, ...info, libraries });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo conectar con Jellyfin' });
+  }
+});
+
+app.get('/api/jellyfin/libraries', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const libraries = await listJellyfinLibraries();
+    res.json({ ok: true, libraries, selected: getJellyfinConfig().libraries });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo leer las bibliotecas de Jellyfin' });
+  }
+});
+
+app.post('/api/jellyfin/preview', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const preview = await previewJellyfinImport({
+      libraryIds: b.libraryIds || [],
+      contentMode: b.contentMode || 'auto'
+    });
+    res.json({ ok: true, ...preview });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo mirar la biblioteca de Jellyfin' });
+  }
+});
+
+app.post('/api/jellyfin/import', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    // La selección de bibliotecas queda guardada para la próxima vez.
+    if (Array.isArray(b.libraryIds) && b.libraryIds.length) {
+      saveJellyfinConfig({ libraries: b.libraryIds });
+    }
+    const stats = await importFromJellyfin({
+      libraryIds: b.libraryIds || [],
+      contentMode: b.contentMode || 'auto',
+      createSymlink: b.createSymlink !== false,
+      symlinkDir: b.symlinkDir || '',
+      useLibraryAsCategory: b.useLibraryAsCategory !== false,
+      defaultCategoryId: b.defaultCategoryId || null,
+      autoTmdb: Boolean(b.autoTmdb),
+      directFallback: typeof b.directFallback === 'boolean' ? b.directFallback : null,
+      fetchImages: b.fetchImages !== false
+    });
+    res.json({ ok: true, stats });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error importando desde Jellyfin' });
+  }
+});
+
+// «Create Symlink»: crea el enlace de una película/episodio ya cargado.
+app.post('/api/vod/:id/symlink', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...createSymlinkForVod(req.params.id) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/series/episodes/:epId/symlink', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...createSymlinkForEpisode(req.params.epId) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/vod/symlinks/rebuild', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...rebuildAllSymlinks({ dryRun: Boolean(req.body?.dryRun) }) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/vod/symlinks/status', requireAuth, requireAdmin, (_req, res) => {
+  const cfg = getJellyfinConfig();
+  let links = 0;
+  let space = 0;
+  try {
+    const walk = (dir, depth) => {
+      if (depth > 3) return;
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) walk(full, depth + 1);
+        else if (ent.isSymbolicLink()) links += 1;
+      }
+    };
+    walk(cfg.symlinkDir, 0);
+  } catch {
+    /* la carpeta aún no existe */
+  }
+  res.json({
+    symlinkDir: cfg.symlinkDir,
+    exists: fs.existsSync(cfg.symlinkDir),
+    links,
+    broken: listBrokenSymlinks(),
+    diskFreeMb: (() => {
+      try {
+        const st = fs.statfsSync(cfg.symlinkDir);
+        return Math.round((st.bavail * st.bsize) / (1024 * 1024));
+      } catch {
+        return null;
+      }
+    })()
+  });
 });
 
 app.get('/api/vod/folders', requireAuth, requireAdmin, (req, res) => {
@@ -2837,6 +2995,10 @@ app.put('/api/series/:id', requireAuth, requireAdmin, (req, res) => {
 
 app.delete('/api/series/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
+  // Al borrar la serie se van también sus enlaces en la carpeta VOD.
+  for (const ep of db.prepare('SELECT id FROM series_episodes WHERE series_id = ?').all(id)) {
+    cleanupEpisodeSymlink(ep.id);
+  }
   db.prepare('DELETE FROM series_episodes WHERE series_id = ?').run(id);
   db.prepare('DELETE FROM series WHERE id = ?').run(id);
   res.json({ ok: true });
@@ -2867,8 +3029,9 @@ app.post('/api/series/:id/episodes', requireAuth, requireAdmin, (req, res) => {
 });
 
 app.delete('/api/series/episodes/:epId', requireAuth, requireAdmin, (req, res) => {
+  const removedLink = cleanupEpisodeSymlink(req.params.epId);
   db.prepare('DELETE FROM series_episodes WHERE id = ?').run(Number(req.params.epId));
-  res.json({ ok: true });
+  res.json({ ok: true, symlink_removed: removedLink });
 });
 
 // ==================== BOUQUETS & PACKAGES ====================

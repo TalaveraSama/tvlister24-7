@@ -4,6 +4,8 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 📖 **[Manual Completo del Panel, Guía de Uso y Tecnología (`docs/DOCUMENTACION_SISTEMA.md`)](docs/DOCUMENTACION_SISTEMA.md)**
 
+🎬 **Jellyfin → VOD con «Create Symlink»**: el panel importa tu catálogo de Jellyfin (películas, otros VOD y series con episodios) y, como XUI.one, **crea enlaces simbólicos** a los archivos que ya tienes en el disco: no copia, no mueve y no recodifica nada. Botón *Jellyfin* en **VOD y Series**; en terminal: `tvlister-admin jellyfin`. Guía: **[`docs/JELLYFIN_VOD.md`](docs/JELLYFIN_VOD.md)**.
+
 🔐 **Protección sin cifrado — registro de aparatos por MAC**: el DRM se ha **retirado** (v2.6.15).
 Cada aparato que se conecta se auto-registra con su MAC (o una huella estable si la app no la
 envía), el panel identifica tipo, marca, modelo, sistema y reproductor, y la línea admite tantos
@@ -29,15 +31,15 @@ curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download
 Para fijar una versión concreta (recomendado en producción) y el puerto:
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.15/install.sh \
-  | sudo bash -s -- --tag v2.6.15 --port 8095
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.16/install.sh \
+  | sudo bash -s -- --tag v2.6.16 --port 8095
 ```
 
 Si un release no tiene el paquete adjunto (o su descarga falla), el instalador usa el árbol del tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.15/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.15
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.16/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.16
 ```
 
 También puedes instalarlo desde la consola del propio servidor:

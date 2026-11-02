@@ -186,6 +186,9 @@ function runInitDbBody() {
       duration_sec INTEGER NOT NULL DEFAULT 600,
       container_ext TEXT NOT NULL DEFAULT 'mp4',
       direct_source INTEGER NOT NULL DEFAULT 1,
+      source_provider TEXT NOT NULL DEFAULT 'manual',
+      external_id TEXT NOT NULL DEFAULT '',
+      symlink_path TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -315,6 +318,7 @@ function runInitDbBody() {
       genre TEXT DEFAULT 'General',
       release_year INTEGER DEFAULT 2025,
       rating REAL DEFAULT 8.0,
+      external_id TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -328,6 +332,8 @@ function runInitDbBody() {
       plot TEXT DEFAULT '',
       duration_sec INTEGER NOT NULL DEFAULT 1200,
       container_ext TEXT NOT NULL DEFAULT 'mp4',
+      external_id TEXT NOT NULL DEFAULT '',
+      symlink_path TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
     );
@@ -539,6 +545,17 @@ function runInitDbBody() {
   ensureColumn('servers', 'https_port', 'INTEGER');
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'xui_id', 'INTEGER');
+  // --- VOD desde Jellyfin (enlaces simbólicos, como el «Create Symlink» de XUI) --
+  ensureColumn('vod_items', 'source_provider', "TEXT NOT NULL DEFAULT 'manual'");
+  ensureColumn('vod_items', 'external_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('vod_items', 'symlink_path', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('series', 'external_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('series_episodes', 'external_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('series_episodes', 'symlink_path', "TEXT NOT NULL DEFAULT ''");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_vod_external ON vod_items(source_provider, external_id);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_series_external ON series(external_id);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_episodes_external ON series_episodes(external_id);");
+
   ensureColumn('streams', 'offline_slate_mode', "TEXT NOT NULL DEFAULT 'disabled'");
   // 1 = el canal está emitiendo el segundo origen (cambio manual o automático, reversible)
   ensureColumn('streams', 'failover_active', 'INTEGER NOT NULL DEFAULT 0');
