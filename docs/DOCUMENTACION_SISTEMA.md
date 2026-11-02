@@ -2859,3 +2859,14 @@ puerto HTTPS configurado. `checkHost()` lo usa para el sondeo por loopback y lo 
 resuelve en DNS se omite la comprobación pública del certificado (evita el doble error
 «ENOTFOUND» + «no resuelve»), y un certificado de origen no verificable se explica con su emisor y
 su código de error; si el fallo parece de cadena local se emite aviso en vez de un problema.
+
+### v2.6.12: video directo (nube gris) y certificado SAN para los dos nombres
+
+`streams-port` elige el esquema según el puerto: 443, 8443, 2053, 2083, 2087 y 2096 son HTTPS (antes
+solo el 443, y `streams-port 8443` guardaba `http://…:8443`, inservible). `tvlister-admin acme`
+acepta varios dominios —`acme <panel> <video> [correo]`— y emite un certificado SAN con
+`--cert-name <primer dominio>`, instalándolo por SNI para cada nombre; respeta `TVLISTER_ACME_DIR` y
+sigue usando `--webroot`, así que no necesita el 80 libre. `docs/DOMINIOS_PANEL_STREAMS.md` añade la
+sección que responde a «¿pongo el video en naranja o en el 8443?»: no, el proxy de Cloudflare no
+sirve para video continuo en planes self-serve (ToS 2.8), el puerto es irrelevante en nube gris y los
+productos válidos para eso son Stream o Spectrum.

@@ -396,7 +396,11 @@ cmd_streams_port() {
       process.exit(1);
     }
 
-    const scheme = num === 443 ? "https" : "http";
+    // Puertos HTTPS: el 443 y los que Cloudflare acepta para TLS (8443 incluido).
+    // Antes se asumía que todo lo que no fuera 443 era HTTP y `streams-port 8443`
+    // generaba enlaces "http://dominio:8443", que ningún reproductor abre.
+    const HTTPS_PORTS = [443, 8443, 2053, 2083, 2087, 2096];
+    const scheme = HTTPS_PORTS.includes(num) ? "https" : "http";
     const base = num === 80 || num === 443 ? scheme + "://" + host : scheme + "://" + host + ":" + num;
     set("public_stream_base", base);
 
@@ -413,6 +417,13 @@ cmd_streams_port() {
     } else if (num === 443) {
       console.log("   Requisitos en el 443: server block con certificado válido para " + host + ".");
       console.log("     (Origin Certificate de Cloudflare + cloudflare ... --cert/--key, o Let\u2019s Encrypt)");
+    } else if (scheme === "https") {
+      console.log("   El puerto " + num + " es HTTPS: el panel lo atiende con el certificado que cubra " + host + ".");
+      console.log("     tvlister-admin add-port " + num + " https");
+      console.log("     · Cloudflare acepta el " + num + " como puerto TLS, pero el VIDEO no puede ir por el proxy:");
+      console.log("       el registro de " + host + " tiene que estar en GRIS (DNS only) igualmente.");
+      console.log("     · Abre " + num + " en el firewall. Algunas redes/reproductores bloquean puertos altos:");
+      console.log("       si puedes, el 443 es la opción que menos falla.");
     } else {
       console.log("   El puerto " + num + " debe estar abierto en el firewall y ser alcanzable desde");
       console.log("   los clientes. Muchos reproductores y algunas redes bloquean puertos altos.");
@@ -3398,33 +3409,52 @@ case "$ACTION" in
     fi
     ;;
   acme)
-    # tvlister-admin acme <dominio> [email]   → Let's Encrypt con webroot
+    # tvlister-admin acme <dominio> [<dominio2> …] [email]   → Let's Encrypt (webroot)
     #
-    # El modo --standalone de certbot necesita escuchar en el 80 y falla cuando
-    # el panel (o nginx) ya lo ocupa. Con --webroot, certbot deja el token en
-    # /var/www/tvlister-acme y lo publica quien tenga el 80: el panel lo hace
-    # solo en /.well-known/acme-challenge/ (también a través del 80 con
-    # redirección), y los server blocks de nginx lo incluyen.
-    ACME_DOM="${2:-}"
-    ACME_EMAIL="${3:-}"
-    if [ -z "$ACME_DOM" ]; then
-      echo "Uso: tvlister-admin acme <dominio> [email]"
-      echo "Ej.: tvlister-admin acme live-stream.alphadigitalnic.xyz correo@dominio.com"
+    # Varios dominios en el MISMO certificado (SAN) es lo normal cuando el panel y
+    # el video salen por el mismo 443: el origen presenta un certificado que cubre
+    # los dos y Cloudflare (Full strict) y los reproductores lo aceptan.
+    #   tvlister-admin acme tvadmin.midominio.com live-stream.midominio.com correo@x.com
+    #
+    # El modo --standalone de certbot necesita escuchar en el 80 y falla cuando el
+    # panel (o nginx) ya lo ocupa. Con --webroot, certbot deja el token en
+    # /var/www/tvlister-acme y lo publica quien tenga el 80: el panel lo hace solo
+    # en /.well-known/acme-challenge/ (también a través del 80 con redirección) y
+    # los server blocks de nginx lo incluyen.
+    ACME_EMAIL=""
+    ACME_DOMAINS=()
+    shift || true
+    for _arg in "$@"; do
+      case "$_arg" in
+        *@*) ACME_EMAIL="$_arg" ;;
+        *.*) ACME_DOMAINS+=("$(printf '%s' "$_arg" | tr 'A-Z' 'a-z' | sed -e 's#^https\?://##' -e 's#/.*$##' -e 's/:.*$//')") ;;
+        *) : ;;
+      esac
+    done
+    if [ "${#ACME_DOMAINS[@]}" -eq 0 ]; then
+      echo "Uso: tvlister-admin acme <dominio> [<dominio2> …] [email]"
+      echo "Ej.: tvlister-admin acme tvadmin.midominio.com live-stream.midominio.com correo@dominio.com"
+      echo "     (varios dominios = un solo certificado que los cubre a todos)"
       exit 1
     fi
+    if [ "${#ACME_DOMAINS[@]}" -gt 10 ]; then
+      echo "❌ Demasiados dominios en un certificado (máximo 10)."
+      exit 1
+    fi
+    ACME_ROOT_DIR="${TVLISTER_ACME_DIR:-/var/www/tvlister-acme}"
     if ! command -v certbot >/dev/null 2>&1; then
       echo "❌ certbot no está instalado."
       echo "   Ubuntu/Debian: sudo apt update && sudo apt install -y certbot"
       echo "   O con snap:    sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot"
       exit 1
     fi
-    mkdir -p /var/www/tvlister-acme/.well-known/acme-challenge
-    chmod 755 /var/www/tvlister-acme /var/www/tvlister-acme/.well-known /var/www/tvlister-acme/.well-known/acme-challenge 2>/dev/null || true
+    mkdir -p "${ACME_ROOT_DIR}/.well-known/acme-challenge"
+    chmod 755 "$ACME_ROOT_DIR" "$ACME_ROOT_DIR/.well-known" "$ACME_ROOT_DIR/.well-known/acme-challenge" 2>/dev/null || true
 
     # ¿Quién tiene el 80? Para avisar de lo que hay que hacer si no es el panel.
     WHO80=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:80$/ {print; exit}' || true)
     echo "============================================================"
-    echo "  Certificado Let's Encrypt (webroot): ${ACME_DOM}"
+    echo "  Certificado Let's Encrypt (webroot): ${ACME_DOMAINS[*]}"
     echo "============================================================"
     if [ -n "$WHO80" ]; then
       echo "  Puerto 80: ${WHO80}"
@@ -3441,18 +3471,24 @@ case "$ACTION" in
       exit 1
     fi
 
-    if certbot certonly --webroot -w /var/www/tvlister-acme -d "$ACME_DOM" \
+    ACME_DARGS=()
+    for _d in "${ACME_DOMAINS[@]}"; do ACME_DARGS+=(-d "$_d"); done
+    if certbot certonly --webroot -w "$ACME_ROOT_DIR" "${ACME_DARGS[@]}" \
+         --cert-name "${ACME_DOMAINS[0]}" \
          --non-interactive --agree-tos -m "$ACME_EMAIL" --keep-until-expiring \
          --deploy-hook "systemctl restart ${SERVICE_NAME:-tvlister24-7}"; then
-      LE_DIR="/etc/letsencrypt/live/${ACME_DOM}"
+      LE_DIR="/etc/letsencrypt/live/${ACME_DOMAINS[0]}"
       echo ""
       echo "✅ Certificado disponible: ${LE_DIR}"
+      echo "   cubre: ${ACME_DOMAINS[*]}"
       echo "   (si certbot dijo «not yet due for renewal», ya estaba vigente y se instala ese)"
-      # Se instala en el panel como certificado de ese dominio (SNI), para que
-      # el 443 del propio panel lo use sin depender de nginx.
-      "$NODE_BIN" "$APP_DIR/scripts/tls_paste.mjs" --host "$ACME_DOM" \
-        --cert "${LE_DIR}/fullchain.pem" --key "${LE_DIR}/privkey.pem" \
-        --source "Let's Encrypt" || true
+      # Una entrada por dominio (SNI): el 443 del panel presenta el certificado
+      # correcto para cada nombre sin depender de nginx.
+      for _d in "${ACME_DOMAINS[@]}"; do
+        "$NODE_BIN" "$APP_DIR/scripts/tls_paste.mjs" --host "$_d" \
+          --cert "${LE_DIR}/fullchain.pem" --key "${LE_DIR}/privkey.pem" \
+          --source "Let's Encrypt" || true
+      done
       # Reabrir el 443 para que el panel cargue el certificado recién instalado.
       systemctl restart "${SERVICE_NAME:-tvlister24-7}" >/dev/null 2>&1 || true
       echo ""
@@ -3467,7 +3503,7 @@ case "$ACTION" in
       echo "   · El 80 lo tiene nginx y su server block no publica el reto: añade"
       echo "     location ^~ /.well-known/acme-challenge/ { root /var/www/tvlister-acme; }"
       echo "     o vuelve a generar los bloques con: tvlister-admin cloudflare <panel> <video>"
-      echo "   · El DNS del dominio no apunta a este servidor todavía."
+      echo "   · El DNS de ${ACME_DOMAINS[*]} no apunta a este servidor todavía."
       exit 1
     fi
     ;;

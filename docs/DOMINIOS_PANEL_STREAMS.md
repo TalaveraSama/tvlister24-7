@@ -39,10 +39,13 @@ reproductor), así que el certificado del origen tiene que cubrir ambos. Lo más
 certificado con los dos nombres**:
 
 ```bash
-sudo certbot certonly --standalone \
-  -d tvadmin.alphadigitalnic.xyz \
-  -d live-stream.alphadigitalnic.xyz
+sudo tvlister-admin acme tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz correo@tudominio.com
 ```
+
+Ese comando (v2.6.12+) emite **un solo certificado con los dos nombres** y lo instala por SNI para
+cada uno. Usa `--webroot`, así que **no necesita el puerto 80 libre**: funciona aunque el panel o el
+nginx de XUI.one lo estén ocupando (`certbot --standalone` falla justo por eso: *Could not bind TCP
+port 80*).
 
 Queda en `/etc/letsencrypt/live/tvadmin.alphadigitalnic.xyz/{fullchain,privkey}.pem` y el panel lo
 detecta solo (también vale acme.sh o el Origin Certificate si algún día separas los nombres).
@@ -52,6 +55,42 @@ detecta solo (también vale acme.sh o el Origin Certificate si algún día separ
   valdría para el panel: el video va directo y un reproductor rechazaría una CA privada.
 - Renovación: `certbot renew --deploy-hook "systemctl restart tvlister24-7"`. Si el panel sirve el
   443, también vale **Reabrir puertos TLS** en la UI tras renovar.
+
+## La pregunta del millón: ¿pongo el video en naranja? ¿Y el puerto 8443?
+
+**No.** Y el puerto no cambia nada: el problema no es el puerto, es el **proxy**.
+
+| Lo que se oye | Qué pasa de verdad |
+| --- | --- |
+| «Cloudflare acepta el 8443, así que el video puede ir por ahí» | Cierto que el 8443 está en la lista de puertos TLS de Cloudflare, pero **el proxy no está pensado para video continuo**: el plan self-serve lo prohíbe (ToS 2.8) y en la práctica añade buffering, cortes y riesgo de suspensión del dominio |
+| «Con naranja protejo la IP del servidor» | Para el video no: el reproductor abre conexiones largas y Cloudflare las corta o las limita. La IP se ve igual en los logs del cliente |
+| «Con naranja el video va más rápido» | Al contrario: el HLS se pide cada 2–6 s y el edge no lo cachea con sentido; se gana latencia y se pierde estabilidad |
+| «Entonces el video no tiene protección» | La tiene a nivel de aplicación: enlaces firmados, token por línea, límite de conexiones, bloqueo por IP/país y DRM. Lo que no hay es CDN de video |
+
+Si algún día **necesitas** Cloudflare delante del video, los productos que sí lo permiten son
+**Cloudflare Stream** (transcodifica y aloja el video, es de pago y cambia el reparto: tú subes el
+archivo, no sirves HLS desde tu servidor) o **Spectrum** (TCP/UDP a nivel 4, también de pago). El
+proxy normal (naranja) nunca es la respuesta para `.m3u8`/`.ts`.
+
+### Y si aun así quieres otro puerto para el video
+
+Se puede, siempre con la nube **gris**:
+
+```bash
+sudo tvlister-admin streams-port 8443 live-stream.alphadigitalnic.xyz   # deja https://...:8443
+sudo tvlister-admin add-port 8443 https                                  # el panel lo atiende
+sudo ufw allow 8443/tcp
+```
+
+- Los enlaces que reciben los clientes pasan a ser `https://live-stream.alphadigitalnic.xyz:8443/live/...`.
+- **En gris, el puerto da igual para Cloudflare**: no interviene. El 8443 solo importa si el registro
+  estuviera en naranja, y ahí ya no queremos estar.
+- Aviso real: algunas redes de operador y televisores bloquean puertos altos. Si puedes, quédate en
+  **443**, que es el que menos falla.
+
+> En la v2.6.11 y anteriores `streams-port 8443` guardaba `http://…:8443` (sin TLS) por un error al
+> elegir el esquema. Corregido en la v2.6.12: los puertos 443, 8443, 2053, 2083, 2087 y 2096 se
+> tratan como HTTPS.
 
 ## Paso 3. Quién atiende el 443 del servidor (elige **una** opción)
 
@@ -176,6 +215,10 @@ Por eso el panel y el video pueden usar certificados distintos en el mismo 443:
   `https://live-stream.alphadigitalnic.xyz`.
 - `xmltv.php` (EPG), login, WebTV y API siguen en `tvadmin…`.
 - Las claves DRM (`/drm/…`) salen por el dominio del panel, no por el de video.
+- **WebTV**: el portal pide el manifiesto al dominio del panel (petición pequeña y en `no-store`),
+  pero el manifiesto se reescribe con URLs absolutas del dominio de video: **los segmentos y el
+  video salen directos** por `live-stream`. Si ves tráfico de video en el panel, es que
+  `public_stream_base` está vacío.
 - Con Cloudflare delante, el panel lee `CF-Connecting-IP` solo si el rango está declarado como
   proxy de confianza (lo hace el paso 4). **Sin eso, todos los clientes parecen la misma IP** y los
   límites por IP (intentos de contraseña, anti-compartición) se aplicarían a todos a la vez.
