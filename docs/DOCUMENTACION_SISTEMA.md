@@ -2831,3 +2831,21 @@ DDL (`sqlite_master`) sustituyendo solo el `CHECK` del canal, en vez de escribir
 columnas. Se ejecuta **después** de `ensureColumn` de `pkt_size`, `rtp` y `freq_locked`, así que
 copia todas las columnas existentes y no pierde datos. Antes fallaba con
 `table wk2500_channels_new has no column named pkt_size` y dejaba el canal 1 deshabilitado.
+
+### v2.6.10: comprobación de dominios con origen y lectura segura del certificado
+
+**1. Objetos de prototipo nulo.** `tls.TLSSocket.getPeerCertificate()` devuelve `subject`/`issuer`
+con prototipo nulo; `String(obj)` lanza `Cannot convert object to primitive value`. `server/domains.js`
+lee los campos con `objField()` (acepta cadena, objeto o **array** de CN, que es lo que llega con
+certificados de dos CN como los de Cloudflare) y nunca convierte el objeto completo.
+
+**2. Comprobación del origen.** `inspectCertificate(host, port, timeout, connectHost)` permite
+conectar a otra IP manteniendo el SNI. `checkHost()` añade `originCertificate`, preguntando a
+`127.0.0.1:443` con el SNI del dominio: distingue «Cloudflare responde» de «el origen responde», que
+es lo que produce los 521 y los `connection refused` del video. Si el origen no cubre el nombre o el
+video usa una CA privada, se reporta como problema.
+
+**3. Detalles.** `getTlsSettings().domains` sin duplicados; `parsePair()` usa el primer SAN con
+dominio cuando el CN no lo parece; la tarjeta del panel muestra `origen :443 → CN · días`; el
+recordatorio del CLI propone `tls origin` y `acme`; `tvlister-admin acme` reinicia el panel después
+de instalar y distingue «emitido» de «ya vigente».

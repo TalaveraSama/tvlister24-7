@@ -3341,6 +3341,14 @@ case "$ACTION" in
         } else if (e.certificate) {
           console.log("          Cert : " + (e.certificate.error || "no se pudo leer"));
         }
+        if (e.originCertificate?.ok) {
+          const caNote = e.originCertificate.authorized
+            ? " · CA pública"
+            : (e.role === "panel" ? " · CA propia (Cloudflare): normal detrás de Cloudflare" : " · CA propia: el reproductor no la acepta");
+          console.log("          Origen: " + e.originCertificate.subject + " · " + e.originCertificate.daysLeft + " días" + caNote);
+        } else if (e.originCertificate) {
+          console.log("          Origen: no responde en 127.0.0.1:443 — " + (e.originCertificate.error || "sin datos"));
+        }
         if (e.http?.ok) {
           console.log("          HTTP : " + e.http.status + " · " + (e.http.server || "?") + (e.http.viaCloudflare ? " · por Cloudflare" : " · directo"));
         }
@@ -3359,9 +3367,10 @@ case "$ACTION" in
         console.log("   Recordatorio:");
         console.log("   · DNS: A de " + (cur.panelDomain || "<panel>") + " a la IP del servidor, nube NARANJA.");
         console.log("   · DNS: A de " + (cur.streamDomain || "<video>") + " a la MISMA IP, nube GRIS (DNS only).");
-        console.log("   · Certificado en el origen que cubra los dos nombres:");
-        console.log("       certbot certonly --standalone -d " + (cur.panelDomain || "panel") + " -d " + (cur.streamDomain || "video"));
-        console.log("     y luego:  tvlister-admin tls  (para que el panel lo use)  o  tvlister-admin cloudflare <panel> <video>");
+        console.log("   · Certificado en el origen (no hace falta uno para los dos nombres):");
+        console.log("       panel (detrás de Cloudflare): tvlister-admin tls origin");
+        console.log("       video (conexión directa)    : tvlister-admin acme " + (cur.streamDomain || "video") + " <correo>");
+        console.log("     Ambos conviven en el mismo 443 (SNI). Detalle: docs/CERTIFICADO_ORIGEN_CLOUDFLARE.md");
         process.exitCode = 1;
       }
     '
@@ -3437,12 +3446,15 @@ case "$ACTION" in
          --deploy-hook "systemctl restart ${SERVICE_NAME:-tvlister24-7}"; then
       LE_DIR="/etc/letsencrypt/live/${ACME_DOM}"
       echo ""
-      echo "✅ Certificado emitido: ${LE_DIR}"
+      echo "✅ Certificado disponible: ${LE_DIR}"
+      echo "   (si certbot dijo «not yet due for renewal», ya estaba vigente y se instala ese)"
       # Se instala en el panel como certificado de ese dominio (SNI), para que
       # el 443 del propio panel lo use sin depender de nginx.
       "$NODE_BIN" "$APP_DIR/scripts/tls_paste.mjs" --host "$ACME_DOM" \
         --cert "${LE_DIR}/fullchain.pem" --key "${LE_DIR}/privkey.pem" \
         --source "Let's Encrypt" || true
+      # Reabrir el 443 para que el panel cargue el certificado recién instalado.
+      systemctl restart "${SERVICE_NAME:-tvlister24-7}" >/dev/null 2>&1 || true
       echo ""
       echo "   Renovación automática: certbot ya deja un timer/cron; este hook"
       echo "   reinicia el panel para que cargue el certificado nuevo."

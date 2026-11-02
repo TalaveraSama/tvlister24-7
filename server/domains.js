@@ -127,16 +127,36 @@ async function resolveHost(host) {
   }
 }
 
+/**
+ * Los objetos de `getPeerCertificate()` tienen prototipo nulo: `String(obj)`
+ * lanza "Cannot convert object to primitive value". Aquí sólo se leen sus
+ * propiedades, nunca se convierten a cadena.
+ */
+function objField(value, key) {
+  if (!value) return '';
+  if (typeof value === 'string') return value.trim();
+  const raw = value[key];
+  if (typeof raw === 'string') return raw.trim();
+  // Un certificado con dos CN (Cloudflare pone el suyo delante) llega como array.
+  if (Array.isArray(raw)) {
+    const list = raw.filter((v) => typeof v === 'string').map((v) => v.trim());
+    return list.find((v) => v.includes('.')) || list[list.length - 1] || '';
+  }
+  return '';
+}
+
 function certCovers(cert, host) {
   const names = new Set();
-  if (cert.subjectaltname) {
+  if (typeof cert.subjectaltname === 'string') {
     for (const entry of cert.subjectaltname.split(',')) {
       const value = entry.trim().replace(/^DNS:/i, '').toLowerCase();
       if (value) names.add(value);
     }
   }
-  const cn = /CN=([^,\n/]+)/.exec(String(cert.subject?.CN || '')) || /CN=([^,\n/]+)/.exec(String(cert.subject || ''));
-  if (cn) names.add(cn[1].trim().toLowerCase());
+  const commonName = objField(cert.subject, 'CN');
+  const cnMatch = /CN=([^,\n/]+)/.exec(commonName);
+  if (cnMatch) names.add(cnMatch[1].trim().toLowerCase());
+  else if (commonName) names.add(commonName.toLowerCase());
 
   for (const name of names) {
     if (name === host) return true;
@@ -148,7 +168,7 @@ function certCovers(cert, host) {
   return false;
 }
 
-export function inspectCertificate(host, port = 443, timeoutMs = 7000) {
+export function inspectCertificate(host, port = 443, timeoutMs = 7000, connectHost = host) {
   return new Promise((resolve) => {
     const started = Date.now();
     let done = false;
@@ -164,7 +184,7 @@ export function inspectCertificate(host, port = 443, timeoutMs = 7000) {
     };
 
     const socket = tls.connect(
-      { host, port, servername: host, servernameIndication: host, rejectUnauthorized: false, timeout: timeoutMs },
+      { host: connectHost, port, servername: host, servernameIndication: host, rejectUnauthorized: false, timeout: timeoutMs },
       () => {
         try {
           const cert = socket.getPeerCertificate(false);
@@ -177,8 +197,12 @@ export function inspectCertificate(host, port = 443, timeoutMs = 7000) {
             ok: true,
             authorized,
             authorizationError: authError,
-            subject: cert.subject?.CN || '',
-            issuer: cert.issuer?.O || cert.issuer?.CN || '',
+            subject: objField(cert.subject, 'CN'),
+            issuer: objField(cert.issuer, 'O') || objField(cert.issuer, 'CN'),
+            subjectFull: ['C', 'O', 'OU', 'CN']
+              .map((k) => (objField(cert.subject, k) ? `${k}=${objField(cert.subject, k)}` : ''))
+              .filter(Boolean)
+              .join(', '),
             validTo: validTo.toISOString(),
             daysLeft,
             coversHost: certCovers(cert, host),
@@ -239,9 +263,19 @@ export async function checkHost(host, role) {
     problems.push(`No resuelve en DNS (${target}). Crea el registro A hacia la IP del servidor.`);
   }
 
+  // Lo que sirve NUESTRO 443 (se pregunta a loopback con el SNI del dominio).
+  // Es la diferencia entre "Cloudflare responde" y "el origen está bien": un
+  // 521 de Cloudflare es exactamente que el origen no contesta.
+  const originCert = await inspectCertificate(target, 443, 6000, '127.0.0.1');
+
   const cert = await inspectCertificate(target, 443);
   if (!cert.ok) {
-    problems.push(`Sin HTTPS válido en 443: ${cert.error}.`);
+    // Si el origen sí contesta, el fallo no está en este servidor: está en el
+    // camino (Cloudflare, o el propio servidor sin volver a su IP pública).
+    const hint = originCert.ok
+      ? ` El 443 de este servidor sí responde para ${target} (certificado de ${originCert.subject}, ${originCert.daysLeft} días): el fallo está en el camino hasta ${target} (Cloudflare o la red del servidor hacia su IP pública).`
+      : '';
+    problems.push(`Sin respuesta HTTPS válida en ${target}:443 (${cert.error}).${hint}`);
   } else {
     if (!cert.coversHost) {
       problems.push(`El certificado del 443 no cubre ${target} (SAN: ${cert.altNames.join(', ') || 'ninguno'}).`);
@@ -254,6 +288,20 @@ export async function checkHost(host, role) {
   }
 
   const http = await httpProbe(target, 443);
+
+  if (!originCert.ok) {
+    const msg = `el 443 de este servidor no responde para ${target} (${originCert.error})`;
+    if (role === 'streams') problems.push(`El video se conecta directo: ${msg}.`);
+    else warnings.push(`Cloudflare dará 521 mientras ${msg}.`);
+  } else if (!originCert.coversHost) {
+    problems.push(
+      `El 443 de este servidor presenta un certificado que NO cubre ${target} (${originCert.altNames.join(', ') || 'sin SAN'}).`
+    );
+  } else if (!originCert.authorized && role === 'streams') {
+    problems.push(
+      `El 443 del origen usa un certificado que el reproductor no conoce (${originCert.issuer}). El video necesita una CA pública: usa Let's Encrypt.`
+    );
+  }
 
   if (role === 'streams') {
     if (http.ok && http.viaCloudflare) {
@@ -282,6 +330,7 @@ export async function checkHost(host, role) {
     warnings,
     dns: dnsInfo,
     certificate: cert,
+    originCertificate: originCert,
     http
   };
 }
@@ -311,10 +360,13 @@ export async function checkDomains() {
     }
   }
 
+  // El prefijo con el dominio sólo cuando el texto no lo menciona ya: el
+  // resumen final se lee mejor sin "dominio: dominio:443 …".
+  const prefixed = (entry, text) => (text.includes(entry.host) ? text : `${entry.host}: ${text}`);
   for (const entry of [panel, streams]) {
     if (!entry) continue;
-    problems.push(...entry.problems.map((p) => `${entry.host}: ${p}`));
-    warnings.push(...entry.warnings.map((w) => `${entry.host}: ${w}`));
+    problems.push(...entry.problems.map((p) => prefixed(entry, p)));
+    warnings.push(...entry.warnings.map((w) => prefixed(entry, w)));
   }
 
   return {
@@ -329,7 +381,7 @@ export async function checkDomains() {
     howTo: {
       panel: 'Cloudflare → DNS → registro A de panel_domain hacia la IP del servidor, nube NARANJA (proxy).',
       streams: 'Cloudflare → DNS → registro A de stream_domain hacia la MISMA IP, nube GRIS (DNS only).',
-      cert: 'El origen necesita un certificado válido para ambos nombres: certbot -d panel -d streams (un solo SAN) o uno por nombre.'
+      cert: 'Cada nombre necesita su certificado en el origen: tls origin (panel, detrás de Cloudflare) y acme <video> <correo> (video, CA pública). Conviven en el mismo 443 por SNI.'
     }
   };
 }

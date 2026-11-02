@@ -151,6 +151,25 @@ echo | openssl s_client -connect live-stream.alphadigitalnic.xyz:443 \
   -servername live-stream.alphadigitalnic.xyz 2>/dev/null | openssl x509 -noout -subject -issuer -dates
 ```
 
+## Qué comprueba `tvlister-admin dominios` (y por qué dos certificados)
+
+Por cada nombre mira **cuatro cosas distintas**:
+
+| Comprobación | Qué detecta |
+| --- | --- |
+| **DNS** | El registro `A` y a qué IP apunta |
+| **Certificado de cara al cliente** (el que ve Cloudflare o el reproductor) | Que sea válido, que cubra el nombre y cuántos días le quedan |
+| **HTTP + `cf-ray`** | Si el tráfico pasa por Cloudflare (el video no debe) |
+| **El 443 de este servidor** (se pregunta a `127.0.0.1` con el SNI del dominio) | Que el **origen** tenga certificado para ese nombre. Si falla en el panel, Cloudflare devolverá **521**; si falla en el video, el reproductor recibe «connection refused» |
+
+Por eso el panel y el video pueden usar certificados distintos en el mismo 443:
+
+- `tvadmin` → **Origin Certificate** de Cloudflare (`tvlister-admin tls origin`). Cloudflare lo acepta
+  porque lo emitió su propia CA; un navegador que entre directo al origen verá un aviso, y eso es
+  normal (nadie debería entrar por ahí).
+- `live-stream` → **Let's Encrypt** (`tvlister-admin acme live-stream… correo`). Aquí sí valida el
+  reproductor, así que tiene que ser una CA pública.
+
 ## Lo que el panel ya hace con esos ajustes
 
 - `get.php` / `player_api.php` → `server_info.url` y todos los enlaces apuntan a

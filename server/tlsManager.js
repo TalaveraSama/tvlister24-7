@@ -52,9 +52,13 @@ export function getTlsSettings() {
   return {
     certPath: getSetting('tls_cert_path'),
     keyPath: getSetting('tls_key_path'),
-    domains: [getSetting('panel_domain'), getSetting('stream_domain'), getSetting('public_stream_base')]
-      .map((d) => String(d || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '').trim())
-      .filter(Boolean)
+    domains: Array.from(
+      new Set(
+        [getSetting('panel_domain'), getSetting('stream_domain'), getSetting('public_stream_base')]
+          .map((d) => String(d || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '').trim())
+          .filter(Boolean)
+      )
+    )
   };
 }
 
@@ -123,7 +127,8 @@ function parsePair(cert, key) {
     .map((l) => l.trim())
     .filter((l) => l.startsWith('CN='))
     .map((l) => l.slice(3).replace(/\\,/g, ',').trim());
-  const commonName = cnCandidates.find((c) => c.includes('.')) || cnCandidates[0] || '';
+  const firstSan = altNames.find((n) => n.includes('.') && !n.startsWith('*.')) || altNames.find((n) => n.includes('.'));
+  const commonName = cnCandidates.find((c) => c.includes('.')) || firstSan || cnCandidates[0] || '';
   const issuer = String(x509.issuer);
   return {
     subject: String(x509.subject),
