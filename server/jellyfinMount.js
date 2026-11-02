@@ -85,10 +85,135 @@ export function mountCapabilities() {
     root: isRoot(),
     platform: process.platform,
     mountBase: MOUNT_BASE,
+    addresses: getPanelAddresses(),
     install: {
       nfs: nfs ? '' : INSTALL_HINT.nfs,
       cifs: cifs ? '' : INSTALL_HINT.cifs
     }
+  };
+}
+
+/** IPv4 de este servidor: la IP que hay que autorizar en el export del NAS. */
+export function getPanelAddresses() {
+  const list = [];
+  try {
+    for (const [name, addrs] of Object.entries(os.networkInterfaces() || {})) {
+      for (const addr of addrs || []) {
+        if (addr.internal || addr.family !== 'IPv4') continue;
+        list.push({ name, address: addr.address, netmask: addr.netmask, cidr: addr.cidr || '' });
+      }
+    }
+  } catch {
+    /* sin interfaces: se devuelve vacío */
+  }
+  return list;
+}
+
+/**
+ * Lista las carpetas que el servidor de Jellyfin comparte por NFS
+ * (`showmount -e`). Sirve para no adivinar la ruta del export.
+ */
+export function listNfsExports(host) {
+  const cleanHost = String(host || '').trim();
+  if (!cleanHost) throw new Error('Falta el host del servidor de Jellyfin.');
+  if (!which('showmount')) {
+    throw new Error(
+      'Falta el comando «showmount» en este servidor. Instálalo con: sudo apt install -y nfs-common'
+    );
+  }
+  let raw = '';
+  try {
+    raw = execFileSync('showmount', ['-e', cleanHost], { stdio: 'pipe', timeout: 20_000, encoding: 'utf8' });
+  } catch (err) {
+    const detail = String(err.stderr || '').trim() || err.message;
+    if (/not found|refused|timed out|no route/i.test(detail)) {
+      throw new Error(
+        `El servidor ${cleanHost} no responde a showmount (${detail}). Comprueba que nfs-kernel-server está corriendo allí y que el puerto 111/tcp está abierto. Para generar los comandos del servidor: tvlister-admin jellyfin mount share nfs /mnt/Storage1/movie`
+      );
+    }
+    throw new Error(`showmount dijo: ${detail}`);
+  }
+  const exports = [];
+  for (const line of raw.split('\n')) {
+    const text = line.trim();
+    if (!text || /^Export list for /i.test(text)) continue;
+    const parts = text.split(/\s+/);
+    const exportPath = parts.shift();
+    if (!exportPath || !exportPath.startsWith('/')) continue;
+    exports.push({ path: exportPath, clients: parts.join(' ') });
+  }
+  return {
+    host: cleanHost,
+    exports,
+    command: `showmount -e ${cleanHost}`,
+    hint: exports.length
+      ? ''
+      : `El servidor ${cleanHost} no está compartiendo ninguna carpeta por NFS: crea el export en /etc/exports (ver los comandos del servidor de Jellyfin).`
+  };
+}
+
+/** Comandos exactos para compartir la carpeta en el servidor de Jellyfin. */
+export function buildShareRecipe({
+  protocol = 'nfs',
+  exportPath = '/mnt/Storage1/movie',
+  panelAddress = '',
+  smbUser = 'tvlister'
+} = {}) {
+  const kind = normalizeProtocol(protocol);
+  const folder = String(exportPath || '').trim() || '/mnt/Storage1/movie';
+  const ip = String(panelAddress || '').trim() || getPanelAddresses()[0]?.address || 'IP_DEL_PANEL';
+  const lines = [];
+
+  lines.push('# EJECUTAR EN EL SERVIDOR DE JELLYFIN (el que tiene el disco), como root');
+  if (kind === 'nfs') {
+    lines.push('sudo apt install -y nfs-kernel-server');
+    lines.push(`sudo mkdir -p ${folder}`);
+    lines.push(`echo '${folder} ${ip}(ro,sync,no_subtree_check)' | sudo tee -a /etc/exports`);
+    lines.push('sudo exportfs -ra');
+    lines.push('sudo systemctl enable --now nfs-kernel-server');
+    lines.push('');
+    lines.push('# Si usa firewall, abra NFS:');
+    lines.push('sudo ufw allow from ' + ip + ' to any port 2049 proto tcp');
+    lines.push('sudo ufw allow from ' + ip + ' to any port 111 proto tcp');
+    lines.push('');
+  } else {
+    lines.push('sudo apt install -y samba');
+    lines.push(`sudo mkdir -p ${folder}`);
+    lines.push('sudo tee -a /etc/samba/smb.conf > /dev/null <<\'CONF\'');
+    lines.push('[jellyfin]');
+    lines.push(`   path = ${folder}`);
+    lines.push('   read only = yes');
+    lines.push('   browseable = yes');
+    lines.push(`   valid users = ${smbUser}`);
+    lines.push('CONF');
+    lines.push(`sudo useradd -r -s /usr/sbin/nologin ${smbUser} 2>/dev/null || true`);
+    lines.push(`sudo smbpasswd -a ${smbUser}`);
+    lines.push('sudo systemctl reload smbd');
+    lines.push('');
+    lines.push('# Si usa firewall, abra SMB:');
+    lines.push(`sudo ufw allow from ${ip} to any port 445 proto tcp`);
+    lines.push('');
+  }
+  lines.push('# Comprobar desde el panel (debe listar la carpeta):');
+  if (kind === 'nfs') {
+    lines.push('showmount -e <IP_DEL_SERVIDOR_JELLYFIN>');
+    lines.push('');
+    lines.push('# Y en este panel: NFS → host del servidor → carpeta exportada');
+    lines.push(`#   ${folder}`);
+  } else {
+    lines.push('smbclient -L //<IP_DEL_SERVIDOR_JELLYFIN> -U ' + smbUser);
+    lines.push('');
+    lines.push('# Y en este panel: SMB → host → recurso jellyfin → usuario y clave');
+  }
+  lines.push('');
+  lines.push('# Nota: si Jellyfin corre en Docker, la ruta del host es la que se');
+  lines.push('# comparte; Jellyfin dentro del contenedor puede verla como /data y');
+  lines.push('# el panel deduce esa equivalencia al montar.');
+  return {
+    protocol: kind,
+    exportPath: folder,
+    panelAddress: ip,
+    recipe: lines.join('\n')
   };
 }
 

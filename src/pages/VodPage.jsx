@@ -153,6 +153,12 @@ export default function VodPage({ onPreview }) {
   // Disco de Jellyfin montado en este servidor (NFS/SMB)
   const [jfMount, setJfMount] = useState(null);
   const [jfMountBusy, setJfMountBusy] = useState('');
+  const [jfExports, setJfExports] = useState(null);
+  const [jfExportsBusy, setJfExportsBusy] = useState('');
+  const [jfRecipe, setJfRecipe] = useState('');
+  const [jfRecipeBusy, setJfRecipeBusy] = useState('');
+  const [jfRecipeAddrs, setJfRecipeAddrs] = useState([]);
+  const [jfRecipeAddr, setJfRecipeAddr] = useState('');
   const [jfMountForm, setJfMountForm] = useState({
     protocol: 'nfs',
     host: '',
@@ -561,6 +567,48 @@ export default function VodPage({ onPreview }) {
       setJfMount(res);
     } catch {
       /* el rol reseller no ve esta sección */
+    }
+  };
+
+  // Carpetas que el servidor de Jellyfin ya comparte por NFS: así no hay que
+  // adivinar la ruta del export.
+  const loadJfExports = async () => {
+    setJfExportsBusy('exports');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/mount/exports', {
+        method: 'POST',
+        body: JSON.stringify({ host: jfMountForm.host.trim() })
+      });
+      setJfExports(res);
+      if (!res.exports?.length) {
+        setJellyfinMsg({ ok: false, text: res.hint || 'Ese servidor no comparte ninguna carpeta por NFS.' });
+      }
+    } catch (err) {
+      setJfExports(null);
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJfExportsBusy('');
+    }
+  };
+
+  // Comandos para ejecutar en el servidor de Jellyfin (con la IP de este panel).
+  const loadJfRecipe = async (addr = '') => {
+    setJfRecipeBusy('recipe');
+    try {
+      const qs = new URLSearchParams({
+        protocol: jfMountForm.protocol,
+        path: jfMountForm.remotePath.trim() || '/mnt/Storage1/movie'
+      });
+      if (addr) qs.set('address', addr);
+      const res = await apiFetch(`/api/jellyfin/mount/share?${qs.toString()}`);
+      setJfRecipe(res.recipe || '');
+      setJfRecipeAddrs(res.panelAddresses || []);
+      setJfRecipeAddr(res.panelAddress || '');
+    } catch (err) {
+      setJfRecipe(`No se pudieron generar los comandos: ${err.message}`);
+    } finally {
+      setJfRecipeBusy('');
     }
   };
 
@@ -1303,11 +1351,47 @@ export default function VodPage({ onPreview }) {
                     <input
                       value={jfMountForm.remotePath}
                       onChange={(e) => setJfMountForm({ ...jfMountForm, remotePath: e.target.value })}
-                      placeholder={jfMountForm.protocol === 'nfs' ? '/srv/media' : 'Media'}
+                      placeholder={jfMountForm.protocol === 'nfs' ? '/mnt/Storage1/movie' : 'jellyfin'}
                       className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
                     />
                   </label>
                 </div>
+
+                {jfMountForm.protocol === 'nfs' && (
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={loadJfExports}
+                        disabled={!jfMountForm.host || jfExportsBusy === 'exports'}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] disabled:opacity-50"
+                      >
+                        <Search className="w-3 h-3" />
+                        {jfExportsBusy === 'exports' ? 'Preguntando…' : 'Ver carpetas compartidas'}
+                      </button>
+                      <span className="text-[10px] text-slate-500">
+                        Consulta en el servidor de Jellyfin qué exporta por NFS (`showmount -e`).
+                      </span>
+                    </div>
+                    {jfExports?.exports?.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {jfExports.exports.map((ex) => (
+                          <button
+                            key={ex.path}
+                            onClick={() => setJfMountForm({ ...jfMountForm, remotePath: ex.path })}
+                            className={`px-2 py-1 rounded-lg border font-mono text-[10px] ${
+                              jfMountForm.remotePath === ex.path
+                                ? 'bg-sky-500/20 border-sky-500/40 text-sky-200'
+                                : 'bg-[#0e1526] border-slate-800 text-slate-300 hover:border-slate-600'
+                            }`}
+                            title={ex.clients ? `Clientes permitidos: ${ex.clients}` : 'Sin restricción de cliente'}
+                          >
+                            {ex.path}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {jfMountForm.protocol === 'smb' && (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1341,6 +1425,54 @@ export default function VodPage({ onPreview }) {
                     className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
                   />
                 </label>
+
+                <details
+                  className="rounded-lg bg-[#0e1526] border border-slate-800 px-3 py-2"
+                  onToggle={(e) => {
+                    if (e.currentTarget.open && !jfRecipe) loadJfRecipe();
+                  }}
+                >
+                  <summary className="cursor-pointer text-[11px] text-amber-200 font-semibold">
+                    ¿El otro servidor todavía no comparte la carpeta? Comandos para el servidor de Jellyfin
+                  </summary>
+                  <div className="pt-2 space-y-2">
+                    <p className="text-[10px] text-slate-500">
+                      Esto se ejecuta <span className="text-slate-300">en el servidor donde está Jellyfin</span>, no
+                      aquí. El export debe dar permiso de lectura a la IP de este panel.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => loadJfRecipe(jfRecipeAddr)}
+                        disabled={jfRecipeBusy === 'recipe'}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] disabled:opacity-50"
+                      >
+                        <RefreshCw className="w-3 h-3" /> Volver a generar con estos datos
+                      </button>
+                      {jfRecipeAddrs.length > 1 && (
+                        <span className="flex flex-wrap items-center gap-1 text-[10px] text-slate-500">
+                          IP del panel:
+                          {jfRecipeAddrs.map((a) => (
+                            <button
+                              key={a.address}
+                              onClick={() => loadJfRecipe(a.address)}
+                              className={`px-1.5 py-0.5 rounded font-mono border ${
+                                jfRecipeAddr === a.address
+                                  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-200'
+                                  : 'bg-[#0e1526] border-slate-800 text-slate-300 hover:border-slate-600'
+                              }`}
+                              title={a.name}
+                            >
+                              {a.address}
+                            </button>
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                    <pre className="p-2 rounded-lg bg-black/40 border border-slate-800 text-[10px] leading-relaxed text-emerald-200 overflow-x-auto whitespace-pre">
+{jfRecipeBusy === 'recipe' ? 'Generando…' : jfRecipe || 'Abre este bloque para ver los comandos.'}
+                    </pre>
+                  </div>
+                </details>
 
                 <div className="flex flex-wrap items-center gap-2">
                   <button

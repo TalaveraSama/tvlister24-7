@@ -6,11 +6,13 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 🎬 **Jellyfin → VOD con «Create Symlink»**: el panel importa tu catálogo de Jellyfin (películas, otros VOD y series con episodios) y, como XUI.one, **crea enlaces simbólicos** a los archivos que ya tienes en el disco: no copia, no mueve y no recodifica nada. Botón *Jellyfin* en **VOD y Series**; en terminal: `tvlister-admin jellyfin`. Guía: **[`docs/JELLYFIN_VOD.md`](docs/JELLYFIN_VOD.md)**.
 
-🗄️ **Jellyfin en otro servidor: monta su disco y «Create Symlink» funciona de verdad (v2.6.20)**: si
+🗄️ **Jellyfin en otro servidor: monta su disco y «Create Symlink» funciona de verdad (v2.6.21)**: si
 Jellyfin no está en la máquina del panel no hay archivo que enlazar. El panel monta su carpeta por
 **NFS o SMB** (desde el modal o con `tvlister-admin jellyfin mount`), deja la línea en `/etc/fstab`
 para que sobreviva al reinicio y **detecta solo la equivalencia de rutas**. El vídeo sale del disco:
-no pasa por Jellyfin. La contraseña de SMB queda en un archivo `600`, nunca en `fstab`.
+no pasa por Jellyfin. La contraseña de SMB queda en un archivo `600`, nunca en `fstab`. El bloque
+también **genera los comandos para compartir la carpeta en el otro servidor** (export NFS con la IP
+del panel, o el recurso Samba) y **lista lo que ese servidor ya comparte** con `showmount -e`.
 
 🔐 **Protección sin cifrado — registro de aparatos por MAC**: el DRM se ha **retirado** (v2.6.15).
 Cada aparato que se conecta se auto-registra con su MAC (o una huella estable si la app no la
@@ -37,15 +39,15 @@ curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download
 Para fijar una versión concreta (recomendado en producción) y el puerto:
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.20/install.sh \
-  | sudo bash -s -- --tag v2.6.20 --port 8095
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.21/install.sh \
+  | sudo bash -s -- --tag v2.6.21 --port 8095
 ```
 
 Si un release no tiene el paquete adjunto (o su descarga falla), el instalador usa el árbol del tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.20/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.20
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.21/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.21
 ```
 
 También puedes instalarlo desde la consola del propio servidor:

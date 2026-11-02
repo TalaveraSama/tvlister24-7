@@ -140,6 +140,9 @@ import {
 } from './jellyfin.js';
 import {
   mountCapabilities,
+  listNfsExports,
+  buildShareRecipe,
+  getPanelAddresses,
   testJellyfinShare,
   mountJellyfinShare,
   unmountJellyfinShare,
@@ -2833,6 +2836,32 @@ app.get('/api/jellyfin/mount', requireAuth, requireAdmin, (_req, res) => {
 app.get('/api/jellyfin/mount/capabilities', requireAuth, requireAdmin, (_req, res) => {
   try {
     res.json({ ok: true, ...mountCapabilities() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Carpetas que el servidor de Jellyfin comparte por NFS (`showmount -e`).
+// El paso que se olvida: sin export en el otro servidor no hay nada que montar.
+app.post('/api/jellyfin/mount/exports', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...listNfsExports(req.body?.host) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Comandos exactos para compartir la carpeta en el servidor de Jellyfin,
+// ya con la IP de este panel en el export.
+app.get('/api/jellyfin/mount/share', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const recipe = buildShareRecipe({
+      protocol: req.query.protocol || 'nfs',
+      exportPath: req.query.path || '',
+      panelAddress: req.query.address || '',
+      smbUser: req.query.user || 'tvlister'
+    });
+    res.json({ ok: true, ...recipe, panelAddresses: getPanelAddresses() });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

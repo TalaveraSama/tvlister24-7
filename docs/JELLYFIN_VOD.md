@@ -149,7 +149,62 @@ Qué hace el panel:
 El panel monta el recurso compartido en **este** servidor (NFS o SMB) y deja el enlace apuntando al
 archivo real del montaje. No hay retransmisión: el vídeo sale del disco, no de Jellyfin.
 
-#### Desde el panel
+#### Paso 1 — en el servidor de Jellyfin: compartir la carpeta
+
+El panel no puede montar algo que el otro servidor no comparte. Esto se hace **en la máquina donde
+está el disco** (el ejemplo usa `/mnt/Storage1/movie`), como root. Cambia `192.168.1.77` por la IP
+del panel: la ves en el propio bloque del panel, que genera estos comandos ya rellenados
+(«¿El otro servidor todavía no comparte la carpeta?») y en `tvlister-admin jellyfin mount share`.
+
+**NFS (Linux / NAS con NFS)**
+
+```bash
+sudo apt install -y nfs-kernel-server
+sudo mkdir -p /mnt/Storage1/movie
+echo '/mnt/Storage1/movie 192.168.1.77(ro,sync,no_subtree_check)' | sudo tee -a /etc/exports
+sudo exportfs -ra
+sudo systemctl enable --now nfs-kernel-server
+
+# Sólo si hay firewall:
+sudo ufw allow from 192.168.1.77 to any port 2049 proto tcp
+sudo ufw allow from 192.168.1.77 to any port 111 proto tcp
+```
+
+Se exporta en **sólo lectura** (`ro`): el panel únicamente lee los vídeos. Si quieres autorizar toda
+la red interna en vez de una IP, usa `192.168.1.0/24`.
+
+**SMB / Samba (Windows o NAS)**
+
+```bash
+sudo apt install -y samba
+sudo mkdir -p /mnt/Storage1/movie
+sudo tee -a /etc/samba/smb.conf > /dev/null <<'CONF'
+[jellyfin]
+   path = /mnt/Storage1/movie
+   read only = yes
+   browseable = yes
+   valid users = tvlister
+CONF
+sudo smbpasswd -a tvlister        # define la contraseña del usuario
+sudo systemctl reload smbd
+sudo ufw allow from 192.168.1.77 to any port 445 proto tcp   # sólo si hay firewall
+```
+
+**Comprobar antes de montar** (desde el panel):
+
+```bash
+sudo tvlister-admin jellyfin mount exports 192.168.1.50   # showmount -e
+# o el botón «Ver carpetas compartidas» del modal
+```
+
+Debe listar la carpeta (`/mnt/Storage1/movie`). Si no aparece, el export no está activo en el otro
+servidor o el firewall está cortando los puertos `111`/`2049`.
+
+> **Jellyfin en Docker:** comparte la ruta del **host** (`/mnt/Storage1/movie`). Dentro del
+> contenedor Jellyfin puede verla como `/data/...`; al montar, el panel detecta esa equivalencia y la
+> guarda sola.
+
+#### Paso 2 — desde el panel
 
 1. Modal **Jellyfin** → bloque **«Disco de Jellyfin en este servidor (NFS / SMB)»**.
 2. Elige el protocolo y escribe el host y la carpeta:
@@ -165,7 +220,7 @@ El estado queda a la vista: origen, punto de montaje, número de vídeos, si est
 ejemplo de archivo. **Desmontar** lo desmonta, quita su línea de `/etc/fstab` y borra las
 credenciales, así que no vuelve a montarse al reiniciar.
 
-#### Desde la terminal
+#### Paso 3 — desde la terminal
 
 ```bash
 # Estado del disco montado (origen, punto, vídeos, fstab)
@@ -181,6 +236,10 @@ sudo tvlister-admin jellyfin mount smb 192.168.1.50 Media usuario -
 sudo tvlister-admin jellyfin mount test nfs 192.168.1.50 /srv/media
 sudo tvlister-admin jellyfin mount umount
 sudo tvlister-admin jellyfin mount remount
+
+# Qué comparte el otro servidor (showmount -e) y cómo compartirlo
+sudo tvlister-admin jellyfin mount exports 192.168.1.50
+sudo tvlister-admin jellyfin mount share nfs /mnt/Storage1/movie   # comandos para el otro servidor
 ```
 
 Al montar, la consola busca la equivalencia de rutas y la guarda; luego
@@ -284,6 +343,8 @@ Todas requieren sesión de administrador.
 | `POST /api/vod/symlinks/rebuild` | Rehace todos los enlaces (`{dryRun:true}` para simular) |
 | `GET /api/jellyfin/mount` | Estado del disco montado: `mounted`, `readable`, vídeos, si está en `fstab` y capacidades del sistema |
 | `GET /api/jellyfin/mount/capabilities` | Si hay `mount.nfs`/`mount.cifs`, si corre como root y el comando de instalación que falta |
+| `POST /api/jellyfin/mount/exports` | `{host}` → carpetas que ese servidor comparte por NFS (`showmount -e`) |
+| `GET /api/jellyfin/mount/share` | `?protocol=nfs\|smb&path=/mnt/Storage1/movie&address=IP` → comandos para compartir la carpeta en el servidor de Jellyfin |
 | `POST /api/jellyfin/mount/test` | `{protocol, host, remotePath, user, password}` → monta en temporal, cuenta vídeos y desmonta |
 | `POST /api/jellyfin/mount` | Monta, deja la línea de `fstab`, guarda la configuración y detecta la equivalencia de rutas (`autoDetect:false` para no detectar) |
 | `POST /api/jellyfin/mount/remount` | Vuelve a montar con la configuración guardada (NAS reiniciado) |

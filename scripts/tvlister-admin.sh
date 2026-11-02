@@ -3789,6 +3789,14 @@ case "$ACTION" in
             fi
             jf_action="test"
             ;;
+          exports|exportaciones|compartidas)
+            # Carpetas que el servidor de Jellyfin comparte por NFS.
+            jf_action="exports"; JF_HOST="${4:-}"
+            ;;
+          share|compartir)
+            # Comandos para compartir la carpeta en el servidor de Jellyfin.
+            jf_action="share"; jf_kind="${4:-nfs}"; JF_PATH="${5:-/mnt/Storage1/movie}"
+            ;;
           umount|desmontar) jf_action="umount" ;;
           remount|remontar) jf_action="remount" ;;
           status|estado) jf_action="status" ;;
@@ -3797,6 +3805,8 @@ case "$ACTION" in
             echo "     tvlister-admin jellyfin mount nfs <host> <export> [punto]"
             echo "     tvlister-admin jellyfin mount smb <host> <recurso> <usuario> <clave|-> [punto]"
             echo "     tvlister-admin jellyfin mount test nfs|smb …"
+            echo "     tvlister-admin jellyfin mount exports <host>      # carpetas compartidas (NFS)"
+            echo "     tvlister-admin jellyfin mount share [nfs|smb] [carpeta]"
             echo "     tvlister-admin jellyfin mount umount | remount"
             exit 1
             ;;
@@ -3820,10 +3830,18 @@ case "$ACTION" in
           import { initDb } from "./server/db.js";
           import {
             mountJellyfinShare, testJellyfinShare, unmountJellyfinShare,
-            remountJellyfinShare, getMountStatus
+            remountJellyfinShare, getMountStatus, listNfsExports, buildShareRecipe
           } from "./server/jellyfinMount.js";
           import { detectJellyfinPathMappings, getJellyfinConfig, saveJellyfinConfig } from "./server/jellyfin.js";
           initDb();
+          // Un error de red (showmount, montaje) se informa en una línea, sin
+          // volcar la traza de Node encima del mensaje.
+          const fail = (err) => {
+            console.error("❌", (err && err.message) || String(err));
+            process.exit(1);
+          };
+          process.on("unhandledRejection", fail);
+          process.on("uncaughtException", fail);
           const env = process.env;
           const action = env.JF_ACTION || "status";
           const params = {
@@ -3835,6 +3853,26 @@ case "$ACTION" in
             mountPoint: env.JF_POINT || ""
           };
 
+          if (action === "exports") {
+            const r = listNfsExports(env.JF_HOST || "");
+            console.log("Servidor:", r.host, "(" + r.command + ")");
+            if (!r.exports.length) {
+              console.log("⚠️", r.hint);
+              console.log("   Compártela allí con: tvlister-admin jellyfin mount share nfs /mnt/Storage1/movie");
+              process.exit(0);
+            }
+            for (const ex of r.exports) {
+              console.log("   -", ex.path, ex.clients ? "→ " + ex.clients : "(sin restricción de cliente)");
+            }
+            process.exit(0);
+          }
+
+          if (action === "share") {
+            const r = buildShareRecipe({ protocol: env.JF_KIND || "nfs", exportPath: env.JF_PATH || "" });
+            console.log(r.recipe);
+            process.exit(0);
+          }
+
           if (action === "status") {
             const st = getMountStatus();
             const caps = st.capabilities;
@@ -3843,6 +3881,8 @@ case "$ACTION" in
             if (!st.configured) {
               console.log("Montaje    : (sin configurar)");
               console.log("Ejemplo    : tvlister-admin jellyfin mount nfs 192.168.1.50 /srv/media");
+              console.log("Si el otro servidor aún no comparte la carpeta:");
+              console.log("  tvlister-admin jellyfin mount share nfs /mnt/Storage1/movie");
               process.exit(0);
             }
             console.log("Montaje    :", st.mounted ? "montado" : "NO montado", st.mounted && !st.readable ? "(sin permiso de lectura)" : "");
