@@ -1,7 +1,7 @@
 import express from 'express';
 import crypto from 'node:crypto';
 import { db } from './db.js';
-import { extractClientIp, verifyToken } from './auth.js';
+import { extractClientIp, verifyToken, requireAuth, requireAdmin } from './auth.js';
 import { getBaseUrl, getConfiguredStreamBase } from './publicBase.js';
 import { negotiateFlussonic2312Connection, fetchJsonWithTimeout } from './flussonic2312Manager.js';
 
@@ -328,20 +328,26 @@ drmRouter.all('/drm/license/:token', handleLicenseProxy);
 
 // --- 4. Snippet de Flussonic y empuje por API -----------------------------
 
-export function buildFlussonicDrmLine(row, req) {
+export function buildFlussonicDrmLine(row, req, { maskContentKeys = false } = {}) {
   const base = publicBaseFor(req);
   const keyserver = `${base}/drm/cas/${row.cas_token}`;
   const mode = row.mode === 'sample_aes' ? 'sample_aes' : row.mode === 'widevine' ? 'widevine' : 'aes128';
   if (mode === 'widevine') {
-    // Widevine necesita tu clave/keyserver de Widevine; aquí sólo se guarda el
-    // destino de licencias y TVLister hace de proxy autenticado por línea.
-    return `drm widevine keyserver=${row.license_url || '<tu_keyserver_widevine>'}`;
+    // Aquí el panel NO emite claves ni licencias: custodia el aes_key/iv que te
+    // da tu cuenta de Widevine y se los pasa a Flussonic; la licencia la firma
+    // tu proveedor (Google/partner) y el panel sólo hace de proxy autorizado.
+    const parts = [`drm widevine`];
+    if (row.cenc_aes_key) parts.push(`aes_key=${maskContentKeys ? '<guardada>' : row.cenc_aes_key}`);
+    if (row.cenc_iv) parts.push(`iv=${maskContentKeys ? '<guardado>' : row.cenc_iv}`);
+    if (row.cenc_content_id) parts.push(`content_id=${row.cenc_content_id}`);
+    parts.push(`keyserver=${row.license_url || '<tu_keyserver_widevine>'}`);
+    return parts.join(' ').replace('drm widevine ', row.cenc_aes_key ? 'drm widevine ' : 'drm widevine ');
   }
   return `drm ${mode} keyserver=${keyserver}`;
 }
 
-function flussonicSnippet(streamName, row, req) {
-  const line = buildFlussonicDrmLine(row, req);
+function flussonicSnippet(streamName, row, req, opts = {}) {
+  const line = buildFlussonicDrmLine(row, req, opts);
   const base = publicBaseFor(req);
   return [
     `stream ${streamName || row.flussonic_stream || '<nombre_del_stream>'} {`,
@@ -363,6 +369,8 @@ function streamDrmView(row, stream = null, req = null) {
     kid: row.kid,
     has_master_key: Boolean(row.master_key),
     has_static_key: Boolean(row.static_key),
+    cenc_content_id: row.cenc_content_id || '',
+    has_cenc_keys: Boolean(row.cenc_aes_key && row.cenc_iv),
     license_url: row.license_url,
     license_headers: row.license_headers,
     flussonic_stream: row.flussonic_stream || stream?.flussonic_stream_name || '',
@@ -374,7 +382,7 @@ function streamDrmView(row, stream = null, req = null) {
   };
 }
 
-drmAdminRouter.get('/api/drm/overview', (req, res) => {
+drmAdminRouter.get('/api/drm/overview', requireAuth, requireAdmin, (req, res) => {
   const settings = getDrmSettings();
   const rows = db
     .prepare(
@@ -421,7 +429,7 @@ drmAdminRouter.get('/api/drm/overview', (req, res) => {
   });
 });
 
-drmAdminRouter.get('/api/drm/candidates', (req, res) => {
+drmAdminRouter.get('/api/drm/candidates', requireAuth, requireAdmin, (req, res) => {
   const rows = db
     .prepare(
       `SELECT s.id, s.name, s.status, s.flussonic_stream_name,
@@ -433,7 +441,7 @@ drmAdminRouter.get('/api/drm/candidates', (req, res) => {
   res.json({ streams: rows, base: publicBaseFor(req) });
 });
 
-drmAdminRouter.put('/api/drm/settings', (req, res) => {
+drmAdminRouter.put('/api/drm/settings', requireAuth, requireAdmin, (req, res) => {
   const { enabled, casAllowIps, defaultLicenseUrl } = req.body || {};
   if (enabled !== undefined) setSetting('drm_enabled', enabled ? 'true' : 'false');
   if (casAllowIps !== undefined) setSetting('drm_cas_allow_ips', String(casAllowIps || '').trim());
@@ -441,19 +449,19 @@ drmAdminRouter.put('/api/drm/settings', (req, res) => {
   res.json({ ok: true, settings: getDrmSettings() });
 });
 
-drmAdminRouter.get('/api/drm/streams/:id', (req, res) => {
+drmAdminRouter.get('/api/drm/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
   if (!stream) return res.status(404).json({ error: 'Canal no encontrado' });
   const row = ensureRow(id);
   res.json({
     drm: streamDrmView(row, stream, req),
-    snippet: flussonicSnippet(row.flussonic_stream || stream.flussonic_stream_name, row, req),
+    snippet: flussonicSnippet(row.flussonic_stream || stream.flussonic_stream_name, row, req, { maskContentKeys: true }),
     stream: { id: stream.id, name: stream.name, status: stream.status }
   });
 });
 
-drmAdminRouter.put('/api/drm/streams/:id', (req, res) => {
+drmAdminRouter.put('/api/drm/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
   if (!stream) return res.status(404).json({ error: 'Canal no encontrado' });
@@ -479,6 +487,24 @@ drmAdminRouter.put('/api/drm/streams/:id', (req, res) => {
   if (licenseUrl && !/^https?:\/\//i.test(licenseUrl)) {
     return res.status(400).json({ error: 'La URL de licencias debe empezar por http:// o https://' });
   }
+  let cencAesKey = row.cenc_aes_key || '';
+  let cencIv = row.cenc_iv || '';
+  let cencContentId = body.cencContentId !== undefined ? String(body.cencContentId || '').trim() : row.cenc_content_id || '';
+  if (body.cencAesKey !== undefined) {
+    const clean = String(body.cencAesKey || '').trim().toLowerCase().replace(/[^0-9a-f]/g, '');
+    if (clean && clean.length !== 32) {
+      return res.status(400).json({ error: 'aes_key de Widevine: 32 caracteres hexadecimales (16 bytes)' });
+    }
+    cencAesKey = clean;
+  }
+  if (body.cencIv !== undefined) {
+    const clean = String(body.cencIv || '').trim().toLowerCase().replace(/[^0-9a-f]/g, '');
+    if (clean && clean.length !== 32) {
+      return res.status(400).json({ error: 'iv de Widevine: 32 caracteres hexadecimales (16 bytes)' });
+    }
+    cencIv = clean;
+  }
+
   let licenseHeaders = row.license_headers || '{}';
   if (body.licenseHeaders !== undefined) {
     const raw = body.licenseHeaders;
@@ -497,15 +523,18 @@ drmAdminRouter.put('/api/drm/streams/:id', (req, res) => {
   const casToken = body.regenerateTokens || !row.cas_token ? randomToken(24) : row.cas_token;
   const keyToken = body.regenerateTokens || !row.key_token ? randomToken(24) : row.key_token;
 
-  if (enabled && mode === 'widevine' && !licenseUrl && !getDrmSettings().defaultLicenseUrl) {
+  if (enabled && (mode === 'widevine' || mode === 'playready') && !licenseUrl && !getDrmSettings().defaultLicenseUrl) {
     return res.status(400).json({
-      error: 'Widevine necesita la URL de tu servidor de licencias (o guarda una por defecto en Ajustes DRM)'
+      error:
+        'Widevine/PlayReady necesitan la URL de tu servidor de licencias (tu proveedor DRM). ' +
+        'Este panel puede emitir las claves de AES-128, pero las licencias Widevine las firma Google o un partner autorizado.'
     });
   }
 
   db.prepare(
     `UPDATE drm_streams SET enabled = ?, mode = ?, master_key = ?, static_key = ?, cas_token = ?,
        key_token = ?, license_url = ?, license_headers = ?, flussonic_stream = ?,
+       cenc_aes_key = ?, cenc_iv = ?, cenc_content_id = ?,
        notes = ?, updated_at = ? WHERE stream_id = ?`
   ).run(
     enabled ? 1 : 0,
@@ -517,16 +546,19 @@ drmAdminRouter.put('/api/drm/streams/:id', (req, res) => {
     licenseUrl,
     licenseHeaders,
     String(body.flussonicStream ?? row.flussonic_stream ?? ''),
+    cencAesKey,
+    cencIv,
+    cencContentId,
     String(body.notes ?? row.notes ?? ''),
     nowIso(),
     id
   );
 
   const fresh = getDrmRow(id);
-  res.json({ ok: true, drm: streamDrmView(fresh, stream, req), snippet: flussonicSnippet(fresh.flussonic_stream || stream.flussonic_stream_name, fresh, req) });
+  res.json({ ok: true, drm: streamDrmView(fresh, stream, req), snippet: flussonicSnippet(fresh.flussonic_stream || stream.flussonic_stream_name, fresh, req, { maskContentKeys: true }) });
 });
 
-drmAdminRouter.post('/api/drm/streams/:id/rotate', (req, res) => {
+drmAdminRouter.post('/api/drm/streams/:id/rotate', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const row = getDrmRow(id);
   if (!row) return res.status(404).json({ error: 'Ese canal no tiene DRM configurado' });
@@ -539,17 +571,17 @@ drmAdminRouter.post('/api/drm/streams/:id/rotate', (req, res) => {
     id
   );
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
-  res.json({ ok: true, drm: streamDrmView(getDrmRow(id), stream, req), snippet: flussonicSnippet(getDrmRow(id).flussonic_stream, getDrmRow(id), req) });
+  res.json({ ok: true, drm: streamDrmView(getDrmRow(id), stream, req), snippet: flussonicSnippet(getDrmRow(id).flussonic_stream, getDrmRow(id), req, { maskContentKeys: true }) });
 });
 
-drmAdminRouter.delete('/api/drm/streams/:id', (req, res) => {
+drmAdminRouter.delete('/api/drm/streams/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   db.prepare('DELETE FROM drm_streams WHERE stream_id = ?').run(id);
   res.json({ ok: true });
 });
 
 /** Prueba de punta a punta sin tocar Flussonic: CAS + entrega de clave. */
-drmAdminRouter.post('/api/drm/streams/:id/test', async (req, res) => {
+drmAdminRouter.post('/api/drm/streams/:id/test', requireAuth, requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
   const row = getDrmRow(id);
   if (!row) return res.status(404).json({ error: 'Ese canal no tiene DRM configurado' });
@@ -569,13 +601,13 @@ drmAdminRouter.post('/api/drm/streams/:id/test', async (req, res) => {
   }
 });
 
-drmAdminRouter.get('/api/drm/log', (req, res) => {
+drmAdminRouter.get('/api/drm/log', requireAuth, requireAdmin, (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 100, 500);
   const rows = db.prepare('SELECT * FROM drm_key_log ORDER BY id DESC LIMIT ?').all(limit);
   res.json({ events: rows });
 });
 
-drmAdminRouter.delete('/api/drm/log', (req, res) => {
+drmAdminRouter.delete('/api/drm/log', requireAuth, requireAdmin, (req, res) => {
   db.prepare('DELETE FROM drm_key_log').run();
   res.json({ ok: true });
 });
@@ -627,7 +659,7 @@ async function fetchRemoteStream(srv, streamName) {
   return { conn, streamName, remote: json.stream || json, headers };
 }
 
-drmAdminRouter.post('/api/drm/streams/:id/flussonic', async (req, res) => {
+drmAdminRouter.post('/api/drm/streams/:id/flussonic', requireAuth, requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
   const row = getDrmRow(id);
@@ -651,6 +683,11 @@ drmAdminRouter.post('/api/drm/streams/:id/flussonic', async (req, res) => {
         type: mode,
         keyserver: mode === 'widevine' ? row.license_url : `${publicBaseFor(req)}/drm/cas/${row.cas_token}`
       };
+      if (mode === 'widevine') {
+        if (row.cenc_aes_key) payload.drm.aes_key = row.cenc_aes_key;
+        if (row.cenc_iv) payload.drm.iv = row.cenc_iv;
+        if (row.cenc_content_id) payload.drm.content_id = row.cenc_content_id;
+      }
     }
 
     if (action === 'preview') {

@@ -108,7 +108,11 @@ export default function DrmPage() {
         licenseHeaders: d.license_headers && d.license_headers !== '{}' ? d.license_headers : '',
         flussonicStream: d.flussonic_stream || '',
         staticKey: '',
-        regenerateMasterKey: false
+        regenerateMasterKey: false,
+        cencAesKey: '',
+        cencIv: '',
+        cencContentId: d.cenc_content_id || '',
+        hasCenc: d.has_cenc_keys
       });
       setSnippet(res.snippet || '');
     } catch (e) {
@@ -125,7 +129,7 @@ export default function DrmPage() {
         body: JSON.stringify(form)
       });
       setSnippet(res.snippet || '');
-      setForm({ ...form, staticKey: '', regenerateMasterKey: false });
+      setForm({ ...form, staticKey: '', cencAesKey: '', cencIv: '', regenerateMasterKey: false });
       flash('DRM guardado. Copia el bloque de Flussonic para que empiece a cifrar.');
       await load();
     } catch (e) {
@@ -251,7 +255,31 @@ export default function DrmPage() {
           </div>
         </div>
 
-        <div className="grid gap-3 mt-4 md:grid-cols-3">
+        <div className="grid gap-2 mt-4 md:grid-cols-3">
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
+            <div className="text-[10px] font-bold text-emerald-300 uppercase tracking-wide">AES-128 / SAMPLE-AES</div>
+            <div className="text-[11px] text-slate-300 mt-1">
+              <b className="text-white">Las emite este panel.</b> Clave maestra por canal + rotación cada 10 min.
+              Gratis, sin terceros, funciona en casi todos los reproductores.
+            </div>
+          </div>
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+            <div className="text-[10px] font-bold text-amber-300 uppercase tracking-wide">ClearKey</div>
+            <div className="text-[11px] text-slate-300 mt-1">
+              <b className="text-white">También las emite el panel</b>, pero la clave viaja al reproductor en un JSON
+              legible: sirve para EME/pruebas, no para proteger contenido de verdad.
+            </div>
+          </div>
+          <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3">
+            <div className="text-[10px] font-bold text-indigo-300 uppercase tracking-wide">Widevine / PlayReady</div>
+            <div className="text-[11px] text-slate-300 mt-1">
+              <b className="text-white">No las puede emitir ningún panel.</b> La licencia la firma Google o un partner
+              autorizado; TVLister custodia tu <code>aes_key/iv</code> y hace de proxy autorizado.
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-3 mt-3 md:grid-cols-3">
           <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3">
             <div className="text-[10px] uppercase tracking-wide text-slate-500">Claves CAS (24 h)</div>
             <div className="text-xl font-bold text-white mt-1">
@@ -459,6 +487,46 @@ export default function DrmPage() {
                       className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white text-[11px] font-mono"
                     />
                   </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="block rounded-xl bg-[#090e1a] border border-slate-800 p-2.5">
+                      <span className="block text-[10px] text-slate-400 mb-1">
+                        aes_key de Widevine (32 hex) {form.hasCenc && <span className="text-emerald-400">· guardada</span>}
+                      </span>
+                      <input
+                        type="password"
+                        value={form.cencAesKey || ''}
+                        onChange={(e) => setForm({ ...form, cencAesKey: e.target.value })}
+                        placeholder="la de tu cuenta Widevine"
+                        className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white text-[10px] font-mono"
+                      />
+                    </label>
+                    <label className="block rounded-xl bg-[#090e1a] border border-slate-800 p-2.5">
+                      <span className="block text-[10px] text-slate-400 mb-1">iv de Widevine (32 hex)</span>
+                      <input
+                        type="password"
+                        value={form.cencIv || ''}
+                        onChange={(e) => setForm({ ...form, cencIv: e.target.value })}
+                        placeholder="la de tu cuenta Widevine"
+                        className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white text-[10px] font-mono"
+                      />
+                    </label>
+                  </div>
+                  <label className="block rounded-xl bg-[#090e1a] border border-slate-800 p-2.5">
+                    <span className="block text-[10px] text-slate-400 mb-1">
+                      content_id (opcional; por defecto el nombre del stream)
+                    </span>
+                    <input
+                      type="text"
+                      value={form.cencContentId || ''}
+                      onChange={(e) => setForm({ ...form, cencContentId: e.target.value })}
+                      placeholder="canal1"
+                      className="w-full px-2 py-1.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white text-[10px] font-mono"
+                    />
+                  </label>
+                  <p className="text-[10px] text-slate-500">
+                    El panel no genera estas claves: te las da tu cuenta de Widevine. Aquí sólo se guardan para pasárselas
+                    a Flussonic y no dejarlas sueltas en el .conf.
+                  </p>
                   <label className="block rounded-xl bg-[#090e1a] border border-slate-800 p-2.5">
                     <span className="block text-[10px] text-slate-400 mb-1">
                       Cabeceras de licencia (JSON, se inyectan en el servidor)
@@ -522,6 +590,13 @@ export default function DrmPage() {
                     <CopyButton text={snippet} />
                   </div>
                   <pre className="text-[10px] text-cyan-200 font-mono whitespace-pre-wrap break-all">{snippet}</pre>
+                  {snippet.includes('<guardada>') && (
+                    <p className="text-[10px] text-amber-300 mt-1">
+                      Las claves de contenido Widevine no se muestran en el navegador. Para verlas en local:
+                      <code className="ml-1 text-slate-300">tvlister-admin drm snippet {selectedId}</code> — o usa
+                      «Aplicar a Flussonic» y no pasan por el navegador.
+                    </p>
+                  )}
                   <div className="flex flex-wrap gap-2 mt-2">
                     <button
                       onClick={() => previewFlussonic('preview')}

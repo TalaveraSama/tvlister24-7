@@ -2603,3 +2603,25 @@ Con esto una app Android (Media3/ExoPlayer) monta `DefaultDrmSessionManager` +
 `HttpMediaDrmCallback(license_url)` por canal, y para AES-128 no necesita ningún cambio (el motor
 sigue la `EXT-X-KEY`). Documento de integración completo, con código y pruebas de aceptación:
 `docs/INTEGRACION_DRM_APP.md`; contrato legible por máquina: `docs/drm_api_contract.json`.
+
+### v2.6.2: quién emite cada clave y custodia de claves Widevine
+
+Documento de referencia: `docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`.
+
+- **AES-128 / SAMPLE-AES / ClearKey**: las emite el panel (`drm_streams.master_key` → HKDF por número
+  de rotación). No interviene ningún tercero.
+- **Widevine / PlayReady**: las **licencias** las firma Google o un partner autorizado (License Server
+  SDK; no hay servicio propio posible sin acuerdo). El panel puede **custodiar** las claves de
+  contenido (`cenc_aes_key`, `cenc_iv`, `cenc_content_id`) y **hacer de proxy autorizado**.
+- Columnas nuevas: `drm_streams.cenc_aes_key`, `drm_streams.cenc_iv`, `drm_streams.cenc_content_id`.
+  Se validan como 32 hex (16 bytes) y **nunca se devuelven al navegador**: el snippet que sirve la API
+  las enmascara como `<guardada>`/`<guardado>`; sólo `tvlister-admin drm snippet <canal>` (terminal
+  local) y el empuje por API a Flussonic las usan en claro.
+- El snippet y el payload de Flussonic para Widevine emiten
+  `drm widevine aes_key=… iv=… content_id=… keyserver=…`.
+- Modo Widevine/PlayReady ahora **exige** keyserver (licencias) con un mensaje que explica que el
+  panel no puede firmarlas.
+- **Seguridad de la propia API DRM**: todas las rutas `/api/drm/*` llevan `requireAuth` +
+  `requireAdmin` por ruta (un `router.use()` bloqueaba también `/api/auth/login`, detectado y
+  corregido). Las rutas de jugador (`/drm/key`, `/drm/clearkey`, `/drm/license`, `/drm/cas`) siguen
+  abiertas porque se autentican por token propio.

@@ -683,6 +683,13 @@ function runInitDbBody() {
     CREATE INDEX IF NOT EXISTS idx_drm_key_log_created ON drm_key_log(created_at DESC);
   `);
 
+  // Widevine/PlayReady: las CLAVES DE CONTENIDO (aes_key + iv) las emite tu
+  // cuenta/proveedor Widevine; el panel las custodia y las entrega a Flussonic.
+  // Las licencias (la firma que abre el contenido) NO las puede emitir TVLister.
+  ensureColumn('drm_streams', 'cenc_aes_key', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('drm_streams', 'cenc_iv', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('drm_streams', 'cenc_content_id', "TEXT NOT NULL DEFAULT ''");
+
   ensureColumn('channels_247', 'engine_mode', "TEXT NOT NULL DEFAULT 'virtual'");
   ensureColumn('epg_sources', 'program_count', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('epg_programs', 'source_id', 'INTEGER');

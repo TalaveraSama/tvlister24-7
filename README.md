@@ -8,6 +8,7 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 10 min) y de **proxy de licencias** Widevine/PlayReady. En el panel: *DRM & Claves*. En terminal:
 `tvlister-admin drm`. Integración en apps: **[`docs/INTEGRACION_DRM_APP.md`](docs/INTEGRACION_DRM_APP.md)**
 y contrato JSON en [`docs/drm_api_contract.json`](docs/drm_api_contract.json).
+¿Quién emite cada clave? [`docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`](docs/DRM_QUIEN_EMITE_LAS_CLAVES.md).
 
 ---
 

@@ -614,8 +614,17 @@ cmd_drm() {
       const name = row.flussonic_stream || stream.flussonic_stream_name || "<nombre_del_stream>";
       console.log("stream " + name + " {");
       console.log("  # ... tu input y protocolos actuales ...");
-      console.log("  drm " + (row.mode === "widevine" ? "widevine" : row.mode) +
-        " keyserver=" + (row.mode === "widevine" ? (row.license_url || "<tu_keyserver_widevine>") : base + "/drm/cas/" + row.cas_token));
+      if (row.mode === "widevine") {
+        const parts = ["drm widevine"];
+        if (row.cenc_aes_key) parts.push("aes_key=" + row.cenc_aes_key);
+        if (row.cenc_iv) parts.push("iv=" + row.cenc_iv);
+        if (row.cenc_content_id) parts.push("content_id=" + row.cenc_content_id);
+        parts.push("keyserver=" + (row.license_url || "<tu_keyserver_widevine>"));
+        console.log("  " + parts.join(" "));
+        console.log("  # aes_key/iv: los de tu cuenta de Widevine (los custodia el panel, no los emite)");
+      } else {
+        console.log("  drm " + row.mode + " keyserver=" + base + "/drm/cas/" + row.cas_token);
+      }
       console.log("}");
     } else if (sub === "test") {
       const stream = requireStream();
