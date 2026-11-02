@@ -150,9 +150,11 @@ function normalizeProtocol(protocol) {
  * `nosuid,nodev,noexec` evita que algo del recurso se ejecute en el servidor.
  */
 export function buildMountOptions(protocol, extra = {}) {
-  const common = ['ro', '_netdev', 'nosuid', 'nodev', 'noexec'];
+  // `nofail`: si el NAS no está al arrancar, el servidor arranca igual y el
+  // montaje se puede rehacer desde el panel o con `jellyfin mount remount`.
+  const common = ['ro', '_netdev', 'nofail', 'nosuid', 'nodev', 'noexec'];
   if (protocol === 'nfs') {
-    const opts = ['ro', 'hard', '_netdev', 'nosuid', 'nodev', 'noexec'];
+    const opts = ['ro', 'hard', '_netdev', 'nofail', 'nosuid', 'nodev', 'noexec'];
     const vers = String(extra.nfsVersion || '').trim();
     if (vers) opts.push(`vers=${vers.replace(/^v/i, '')}`);
     return opts.join(',');

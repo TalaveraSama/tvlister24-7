@@ -40,12 +40,12 @@ Al montar, la consola detecta la equivalencia de rutas y la guarda; después
 | Detalle | Cómo queda |
 | --- | --- |
 | Punto de montaje | `/mnt/jellyfin-<host>` (o el que se indique) |
-| Opciones NFS | `ro,hard,_netdev,nosuid,nodev,noexec` (+`vers=` opcional) |
-| Opciones SMB | `ro,_netdev,nosuid,nodev,noexec,iocharset=utf8,credentials=…` |
+| Opciones NFS | `ro,hard,_netdev,nofail,nosuid,nodev,noexec` (+`vers=` opcional) |
+| Opciones SMB | `ro,_netdev,nofail,nosuid,nodev,noexec,iocharset=utf8,credentials=…` |
 | `/etc/fstab` | **una sola línea**, terminada en `# tvlister:jellyfin`; copia del original en `/etc/fstab.tvlister-bak` |
 | Resto de `/etc/fstab` | intacto: comentarios, UUID y swap se conservan tal cual |
 | Credenciales SMB | `/etc/tvlister-cifs-<host>.cred` con permisos **600**; nunca en `fstab` ni en la base de datos |
-| Persistencia | el montaje sobrevive al reinicio (`fstab`), y **desmontar quita la línea** |
+| Persistencia | el montaje sobrevive al reinicio (`fstab` + `nofail`: si el NAS no está, el servidor arranca igual) y **desmontar quita la línea** |
 | Si falta el cliente | se muestra el comando exacto (`sudo apt install -y nfs-common` / `cifs-utils`); el panel **no** instala nada solo |
 | Sin root | el panel avisa y el montaje se hace con `sudo tvlister-admin jellyfin mount …` |
 
@@ -61,7 +61,7 @@ Al montar, la consola detecta la equivalencia de rutas y la guarda; después
 | Vista previa **antes** de montar | `accesibles: 0`, `no accesibles: 2`, `remoteServer: true` |
 | Probar NFS desde el panel | `ok`, **2 vídeos**, se desmontó y no dejó nada |
 | Montar NFS | `/mnt/jellyfin-192.168.1.50`, **2 vídeos**, legible |
-| Línea de `/etc/fstab` | `192.168.1.50:/srv/media /mnt/jellyfin-192.168.1.50 nfs ro,hard,_netdev,nosuid,nodev,noexec 0 0 # tvlister:jellyfin` |
+| Línea de `/etc/fstab` | `192.168.1.50:/srv/media /mnt/jellyfin-192.168.1.50 nfs ro,hard,_netdev,nofail,nosuid,nodev,noexec 0 0 # tvlister:jellyfin` |
 | Equivalencia detectada | `/data => /mnt/jellyfin-192.168.1.50`, **2/2 archivos resueltos** |
 | Vista previa **después** de montar | `accesibles: 2`, `no accesibles: 0`, `remoteServer: false` |
 | Import con «Create Symlink» | 1 película + 1 serie + 1 episodio, **2 enlaces**, `relayed: 0` |

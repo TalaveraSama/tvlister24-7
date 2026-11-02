@@ -167,15 +167,8 @@ credenciales, así que no vuelve a montarse al reiniciar.
 
 #### Desde la terminal
 
-Estado del disco de Jellyfin montado (origen, punto, vídeos, `fstab`):
-
 ```bash
-sudo tvlister-admin jellyfin mount
-```
-
-
-```bash
-# Estado (sin argumentos)
+# Estado del disco montado (origen, punto, vídeos, fstab)
 sudo tvlister-admin jellyfin mount
 
 # NFS: host y carpeta exportada (punto de montaje opcional)
@@ -198,9 +191,9 @@ Al montar, la consola busca la equivalencia de rutas y la guarda; luego
 | Elemento | Valor |
 | --- | --- |
 | Punto de montaje | `/mnt/jellyfin-<host>` (o el que indiques) |
-| Opciones NFS | `ro,hard,_netdev,nosuid,nodev,noexec` (+`vers=` si lo indicas) |
-| Opciones SMB | `ro,_netdev,nosuid,nodev,noexec,iocharset=utf8,credentials=…` |
-| `/etc/fstab` | una línea terminada en `# tvlister:jellyfin` (copia del original en `fstab.tvlister-bak`) |
+| Opciones NFS | `ro,hard,_netdev,nofail,nosuid,nodev,noexec` (+`vers=` si lo indicas) |
+| Opciones SMB | `ro,_netdev,nofail,nosuid,nodev,noexec,iocharset=utf8,credentials=…` |
+| `/etc/fstab` | una línea terminada en `# tvlister:jellyfin` (copia del original en `fstab.tvlister-bak`); `nofail` evita que el servidor se quede sin arrancar si el NAS no responde |
 | Credenciales SMB | `/etc/tvlister-cifs-<host>.cred` con permisos **600** |
 
 La contraseña de SMB **no** se guarda en `/etc/fstab` ni en la base de datos del panel.
