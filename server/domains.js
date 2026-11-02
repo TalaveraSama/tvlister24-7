@@ -250,6 +250,42 @@ async function httpProbe(host, port = null) {
  * Comprueba un dominio con su papel: `panel` (puede ir por Cloudflare) o
  * `streams` (no debe ir por Cloudflare nunca).
  */
+/**
+ * Puerto del 443 «de casa» que se sondea por loopback.
+ *
+ * No siempre es 443: el panel puede servirse en otro puerto, y la base pública
+ * del video puede llevar puerto explícito. Se elige, en este orden, el puerto de
+ * `public_stream_base`, el 443 si está declarado como HTTPS y, si no, el primer
+ * puerto HTTPS configurado. Así la comprobación del origen apunta a donde de
+ * verdad escucha el panel y no inventa un «no responde».
+ */
+export function originProbePort() {
+  const base = getDomains().publicStreamBase;
+  const explicit = /^[a-z]+:\/\/[^/:]+:(\d+)/i.exec(base);
+  if (explicit) return Number(explicit[1]);
+
+  let stored = '';
+  try {
+    stored = String(db.prepare("SELECT value FROM settings WHERE key = 'extra_http_ports'").get()?.value || '');
+  } catch {
+    stored = '';
+  }
+  const tlsPorts = stored
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [port, scheme] = entry.split(':');
+      return { port: Number(port), scheme: String(scheme || '').toLowerCase() };
+    })
+    .filter((entry) => Number.isInteger(entry.port) && (entry.scheme === 'https' || entry.scheme === 'both'))
+    .map((entry) => entry.port)
+    .sort((a, b) => a - b);
+
+  if (tlsPorts.includes(443)) return 443;
+  return tlsPorts[0] || 443;
+}
+
 export async function checkHost(host, role) {
   const target = normalizeHost(host);
   if (!target) {
@@ -266,19 +302,28 @@ export async function checkHost(host, role) {
   // Lo que sirve NUESTRO 443 (se pregunta a loopback con el SNI del dominio).
   // Es la diferencia entre "Cloudflare responde" y "el origen está bien": un
   // 521 de Cloudflare es exactamente que el origen no contesta.
-  const originCert = await inspectCertificate(target, 443, 6000, '127.0.0.1');
+  const originPort = originProbePort();
+  const originCert = await inspectCertificate(target, originPort, 6000, '127.0.0.1');
 
-  const cert = await inspectCertificate(target, 443);
-  if (!cert.ok) {
+  // El puerto público es el que verán los clientes: el de la base del video si
+  // lleva uno explícito; si no, el 443 de siempre.
+  const publicPort = role === 'streams' ? getDomains().streamPort || 443 : 443;
+
+  // Sin DNS público no tiene sentido culpar al 443: se avisa de lo único que
+  // falla de verdad (el registro A) y se sigue mirando el origen local.
+  const cert = dnsInfo.ok
+    ? await inspectCertificate(target, publicPort)
+    : { ok: false, error: 'sin DNS no se puede comprobar el certificado público' };
+  if (dnsInfo.ok && !cert.ok) {
     // Si el origen sí contesta, el fallo no está en este servidor: está en el
     // camino (Cloudflare, o el propio servidor sin volver a su IP pública).
     const hint = originCert.ok
-      ? ` El 443 de este servidor sí responde para ${target} (certificado de ${originCert.subject}, ${originCert.daysLeft} días): el fallo está en el camino hasta ${target} (Cloudflare o la red del servidor hacia su IP pública).`
+      ? ` El ${originPort} de este servidor sí responde para ${target} (certificado de ${originCert.subject}, ${originCert.daysLeft} días): el fallo está en el camino hasta ${target} (Cloudflare o la red del servidor hacia su IP pública).`
       : '';
-    problems.push(`Sin respuesta HTTPS válida en ${target}:443 (${cert.error}).${hint}`);
-  } else {
+    problems.push(`Sin respuesta HTTPS válida en ${target}:${publicPort} (${cert.error}).${hint}`);
+  } else if (dnsInfo.ok) {
     if (!cert.coversHost) {
-      problems.push(`El certificado del 443 no cubre ${target} (SAN: ${cert.altNames.join(', ') || 'ninguno'}).`);
+      problems.push(`El certificado del ${publicPort} no cubre ${target} (SAN: ${cert.altNames.join(', ') || 'ninguno'}).`);
     }
     if (!cert.authorized) {
       problems.push(`Certificado no confiable para los clientes (${cert.authorizationError || 'no verificado'}).`);
@@ -287,20 +332,33 @@ export async function checkHost(host, role) {
     else if (cert.daysLeft <= 21) warnings.push(`El certificado caduca en ${cert.daysLeft} días.`);
   }
 
-  const http = await httpProbe(target, 443);
+  const http = dnsInfo.ok ? await httpProbe(target, publicPort) : { ok: false, error: 'sin DNS' };
 
   if (!originCert.ok) {
-    const msg = `el 443 de este servidor no responde para ${target} (${originCert.error})`;
+    const msg = `el ${originPort} de este servidor no responde para ${target} (${originCert.error})`;
     if (role === 'streams') problems.push(`El video se conecta directo: ${msg}.`);
     else warnings.push(`Cloudflare dará 521 mientras ${msg}.`);
   } else if (!originCert.coversHost) {
     problems.push(
-      `El 443 de este servidor presenta un certificado que NO cubre ${target} (${originCert.altNames.join(', ') || 'sin SAN'}).`
+      `El ${originPort} de este servidor presenta un certificado que NO cubre ${target} (${originCert.altNames.join(', ') || 'sin SAN'}).`
     );
   } else if (!originCert.authorized && role === 'streams') {
-    problems.push(
-      `El 443 del origen usa un certificado que el reproductor no conoce (${originCert.issuer}). El video necesita una CA pública: usa Let's Encrypt.`
+    // Sólo es un fallo si el certificado no lo puede validar nadie (autofirmado o
+    // CA privada). Un problema de cadena en ESTE servidor (p. ej. una CA raíz que
+    // Node no trae) se avisa sin afirmar que el reproductor lo rechazará.
+    const privateish = /SELF_SIGNED|UNABLE_TO_GET_ISSUER|UNABLE_TO_VERIFY_LEAF/i.test(
+      originCert.authorizationError || ''
     );
+    const detail = `${originCert.issuer || 'emisor desconocido'}; ${originCert.authorizationError || 'sin verificar'}`;
+    if (privateish) {
+      problems.push(
+        `El ${originPort} del origen usa un certificado que el reproductor no conoce (${detail}). El video necesita una CA pública: usa Let's Encrypt.`
+      );
+    } else {
+      warnings.push(
+        `El ${originPort} del origen no se pudo validar desde este servidor (${detail}). Si es un certificado público, comprueba la cadena con: openssl s_client -connect 127.0.0.1:${originPort} -servername ${target}`
+      );
+    }
   }
 
   if (role === 'streams') {
@@ -330,7 +388,7 @@ export async function checkHost(host, role) {
     warnings,
     dns: dnsInfo,
     certificate: cert,
-    originCertificate: originCert,
+    originCertificate: { ...originCert, port: originPort },
     http
   };
 }

@@ -2849,3 +2849,13 @@ video usa una CA privada, se reporta como problema.
 dominio cuando el CN no lo parece; la tarjeta del panel muestra `origen :443 → CN · días`; el
 recordatorio del CLI propone `tls origin` y `acme`; `tvlister-admin acme` reinicia el panel después
 de instalar y distingue «emitido» de «ya vigente».
+
+### v2.6.11: el origen se sondea en el puerto correcto
+
+`originProbePort()` (`server/domains.js`) deduce el puerto HTTPS del propio servidor: el de
+`public_stream_base` si lo lleva, el 443 si está declarado en `extra_http_ports` y, si no, el primer
+puerto HTTPS configurado. `checkHost()` lo usa para el sondeo por loopback y lo devuelve dentro de
+`originCertificate.port` (visible en el CLI y en la tarjeta del panel). Además, si el dominio no
+resuelve en DNS se omite la comprobación pública del certificado (evita el doble error
+«ENOTFOUND» + «no resuelve»), y un certificado de origen no verificable se explica con su emisor y
+su código de error; si el fallo parece de cadena local se emite aviso en vez de un problema.

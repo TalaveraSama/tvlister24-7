@@ -3347,7 +3347,7 @@ case "$ACTION" in
             : (e.role === "panel" ? " · CA propia (Cloudflare): normal detrás de Cloudflare" : " · CA propia: el reproductor no la acepta");
           console.log("          Origen: " + e.originCertificate.subject + " · " + e.originCertificate.daysLeft + " días" + caNote);
         } else if (e.originCertificate) {
-          console.log("          Origen: no responde en 127.0.0.1:443 — " + (e.originCertificate.error || "sin datos"));
+          console.log("          Origen: no responde en 127.0.0.1:" + (e.originCertificate.port || 443) + " — " + (e.originCertificate.error || "sin datos"));
         }
         if (e.http?.ok) {
           console.log("          HTTP : " + e.http.status + " · " + (e.http.server || "?") + (e.http.viaCloudflare ? " · por Cloudflare" : " · directo"));

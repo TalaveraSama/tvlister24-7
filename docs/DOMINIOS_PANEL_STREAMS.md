@@ -160,7 +160,7 @@ Por cada nombre mira **cuatro cosas distintas**:
 | **DNS** | El registro `A` y a qué IP apunta |
 | **Certificado de cara al cliente** (el que ve Cloudflare o el reproductor) | Que sea válido, que cubra el nombre y cuántos días le quedan |
 | **HTTP + `cf-ray`** | Si el tráfico pasa por Cloudflare (el video no debe) |
-| **El 443 de este servidor** (se pregunta a `127.0.0.1` con el SNI del dominio) | Que el **origen** tenga certificado para ese nombre. Si falla en el panel, Cloudflare devolverá **521**; si falla en el video, el reproductor recibe «connection refused» |
+| **El 443 de este servidor** (se pregunta a `127.0.0.1` en el puerto HTTPS configurado, con el SNI del dominio) | Que el **origen** tenga certificado para ese nombre. Si falla en el panel, Cloudflare devolverá **521**; si falla en el video, el reproductor recibe «connection refused» |
 
 Por eso el panel y el video pueden usar certificados distintos en el mismo 443:
 

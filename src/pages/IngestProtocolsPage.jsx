@@ -1237,10 +1237,10 @@ export default function IngestProtocolsPage() {
                         </div>
                         <div className="text-slate-500 mt-0.5 font-mono text-[10px]">
                           {data.originCertificate?.ok
-                            ? `origen :443 \u2192 ${data.originCertificate.subject || '?'} \u00b7 ${data.originCertificate.daysLeft}d \u00b7 ${
+                            ? `origen :${data.originCertificate.port || 443} \u2192 ${data.originCertificate.subject || '?'} \u00b7 ${data.originCertificate.daysLeft}d \u00b7 ${
                                 data.originCertificate.authorized ? 'CA p\u00fablica' : 'CA propia'
                               }`
-                            : `origen :443 no responde (${data.originCertificate?.error || 'sin datos'})`}
+                            : `origen :${data.originCertificate?.port || 443} no responde (${data.originCertificate?.error || 'sin datos'})`}
                         </div>
                         {data.problems?.map((p) => (
                           <div key={p} className="text-rose-300 mt-1">
