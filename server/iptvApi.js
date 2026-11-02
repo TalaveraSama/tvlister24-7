@@ -8,7 +8,7 @@ import { db } from './db.js';
 import { getStreamBaseUrl } from './publicBase.js';
 import { signToken } from './auth.js';
 import { getActiveDrm, getDrmSettings } from './drm.js';
-import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken } from './auth.js';
+import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit } from './auth.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import { resolveIpGeoSync } from './geoIspResolver.js';
@@ -252,6 +252,7 @@ function serveLocalMediaFileWithRange(req, res, filePath, connId = null) {
 
 // Rewrite upstream HLS .m3u8 manifest so all segments & sub-playlists route through Stream Shield proxy
 function rewriteHlsManifestForProxy(manifestText, manifestFinalUrl, proxyPrefix, streamId) {
+  const selfPrefix = proxyPrefix.replace(/\/hls_proxy\/.*$/, '');
   const resolveAndSign = (rawUri) => {
     const trimmed = rawUri.trim();
     if (!trimmed) return trimmed;
@@ -260,6 +261,18 @@ function rewriteHlsManifestForProxy(manifestText, manifestFinalUrl, proxyPrefix,
       absUrl = new URL(trimmed, manifestFinalUrl).toString();
     } catch {
       return trimmed;
+    }
+    // La clave del DRM la sirve este mismo panel y ya está protegida por su
+    // token: no hace falta (ni conviene) dar otra vuelta por el proxy.
+    if (/\.\/|^https?:\/\//.test(trimmed) || trimmed.startsWith('/')) {
+      try {
+        const u = new URL(absUrl);
+        if (u.pathname.startsWith('/drm/') || (selfPrefix && absUrl.startsWith(selfPrefix))) {
+          return absUrl;
+        }
+      } catch {
+        /* seguimos con la firma normal */
+      }
     }
     const { u, sig } = signUpstreamUrl(absUrl, streamId);
     return `${proxyPrefix}?u=${encodeURIComponent(u)}&sig=${encodeURIComponent(sig)}`;
@@ -1407,10 +1420,13 @@ iptvRouter.get('/hls_proxy/:username/:password/:streamId', async (req, res) => {
   }
 });
 
-async function serveLiveStreamRequest(req, res) {
-  const { username, password, streamSpec } = req.params;
-  const auth = authenticateLine(username, password, req);
-  if (auth.error) return res.status(auth.code).send(auth.error);
+/**
+ * Entrega de un canal ya autenticado. Se separa del router para que la WebTV
+ * pueda reproducir con una URL FIRMADA (token) sin que el navegador vea nunca
+ * las credenciales de la línea ni la URL del proveedor.
+ */
+async function serveLiveForLine(req, res, { line, username, password, streamSpec }) {
+  const auth = { line };
 
   const rawId = streamSpec.replace(/\.(m3u8|ts)$/i, '');
   const protocol = streamSpec.toLowerCase().endsWith('.ts') ? 'MPEG-TS' : 'HLS';
@@ -1686,7 +1702,32 @@ async function serveLiveStreamRequest(req, res) {
 }
 
 // 4. Live Stream Delivery (/live/:username/:password/:streamSpec AND short Xtream /:username/:password/:numericId)
-iptvRouter.get('/live/:username/:password/:streamSpec', serveLiveStreamRequest);
+iptvRouter.get('/live/:username/:password/:streamSpec', async (req, res) => {
+  const { username, password, streamSpec } = req.params;
+  const auth = authenticateLine(username, password, req);
+  if (auth.error) return res.status(auth.code).send(auth.error);
+  return serveLiveForLine(req, res, { line: auth.line, username, password, streamSpec });
+});
+
+// Reproducción de la WebTV (y de cualquier enlace "player") con URL firmada y
+// caducable: no expone credenciales ni el origen real del canal.
+iptvRouter.get('/webtv_play/:token', async (req, res) => {
+  const payload = verifyToken(String(req.params.token || ''));
+  if (!payload || payload.scope !== 'webtv_play') return res.status(401).send('Enlace de reproducción no válido o caducado');
+
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(Number(payload.id));
+  if (!line) return res.status(401).send('Línea no encontrada');
+  if (line.status !== 'active') return res.status(403).send('Línea suspendida');
+  if (line.exp_date && new Date(line.exp_date).getTime() < Date.now()) return res.status(403).send('Suscripción expirada');
+
+  const streamSpec = `${payload.streamId}.${payload.ext === 'ts' ? 'ts' : 'm3u8'}`;
+  return serveLiveForLine(req, res, {
+    line,
+    username: line.username,
+    password: line.password,
+    streamSpec
+  });
+});
 
 // 4b. Native Ultra-Light MNF v1 (TVLister Media NanoFrame) Delivery (/mnf/:username/:password/:streamSpec)
 iptvRouter.get('/mnf/:username/:password/:streamSpec', (req, res) => {
@@ -1748,6 +1789,57 @@ iptvRouter.get(/^\/([^/]+)\/([^/]+)\/(\d+(?:\.(?:ts|m3u8))?)$/i, (req, res) => {
 });
 
 // 5. Movie VOD Delivery (/movie/:username/:password/:vodSpec)
+// VOD / series con enlace firmado para la WebTV (sin credenciales ni origen real)
+async function serveVodForLine(req, res, line, vodId) {
+  const vod = db.prepare('SELECT * FROM vod_items WHERE id = ?').get(Number(vodId));
+  if (!vod) return res.status(404).send('VOD no encontrado');
+  if (!isItemAllowedForLine(line, 'vod', vod.id)) return res.status(403).send('Película VOD no incluida en tu paquete');
+
+  const edgeTarget = selectEdgeRedirect(req);
+  const conn = recordConnection(req, line, 'vod', vod.id, vod.title, 'VOD', edgeTarget?.serverId || 1);
+  if (!conn.allowed) return res.status(429).send(conn.error);
+  if (edgeTarget) return res.redirect(302, edgeTarget.url);
+  if (vod.source_url.startsWith('/')) return serveLocalMediaFileWithRange(req, res, vod.source_url, conn.connId);
+  return res.redirect(302, vod.source_url);
+}
+
+async function serveEpisodeForLine(req, res, line, epId) {
+  const ep = db
+    .prepare(
+      `SELECT e.*, s.title as series_title FROM series_episodes e
+       LEFT JOIN series s ON s.id = e.series_id WHERE e.id = ?`
+    )
+    .get(Number(epId));
+  if (!ep) return res.status(404).send('Episodio no encontrado');
+  if (!isItemAllowedForLine(line, 'series', ep.series_id)) return res.status(403).send('Serie no incluida en tu paquete');
+
+  const edgeTarget = selectEdgeRedirect(req);
+  const label = `${ep.series_title || 'Serie'} S${ep.season_num}E${ep.episode_num}`;
+  const conn = recordConnection(req, line, 'series', ep.id, label, 'Series', edgeTarget?.serverId || 1);
+  if (!conn.allowed) return res.status(429).send(conn.error);
+  if (edgeTarget) return res.redirect(302, edgeTarget.url);
+  if (ep.source_url.startsWith('/')) return serveLocalMediaFileWithRange(req, res, ep.source_url, conn.connId);
+  return res.redirect(302, ep.source_url);
+}
+
+async function handleWebTvPlayToken(req, res, kind) {
+  const payload = verifyToken(String(req.params.token || ''));
+  if (!payload || payload.scope !== 'webtv_play' || (payload.kind && payload.kind !== kind)) {
+    return res.status(401).send('Enlace de reproducción no válido o caducado');
+  }
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(Number(payload.id));
+  if (!line) return res.status(401).send('Línea no encontrada');
+  if (line.status !== 'active') return res.status(403).send('Línea suspendida');
+  if (line.exp_date && new Date(line.exp_date).getTime() < Date.now()) return res.status(403).send('Suscripción expirada');
+
+  if (kind === 'vod') return serveVodForLine(req, res, line, payload.streamId);
+  if (kind === 'series') return serveEpisodeForLine(req, res, line, payload.streamId);
+  return res.status(400).send('Tipo de enlace no válido');
+}
+
+iptvRouter.get('/webtv_vod/:token', (req, res) => handleWebTvPlayToken(req, res, 'vod'));
+iptvRouter.get('/webtv_series/:token', (req, res) => handleWebTvPlayToken(req, res, 'series'));
+
 iptvRouter.all('/movie/:username/:password/:vodSpec', (req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).end();
   const { username, password, vodSpec } = req.params;
@@ -1915,15 +2007,25 @@ iptvRouter.get('/streaming/timeshift.php', (req, res) => {
 // 6. Built-in WebTV HTML5 Client Portal Endpoints (/api/webtv/*)
 iptvRouter.post('/api/webtv/login', (req, res) => {
   const { username, password } = req.body || {};
+
+  // Mismo freno que el login del panel: sin esto se puede probar contraseñas
+  // en bucle contra las líneas desde el portal público.
+  const clientIp = extractClientIp(req);
+  const rl = checkLoginRateLimit(clientIp);
+  if (!rl.allowed) {
+    return res.status(429).json({ error: `Demasiados intentos. Espera ${rl.retrySec || 60} segundos.` });
+  }
+
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).json({ error: auth.error });
+  clearLoginRateLimit(clientIp);
 
   const { line } = auth;
+  // La contraseña NO se devuelve al navegador: ya la conoce quien la escribió.
   res.json({
     line: {
       id: line.id,
       username: line.username,
-      password: line.password,
       exp_date: line.exp_date,
       max_connections: line.max_connections,
       device_type: line.device_type
@@ -1939,14 +2041,45 @@ iptvRouter.get('/api/webtv/catalog', (req, res) => {
   const { categories, streams, channels247, vodItems, seriesItems } = getAllowedContentForLine(auth.line);
   const allPrograms = db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC').all();
 
+  // Enlaces de reproducción firmados y caducables. El navegador NO recibe la
+  // URL del proveedor (llevaba sus credenciales) ni la de la línea.
+  const PLAYLINK_TTL_MS = 6 * 3600 * 1000;
+  const webTvPlayUrl = (streamId, ext = 'm3u8', kind = 'live') => {
+    const token = signToken({
+      scope: 'webtv_play',
+      kind,
+      id: auth.line.id,
+      streamId: Number(streamId),
+      ext,
+      exp: Date.now() + PLAYLINK_TTL_MS
+    });
+    const base = kind === 'vod' ? '/webtv_vod' : kind === 'series' ? '/webtv_series' : '/webtv_play';
+    return `${base}/${token}`;
+  };
+
+  const publicStreamFields = (s) => {
+    const { source_url, backup_url, original_source_url, astra_local_url, user_agent, notes, ...safe } = s;
+    return safe;
+  };
+
   const enrichedStreams = streams.map((s) => ({
-    ...s,
+    ...publicStreamFields(s),
+    play_url: webTvPlayUrl(s.id),
     epg: allPrograms.filter((p) => p.channel_epg_id === s.epg_channel_id).slice(0, 3)
   }));
 
   const enrichedCh247 = channels247.map((ch) => ({
     ...ch,
-    liveState: computeChannel247LiveState(ch)
+    play_url: webTvPlayUrl(10000 + ch.id),
+    liveState: (() => {
+      const st = computeChannel247LiveState(ch);
+      const { currentItem, ...rest } = st || {};
+      return {
+        ...rest,
+        // Se conserva el título/tipo (para el OSD) pero nunca la URL real.
+        currentTitle: currentItem?.title || ''
+      };
+    })()
   }));
 
   const activeMessages = db
@@ -1959,16 +2092,27 @@ iptvRouter.get('/api/webtv/catalog', (req, res) => {
     categories,
     streams: enrichedStreams,
     channels247: enrichedCh247,
-    vodItems: vodItems.map((v) => ({
-      ...v,
-      poster_url: normalizeXuiOrTmdbImageUrl(v.poster_url || '', 'poster'),
-      backdrop_url: normalizeXuiOrTmdbImageUrl(v.backdrop_url || '', 'backdrop')
-    })),
-    series: seriesItems.map((sr) => ({
-      ...sr,
-      poster_url: normalizeXuiOrTmdbImageUrl(sr.poster_url || '', 'poster'),
-      backdrop_url: normalizeXuiOrTmdbImageUrl(sr.backdrop_url || '', 'backdrop')
-    })),
+    vodItems: vodItems.map((v) => {
+      const { source_url, ...safe } = v;
+      return {
+        ...safe,
+        play_url: webTvPlayUrl(v.id, v.container_ext || 'mp4', 'vod'),
+        poster_url: normalizeXuiOrTmdbImageUrl(v.poster_url || '', 'poster'),
+        backdrop_url: normalizeXuiOrTmdbImageUrl(v.backdrop_url || '', 'backdrop')
+      };
+    }),
+    series: seriesItems.map((sr) => {
+      const { poster_url, backdrop_url, episodes, ...safe } = sr;
+      return {
+        ...safe,
+        poster_url: normalizeXuiOrTmdbImageUrl(poster_url || '', 'poster'),
+        backdrop_url: normalizeXuiOrTmdbImageUrl(backdrop_url || '', 'backdrop'),
+        episodes: (episodes || []).map((ep) => {
+          const { source_url, ...epSafe } = ep;
+          return { ...epSafe, play_url: webTvPlayUrl(ep.id, ep.container_ext || 'mp4', 'series') };
+        })
+      };
+    }),
     osdMessages: activeMessages
   });
 });
@@ -2057,7 +2201,11 @@ iptvRouter.get('/vod_local_poster', (req, res) => {
 function checkAdminPreviewJwt(req) {
   const authHeader = req.headers.authorization || '';
   const rawJwt = String(req.query.jwt || (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '')).trim();
-  return { user: verifyToken(rawJwt), rawJwt };
+  const payload = verifyToken(rawJwt);
+  // Antes valía cualquier token firmado, incluido uno de código de acceso (que
+  // no es un usuario y no es admin). La vista previa es sólo de administración.
+  if (!payload || payload.role !== 'admin' || !payload.id) return { user: null, rawJwt };
+  return { user: payload, rawJwt };
 }
 
 iptvRouter.get('/api/admin/preview/hls_local/:workerKey/:fileName', (req, res) => {

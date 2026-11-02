@@ -171,6 +171,24 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
+// --- Cabeceras de seguridad del panel y del reproductor ---------------------
+// El reproductor del panel (y el portal WebTV) no debe poder incrustarse en
+// otra web: sin esto, cualquiera pone un <iframe> al panel/portal del cliente y
+// lo usa como reproductor propio a tu costa. También se cierra el sniffing de
+// tipos y se evita que las URLs con token se filtren por el Referer.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  // Los manifiestos y las claves no se cachean: un enlace caducado no debe
+  // seguir funcionando desde la caché del navegador.
+  if (/^\/(drm|live|hls_proxy|hls_out|webtv_play|webtv_vod|webtv_series|timeshift|archive_seg)\//.test(req.path)) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
+
 // Application-level firewall check
 app.use(firewallMiddleware);
 

@@ -2653,3 +2653,45 @@ configurado) en vez de dar por hecho que se aplicó.
 Además, `X-Key-Url` del CAS usa ahora la base que ven los **clientes** (`public_stream_base`, luego
 `panel_domain`) y no la que usó Flussonic para llamar: si Flussonic llama por `127.0.0.1`, antes se
 devolvía una URL de clave inalcanzable desde fuera.
+
+### v2.6.4: seguridad del reproductor (portal WebTV y vista previa del panel)
+
+**1. El navegador ya no ve la URL del proveedor.** `/api/webtv/catalog` devolvía `source_url` de
+canales, VOD y episodios (la URL real del proveedor, con sus credenciales, y el origen que se podría
+restreamear). Ahora devuelve `play_url` firmado por línea:
+
+| Tipo | Enlace |
+| --- | --- |
+| Canal / 24/7 | `/webtv_play/<token>` |
+| VOD | `/webtv_vod/<token>` |
+| Episodio | `/webtv_series/<token>` |
+
+Token = `signToken({scope:'webtv_play', kind, id:<línea>, streamId, ext, exp: +6 h})`. Al resolverlo
+se vuelve a comprobar línea activa y expiración, se aplican bouquet y límite de conexiones, y se
+registra la conexión (`recordConnection`), exactamente igual que por `/live/`. Un enlace copiado deja
+de servir a las 6 h. Para permitirlo, la entrega de canal se separó en `serveLiveForLine(req,res,{line,
+username,password,streamSpec})`; el router `/live/:usuario/:clave/:canal` sigue igual.
+
+**2. `/api/webtv/login` ya no devuelve la contraseña** de la línea en el JSON (la escribió el usuario;
+no hace falta repetírsela ni dejarla en el historial del navegador). Además usa el mismo freno de
+intentos que el login del panel (`checkLoginRateLimit`, 12 intentos por IP) y se limpia al acertar.
+
+**3. Cabeceras de seguridad para panel y reproductor**: `X-Frame-Options: SAMEORIGIN` (no se puede
+incrustar el portal en otra web y usarlo de reproductor ajeno), `Referrer-Policy: same-origin` (las
+URLs con token no se filtran por el Referer), `X-Content-Type-Options: nosniff` y
+`Permissions-Policy` sin cámara/micrófono/geolocalización. En `/drm/*`, `/live/*`, `/hls_proxy/*`,
+`/hls_out/*`, `/webtv_*`, `/timeshift/*` y `/archive_seg/*` se fuerza `Cache-Control: no-store`
+(un enlace caducado no revive desde la caché del navegador).
+
+**4. Vista previa del panel sólo para administradores**: `checkAdminPreviewJwt` aceptaba *cualquier*
+token firmado, incluido uno de código de acceso (que no es usuario ni admin). Ahora exige
+`role === 'admin'` e `id`.
+
+**5. La clave del DRM no pasa dos veces por el proxy**: al reescribir un manifiesto, si el
+`#EXT-X-KEY`/`URI` apunta ya a `/drm/...` de este mismo panel se deja tal cual (ya va protegido por
+su propio token), evitando un salto extra panel→panel en cada petición de clave.
+
+**6. Estado visible**: `GET /api/drm/player-security` y la tarjeta «Seguridad del reproductor» en
+*DRM & Claves*: comprueba en vivo cada punto (URL oculta, enlaces firmados, anti-incrustación, sin
+caché, límite de intentos, contraseña oculta, vista previa sólo admin, DRM activo, base pública) y
+cuenta los canales que siguen sin DRM.

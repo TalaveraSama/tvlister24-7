@@ -958,3 +958,90 @@ drmAdminRouter.post('/api/drm/bulk/push', requireAuth, requireAdmin, async (req,
     results
   });
 });
+
+// --- Estado de la seguridad del reproductor (sólo lectura, para el panel) ---
+drmAdminRouter.get('/api/drm/player-security', requireAuth, requireAdmin, (req, res) => {
+  const drmCfg = getDrmSettings();
+  const base = getConfiguredStreamBase();
+  const panelDomain = String(
+    db.prepare("SELECT value FROM settings WHERE key = 'panel_domain'").get()?.value || ''
+  ).trim();
+  const totalStreams = db.prepare('SELECT COUNT(*) AS c FROM streams').get().c;
+  const protectedCount = db
+    .prepare("SELECT COUNT(*) AS c FROM drm_streams WHERE enabled = 1 AND mode IN ('aes128','sample_aes')")
+    .get().c;
+  const revokedToday = db
+    .prepare(
+      "SELECT COUNT(*) AS c FROM drm_key_log WHERE ok = 0 AND created_at >= ?"
+    )
+    .get(new Date(Date.now() - 24 * 3600 * 1000).toISOString()).c;
+
+  const checks = [
+    {
+      id: 'upstream_hidden',
+      ok: true,
+      label: 'El reproductor no ve la URL del proveedor',
+      detail: 'La WebTV recibe enlaces firmados (/webtv_play, /webtv_vod, /webtv_series) en vez de source_url.'
+    },
+    {
+      id: 'signed_links',
+      ok: true,
+      label: 'Enlaces de reproducción firmados y caducables',
+      detail: 'HMAC por línea y caducidad de 6 h; un enlace copiado deja de servir.'
+    },
+    {
+      id: 'no_embed',
+      ok: true,
+      label: 'El panel y el portal no se pueden incrustar en otra web',
+      detail: 'X-Frame-Options: SAMEORIGIN + Referrer-Policy same-origin.'
+    },
+    {
+      id: 'no_cache_keys',
+      ok: true,
+      label: 'Claves y manifiestos sin caché',
+      detail: 'Cache-Control: no-store en /drm/*, /live/*, /hls_proxy/* y enlaces firmados.'
+    },
+    {
+      id: 'login_limit',
+      ok: true,
+      label: 'Límite de intentos en el login del portal',
+      detail: 'Mismo freno que el login del panel (12 intentos por IP y ventana).'
+    },
+    {
+      id: 'password_hidden',
+      ok: true,
+      label: 'La contraseña de la línea no viaja al navegador',
+      detail: '/api/webtv/login ya no devuelve la contraseña en el JSON.'
+    },
+    {
+      id: 'preview_admin_only',
+      ok: true,
+      label: 'Vista previa sólo para administradores',
+      detail: 'Los endpoints /api/admin/preview/* exigen token de admin (antes valía cualquier token firmado).'
+    },
+    {
+      id: 'drm_on',
+      ok: drmCfg.enabled,
+      label: drmCfg.enabled ? 'DRM activo en el panel' : 'DRM apagado: los canales salen en claro',
+      detail: drmCfg.enabled
+        ? 'Las claves AES-128 se emiten desde este panel.'
+        : 'Actívalo en esta misma página para que los canales cifrados pidan clave.'
+    },
+    {
+      id: 'base_public',
+      ok: Boolean(base || panelDomain),
+      label: base || panelDomain ? `Base pública: ${base || `http://${panelDomain}`}` : 'Sin base pública de streaming',
+      detail:
+        base || panelDomain
+          ? 'Los enlaces y las claves se generan con esa base, alcanzable desde los clientes.'
+          : 'Sin public_stream_base ni panel_domain los enlaces pueden salir con 127.0.0.1 (reproductor en negro).'
+    }
+  ];
+
+  res.json({
+    checks,
+    totals: { streams: totalStreams, protected: protectedCount, unprotected: Math.max(totalStreams - protectedCount, 0) },
+    revokedToday,
+    playLinkTtlHours: 6
+  });
+});

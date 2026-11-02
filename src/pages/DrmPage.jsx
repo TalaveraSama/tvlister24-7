@@ -72,6 +72,7 @@ export default function DrmPage() {
   const [bulk, setBulk] = useState(null);
   const [bulkBusy, setBulkBusy] = useState('');
   const [bulkResult, setBulkResult] = useState(null);
+  const [playerSec, setPlayerSec] = useState(null);
 
   const flash = (msg) => {
     setNotice(msg);
@@ -85,9 +86,14 @@ export default function DrmPage() {
 
   const load = async () => {
     try {
-      const [ov, cand] = await Promise.all([apiFetch('/api/drm/overview'), apiFetch('/api/drm/candidates')]);
+      const [ov, cand, sec] = await Promise.all([
+        apiFetch('/api/drm/overview'),
+        apiFetch('/api/drm/candidates'),
+        apiFetch('/api/drm/player-security')
+      ]);
       setData(ov);
       setCandidates(cand.streams || []);
+      setPlayerSec(sec);
     } catch (e) {
       fail(e.message);
     }
@@ -397,6 +403,58 @@ export default function DrmPage() {
         {notice && <div className="mt-3 text-[11px] text-emerald-300 flex items-center gap-1.5"><Check size={12} /> {notice}</div>}
         {err && <div className="mt-3 text-[11px] text-rose-300 flex items-center gap-1.5"><AlertTriangle size={12} /> {err}</div>}
       </div>
+
+      {/* Seguridad del reproductor */}
+      {playerSec && (
+        <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-cyan-400" /> Seguridad del reproductor del panel
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-1 max-w-3xl">
+                Lo que protege al reproductor del portal y al de la vista previa: enlaces firmados que caducan, sin URL
+                del proveedor, sin incrustar en webs ajenas y sin caché de claves.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Badge tone="indigo">{playerSec.totals.protected} protegidos</Badge>
+              <Badge tone={playerSec.totals.unprotected > 0 ? 'amber' : 'green'}>
+                {playerSec.totals.unprotected} sin DRM
+              </Badge>
+              <Badge tone="slate">enlaces {playerSec.playLinkTtlHours} h</Badge>
+            </div>
+          </div>
+
+          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {playerSec.checks.map((c) => (
+              <div
+                key={c.id}
+                className={`rounded-xl border p-2.5 ${
+                  c.ok ? 'border-emerald-500/25 bg-emerald-500/5' : 'border-amber-500/30 bg-amber-500/5'
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  {c.ok ? (
+                    <ShieldCheck size={12} className="text-emerald-400" />
+                  ) : (
+                    <AlertTriangle size={12} className="text-amber-400" />
+                  )}
+                  <span className="text-[11px] font-semibold text-slate-200">{c.label}</span>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">{c.detail}</p>
+              </div>
+            ))}
+          </div>
+
+          {playerSec.totals.unprotected > 0 && (
+            <p className="text-[10px] text-amber-300 mt-3">
+              Hay {playerSec.totals.unprotected} canales sin DRM. Usa «Proteger todos» abajo para
+              cifrarlos con las claves de este panel.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Fase 1: proteger todos los canales HLS */}
       <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/25 p-5">

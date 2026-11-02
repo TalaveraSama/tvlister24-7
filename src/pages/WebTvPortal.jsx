@@ -105,10 +105,10 @@ export default function WebTvPortal({ onBackToAdmin }) {
           kind: 'channel247',
           id: ch.id,
           name: ch.name,
-          url: ch.liveState?.currentItem?.url,
+          url: ch.play_url,
           seekOffsetSec: ch.liveState?.seekOffsetSec || 0,
           watermark: ch.watermark_text,
-          subtitle: ch.liveState?.currentItem?.title || 'Señal 24/7'
+          subtitle: ch.liveState?.currentTitle || 'Señal 24/7'
         });
       } else if (data.streams?.length > 0) {
         const s = data.streams[0];
@@ -117,7 +117,7 @@ export default function WebTvPortal({ onBackToAdmin }) {
           kind: 'live',
           id: s.id,
           name: s.name,
-          url: s.source_url,
+          url: s.play_url,
           seekOffsetSec: 0,
           subtitle: s.epg?.[0]?.title || s.category_name
         });
@@ -343,10 +343,10 @@ export default function WebTvPortal({ onBackToAdmin }) {
       name: c.name,
       logo: c.logo_url,
       badge: '24/7',
-      url: c.liveState?.currentItem?.url,
+      url: c.play_url,
       seekOffsetSec: c.liveState?.seekOffsetSec || 0,
       watermark: c.watermark_text,
-      subtitle: c.liveState?.currentItem ? `Ahora: ${c.liveState.currentItem.title}` : 'Programación 24/7'
+      subtitle: c.liveState?.currentTitle ? `Ahora: ${c.liveState.currentTitle}` : 'Programación 24/7'
     })),
     ...catalog.streams.map((s) => ({
       uid: `live-${s.id}`,
@@ -355,7 +355,7 @@ export default function WebTvPortal({ onBackToAdmin }) {
       name: s.name,
       logo: s.logo_url,
       badge: 'LIVE',
-      url: s.source_url,
+      url: s.play_url,
       seekOffsetSec: 0,
       subtitle: s.epg?.[0]?.title || s.category_name
     })),
@@ -366,7 +366,7 @@ export default function WebTvPortal({ onBackToAdmin }) {
       name: v.title,
       logo: v.poster_url,
       badge: 'VOD',
-      url: v.source_url,
+      url: v.play_url,
       seekOffsetSec: 0,
       subtitle: `${v.genre} • ${v.release_year}`
     })),
@@ -378,7 +378,7 @@ export default function WebTvPortal({ onBackToAdmin }) {
         name: `${sr.title} T${ep.season_num}E${ep.episode_num}`,
         logo: sr.poster_url,
         badge: 'SERIE',
-        url: ep.source_url,
+        url: ep.play_url,
         seekOffsetSec: 0,
         subtitle: ep.title
       }))
