@@ -2508,3 +2508,35 @@ registro A, gris en Cloudflare para video, certificado para 443, firewall para p
 `cloudflare --check` ahora: imprime el **puerto de salida** de los streams y avisa si no es
 80/443; y comprueba el dominio de streams con **su** esquema y puerto reales (`headers_of` y
 `headers_from_origin` reciben la URL completa en vez de forzar `https://`).
+
+### v2.5.29: el dominio de los streams se aplica a TODO el video y se edita desde el panel
+
+`server/publicBase.js` centraliza las dos bases: `getBaseUrl(req)` (dominio del panel, para la
+UI y la API) y `getStreamBaseUrl(req)` (`public_stream_base` si está fijado; si no, el de la
+petición). `iptvApi.js` y `stalkerPortal.js` la importan de ahí.
+
+Puntos que ahora usan la base de streams y antes usaban la del panel (por eso un reproductor
+seguía yendo al panel aunque la lista M3U llevara otro dominio):
+
+- `player_api.php` / `panel_api.php` → `server_info.url`, `server_info.port` y
+  `server_info.server_protocol` (los players Xtream montan las URLs de reproducción con eso);
+- portal Stalker `load.php` → `cmd` de canales y VOD;
+- segmentos del catch-up en el manifiesto de `/timeshift/` (`/archive_seg/...`).
+
+Edición desde el panel: *Servidores y Seguridad → Ajustes Globales → Dominio de los streams*
+(campo + atajos Automático / 80 / 443 / Limpiar). Se guarda con el `PUT /api/settings` de
+siempre, que ahora **valida** `public_stream_base`: vacío o `auto` ⇒ se borra; si no, se le pone
+esquema si falta, se quitan `:80`/`:443` redundantes y se rechaza con `400` cualquier cosa que no
+sea un host válido. No hay que reiniciar: se lee de la base en cada petición.
+
+`cloudflare <panel> <streams>` elige el esquema de la base según el certificado que realmente
+haya generado (`http` si el server block es sólo HTTP:80, `https` si lleva `ssl_certificate`);
+antes fijaba `https://` siempre y dejaba los enlaces muertos en instalaciones sin TLS.
+
+`streams-port` comprueba además, al fijar el dominio, que el nombre resuelva y a qué IP (avisando
+si es un rango de Cloudflare, es decir, si el registro está en naranja en vez de gris) y si algún
+server block del nginx (XUI.one o del sistema) lo atiende.
+
+Exenciones de la puerta de access codes: se añaden `/archive_seg/`, `/xui_images/` y
+`/vod_local_poster`; sin ellas, con un código activo, el timeshift y las carátulas devolvían la
+página del código.

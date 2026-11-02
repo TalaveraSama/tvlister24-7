@@ -106,7 +106,8 @@ export default function ServersSecurityPage() {
       anti_restreaming: data.settings?.anti_restreaming || 'true',
       proxy_direct_ts: data.settings?.proxy_direct_ts || 'false',
       flood_limit_per_min: data.settings?.flood_limit_per_min || '240',
-      lb_routing_mode: data.settings?.lb_routing_mode || 'load'
+      lb_routing_mode: data.settings?.lb_routing_mode || 'load',
+      public_stream_base: data.settings?.public_stream_base || ''
     });
     if (data.admins?.length > 0 && !pwdTargetId) {
       setPwdTargetId(data.admins[0].id);
@@ -576,6 +577,55 @@ export default function ServersSecurityPage() {
                       className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                     />
                   </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-800 bg-[#090e1a] p-3 space-y-2">
+                  <label className="block text-slate-400 mb-1">
+                    Dominio de los streams / video (puerto de salida)
+                  </label>
+                  <input
+                    type="text"
+                    value={settingsForm.public_stream_base}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, public_stream_base: e.target.value })}
+                    placeholder="http://live-stream.midominio.com   (vacío = mismo dominio del panel)"
+                    className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono text-[11px]"
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { label: 'Automático (seguir la petición)', value: '' },
+                      { label: 'Puerto 80', value: 'http://' },
+                      { label: 'Puerto 443 (HTTPS)', value: 'https://' }
+                    ].map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() =>
+                          setSettingsForm({
+                            ...settingsForm,
+                            public_stream_base:
+                              preset.value === '' ? '' : preset.value + settingsForm.public_stream_base.replace(/^https?:\/\//i, '')
+                          })
+                        }
+                        className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-semibold"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setSettingsForm({ ...settingsForm, public_stream_base: '' })}
+                      className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-semibold"
+                    >
+                      Limpiar
+                    </button>
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-slate-500">
+                    Todos los enlaces de video (lista M3U, <code>.m3u8</code>, <code>.ts</code>, VOD, catch-up y el
+                    <code> server_info </code> de la API Xtream) se construyen con esta base. Si se deja vacío, salen por el
+                    mismo dominio y puerto con el que el cliente pide la lista (dominio sin puerto → 80, https → 443).
+                    Para video usa un subdominio <b className="text-amber-300">DNS only (gris)</b> en Cloudflare, nunca el
+                    naranja.
+                  </p>
                 </div>
 
                 <button

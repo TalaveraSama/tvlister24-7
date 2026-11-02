@@ -3736,6 +3736,29 @@ app.delete('/api/firewall/:id', requireAuth, requireAdmin, (req, res) => {
 app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
   const updates = req.body || {};
   const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+
+  // Dominio de los streams: se acepta vacío/auto (sigue la petición) o una URL
+  // http(s). Se valida aquí para que un valor raro no rompa las playlists.
+  if (Object.prototype.hasOwnProperty.call(updates, 'public_stream_base')) {
+    const raw = String(updates.public_stream_base ?? '').trim();
+    if (raw === '' || /^auto$/i.test(raw)) {
+      updates.public_stream_base = '';
+    } else {
+      const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+      let parsed;
+      try {
+        parsed = new URL(withScheme);
+      } catch {
+        return res.status(400).json({ error: 'Dominio de streams inválido. Ej: http://live-stream.midominio.com' });
+      }
+      if (!parsed.hostname || /\s/.test(raw)) {
+        return res.status(400).json({ error: 'Dominio de streams inválido. Ej: http://live-stream.midominio.com' });
+      }
+      if (parsed.port === '80' || parsed.port === '443') parsed.port = '';
+      updates.public_stream_base = `${parsed.protocol}//${parsed.host}`.replace(/\/+$/, '');
+    }
+  }
+
   for (const [k, v] of Object.entries(updates)) {
     upsert.run(String(k), String(v));
   }

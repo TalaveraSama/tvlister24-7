@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
+import { getStreamBaseUrl } from './publicBase.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken } from './auth.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
@@ -66,36 +67,7 @@ function formatXmltvDate(isoOrDate) {
   );
 }
 
-function getBaseUrl(req) {
-  const proto = req.headers['x-forwarded-proto']?.split(',')[0]?.trim() || req.protocol || 'http';
-  const host = req.headers['x-forwarded-host']?.split(',')[0]?.trim() || req.headers.host || 'localhost:8080';
-  return `${proto}://${host}`;
-}
-
-/**
- * Base pública para las URLs de STREAMING (playlist, .m3u8, .ts, VOD, catchup).
- *
- * Cuando el panel va detrás de Cloudflare, el video NO debe salir por el mismo
- * dominio: Cloudflare no permite el tráfico de video continuo en los planes
- * self-serve y además mete buffering. Con la clave `public_stream_base`
- * (ej. https://stream.midominio.com) todos los enlaces de video apuntan a ese
- * subdominio (DNS only), mientras el panel y su API siguen por el dominio
- * proxied.
- *
- * Sin esa clave, todo se comporta como siempre (mismo host de la petición).
- */
-export function getStreamBaseUrl(req) {
-  let configured = '';
-  try {
-    configured = String(
-      db.prepare("SELECT value FROM settings WHERE key = 'public_stream_base'").get()?.value || ''
-    ).trim();
-  } catch {
-    configured = '';
-  }
-  if (/^https?:\/\//i.test(configured)) return configured.replace(/\/+$/, '');
-  return getBaseUrl(req);
-}
+export { getBaseUrl, getStreamBaseUrl } from './publicBase.js';
 
 export function authenticateLine(username, password, req = null) {
   if (!username || !password) return { error: 'Credenciales requeridas', code: 401 };
@@ -781,7 +753,7 @@ const handlePlayerApi = (req, res) => {
   }
 
   const { line } = auth;
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = getStreamBaseUrl(req);
   const parsedUrl = new URL(baseUrl);
   const { categories, streams, channels247, vodItems, seriesItems } = getAllowedContentForLine(line);
   const activeConns = db.prepare('SELECT COUNT(*) as c FROM active_connections WHERE line_id = ?').get(line.id).c;
@@ -1839,7 +1811,7 @@ async function handleTimeshiftPlayback(req, res, { username, password, streamSpe
     return res.end();
   }
 
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = getStreamBaseUrl(req);
   const m3u8 = [
     '#EXTM3U',
     '#EXT-X-VERSION:3',

@@ -44,6 +44,7 @@ const EXEMPT_PREFIXES = [
   '/movie/',
   '/series/',
   '/timeshift/',
+  '/archive_seg/',
   '/mnf/',
   '/hls_proxy/',
   '/hls_out/',
@@ -52,7 +53,11 @@ const EXEMPT_PREFIXES = [
   // OJO: /api/auth/ NO va exento. Si el login por API quedara abierto, el código
   // se saltaría con un curl y no protegería nada: la puerta es previa al login.
   '/api/portal',
-  '/slates/'
+  '/slates/',
+  // Carátulas y pósters servidos por el propio panel: el reproductor los pide
+  // ya dentro de la sesión y no deben devolver la página del código.
+  '/xui_images/',
+  '/vod_local_poster'
 ];
 
 function isExempt(p) {

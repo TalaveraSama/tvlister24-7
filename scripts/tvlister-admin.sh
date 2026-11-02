@@ -315,7 +315,8 @@ cmd_streams_port() {
   port=$(get_current_port)
   cd "$APP_DIR" || return 1
 
-  SP_WANT="$want" SP_DOMAIN="$domain" SP_MAINPORT="$port" "$NODE_BIN" --no-warnings --input-type=module -e '
+  local out
+  out=$(SP_WANT="$want" SP_DOMAIN="$domain" SP_MAINPORT="$port" "$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
     initDb();
 
@@ -405,7 +406,7 @@ cmd_streams_port() {
     if (num === 80) {
       console.log("   Requisitos en el puerto 80:");
       console.log("     · Un server block que atienda " + host + " y haga proxy a 127.0.0.1:" + mainPort + ".");
-      console.log("       (lo crea: tvlister-admin cloudflare " + host + " " + host + ")");
+      console.log("       (lo crea: tvlister-admin cloudflare " + (panelDomain || "<dominio_del_panel>") + " " + host + ")");
       console.log("     · Ese nombre debe resolver al servidor (registro A) y NO estar en naranja en");
       console.log("       Cloudflare si se usa para video: el proxy de Cloudflare no sirve para");
       console.log("       streaming continuo. Déjalo en GRIS.");
@@ -420,7 +421,43 @@ cmd_streams_port() {
     console.log("");
     console.log("   Aplica al instante (se lee de la base en cada petición). Comprueba con:");
     console.log("     tvlister-admin streams-check");
-  '
+  ' 2>&1)
+  echo "$out"
+
+  # --- Comprobaciones del mundo real: DNS y server block -------------------
+  # Si la base acaba de quedar fijada, esto evita el clásico «puse el dominio
+  # de los streams y no se ve nada»: o el nombre no resuelve, o ningún server
+  # block lo atiende.
+  local base_host
+  base_host=$(printf '%s\n' "$out" | sed -n 's/.*Base pública de streaming: *[a-z]*:\/\/\([^\/:]*\).*/\1/p' | head -1)
+  if [ -n "$base_host" ]; then
+    if getent hosts "$base_host" >/dev/null 2>&1; then
+      local dip sip
+      dip=$(getent ahostsv4 "$base_host" 2>/dev/null | awk 'NR==1{print $1}')
+      sip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+      if [ -n "$sip" ] && [ -n "$dip" ] && [ "$sip" != "$dip" ]; then
+        echo "   [AVISO] $base_host resuelve a $dip, no a este servidor ($sip)."
+        echo "           Los clientes no llegarán al video hasta arreglar el registro A/DNS."
+        if [ "$dip" != "" ] && printf '%s' "$dip" | grep -Eq '^(104\.|172\.6[4-9]\.|172\.7[0-1]\.|188\.114\.|162\.15[89]\.|173\.245\.|141\.101\.|108\.162\.|190\.93\.|198\.41\.|131\.0\.72\.|103\.2[12]\.|197\.234\.|103\.31\.)'; then
+          echo "           Esa IP es de Cloudflare: el registro está en NARANJA (proxied)."
+          echo "           Para video tiene que estar en GRIS (DNS only)."
+        fi
+      fi
+    else
+      echo "   [AVISO] $base_host no resuelve todavía. Crea el registro A en el DNS."
+    fi
+    local served=""
+    for f in /home/xui/bin/nginx/conf/servers/*.conf /etc/nginx/conf.d/*.conf /etc/nginx/sites-enabled/*; do
+      [ -f "$f" ] || continue
+      if grep -Eq "^[[:space:]]*server_name[^;]*\b${base_host//./\\.}\b" "$f" 2>/dev/null; then served="$f"; break; fi
+    done
+    if [ -n "$served" ]; then
+      echo "   [OK]    Server block que atiende $base_host: $served"
+    else
+      echo "   [AVISO] Ningún server block atiende $base_host todavía."
+      echo "           Créalo con:  tvlister-admin cloudflare <dominio_del_panel> $base_host"
+    fi
+  fi
 }
 
 cmd_access_code() {
@@ -1579,8 +1616,13 @@ EOF
   fi
 
   # --- Base pública de streaming (siempre, haya o no nginx del sistema) ----
+  # Si el server block de video no tiene certificado, el dominio SÓLO atiende
+  # por HTTP:80. Poner https ahí dejaría todos los enlaces muertos, así que el
+  # esquema se elige según lo que realmente se haya generado.
+  local stream_scheme="http"
+  [ -n "$ssl_block" ] && stream_scheme="https"
   cd "$APP_DIR"
-  STREAM_BASE="https://${stream_domain}" PANEL_DOMAIN="${domain}" "$NODE_BIN" --no-warnings --input-type=module -e '
+  STREAM_BASE="${stream_scheme}://${stream_domain}" STREAM_HOST="${stream_domain}" PANEL_DOMAIN="${domain}" "$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
     initDb();
     const base = String(process.env.STREAM_BASE || "").replace(/\/+$/, "");
@@ -1589,6 +1631,7 @@ EOF
     console.log("");
     console.log("  Base pública de streaming: " + base);
     console.log("  Las playlist, .m3u8 y .ts saldrán por ahí (sin Cloudflare).");
+    console.log("  Si quieres otro puerto/dominio: tvlister-admin streams-port 80 " + (process.env.STREAM_HOST || ""));
     console.log("  El panel y su API siguen por " + (process.env.PANEL_DOMAIN || "el dominio del panel") + ".");
     console.log("  Para volver atrás: tvlister-admin cloudflare --clear");
   ' || echo "⚠️  No se pudo guardar public_stream_base"

@@ -1,14 +1,9 @@
 import express from 'express';
 import crypto from 'node:crypto';
 import { db } from './db.js';
+import { getBaseUrl, getStreamBaseUrl } from './publicBase.js';
 
 export const stalkerRouter = express.Router();
-
-function getBaseUrl(req) {
-  const proto = req.headers['x-forwarded-proto']?.split(',')[0]?.trim() || req.protocol || 'http';
-  const host = req.headers['x-forwarded-host']?.split(',')[0]?.trim() || req.headers.host || 'localhost:8080';
-  return `${proto}://${host}`;
-}
 
 function extractStbMac(req) {
   const qMac = req.query.mac || req.body?.mac;
@@ -130,7 +125,7 @@ const handleStalkerLoad = (req, res) => {
   const params = { ...req.query, ...req.body };
   const type = params.type || 'stb';
   const action = params.action || 'handshake';
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = getStreamBaseUrl(req);
   const line = findLineForStb(req);
 
   if (type === 'stb' && action === 'handshake') {
