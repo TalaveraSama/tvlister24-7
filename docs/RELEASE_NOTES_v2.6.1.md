@@ -43,7 +43,7 @@ GET {panel}/player_api.php?username=X&password=Y&action=get_drm
 
 ## 2. El documento para el otro agente
 
-`docs/INTEGRACION_DRM_APP.md` — hecho para pegarlo tal cual:
+`docs/INTEGRACION_DRM_APP.md` — hecho para pegarlo tal cual (**eliminado en v2.6.15**, el DRM se retiró; ver `docs/REGISTRO_APARATOS_MAC.md`):
 
 | Sección | Contenido |
 | --- | --- |
@@ -58,7 +58,7 @@ GET {panel}/player_api.php?username=X&password=Y&action=get_drm
 | 9 | **prompt listo para pegar** en el otro agente |
 | 10 | lo que el panel no hace (licencias Widevine propias, offline) |
 
-Y `docs/drm_api_contract.json` para que el agente no tenga que interpretar prosa.
+Y `docs/drm_api_contract.json` para que el agente no tenga que interpretar prosa (también eliminado en v2.6.15).
 
 ## 3. Lo que la app tiene que hacer, en corto
 

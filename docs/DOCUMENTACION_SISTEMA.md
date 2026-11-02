@@ -2541,6 +2541,12 @@ Exenciones de la puerta de access codes: se añaden `/archive_seg/`, `/xui_image
 `/vod_local_poster`; sin ellas, con un código activo, el timeshift y las carátulas devolvían la
 página del código.
 
+> ⚠️ **Retirado en v2.6.15.** Las secciones v2.6.0–v2.6.4 describen el DRM que **ya no existe** en el
+> producto: no se cifra nada y las rutas `/drm/*`, las tablas `drm_streams`/`drm_key_log`, el módulo
+> `server/drm.js`, la página *DRM & Claves* y `tvlister-admin drm` se han eliminado. Se conservan
+> como histórico de lo que se probó y por qué se descartó. La protección actual es el
+> **[registro de aparatos por MAC](REGISTRO_APARATOS_MAC.md)**.
+
 ### v2.6.0: DRM con TVLister como CAS (servidor de claves) de Flussonic
 
 Módulo `server/drm.js`. Flussonic, con `drm aes128`, pide la clave a un servidor de claves y
@@ -2602,11 +2608,11 @@ servidor de licencias** (las inyecta el proxy del panel). `stream_id` es el mism
 Con esto una app Android (Media3/ExoPlayer) monta `DefaultDrmSessionManager` +
 `HttpMediaDrmCallback(license_url)` por canal, y para AES-128 no necesita ningún cambio (el motor
 sigue la `EXT-X-KEY`). Documento de integración completo, con código y pruebas de aceptación:
-`docs/INTEGRACION_DRM_APP.md`; contrato legible por máquina: `docs/drm_api_contract.json`.
+(documento **eliminado** en v2.6.15 junto con el DRM; ver `docs/REGISTRO_APARATOS_MAC.md`).
 
 ### v2.6.2: quién emite cada clave y custodia de claves Widevine
 
-Documento de referencia: `docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`.
+Documento de referencia: `docs/DRM_QUIEN_EMITE_LAS_CLAVES.md` (**eliminado** en v2.6.15: el DRM ya no existe).
 
 - **AES-128 / SAMPLE-AES / ClearKey**: las emite el panel (`drm_streams.master_key` → HKDF por número
   de rotación). No interviene ningún tercero.
@@ -2891,3 +2897,48 @@ dominio (no puede ser el del panel), lo comprueba con rol `compat` (debe ir en n
 Cloudflare) y sondea `GET /player_api.php` para confirmar que la API Xtream responde. El nombre entra
 en la lista SNI del 443 (`tlsManager`), el CLI lo acepta como tercer argumento de `dominios` y
 `cloudflare` lo mete en el `server_name` del bloque de streams.
+
+### v2.6.15: se retira el DRM y entra el registro de aparatos por MAC
+
+**El DRM se elimina del producto.** No hay cifrado de ningún tipo: ni AES-128 propio, ni ClearKey,
+ni proxy de licencias Widevine/PlayReady, ni claves por canal en Flussonic. Se borran
+`server/drm.js`, la página *DRM & Claves*, la entrada del menú, las rutas `/drm/*` (y su excepción en
+la puerta de access codes), el `action=get_drm`, las `#KODIPROP` de la lista M3U, las tablas
+`drm_streams` y `drm_key_log`, y `tvlister-admin drm` (el menú 29 pasa a `devices`).
+
+En su lugar, **protección sin cifrar el video**, que es lo que pedían las apps en producción:
+`server/deviceRegistry.js` registra cada aparato que se conecta y la línea admite tantos aparatos
+como conexiones tenga.
+
+| Pieza | Detalle |
+| --- | --- |
+| Ajuste `device_registry_mode` | `off` · `monitor` (**por defecto**, sólo registra y avisa) · `enforce` (corta con `403`) |
+| Identificador | MAC normalizada (`AA:BB:CC:DD:EE:FF`) o `fp:<hash24>` de modelo+sistema+reproductor si la app no manda MAC |
+| De dónde sale la MAC | `X-MAC-Address`, `X-Device-MAC`, `X-MAC`, `X-Client-MAC`, `Mac`, `X-Stalker-MAC`, `Cookie: mac=` (MAG), `X-User-Agent: … MAC=…`, `Authorization: MAC …`, `?mac=` |
+| Tipo de equipo | `stb` (MAG/Stalker), `enigma2`, `smart-tv`, `streaming-box`, `android-box`, `movil`, `app`, `navegador`, `dispositivo` + marca, modelo, SO y reproductor |
+| Cupo por línea | `lines.device_limit` si es > 0; si es 0 (por defecto) usa `max_connections` |
+| Auto-registro | El aparato entra solo mientras haya hueco; el que sobra queda `pending` en modo monitor y se rechaza en modo bloquear |
+| Vetos | `blocked = 1` o `revoked_by = 'panel'` → `403 device_blocked` / `403 device_revoked` |
+| Caché | 60 s por línea+aparato, invalidada al instante por `device_registry_version` (panel y CLI son procesos distintos) |
+| Limpieza del DRM antiguo | Al migrar se guarda qué canales tenían `drm` en `drm_legacy_streams`; `tvlister-admin devices undrm --apply` lo quita de Flussonic (si no, ese HLS saldría cifrado sin servidor de claves) |
+
+Columnas nuevas en `line_devices`: `mac`, `device_type`, `brand`, `model`, `os`, `player`,
+`user_agent`, `auto_registered`, `blocked`, `seen_count`.
+
+API del panel (`requireAuth`; el modo exige `requireAdmin`):
+
+| Ruta | Qué hace |
+| --- | --- |
+| `GET /api/devices/registry` | modo, aparatos, activos, automáticos, por tipo, líneas por encima del cupo y canales con DRM antiguo |
+| `POST /api/devices/registry` | `{ mode }` → `off`/`monitor`/`enforce` |
+| `GET /api/lines/:id/devices` | aparatos de la línea con cupo y modo |
+| `POST /api/lines/:id/devices` | alta manual `{ mac, name }` |
+| `POST /api/lines/:id/devices/limit` | cupo de esa línea (0 = usar `max_connections`) |
+| `POST /api/lines/:id/devices/:deviceId/block` \| `/allow` | bloquea o libera |
+| `DELETE /api/lines/:id/devices/:deviceId` | borra la fila (se vuelve a registrar al conectar) |
+| `POST /api/lines/:id/devices/reset` | olvida todos los aparatos de la línea |
+| `POST /api/devices/undrm` | `{ action: 'preview' \| 'apply' }` quita el `drm` de Flussonic |
+
+CLI: `tvlister-admin devices [list | mode off|monitor|enforce | line <usuario> | block <usuario> <mac> | allow <usuario> <mac> | reset <usuario> | undrm [--apply]]`.
+El límite de conexiones simultáneas (`max_connections` y la tabla `active_connections`) sigue
+funcionando igual y es independiente de este registro.

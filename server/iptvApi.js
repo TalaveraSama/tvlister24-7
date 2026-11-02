@@ -6,8 +6,8 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
 import { getStreamBaseUrl } from './publicBase.js';
+import { resolveDeviceForLine } from './deviceRegistry.js';
 import { signToken } from './auth.js';
-import { getActiveDrm, getDrmSettings } from './drm.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit, checkCredentialGate, noteCredentialFailure, clearCredentialFailures } from './auth.js';
 import {
   registerDevice,
@@ -113,7 +113,20 @@ export function authenticateLine(username, password, req = null) {
       return { error: 'IP no autorizada para esta línea', code: 403 };
     }
   }
-  return { line };
+
+  // Registro de aparatos por MAC: el equipo se apunta solo en la primera
+  // conexión y, si la línea ya tiene su cupo lleno, se rechaza (sólo en modo
+  // `enforce`; por defecto `monitor` únicamente apunta y avisa).
+  const registry = resolveDeviceForLine(line, req, { ip: clientIp });
+  if (!registry.ok) {
+    return {
+      error: registry.message || 'Este aparato no está autorizado en la línea',
+      code: registry.code || 403,
+      device_error: registry.error,
+      registry_mode: registry.mode
+    };
+  }
+  return { line, device: registry.device || null, registry_mode: registry.mode };
 }
 
 function getAllowedIdSetsForLine(line) {
@@ -294,7 +307,7 @@ function rewriteHlsManifestForProxy(manifestText, manifestFinalUrl, proxyPrefix,
     if (/\.\/|^https?:\/\//.test(trimmed) || trimmed.startsWith('/')) {
       try {
         const u = new URL(absUrl);
-        if (u.pathname.startsWith('/drm/') || (selfPrefix && absUrl.startsWith(selfPrefix))) {
+        if (selfPrefix && absUrl.startsWith(selfPrefix)) {
           return absUrl;
         }
       } catch {
@@ -628,26 +641,6 @@ iptvRouter.get('/get.php', (req, res) => {
   const epgUrl = `${baseUrl}/xmltv.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
   const linesOut = [`#EXTM3U x-tvg-url="${epgUrl}"`];
 
-  // DRM: los canales protegidos con Widevine/PlayReady necesitan que el
-  // reproductor sepa a qué servidor de licencias pedir la licencia. Se emiten
-  // las líneas #KODIPROP que entienden Kodi, OTT Navigator, TiviMate y la app
-  // DRM, apuntando a nuestro proxy (con token de ESTA línea) y no al Flussonic.
-  const drmSettings = getDrmSettings();
-  const drmLicenseBase = `${baseUrl}/drm/license`;
-  const lineDrmToken = drmSettings.enabled ? signToken({ scope: 'drm_line', id: auth.line.id }) : '';
-  const drmProps = (streamId) => {
-    if (!drmSettings.enabled) return [];
-    const drm = getActiveDrm(streamId);
-    if (!drm || !drm.key_token) return [];
-    if (drm.mode !== 'widevine' && drm.mode !== 'playready') return [];
-    const type = drm.mode === 'playready' ? 'com.microsoft.playready' : 'com.widevine.alpha';
-    const url = `${drmLicenseBase}/${drm.key_token}${lineDrmToken ? `?t=${encodeURIComponent(lineDrmToken)}` : ''}`;
-    return [
-      `#KODIPROP:inputstream.adaptive.license_type=${type}`,
-      `#KODIPROP:inputstream.adaptive.license_key=${url}`
-    ];
-  };
-
   let chNo = 1;
   for (const s of streams) {
     const catchupAttr =
@@ -655,7 +648,6 @@ iptvRouter.get('/get.php', (req, res) => {
         ? ` catchup="default" catchup-days="${s.tv_archive_days}" catchup-source="${baseUrl}/timeshift/${encodeURIComponent(username)}/${encodeURIComponent(password)}/{duration}/{Y}-{m}-{d}:{H}-{M}/${s.id}.m3u8"`
         : '';
     const pubLogo = resolvePublicPosterUrl(s.logo_url, baseUrl);
-    linesOut.push(...drmProps(s.id));
     linesOut.push(
       `#EXTINF:-1 tvg-chno="${chNo++}" tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${pubLogo}"${catchupAttr} group-title="${s.category_name}",${s.name}`
     );
@@ -925,6 +917,16 @@ const handlePlayerApi = (req, res) => {
     });
   }
 
+  // DRM retirado (v2.6.15): se contesta con un error explícito para que la app
+  // deje de pedir licencias en vez de recibir una lista vacía.
+  if (action === 'get_drm') {
+    return res.status(410).json({
+      auth: 0,
+      error: 'drm_retired',
+      message: 'El DRM se ha retirado: el video no va cifrado. Quita esta llamada de la app.'
+    });
+  }
+
   if (action === 'unlink_device') {
     const deviceId = normalizeDeviceId(params.device_id);
     const token = String(params.device_token || req.headers['x-device-token'] || '').trim();
@@ -935,43 +937,6 @@ const handlePlayerApi = (req, res) => {
     const target = deviceId || check.row.device_id;
     const done = revokeDevice(line.id, target, 'app');
     return res.json({ auth: 1, unlinked: done, device_id: target });
-  }
-
-  // DRM: la app pide aquí la información de licencias de ESTA línea. Se
-  // devuelve el token firmado (no las cabeceras secretas: el proxy de TVLister
-  // las inyecta) y sólo los canales que la línea tiene permitidos.
-  if (action === 'get_drm') {
-    const drmCfg = getDrmSettings();
-    const lineToken = drmCfg.enabled ? signToken({ scope: 'drm_line', id: line.id }) : '';
-    const baseDrm = getStreamBaseUrl(req);
-    const items = [];
-    const pushItem = (streamId, kind, virtualId = null) => {
-      if (!drmCfg.enabled) return;
-      const drm = getActiveDrm(streamId);
-      if (!drm || !drm.key_token) return;
-      const q = lineToken ? `?t=${encodeURIComponent(lineToken)}` : '';
-      const isEme = drm.mode === 'widevine' || drm.mode === 'playready';
-      items.push({
-        stream_id: virtualId ?? streamId,
-        source_stream_id: streamId,
-        kind,
-        drm_type: drm.mode,
-        scheme: isEme ? 'widevine' : 'aes128',
-        license_type: isEme ? (drm.mode === 'playready' ? 'com.microsoft.playready' : 'com.widevine.alpha') : '',
-        license_url: isEme ? `${baseDrm}/drm/license/${drm.key_token}${q}` : '',
-        clearkey_url: `${baseDrm}/drm/clearkey/${drm.key_token}${q}`,
-        key_url: `${baseDrm}/drm/key/${drm.key_token}${q}`,
-        requires_eme: isEme
-      });
-    };
-    for (const s of streams) pushItem(s.id, 'live');
-    for (const ch of channels247) pushItem(ch.id, 'channel247', 10000 + ch.id);
-    return res.json({
-      drm_enabled: drmCfg.enabled,
-      line: line.username,
-      token_ttl_seconds: 7 * 24 * 3600,
-      streams: items
-    });
   }
 
   if (action === 'get_live_categories') {

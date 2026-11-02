@@ -49,6 +49,10 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
   const [sessionsLineId, setSessionsLineId] = useState(null);
   const [devicesLineId, setDevicesLineId] = useState(null);
   const [devicesState, setDevicesState] = useState({ loading: false, list: [], meta: null });
+  const [registry, setRegistry] = useState(null);
+  const [newDeviceMac, setNewDeviceMac] = useState('');
+  const [newDeviceName, setNewDeviceName] = useState('');
+  const [savingMode, setSavingMode] = useState(false);
   const [copiedKey, setCopiedKey] = useState('');
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -96,8 +100,13 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
 
   useEffect(() => {
     loadAll();
+    loadRegistry();
     const timer = setInterval(loadLinesOnly, 6000);
-    return () => clearInterval(timer);
+    const registryTimer = setInterval(loadRegistry, 30000);
+    return () => {
+      clearInterval(timer);
+      clearInterval(registryTimer);
+    };
   }, []);
 
   const openCreate = (deviceType = 'm3u') => {
@@ -191,12 +200,37 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
     await loadLinesOnly();
   };
 
+  const loadRegistry = async () => {
+    try {
+      const r = await apiFetch('/api/devices/registry');
+      setRegistry(r);
+    } catch {
+      /* el resumen es informativo: si falla, la página sigue funcionando */
+    }
+  };
+
+  const changeRegistryMode = async (mode) => {
+    setSavingMode(true);
+    try {
+      await apiFetch('/api/devices/registry', { method: 'POST', body: JSON.stringify({ mode }) });
+      await loadRegistry();
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setSavingMode(false);
+    }
+  };
+
   const openDevices = async (line) => {
     setDevicesLineId(line.id);
     setDevicesState({ loading: true, list: [], meta: null });
     try {
       const d = await apiFetch(`/api/lines/${line.id}/devices`);
-      setDevicesState({ loading: false, list: d.devices || [], meta: d.line });
+      setDevicesState({
+        loading: false,
+        list: d.devices || [],
+        meta: { ...d.line, mode: d.mode, allowed: d.line?.allowed ?? d.line?.device_limit_effective }
+      });
     } catch (err) {
       setDevicesState({ loading: false, list: [], meta: null });
       window.alert(err.message);
@@ -207,39 +241,49 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
     if (!devicesLineId) return;
     try {
       const d = await apiFetch(`/api/lines/${devicesLineId}/devices`);
-      setDevicesState({ loading: false, list: d.devices || [], meta: d.line });
+      setDevicesState({
+        loading: false,
+        list: d.devices || [],
+        meta: { ...d.line, mode: d.mode, allowed: d.line?.allowed ?? d.line?.device_limit_effective }
+      });
     } catch {
       /* polling silencioso */
     }
   };
 
-  const toggleDeviceLock = async (enabled) => {
+  const setDeviceLimit = async (next) => {
     if (!devicesLineId) return;
-    const limit = devicesState.meta?.device_limit || 1;
-    const r = await apiFetch(`/api/lines/${devicesLineId}/device-lock`, {
+    const limit = Math.max(0, Math.min(20, Number(next) || 0));
+    const r = await apiFetch(`/api/lines/${devicesLineId}/devices/limit`, {
       method: 'POST',
-      body: JSON.stringify({ enabled, limit })
+      body: JSON.stringify({ limit })
     });
     setDevicesState((prev) => ({
       ...prev,
-      meta: { ...prev.meta, device_lock: r.device_lock, device_limit: r.device_limit }
+      meta: {
+        ...prev.meta,
+        device_limit: r.device_limit,
+        device_limit_effective: r.device_limit_effective,
+        allowed: r.device_limit_effective
+      }
     }));
     await loadLinesOnly();
   };
 
-  const setDeviceLimit = async (next) => {
+  const blockDevice = async (deviceId) => {
     if (!devicesLineId) return;
-    const limit = Math.max(1, Math.min(20, Number(next) || 1));
-    const r = await apiFetch(`/api/lines/${devicesLineId}/device-lock`, {
-      method: 'POST',
-      body: JSON.stringify({ enabled: devicesState.meta?.device_lock, limit })
+    if (!window.confirm(`¿Bloquear el aparato "${deviceId}"? Se le corta la sesión y no podrá volver a conectar.`))
+      return;
+    await apiFetch(`/api/lines/${devicesLineId}/devices/${encodeURIComponent(deviceId)}/block`, {
+      method: 'POST'
     });
-    setDevicesState((prev) => ({ ...prev, meta: { ...prev.meta, device_limit: r.device_limit } }));
+    await refreshDevices();
+    await loadLinesOnly();
   };
 
-  const revokeDevice = async (deviceId) => {
+  const removeDevice = async (deviceId) => {
     if (!devicesLineId) return;
-    if (!window.confirm(`¿Desvincular el aparato "${deviceId}"? Su sesión se corta al instante.`))
+    if (!window.confirm(`¿Borrar el aparato "${deviceId}" del registro? Se volverá a registrar con la próxima conexión.`))
       return;
     await apiFetch(`/api/lines/${devicesLineId}/devices/${encodeURIComponent(deviceId)}`, {
       method: 'DELETE'
@@ -256,9 +300,27 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
     await refreshDevices();
   };
 
+  const addDevice = async () => {
+    if (!devicesLineId) return;
+    const mac = newDeviceMac.trim();
+    if (!mac) return;
+    try {
+      await apiFetch(`/api/lines/${devicesLineId}/devices`, {
+        method: 'POST',
+        body: JSON.stringify({ mac, name: newDeviceName.trim() })
+      });
+      setNewDeviceMac('');
+      setNewDeviceName('');
+      await refreshDevices();
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
   const resetDevices = async () => {
     if (!devicesLineId) return;
-    if (!window.confirm('¿Desvincular TODOS los aparatos de esta línea?')) return;
+    if (!window.confirm('¿Borrar TODOS los aparatos registrados de esta línea? Se volverán a registrar al conectar.'))
+      return;
     await apiFetch(`/api/lines/${devicesLineId}/devices/reset`, { method: 'POST' });
     await refreshDevices();
     await loadLinesOnly();
@@ -403,6 +465,68 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
           />
         </div>
       </div>
+
+      {/* Registro de aparatos por MAC (sustituye al DRM) */}
+      {registry && (
+        <div className="flex flex-wrap items-center gap-3 px-4 py-3 rounded-2xl bg-[#0e1526] border border-slate-800/80 text-xs">
+          <span className="flex items-center gap-1.5 font-semibold text-white">
+            <Cpu className="w-4 h-4 text-cyan-400" /> Registro de aparatos
+          </span>
+          <span
+            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
+              registry.mode === 'enforce'
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                : registry.mode === 'monitor'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            {registry.mode === 'enforce' ? 'Bloquear' : registry.mode === 'monitor' ? 'Sólo registrar' : 'Apagado'}
+          </span>
+          <span className="text-slate-400">
+            <span className="text-white font-semibold">{registry.active}</span> activos de{' '}
+            {registry.devices} registrados
+          </span>
+          <span className="text-slate-500">
+            {registry.auto} automáticos
+            {Array.isArray(registry.byType) && registry.byType.length > 0
+              ? ` • ${registry.byType
+                  .slice(0, 4)
+                  .map((t) => `${t.type} ${t.n}`)
+                  .join(' · ')}`
+              : ''}
+          </span>
+          {registry.linesOverLimit?.length > 0 && (
+            <span className="px-2 py-0.5 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-semibold">
+              {registry.linesOverLimit.length} línea(s) por encima del cupo
+            </span>
+          )}
+          {registry.drm_legacy?.length > 0 && (
+            <span
+              className="px-2 py-0.5 rounded-lg bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-semibold"
+              title="Canales que todavía tienen el bloque drm en Flussonic. Quítalo con: tvlister-admin devices undrm --apply"
+            >
+              {registry.drm_legacy.length} canal(es) con DRM antiguo en Flussonic
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-1">
+            {['off', 'monitor', 'enforce'].map((m) => (
+              <button
+                key={m}
+                onClick={() => changeRegistryMode(m)}
+                disabled={savingMode || registry.mode === m}
+                className={`px-2.5 py-1 rounded-lg font-semibold border ${
+                  registry.mode === m
+                    ? 'bg-cyan-500/20 text-cyan-200 border-cyan-500/40'
+                    : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                }`}
+              >
+                {m === 'off' ? 'Apagado' : m === 'monitor' ? 'Sólo registrar' : 'Bloquear'}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Lines Table with Real-Time IP, Player Agent & ISP */}
       <div className="rounded-2xl bg-[#0e1526] border border-slate-800/80 overflow-hidden">
@@ -614,15 +738,11 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                           <button
                             onClick={() => openDevices(l)}
                             className={`p-1.5 rounded-lg ${
-                              l.device_lock
+                              (l.device_count || 0) > 0
                                 ? 'bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300'
                                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
                             }`}
-                            title={
-                              l.device_lock
-                                ? `Aparatos vinculados (bloqueo activo, ${l.device_count ?? 0})`
-                                : 'Aparatos / anti-compartición'
-                            }
+                            title={`Aparatos registrados por MAC (${l.device_count ?? 0})`}
                           >
                             <Smartphone className="w-3.5 h-3.5" />
                           </button>
@@ -982,14 +1102,14 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
       {/* Aparatos vinculados (anti-compartición) */}
       {devicesLineId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
-          <div className="w-full max-w-3xl rounded-2xl bg-[#0e1526] border border-slate-800 overflow-hidden shadow-2xl">
+          <div className="w-full max-w-4xl rounded-2xl bg-[#0e1526] border border-slate-800 overflow-hidden shadow-2xl">
             {(() => {
               const lineInfo = lines.find((x) => x.id === devicesLineId);
-              const meta = devicesState.meta || {
-                device_lock: Boolean(lineInfo?.device_lock),
-                device_limit: lineInfo?.device_limit || 1
-              };
-              const active = devicesState.list.filter((d) => d.status === 'active');
+              const meta = devicesState.meta || {};
+              const active = devicesState.list.filter((d) => d.status === 'active' && !d.blocked);
+              const allowed = meta.allowed || meta.device_limit_effective || meta.max_connections || 1;
+              const mode = meta.mode || registry?.mode || 'monitor';
+              const overLimit = active.length > allowed;
               return (
                 <>
                   <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
@@ -999,8 +1119,21 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                         {lineInfo?.username || 'la línea'}
                       </h3>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        {active.length} vinculado(s) de {meta.device_limit} permitido(s) •{' '}
-                        {meta.device_lock ? 'bloqueo ACTIVO' : 'bloqueo desactivado'}
+                        <span className={overLimit ? 'text-amber-300 font-semibold' : 'text-white font-semibold'}>
+                          {active.length}
+                        </span>{' '}
+                        aparato(s) de {allowed} permitido(s) • modo{' '}
+                        <span
+                          className={
+                            mode === 'enforce'
+                              ? 'text-emerald-300 font-semibold'
+                              : mode === 'monitor'
+                                ? 'text-amber-300 font-semibold'
+                                : 'text-slate-400 font-semibold'
+                          }
+                        >
+                          {mode === 'enforce' ? 'BLOQUEAR' : mode === 'monitor' ? 'SÓLO REGISTRAR' : 'APAGADO'}
+                        </span>
                       </p>
                     </div>
                     <button onClick={() => setDevicesLineId(null)} className="text-slate-400 hover:text-white">
@@ -1010,99 +1143,208 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
 
                   <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
                     <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-[#090e1a] border border-slate-800">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(meta.device_lock)}
-                          onChange={(e) => toggleDeviceLock(e.target.checked)}
-                          className="w-4 h-4 accent-cyan-500"
-                        />
-                        <span className="text-slate-200 font-semibold">
-                          Exigir aparato vinculado para reproducir
-                        </span>
-                      </label>
-                      <span className="text-[10px] text-slate-500">
-                        Afecta a /live, /movie y /series. La lista M3U y la API siguen abiertas.
-                      </span>
-                      <div className="ml-auto flex items-center gap-2">
-                        <span className="text-slate-400">Aparatos permitidos</span>
+                      <span className="text-slate-300 font-semibold">Cupo de aparatos de esta línea</span>
+                      <div className="flex items-center gap-2">
                         <input
                           type="number"
-                          min="1"
+                          min="0"
                           max="20"
-                          value={meta.device_limit}
+                          value={meta.device_limit ?? 0}
                           onChange={(e) => setDeviceLimit(e.target.value)}
                           className="w-16 px-2 py-1 rounded-lg bg-[#0e1526] border border-slate-800 text-white"
                         />
+                        <span className="text-[10px] text-slate-500">
+                          {Number(meta.device_limit) > 0
+                            ? 'cupo propio de la línea'
+                            : `0 = usar las conexiones de la línea (${meta.max_connections || 1})`}
+                        </span>
                       </div>
+                      <div className="ml-auto flex items-center gap-2">
+                        {['off', 'monitor', 'enforce'].map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => changeRegistryMode(m)}
+                            disabled={savingMode || mode === m}
+                            className={`px-2.5 py-1 rounded-lg font-semibold border ${
+                              mode === m
+                                ? 'bg-cyan-500/20 text-cyan-200 border-cyan-500/40'
+                                : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                            }`}
+                            title={
+                              m === 'off'
+                                ? 'No se registra ni se corta a nadie'
+                                : m === 'monitor'
+                                  ? 'Se registra y se avisa, pero no se corta'
+                                  : 'Se corta al aparato que pase del cupo'
+                            }
+                          >
+                            {m === 'off' ? 'Apagado' : m === 'monitor' ? 'Sólo registrar' : 'Bloquear'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-slate-500 -mt-2">
+                      El modo es global: se aplica a todas las líneas. «Sólo registrar» deja ver qué
+                      aparatos entran sin cortar a ningún cliente. Empieza así y cambia a «Bloquear»
+                      cuando el registro esté completo.
+                    </p>
+
+                    {meta.device_lock && (
+                      <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-amber-500/5 border border-amber-500/30">
+                        <span className="text-amber-200 font-semibold">
+                          Esta línea exige el token de la app propia (bloqueo antiguo)
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          Con esto activo, los reproductores que no sean la app de TVLister reciben
+                          403. Se desactiva aquí si el cliente usa TiviMate, VLC o una TV.
+                        </span>
+                        <button
+                          onClick={async () => {
+                            await apiFetch(`/api/lines/${devicesLineId}/device-lock`, {
+                              method: 'POST',
+                              body: JSON.stringify({ enabled: false })
+                            });
+                            await refreshDevices();
+                          }}
+                          className="ml-auto px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 font-semibold"
+                        >
+                          Desactivar ese bloqueo
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-2 p-3 rounded-xl bg-[#090e1a] border border-slate-800">
+                      <span className="text-slate-300 font-semibold">Alta manual</span>
+                      <input
+                        value={newDeviceMac}
+                        onChange={(e) => setNewDeviceMac(e.target.value)}
+                        placeholder="AA:BB:CC:DD:EE:FF"
+                        className="w-48 px-2 py-1 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                      />
+                      <input
+                        value={newDeviceName}
+                        onChange={(e) => setNewDeviceName(e.target.value)}
+                        placeholder="Nombre (TV salón)"
+                        className="w-40 px-2 py-1 rounded-lg bg-[#0e1526] border border-slate-800 text-white"
+                      />
+                      <button
+                        onClick={addDevice}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 font-semibold"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Añadir
+                      </button>
                     </div>
 
                     {devicesState.loading ? (
                       <div className="p-6 text-center text-slate-400">Cargando aparatos…</div>
                     ) : devicesState.list.length === 0 ? (
                       <div className="p-8 text-center text-slate-400 bg-[#090e1a] rounded-xl border border-slate-800">
-                        Esta línea todavía no tiene aparatos vinculados. La app los registra sola con
-                        <span className="font-mono text-indigo-300"> action=register_device</span>.
+                        Esta línea todavía no tiene aparatos apuntados. En cuanto el cliente abra la
+                        lista M3U o su app Xtream, el aparato se registra solo (MAC, tipo, marca,
+                        modelo, sistema y reproductor).
                       </div>
                     ) : (
                       <div className="space-y-2">
                         {devicesState.list.map((d) => (
                           <div
                             key={d.device_id}
-                            className={`p-3 rounded-xl border flex flex-wrap items-center gap-3 ${
-                              d.status === 'active'
-                                ? 'bg-[#090e1a] border-emerald-500/25'
-                                : 'bg-[#090e1a] border-rose-500/25 opacity-70'
+                            className={`p-3 rounded-xl border ${
+                              d.blocked
+                                ? 'bg-[#090e1a] border-rose-500/40 opacity-80'
+                                : d.status === 'active'
+                                  ? 'bg-[#090e1a] border-emerald-500/25'
+                                  : 'bg-[#090e1a] border-amber-500/25 opacity-80'
                             }`}
                           >
-                            <div className="min-w-0">
-                              <div className="text-white font-semibold truncate">
-                                {d.device_name || d.device_id}
-                              </div>
-                              <div className="font-mono text-[10px] text-slate-500 truncate">
-                                {d.device_id}
-                              </div>
-                            </div>
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
-                                {d.ip || 'sin IP'}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-white font-semibold">
+                                {d.mac || d.device_id}
                               </span>
-                              {d.platform && (
-                                <span className="px-2 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30 text-[10px]">
-                                  {d.platform}
-                                  {d.app_version ? ` ${d.app_version}` : ''}
+                              {d.auto_registered && (
+                                <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 text-[10px]">
+                                  AUTO
                                 </span>
                               )}
-                              <span className="text-[10px] text-slate-500">
-                                visto: {d.last_seen}
-                              </span>
+                              {d.device_type && (
+                                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] uppercase">
+                                  {d.device_type}
+                                </span>
+                              )}
                               <span
-                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                                  d.status === 'active'
-                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                  d.blocked
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                    : d.status === 'active'
+                                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                      : d.status === 'pending'
+                                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                        : 'bg-slate-800 text-slate-400 border border-slate-700'
                                 }`}
                               >
-                                {d.status === 'active' ? 'ACTIVO' : 'DESVINCULADO'}
+                                {d.blocked
+                                  ? 'BLOQUEADO'
+                                  : d.status === 'active'
+                                    ? 'ACTIVO'
+                                    : d.status === 'pending'
+                                      ? 'PENDIENTE'
+                                      : 'LIBERADO'}
                               </span>
                             </div>
-                            <div className="ml-auto">
-                              {d.status === 'active' ? (
-                                <button
-                                  onClick={() => revokeDevice(d.device_id)}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 font-semibold"
-                                >
-                                  <PowerOff className="w-3.5 h-3.5" /> Desvincular
-                                </button>
-                              ) : (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-400">
+                              {[d.brand, d.model].filter(Boolean).length > 0 && (
+                                <span>
+                                  <span className="text-slate-500">Equipo:</span>{' '}
+                                  {[d.brand, d.model].filter(Boolean).join(' ')}
+                                </span>
+                              )}
+                              {d.os && (
+                                <span>
+                                  <span className="text-slate-500">Sistema:</span> {d.os}
+                                </span>
+                              )}
+                              {d.player && (
+                                <span>
+                                  <span className="text-slate-500">Reproductor:</span> {d.player}
+                                </span>
+                              )}
+                              <span>
+                                <span className="text-slate-500">IP:</span> {d.ip || 'sin IP'}
+                              </span>
+                              <span>
+                                <span className="text-slate-500">Visto:</span> {d.last_seen}
+                              </span>
+                              <span>
+                                <span className="text-slate-500">Veces:</span> {d.seen_count}
+                              </span>
+                            </div>
+                            {d.user_agent && (
+                              <div className="mt-1 font-mono text-[9px] text-slate-600 truncate">
+                                {d.user_agent}
+                              </div>
+                            )}
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {d.blocked || d.status !== 'active' ? (
                                 <button
                                   onClick={() => allowDevice(d.device_id)}
                                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 font-semibold"
-                                  title={`Desvinculado el ${d.revoked_at || ''} — permitir de nuevo`}
                                 >
-                                  <Check className="w-3.5 h-3.5" /> Permitir de nuevo
+                                  <Check className="w-3.5 h-3.5" /> Permitir
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => blockDevice(d.device_id)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 font-semibold"
+                                >
+                                  <ShieldAlert className="w-3.5 h-3.5" /> Bloquear
                                 </button>
                               )}
+                              <button
+                                onClick={() => removeDevice(d.device_id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+                                title="Borra la fila: el aparato se vuelve a registrar solo al conectar"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" /> Borrar
+                              </button>
                             </div>
                           </div>
                         ))}
@@ -1111,8 +1353,9 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
 
                     <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">
                       <p className="text-[10px] text-slate-500 max-w-lg">
-                        Al desvincular un aparato, su token deja de valer aunque no haya caducado y se
-                        cortan sus sesiones activas.
+                        El aparato se identifica por su MAC; si la app no la envía, por huella de
+                        modelo + sistema + reproductor. Bloquear corta la sesión al instante; borrar
+                        sólo limpia el registro.
                       </p>
                       <div className="flex gap-2">
                         <button
@@ -1125,7 +1368,7 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                           onClick={resetDevices}
                           className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 font-semibold"
                         >
-                          <PowerOff className="w-3.5 h-3.5" /> Desvincular todos
+                          <PowerOff className="w-3.5 h-3.5" /> Limpiar todos
                         </button>
                       </div>
                     </div>

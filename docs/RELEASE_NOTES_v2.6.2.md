@@ -7,7 +7,7 @@ Tu pregunta, respondida sin adornos:
 | **AES-128 / SAMPLE-AES / ClearKey** | **TVLister** | **Sí, ya lo hace** | 0 |
 | **Widevine / PlayReady** | Google / Microsoft o un partner autorizado | **No** (ningún panel puede) | Proveedor o acuerdo |
 
-Documento completo: **`docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`**.
+Documento completo: **`docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`** (*eliminado en v2.6.15*: el DRM se retiró del producto).
 
 ## Por qué Widevine no lo puede emitir un panel
 

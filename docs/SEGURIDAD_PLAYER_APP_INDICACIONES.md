@@ -18,7 +18,7 @@ esto, sigue funcionando igual; lo que se pierde es el control por aparato y el b
 | 1 | `/live/...` y `player_api.php` aceptaban intentos de contraseña sin límite | 20 fallos por IP en 10 min ⇒ `429` durante 10 min | Leer `Retry-After` y **no** reintentar en bucle |
 | 2 | No había forma de atar una línea a un aparato | `action=register_device` + `X-Device-Token` | Registrar el aparato una vez y mandar la cabecera |
 | 3 | Desvincular = cambiar la contraseña a todos | `action=unlink_device` y panel con «Desvincular» | Ofrecer «Desvincular este aparato» en ajustes |
-| 4 | La app podía pedir licencias DRM | `action=get_drm` (igual, pero con `error` explícito) | Usar `key_url`/`clearkey_url` como vienen, sin tocar |
+| 4 | La app podía pedir licencias DRM | **retirado**: `action=get_drm` ya no existe | Quitar la llamada; el video va sin cifrar |
 | 5 | Vista previa del panel aceptaba cualquier token | ahora exige admin | No aplica a la app (no usar `/api/admin/*`) |
 | 6 | CORS del panel reflejaba cualquier origen | sólo mismo host / lista blanca | No aplica (la app es nativa, no manda `Origin`) |
 
@@ -35,7 +35,7 @@ siguen con el mismo contrato. **No hay que reescribir el reproductor.**
 | `password` | Sí (Xtream la exige en cada llamada) | `EncryptedSharedPreferences` | mientras haya sesión |
 | `device_token` | Sí | `EncryptedSharedPreferences` | 30 días |
 | `device_id` | Sí (estable) | `EncryptedSharedPreferences` + copia en `SharedPreferences` para sobrevivir a la reinstalación del keystore | permanente |
-| Claves DRM / `key_url` | **No** | — | se piden en cada reproducción |
+| Claves DRM / `key_url` | **No** | — | ya no existen: el video no va cifrado |
 
 Reglas:
 
@@ -279,33 +279,17 @@ cambio lo da de baja el panel, ese aparato queda vetado y hay que pedir que lo �
 
 ---
 
-## 11. DRM (si la línea tiene canales cifrados)
+## 11. DRM: retirado (ya no hay canales cifrados)
 
-`GET {base}/player_api.php?username=..&password=..&action=get_drm`
-
-```json
-{ "drm_enabled": true, "line": "cliente1", "token_ttl_seconds": 604800,
-  "streams": [ { "stream_id": 12, "source_stream_id": 12, "kind": "live",
-                 "drm_type": "aes128", "scheme": "aes128", "license_type": "",
-                 "license_url": "", "clearkey_url": "https://panel/drm/clearkey/TOK?t=JWT",
-                 "key_url": "https://panel/drm/key/TOK?t=JWT", "requires_eme": false } ] }
-```
-
-- `drm_type: aes128` (y `sample_aes`): **no hay que programar nada**. ExoPlayer lee
-  `#EXT-X-KEY` del manifiesto y pide la clave a `key_url`, que ya lleva su token. Lo único
-  obligatorio: **no cachear** esa respuesta y **no** guardar la clave en disco.
-- `drm_type: clearkey` → `MediaDrm`/`requires_eme` con `clearkey_url`. La clave rota cada **10
-  minutos** (Flussonic): hay que dejar que el reproductor la vuelva a pedir, no fijarla.
-- `drm_type: widevine`/`playready` → `license_url` + `license_type` (`com.widevine.alpha` /
-  `com.microsoft.playready`). Si el panel devuelve `requires_eme: true` y la app no implementa EME,
-  mostrar «Este contenido requiere un reproductor compatible» — **no** intentar descifrar.
-- Nunca embeber claves, ni `kid`, ni seeds en el APK. El panel entrega URL, no secretos.
-- Si `key_url` responde `403`, el token de la línea caducó o se revocó: refrescar `get_drm` una vez
-  y, si sigue, parar.
-
-Referencia de implementación del servidor de claves: `docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`.
-
----
+> **v2.6.15 — el DRM se ha eliminado del producto.** No hay AES-128, ni ClearKey, ni licencias
+> Widevine/PlayReady, ni `action=get_drm`: esa acción ya no existe: `/drm/*` y `action=get_drm` responden **410 Gone**
+> con `error: "drm_retired"`. Si tu
+> app la llama, recibe error: quita esa llamada.
+>
+> La protección actual es el **registro de aparatos por MAC**: no cambia nada en el reproductor. La
+> app sigue pidiendo `/live/{user}/{pass}/{id}.m3u8` como siempre; si el aparato pasa del cupo de
+> la línea, el panel responde `403` con un texto explicativo. Detalle completo en
+> [`REGISTRO_APARATOS_MAC.md`](REGISTRO_APARATOS_MAC.md).
 
 ## 12. Almacenamiento y red: lo que la app debe cumplir
 
@@ -454,8 +438,8 @@ Nada de esto lo debe hacer la app; es la parte del operador:
 > `429 Retry-After` y usando `server_time`/`exp_date` del panel en vez del reloj local; (4)
 > `action=unlink_device` en Ajustes; (5) HTTPS obligatorio con certificate pinning de dos pines y
 > `expiration`, sin `TrustManager` permisivo; (6) ningún log, analítica ni backup con credenciales o
-> tokens. No cambies las URLs de reproducción ni implementes DRM propio: `/live` sigue igual y las
-> claves las entrega el panel. Antes de entregar, pasa la tabla de pruebas de §14 y mándame la salida.
+> tokens. No cambies las URLs de reproducción ni implementes DRM propio: `/live` sigue igual y el
+> panel no cifra el video. Antes de entregar, pasa la tabla de pruebas de §14 y mándame la salida.
 
 ---
 
@@ -480,11 +464,9 @@ GET /live/{user}/{pass}/{id}.m3u8   Header: X-Device-Token (si device_lock)
 GET /movie/{user}/{pass}/{id}.mp4   Header: X-Device-Token (si device_lock)
 GET /series/{user}/{pass}/{id}.mp4  Header: X-Device-Token (si device_lock)
   403 device_required | device_invalid | device_revoked
+  403 device_limit     (la línea ya tiene su cupo de aparatos registrados)
+  403 device_blocked   (ese aparato está bloqueado en el panel)
   429 límite de conexiones (cuerpo de texto)
-
-GET /player_api.php?action=get_drm
-  200 { drm_enabled, token_ttl_seconds, streams[{ stream_id, drm_type, scheme, license_type,
-        license_url, clearkey_url, key_url, requires_eme }] }
 
 Errores globales: 429 + Retry-After (rate limit) · 401 credenciales · 403 línea
 suspendida/expirada/IP no autorizada · 503 canal sin fuente

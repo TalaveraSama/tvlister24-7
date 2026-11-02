@@ -4,11 +4,13 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 📖 **[Manual Completo del Panel, Guía de Uso y Tecnología (`docs/DOCUMENTACION_SISTEMA.md`)](docs/DOCUMENTACION_SISTEMA.md)**
 
-🔐 **DRM**: TVLister hace de **servidor de claves (CAS)** de Flussonic (AES-128 con rotación cada
-10 min) y de **proxy de licencias** Widevine/PlayReady. En el panel: *DRM & Claves*. En terminal:
-`tvlister-admin drm`. Integración en apps: **[`docs/INTEGRACION_DRM_APP.md`](docs/INTEGRACION_DRM_APP.md)**
-y contrato JSON en [`docs/drm_api_contract.json`](docs/drm_api_contract.json).
-¿Quién emite cada clave? [`docs/DRM_QUIEN_EMITE_LAS_CLAVES.md`](docs/DRM_QUIEN_EMITE_LAS_CLAVES.md).
+🔐 **Protección sin cifrado — registro de aparatos por MAC**: el DRM se ha **retirado** (v2.6.15).
+Cada aparato que se conecta se auto-registra con su MAC (o una huella estable si la app no la
+envía), el panel identifica tipo, marca, modelo, sistema y reproductor, y la línea admite tantos
+aparatos como conexiones tenga (`max_connections`, o un `device_limit` propio). El que sobra se
+rechaza con `403` en modo *bloquear*; por defecto sólo se registra. Funciona con lista M3U, apps
+Xtream/XUI, MAG/Stalker y Enigma2 **sin tocar la app**. En el panel: botón *aparatos* de cada línea;
+en terminal: `tvlister-admin devices`. Guía: **[`docs/REGISTRO_APARATOS_MAC.md`](docs/REGISTRO_APARATOS_MAC.md)**.
 
 ---
 

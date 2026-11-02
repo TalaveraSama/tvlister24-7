@@ -107,11 +107,23 @@ import {
   getSegmentMissStats,
   getPrebufferStats
 } from './iptvApi.js';
-import { listLineDevices, publicDevice, revokeDevice, resetLineDevices, allowDeviceAgain } from './devices.js';
+import { listLegacyDrmStreams, removeDrmFromFlussonic } from './drmCleanup.js';
+import {
+  addDeviceManually,
+  deviceLimitFor,
+  getRegistryMode,
+  listLineDevices,
+  publicDevice,
+  registryOverview,
+  removeDeviceRow,
+  resetLineDevices,
+  setDeviceStatus,
+  setRegistryMode,
+  bumpRegistryVersion
+} from './deviceRegistry.js';
 import { computeRecommendation, applyRecommendation } from './tune.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
-import { drmRouter, drmAdminRouter } from './drm.js';
 import { headendRouter } from './headendManager.js';
 import { flussonic2312Router } from './flussonic2312Manager.js';
 import { wk2500Router, resumeEnabledWk2500Channels, stopAllWk2500Workers } from './wk2500Manager.js';
@@ -186,7 +198,7 @@ app.set('trust proxy', true);
 //     TVs y la app (que no mandan cabecera Origin).
 //   - API del panel: sólo el mismo host del panel (o los orígenes que se
 //     declaren en CORS_ALLOWED_ORIGINS), con credenciales.
-const PLAYER_CORS_PREFIXES = ['/player_api.php', '/panel_api.php', '/get.php', '/xmltv.php', '/live/', '/movie/', '/series/', '/mnf/', '/drm/', '/hls_proxy/', '/webtv', '/timeshift', '/archive_seg/'];
+const PLAYER_CORS_PREFIXES = ['/player_api.php', '/panel_api.php', '/get.php', '/xmltv.php', '/live/', '/movie/', '/series/', '/mnf/', '/hls_proxy/', '/webtv', '/timeshift', '/archive_seg/'];
 const extraOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
@@ -235,7 +247,7 @@ app.use((req, res, next) => {
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
   // Los manifiestos y las claves no se cachean: un enlace caducado no debe
   // seguir funcionando desde la caché del navegador.
-  if (/^\/(drm|live|hls_proxy|hls_out|webtv_play|webtv_vod|webtv_series|timeshift|archive_seg)\//.test(req.path)) {
+  if (/^\/(live|hls_proxy|hls_out|webtv_play|webtv_vod|webtv_series|timeshift|archive_seg)\//.test(req.path)) {
     res.setHeader('Cache-Control', 'no-store');
   }
   next();
@@ -283,11 +295,6 @@ app.get('/api/health', (_req, res) => {
     res.status(500).json({ status: 'error', error: err.message });
   }
 });
-
-// DRM / CAS: Flussonic pide aquí las claves y el jugador las recibe por /drm/key.
-// Va antes de todo para que la puerta de códigos de acceso no lo bloquee.
-app.use(drmRouter);
-app.use(drmAdminRouter);
 
 // Mount Stalker / Ministra MAG STB Middleware (/c/, /stalker_portal/c/, /server/load.php)
 app.use(stalkerRouter);
@@ -3039,38 +3046,77 @@ app.get('/api/lines/:id/devices', requireAuth, (req, res) => {
     line: {
       id: line.id,
       username: line.username,
+      device_limit: Number(line.device_limit) || 0,
+      device_limit_effective: deviceLimitFor(line),
+      max_connections: line.max_connections,
       device_lock: Number(line.device_lock) === 1,
-      device_limit: Number(line.device_limit) || 1,
-      max_connections: line.max_connections
+      allowed: deviceLimitFor(line)
     },
+    mode: getRegistryMode(),
     devices: listLineDevices(line.id).map(publicDevice)
   });
 });
 
+// Alta manual: para aparatos que no mandan MAC (o para reservar el hueco antes
+// de que el cliente encienda el equipo).
+app.post('/api/lines/:id/devices', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  try {
+    const device = addDeviceManually(line.id, {
+      mac: req.body?.mac,
+      name: req.body?.name,
+      type: req.body?.type
+    });
+    res.json({ ok: true, device });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Bloqueo antiguo de la app propia (`device_lock`): sigue disponible para las
+// líneas que ya lo tenían activo; no tiene nada que ver con el registro por MAC.
 app.post('/api/lines/:id/device-lock', requireAuth, (req, res) => {
   const line = loadLineForAdmin(req, res);
   if (!line) return;
   const enabled = req.body?.enabled ? 1 : 0;
-  const limit = Math.max(1, Math.min(20, Number(req.body?.limit) || Number(line.device_limit) || 1));
-  db.prepare('UPDATE lines SET device_lock = ?, device_limit = ? WHERE id = ?').run(enabled, limit, line.id);
-  res.json({ ok: true, device_lock: enabled === 1, device_limit: limit });
+  db.prepare('UPDATE lines SET device_lock = ? WHERE id = ?').run(enabled, line.id);
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, device_lock: enabled === 1 });
 });
 
-app.delete('/api/lines/:id/devices/:deviceId', requireAuth, (req, res) => {
+// Cupo de aparatos de la línea. 0 = usar `max_connections`.
+app.post('/api/lines/:id/devices/limit', requireAuth, (req, res) => {
   const line = loadLineForAdmin(req, res);
   if (!line) return;
-  // 'panel' = veto: ese aparato no se vuelve a vincular solo (el cliente tiene
-  // que llamar). Un reset masivo sí permite volver a vincularse.
-  const done = revokeDevice(line.id, req.params.deviceId, 'panel');
-  kickAllLineConnections(line.id);
-  res.json({ ok: true, revoked: done, device_id: req.params.deviceId });
+  const raw = Number(req.body?.limit);
+  const limit = Number.isFinite(raw) ? Math.max(0, Math.min(20, Math.trunc(raw))) : 0;
+  db.prepare('UPDATE lines SET device_limit = ? WHERE id = ?').run(limit, line.id);
+  bumpRegistryVersion();
+  res.json({ ok: true, device_limit: limit, device_limit_effective: deviceLimitFor({ ...line, device_limit: limit }) });
 });
 
 app.post('/api/lines/:id/devices/:deviceId/allow', requireAuth, (req, res) => {
   const line = loadLineForAdmin(req, res);
   if (!line) return;
-  const ok = allowDeviceAgain(line.id, req.params.deviceId);
+  const ok = setDeviceStatus(line.id, req.params.deviceId, 'active');
   res.json({ ok, device_id: req.params.deviceId });
+});
+
+app.post('/api/lines/:id/devices/:deviceId/block', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  setDeviceStatus(line.id, req.params.deviceId, 'blocked');
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, device_id: req.params.deviceId, blocked: true });
+});
+
+app.delete('/api/lines/:id/devices/:deviceId', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const done = removeDeviceRow(line.id, req.params.deviceId);
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, removed: done, device_id: req.params.deviceId });
 });
 
 app.post('/api/lines/:id/devices/reset', requireAuth, (req, res) => {
@@ -3079,6 +3125,56 @@ app.post('/api/lines/:id/devices/reset', requireAuth, (req, res) => {
   const n = resetLineDevices(line.id);
   kickAllLineConnections(line.id);
   res.json({ ok: true, revoked: n });
+});
+
+// El DRM se retiró en v2.6.15: estas rutas ya no existen. Se responde con un
+// error explícito (y no con la página del panel) para que ninguna app se quede
+// esperando una clave que no va a llegar.
+const drmRetired = (req, res) =>
+  res.status(410).json({
+    error: 'drm_retired',
+    message:
+      'El DRM se ha retirado en TVLister v2.6.15: el video no va cifrado. Quita las llamadas a /drm/* y a action=get_drm.'
+  });
+app.all('/drm/*', drmRetired);
+app.all('/api/drm/*', drmRetired);
+
+// --- Registro de aparatos: ajustes globales --------------------------------
+app.get('/api/devices/registry', requireAuth, (req, res) => {
+  res.json({ ...registryOverview(), drm_legacy: listLegacyDrmStreams() });
+});
+
+// Limpieza del DRM que quedó empujado a Flussonic antes de retirarlo.
+// preview (por defecto) sólo enseña qué se enviaría; apply lo aplica.
+app.post('/api/devices/undrm', requireAuth, requireAdmin, async (req, res) => {
+  const action = String(req.body?.action || 'preview') === 'apply' ? 'apply' : 'preview';
+  const names = Array.isArray(req.body?.streams) && req.body.streams.length
+    ? req.body.streams.map((x) => String(x))
+    : listLegacyDrmStreams().map((s) => s.name).filter(Boolean);
+  const results = [];
+  for (const name of names) {
+    try {
+      results.push(await removeDrmFromFlussonic({ name, action }));
+    } catch (err) {
+      results.push({ ok: false, stream: name, error: err.message, detail: err.detail || '' });
+    }
+  }
+  res.json({
+    ok: results.every((r) => r.ok),
+    action,
+    total: results.length,
+    cleaned: results.filter((r) => r.ok && r.had_drm).length,
+    results
+  });
+});
+
+app.post('/api/devices/registry', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const mode = setRegistryMode(req.body?.mode);
+    res.json({ ok: true, mode });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post('/api/lines', requireAuth, (req, res) => {

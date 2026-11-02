@@ -471,397 +471,215 @@ cmd_streams_port() {
   fi
 }
 
-# ============================ DRM / CLAVES =================================
-# Uso:
-#   tvlister-admin drm                       estado de todos los canales
-#   tvlister-admin drm list
-#   tvlister-admin drm enable <canal> [aes128|sample_aes|widevine|playready]
-#   tvlister-admin drm disable <canal>
-#   tvlister-admin drm snippet <canal>       bloque para /etc/flussonic/flussonic.conf
-#   tvlister-admin drm test <canal>          comprueba que la clave sale y rota
-#   tvlister-admin drm tokens <canal>        rota las URLs del CAS y de la clave
-#   tvlister-admin drm log [n]               últimas peticiones de claves
+# ========================= REGISTRO DE APARATOS ============================
+# Sustituye al DRM: ya no se cifra nada. Cada aparato que se conecta se apunta
+# con su MAC (o, si la app no la manda, con huella de modelo+sistema+player) y
+# la línea sólo admite tantos aparatos como conexiones tenga.
 #
-# <canal> puede ser el ID numérico o el nombre exacto del canal.
-cmd_drm() {
-  local sub="${1:-list}" target="" extra="" flags=""
+# Uso:
+#   tvlister-admin devices                      resumen: modo, aparatos, por tipo
+#   tvlister-admin devices mode monitor          apagado|monitor|enforce
+#   tvlister-admin devices line <usuario>        aparatos de una línea
+#   tvlister-admin devices block <usuario> <mac|device_id>
+#   tvlister-admin devices allow <usuario> <mac|device_id>
+#   tvlister-admin devices reset <usuario>       olvida los aparatos de esa línea
+#   tvlister-admin devices undrm                 qué canales siguen con drm en Flussonic
+#   tvlister-admin devices undrm --apply         lo quita de Flussonic
+#
+# <usuario> es el nombre de la línea (el mismo de la lista M3U).
+cmd_devices() {
+  local sub="${1:-list}" target="${2:-}" extra="${3:-}"
   shift 2>/dev/null || true
-  # Los argumentos con -- son opciones (--apply, --include-catv); el resto, el canal.
-  for a in "$@"; do
-    case "$a" in
-      --*) flags="$flags $a" ;;
-      *) [ -z "$target" ] && target="$a" || extra="$a" ;;
-    esac
-  done
+  local flags=""
+  for a in "$@"; do case "$a" in --*) flags="$flags $a" ;; esac; done
   cd "$APP_DIR" || return 1
-  local fallback_host fallback_base
-  fallback_host=$(hostname -I 2>/dev/null | awk '{print $1}')
-  [ -z "$fallback_host" ] && fallback_host="127.0.0.1"
-  fallback_base="http://${fallback_host}:$(get_current_port)"
-  # `drm troncal <id> off` llega como argumento suelto, no como --opción.
-  case "${extra,,}" in
-    off | no | emisor) flags="$flags --off" ;;
-  esac
-  DRM_SUB="$sub" DRM_TARGET="$target" DRM_EXTRA="$extra" DRM_FLAGS="$flags" DRM_BASE="$fallback_base" "$NODE_BIN" --no-warnings --input-type=module -e '
+
+  DEV_SUB="$sub" DEV_TARGET="$target" DEV_EXTRA="$extra" DEV_FLAGS="$flags" \
+    "$NODE_BIN" --no-warnings --input-type=module -e '
     import { initDb, db } from "./server/db.js";
-    import { deriveKey, getDrmRow, getDrmSettings } from "./server/drm.js";
+    import { setRegistryMode, registryOverview, getRegistryMode, bumpRegistryVersion } from "./server/deviceRegistry.js";
     initDb();
 
-    const sub = String(process.env.DRM_SUB || "list").toLowerCase();
-    const target = String(process.env.DRM_TARGET || "").trim();
-    const extra = String(process.env.DRM_EXTRA || "").trim();
-    const flags = String(process.env.DRM_FLAGS || "");
-    const base = (() => {
-      const row = db.prepare("SELECT value FROM settings WHERE key = ?").get("public_stream_base");
-      if (row && /^https?:\/\//i.test(String(row.value || ""))) return String(row.value).replace(/\/+$/, "");
-      const panel = db.prepare("SELECT value FROM settings WHERE key = ?").get("panel_domain");
-      if (panel && panel.value) return "http://" + String(panel.value).replace(/^https?:\/\//, "");
-      return String(process.env.DRM_BASE || "").replace(/\/+$/, "") || "http://<tu-dominio>";
-    })();
+    const sub = String(process.env.DEV_SUB || "list").toLowerCase();
+    const target = String(process.env.DEV_TARGET || "").trim();
+    const extra = String(process.env.DEV_EXTRA || "").trim();
+    const flags = String(process.env.DEV_FLAGS || "");
+    const line = (a, b) => console.log("  " + String(a).padEnd(26) + b);
 
-    const findStream = (needle) => {
+    const findLine = (needle) => {
       if (!needle) return null;
-      if (/^\d+$/.test(needle)) {
-        const byId = db.prepare("SELECT * FROM streams WHERE id = ?").get(Number(needle));
-        if (byId) return byId;
-      }
       return (
-        db.prepare("SELECT * FROM streams WHERE name = ? COLLATE NOCASE").get(needle) ||
-        db.prepare("SELECT * FROM streams WHERE name LIKE ? COLLATE NOCASE ORDER BY id LIMIT 1").get("%" + needle + "%") ||
+        db.prepare("SELECT * FROM lines WHERE username = ? COLLATE NOCASE").get(needle) ||
+        db.prepare("SELECT * FROM lines WHERE username LIKE ? COLLATE NOCASE ORDER BY id LIMIT 1").get("%" + needle + "%") ||
         null
       );
     };
 
-    const ensureRow = (streamId) => {
-      let row = getDrmRow(streamId);
-      if (!row) {
-        db.prepare("INSERT INTO drm_streams (stream_id) VALUES (?)").run(streamId);
-        row = getDrmRow(streamId);
-      }
-      return row;
-    };
-
-    const line = (label, value) => console.log("  " + label.padEnd(26) + value);
-
-    const printStatus = () => {
-      const settings = getDrmSettings();
-      console.log("============================================================");
-      console.log("  TVLister 24/7 — DRM / servidor de claves (CAS)");
-      console.log("============================================================");
-      line("DRM global", settings.enabled ? "ACTIVO" : "APAGADO  (tvlister-admin drm on)");
-      line("Base pública", base);
-      if (settings.casAllowIps) line("IPs permitidas al CAS", settings.casAllowIps);
+    const main = async () => {
+    if (["list", "status", ""].includes(sub)) {
+      const o = registryOverview();
       console.log("");
-      const rows = db.prepare(
-        `SELECT d.*, s.name AS stream_name FROM drm_streams d
-         LEFT JOIN streams s ON s.id = d.stream_id ORDER BY d.enabled DESC, s.name COLLATE NOCASE`
-      ).all();
-      if (rows.length === 0) {
-        console.log("  Ningún canal con DRM todavía.");
-        console.log("  Activa uno con:  tvlister-admin drm enable <canal> aes128");
-      } else {
-        for (const row of rows) {
-          const state = row.enabled ? "ON " : "off";
-          console.log("  [" + state + "] #" + String(row.stream_id).padEnd(5) + (row.stream_name || "(borrado)").padEnd(26) + row.mode);
-          if (row.enabled) {
-            console.log("         CAS : " + base + "/drm/cas/" + row.cas_token);
-            console.log("         clave: " + base + "/drm/key/" + row.key_token);
-          }
-        }
-      }
-      const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      const stats = db.prepare(
-        "SELECT kind, COUNT(*) total FROM drm_key_log WHERE created_at >= ? GROUP BY kind"
-      ).all(since);
-      if (stats.length) {
+      console.log("  TVLister — Registro de aparatos (por MAC)");
+      console.log("  " + "=".repeat(58));
+      line("Modo", o.mode === "enforce" ? "BLOQUEAR (corta al que pase del cupo)" : o.mode === "monitor" ? "SÓLO REGISTRAR (no corta)" : "APAGADO (no se registra nada)");
+      line("Aparatos registrados", String(o.devices));
+      line("Activos ahora", String(o.active));
+      line("Registrados solos", String(o.auto));
+      if (o.byType.length) {
         console.log("");
-        console.log("  Últimas 24 h: " + stats.map((s) => s.kind + "=" + s.total).join("  "));
+        console.log("  Por tipo de equipo:");
+        for (const t of o.byType) console.log("    " + String(t.type).padEnd(18) + String(t.n).padStart(5));
       }
-      console.log("============================================================");
-    };
-
-    const requireStream = () => {
-      const stream = findStream(target);
-      if (!stream) {
-        console.error("❌ No encuentro el canal \"" + target + "\". Mira los IDs con: tvlister-admin drm");
-        process.exit(1);
-      }
-      return stream;
-    };
-
-    if (sub === "list" || sub === "status") {
-      printStatus();
-    } else if (sub === "on" || sub === "off") {
-      db.prepare("INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .run("drm_enabled", sub === "on" ? "true" : "false");
-      console.log(sub === "on" ? "✅ DRM global ACTIVO." : "⛔ DRM global APAGADO: no se entregan claves.");
-    } else if (sub === "enable") {
-      const stream = requireStream();
-      const mode = (extra || "aes128").toLowerCase();
-      if (!["aes128", "sample_aes", "widevine", "playready"].includes(mode)) {
-        console.error("❌ Modo no válido: " + mode + " (aes128 | sample_aes | widevine | playready)");
-        process.exit(1);
-      }
-      const row = ensureRow(stream.id);
-      const crypto = await import("node:crypto");
-      let master = row.master_key;
-      if (!master) master = crypto.randomBytes(32).toString("hex");
-      const casToken = row.cas_token || crypto.randomBytes(24).toString("base64url");
-      const keyToken = row.key_token || crypto.randomBytes(24).toString("base64url");
-      db.prepare(
-        "UPDATE drm_streams SET enabled = 1, mode = ?, master_key = ?, cas_token = ?, key_token = ?, updated_at = ? WHERE stream_id = ?"
-      ).run(mode, master, casToken, keyToken, new Date().toISOString(), stream.id);
-      console.log("✅ DRM activado en #" + stream.id + " (" + stream.name + ") modo " + mode);
-      console.log("");
-      console.log("   CAS   : " + base + "/drm/cas/" + casToken);
-      console.log("   clave : " + base + "/drm/key/" + keyToken);
-      console.log("");
-      console.log("   En /etc/flussonic/flussonic.conf, dentro del stream:");
-      console.log("     drm " + mode + " keyserver=" + base + "/drm/cas/" + casToken);
-      console.log("");
-      console.log("   (tvlister-admin drm snippet " + stream.id + " te lo da listo para copiar)");
-    } else if (sub === "disable") {
-      const stream = requireStream();
-      db.prepare("UPDATE drm_streams SET enabled = 0, updated_at = ? WHERE stream_id = ?").run(
-        new Date().toISOString(),
-        stream.id
-      );
-      console.log("⛔ DRM desactivado en #" + stream.id + " (" + stream.name + ").");
-      console.log("   Ojo: si Flussonic sigue con la línea drm, seguirá cifrando. Quita también esa línea.");
-    } else if (sub === "snippet") {
-      const stream = requireStream();
-      const row = getDrmRow(stream.id);
-      if (!row) {
-        console.error("❌ Ese canal no tiene DRM configurado. Actívalo: tvlister-admin drm enable " + stream.id);
-        process.exit(1);
-      }
-      const name = row.flussonic_stream || stream.flussonic_stream_name || "<nombre_del_stream>";
-      console.log("stream " + name + " {");
-      console.log("  # ... tu input y protocolos actuales ...");
-      if (row.mode === "widevine") {
-        const parts = ["drm widevine"];
-        if (row.cenc_aes_key) parts.push("aes_key=" + row.cenc_aes_key);
-        if (row.cenc_iv) parts.push("iv=" + row.cenc_iv);
-        if (row.cenc_content_id) parts.push("content_id=" + row.cenc_content_id);
-        parts.push("keyserver=" + (row.license_url || "<tu_keyserver_widevine>"));
-        console.log("  " + parts.join(" "));
-        console.log("  # aes_key/iv: los de tu cuenta de Widevine (los custodia el panel, no los emite)");
-      } else {
-        console.log("  drm " + row.mode + " keyserver=" + base + "/drm/cas/" + row.cas_token);
-      }
-      console.log("}");
-    } else if (sub === "test") {
-      const stream = requireStream();
-      const row = getDrmRow(stream.id);
-      if (!row) {
-        console.error("❌ Ese canal no tiene DRM configurado.");
-        process.exit(1);
-      }
-      try {
-        const k1 = deriveKey(row, "1");
-        const k2 = deriveKey(row, "2");
-        console.log("  Canal   : #" + stream.id + " " + stream.name);
-        console.log("  Clave 1 : " + k1.toString("hex") + "  (" + k1.length + " bytes)");
-        console.log("  Clave 2 : " + k2.toString("hex") + "  (" + k2.length + " bytes)");
-        console.log(k1.equals(k2) ? "  ❌ NO rota (mismo número de clave)" : "  ✅ Rota por número de clave");
-      } catch (err) {
-        console.error("❌ " + err.message);
-        process.exit(1);
-      }
-    } else if (sub === "tokens") {
-      const stream = requireStream();
-      const row = getDrmRow(stream.id);
-      if (!row) {
-        console.error("❌ Ese canal no tiene DRM configurado.");
-        process.exit(1);
-      }
-      const crypto = await import("node:crypto");
-      const casToken = crypto.randomBytes(24).toString("base64url");
-      const keyToken = crypto.randomBytes(24).toString("base64url");
-      db.prepare("UPDATE drm_streams SET cas_token = ?, key_token = ?, updated_at = ? WHERE stream_id = ?").run(
-        casToken, keyToken, new Date().toISOString(), stream.id
-      );
-      console.log("✅ Tokens rotados en #" + stream.id + " (" + stream.name + ")");
-      console.log("   CAS nuevo  : " + base + "/drm/cas/" + casToken);
-      console.log("   clave nueva: " + base + "/drm/key/" + keyToken);
-      console.log("   Actualiza la línea drm de Flussonic con el CAS nuevo.");
-    } else if (sub === "protect-all" || sub === "proteger-todo" || sub === "bulk") {
-      const includeCatv = /--include-catv/.test(flags);
-      const apply = /--apply/.test(flags);
-      const { planBulkProtect, applyBulkProtect } = await import("./server/drm.js");
-      const plan = planBulkProtect({ includeCatv });
-      console.log("============================================================");
-      console.log("  Fase 1 — AES-128 del panel en los canales HLS");
-      console.log("============================================================");
-      console.log("  Canales totales     : " + plan.totals.streams);
-      console.log("  Se pueden cifrar    : " + plan.totals.eligible);
-      console.log("  Ya protegidos       : " + plan.totals.already);
-      console.log("  Se quedan fuera     : " + plan.totals.skipped);
-      console.log("");
-      if (plan.eligible.length) {
-        console.log("  SE CIFRAN (Flussonic empaqueta):");
-        for (const s of plan.eligible) {
-          console.log("   #" + String(s.id).padEnd(5) + s.name.padEnd(28) + "-> " + s.flussonic_stream +
-            (s.catv_channels.length ? "  [CATV CH " + s.catv_channels.join(",") + "]" : ""));
-        }
+      if (o.linesOverLimit.length) {
         console.log("");
-      }
-      if (plan.skipped.length) {
-        console.log("  SE QUEDAN FUERA (y por qué):");
-        for (const s of plan.skipped) console.log("   #" + String(s.id).padEnd(5) + s.name.padEnd(28) + s.reason);
-        console.log("");
-      }
-      if (!apply) {
-        console.log("  Nada cambiado. Para aplicarlo:");
-        console.log("     tvlister-admin drm protect-all --apply");
-        console.log("  Si quieres incluir los canales que alimentan el UDP de CATV");
-        console.log("  (NO recomendado, el UDP puede verse afectado):");
-        console.log("     tvlister-admin drm protect-all --apply --include-catv");
-        console.log("============================================================");
-        process.exit(0);
-      }
-      const result = applyBulkProtect({ includeCatv });
-      console.log("✅ Activado AES-128 en " + result.applied.length + " canales del panel.");
-      if (result.applied.length) {
-        console.log("");
-        console.log("   Falta que Flussonic cifre: pega el bloque de cada canal o usa");
-        console.log("     tvlister-admin drm push-all        (vista previa no: envía de verdad)");
-        console.log("   Bloque de ejemplo para un canal:");
-        const first = result.applied[0];
-        const row = getDrmRow(first.id);
-        console.log("     stream " + first.flussonic_stream + " {");
-        console.log("       drm aes128 keyserver=" + base + "/drm/cas/" + row.cas_token);
-        console.log("     }");
-      }
-      console.log("============================================================");
-    } else if (sub === "push-all") {
-      const { pushDrmToFlussonic } = await import("./server/drm.js");
-      const rows = db.prepare(
-        "SELECT d.stream_id, d.flussonic_stream, s.name AS sn, s.flussonic_stream_name FROM drm_streams d " +
-        "LEFT JOIN streams s ON s.id = d.stream_id WHERE d.enabled = 1 AND d.mode IN (?,?) ORDER BY d.stream_id"
-      ).all("aes128", "sample_aes");
-      if (rows.length === 0) {
-        console.log("  No hay canales protegidos todavía. Primero: tvlister-admin drm protect-all --apply");
-        process.exit(0);
-      }
-      console.log("  Enviando el bloque drm a Flussonic para " + rows.length + " canales...");
-      console.log("  Destino: el Flussonic de cada canal (streams.flussonic_server_id).");
-      console.log("           Los marcados como troncal (solo origen) NO se tocan.");
-      console.log("");
-      let ok = 0;
-      let blocked = 0;
-      for (const r of rows) {
-        const name = r.flussonic_stream || r.flussonic_stream_name || "";
-        const label = String(r.sn || ("#" + r.stream_id)).padEnd(28);
-        if (!name) {
-          console.log("  [--] " + label + " sin nombre de stream en Flussonic");
-          continue;
+        console.log("  ⚠ Líneas con más aparatos que su cupo:");
+        for (const l of o.linesOverLimit) {
+          const cupo = Number(l.device_limit) || Number(l.max_connections) || 1;
+          console.log("    " + String(l.username).padEnd(22) + l.devices + " aparatos / " + cupo + " permitidos");
         }
-        try {
-          const res = await pushDrmToFlussonic({ id: r.stream_id, streamName: name, action: "apply", base });
-          ok++;
-          console.log("  [OK] " + label + name + "  -> " + (res.server_name || res.server));
-        } catch (err) {
-          if (err.code === "ORIGIN_ONLY") blocked++;
-          console.log("  [!!] " + label + (err.message || "error") +
-            (err.detail ? " -> " + String(err.detail).slice(0, 120) : ""));
-        }
+      }
+      if (!o.devices) console.log("\n  Todavía no hay aparatos. En cuanto un cliente abra su lista M3U o su app, entra solo.");
+      const legacy = (() => {
+        try { return JSON.parse(db.prepare("SELECT value FROM settings WHERE key = ?").get("drm_legacy_streams")?.value || "{}"); }
+        catch { return {}; }
+      })();
+      const legacyNames = Array.isArray(legacy.names) ? legacy.names.filter(Boolean) : [];
+      if (legacyNames.length) {
+        console.log("");
+        console.log("  ⚠ DRM retirado: " + legacyNames.length + " canal(es) siguen con el bloque drm en Flussonic.");
+        console.log("    Quítalo con:  tvlister-admin devices undrm --apply");
+        console.log("    " + legacyNames.slice(0, 8).join(", ") + (legacyNames.length > 8 ? " …" : ""));
       }
       console.log("");
-      console.log("  Enviados " + ok + "/" + rows.length + ". Comprueba en Flussonic que cada stream tiene su bloque drm.");
-      if (blocked > 0) {
-        console.log("  " + blocked + " canal(es) apuntaban al troncal: revisa a qué Flussonic pertenecen antes de cifrar.");
-      }
-      if (ok === 0) process.exit(1);
-    } else if (sub === "servers" || sub === "troncal" || sub === "origen") {
-      const listServers = () => {
-        const rows = db
-          .prepare(
-            "SELECT f.id, f.name, f.base_url, f.origin_only, " +
-              "(SELECT COUNT(*) FROM streams s WHERE s.flussonic_server_id = f.id) AS n " +
-              "FROM flussonic_servers f ORDER BY f.id"
-          )
-          .all();
-        if (!rows.length) {
-          console.log("  No hay servidores Flussonic registrados.");
-          return;
-        }
-        console.log("  ID   ROL        CANALES  SERVIDOR");
-        for (const r of rows) {
-          console.log(
-            "  " + String(r.id).padEnd(5) +
-            (Number(r.origin_only) === 1 ? "TRONCAL  " : "emisor   ") +
-            String(r.n).padEnd(9) +
-            r.name + "  (" + r.base_url + ")"
-          );
-        }
-      };
-      if (sub === "servers") {
-        console.log("============================================================");
-        console.log("  Flussonic registrados: rol y canales asignados");
-        console.log("============================================================");
-        listServers();
-        console.log("");
-        console.log("  El TRONCAL es el que recibe los canales y sirve a varios paneles:");
-        console.log("  nunca se le escribe DRM ni salidas. Marcarlo con:");
-        console.log("     tvlister-admin drm troncal <id>");
-        console.log("  Un emisor vuelve a ser escribible con:");
-        console.log("     tvlister-admin drm troncal <id> off");
-        process.exit(0);
-      }
-      const id = Number(target);
-      if (!Number.isInteger(id) || id <= 0) {
-        console.error("Uso: tvlister-admin drm troncal <id> [on|off]");
-        console.error("     tvlister-admin drm servers    (ver los ids)");
-        process.exit(1);
-      }
-      const srv = db.prepare("SELECT * FROM flussonic_servers WHERE id = ?").get(id);
-      if (!srv) {
-        console.error("❌ No existe el servidor Flussonic #" + id + ". Míralos con: tvlister-admin drm servers");
-        process.exit(1);
-      }
-      const on = !/--off\b/.test(flags);
-      db.prepare("UPDATE flussonic_servers SET origin_only = ? WHERE id = ?").run(on ? 1 : 0, id);
-      console.log(
-        on
-          ? "✅ «" + srv.name + "» marcado como TRONCAL (solo origen). No se le escribirá DRM."
-          : "✅ «" + srv.name + "» marcado como EMISOR: se le puede enviar DRM."
-      );
-      if (on) {
-        const affected = db
-          .prepare(
-            "SELECT COUNT(*) AS c FROM drm_streams d JOIN streams s ON s.id = d.stream_id " +
-              "WHERE s.flussonic_server_id = ? AND d.enabled = 1"
-          )
-          .get(id);
-        if (Number(affected?.c) > 0) {
-          console.log("   Aviso: " + affected.c + " canal(es) de ese servidor tienen DRM activado en el panel.");
-          console.log("   Están protegidos por partes, pero el bloque drm NO se enviará al troncal.");
-          console.log("   Revisa a qué Flussonic pertenecen: tvlister-admin drm list");
-        }
-      }
-    } else if (sub === "log") {
-      const limit = Number(target) > 0 ? Math.min(Number(target), 200) : 25;
-      const rows = db.prepare("SELECT * FROM drm_key_log ORDER BY id DESC LIMIT ?").all(limit);
-      if (rows.length === 0) {
-        console.log("  Sin peticiones registradas todavía.");
-      } else {
-        console.log("  HORA                 TIPO    CANAL  Nº      IP                 OK");
-        for (const r of rows) {
-          console.log(
-            "  " + String(r.created_at).replace("T", " ").slice(0, 19).padEnd(20) +
-            String(r.kind).padEnd(8) +
-            ("#" + r.stream_id).padEnd(7) +
-            String(r.key_number).slice(0, 6).padEnd(8) +
-            String(r.ip).padEnd(19) +
-            (r.ok ? "sí" : "no " + (r.reason || ""))
-          );
-        }
-      }
-    } else {
-      console.error("Uso: tvlister-admin drm [list|on|off|enable|disable|snippet|test|tokens|log] [canal] [modo]");
-      process.exit(1);
+      console.log("  Modo:  tvlister-admin devices mode monitor|enforce|off");
+      console.log("  Línea: tvlister-admin devices line <usuario>");
+      console.log("");
+      return;
     }
+
+    if (sub === "mode" || sub === "modo") {
+      const want = String(target || "").toLowerCase();
+      if (!want) {
+        console.log("  Modo actual: " + getRegistryMode());
+        console.log("  Usa: tvlister-admin devices mode off|monitor|enforce");
+        return;
+      }
+      const normal = want === "on" || want === "bloquear" ? "enforce" : want === "solo-registrar" ? "monitor" : want;
+      console.log("  ✅ Modo del registro: " + setRegistryMode(normal));
+      if (normal === "enforce") console.log("     A partir de ahora se corta al aparato que pase del cupo de su línea.");
+      if (normal === "monitor") console.log("     Se sigue registrando, pero no se corta a nadie.");
+      return;
+    }
+
+    if (sub === "line" || sub === "linea" || sub === "ls") {
+      const l = findLine(target);
+      if (!l) { console.error("❌ No existe la línea \"" + target + "\"."); process.exit(1); }
+      const cupo = Number(l.device_limit) > 0 ? Number(l.device_limit) : Number(l.max_connections) || 1;
+      const rows = db.prepare("SELECT * FROM line_devices WHERE line_id = ? ORDER BY status ASC, last_seen DESC").all(l.id);
+      const active = rows.filter((r) => r.status === "active" && Number(r.blocked) !== 1).length;
+      console.log("");
+      console.log("  Línea: " + l.username + "   (modo global: " + getRegistryMode() + ")");
+      line("Cupo", cupo + " aparato(s)" + (Number(l.device_limit) > 0 ? " (propio de la línea)" : " (máx. conexiones)"));
+      line("Registrados", active + " activos / " + rows.length + " filas");
+      console.log("");
+      if (!rows.length) {
+        console.log("  Sin aparatos todavía.");
+      } else {
+        console.log("  " + "ESTADO".padEnd(11) + "MAC / ID".padEnd(21) + "TIPO".padEnd(13) + "EQUIPO".padEnd(22) + "VISTO");
+        for (const r of rows) {
+          const estado = Number(r.blocked) === 1 ? "BLOQUEADO" : r.status === "active" ? "activo" : r.status === "pending" ? "pendiente" : "liberado";
+          const equipo = [r.brand, r.model || r.os || r.player].filter(Boolean).join(" ") || "-";
+          // Las huellas (aparatos que no mandan MAC) son largas: se abrevian.
+          const ident = String(r.mac || r.device_id || "");
+          const idCorto = ident.startsWith("fp:") ? "fp:" + ident.slice(3, 13) + "…" : ident;
+          console.log(
+            "  " + String(estado).padEnd(11) +
+            idCorto.padEnd(21) +
+            String(r.device_type || "-").padEnd(13) +
+            String(equipo).slice(0, 21).padEnd(22) +
+            String(r.last_seen || "")
+          );
+        }
+      }
+      console.log("");
+      console.log("  Bloquear: tvlister-admin devices block " + l.username + " <mac>");
+      console.log("  Liberar : tvlister-admin devices allow " + l.username + " <mac>");
+      console.log("");
+      return;
+    }
+
+    if (sub === "block" || sub === "allow" || sub === "reset" || sub === "borrar") {
+      const l = findLine(target);
+      if (!l) { console.error("❌ No existe la línea \"" + target + "\"."); process.exit(1); }
+      if (sub === "reset" || sub === "borrar") {
+        const info = db.prepare("DELETE FROM line_devices WHERE line_id = ?").run(l.id);
+        bumpRegistryVersion();
+        console.log("  ✅ " + info.changes + " aparato(s) olvidados en \"" + l.username + "\". Se registrarán de nuevo al conectar.");
+        return;
+      }
+      if (!extra) { console.error("❌ Falta la MAC o device_id. Mira: tvlister-admin devices line " + l.username); process.exit(1); }
+      const needle = extra.toUpperCase().replace(/[^0-9A-F]/g, "");
+      const rowsAll = db.prepare("SELECT * FROM line_devices WHERE line_id = ?").all(l.id);
+      const row =
+        rowsAll.find(
+          (r) =>
+            String(r.device_id).toUpperCase() === extra.toUpperCase() ||
+            String(r.mac || "").toUpperCase().replace(/[^0-9A-F]/g, "") === needle
+        ) || null;
+      if (!row) { console.error("❌ Ese aparato no está registrado en \"" + l.username + "\"."); process.exit(1); }
+      if (sub === "block") {
+        db.prepare("UPDATE line_devices SET blocked = 1 WHERE id = ?").run(row.id);
+        bumpRegistryVersion();
+        console.log("  ⛔ Bloqueado: " + (row.mac || row.device_id) + " (" + l.username + "). Se le corta la sesión activa.");
+      } else {
+        db.prepare("UPDATE line_devices SET blocked = 0, status = ?, revoked_at = NULL, revoked_by = ? WHERE id = ?").run("active", "", row.id);
+        bumpRegistryVersion();
+        console.log("  ✅ Permitido: " + (row.mac || row.device_id) + " (" + l.username + ").");
+      }
+      return;
+    }
+
+    if (sub === "undrm") {
+      const legacy = (() => {
+        try { return JSON.parse(db.prepare("SELECT value FROM settings WHERE key = ?").get("drm_legacy_streams")?.value || "{}"); }
+        catch { return {}; }
+      })();
+      const rows = Array.isArray(legacy.streams) ? legacy.streams : [];
+      if (!rows.length) {
+        console.log("  ✅ No queda ningún canal con DRM antiguo apuntado.");
+        return;
+      }
+      const apply = /--apply\b/.test(flags);
+      const { removeDrmFromFlussonic } = await import("./server/drmCleanup.js");
+      console.log("");
+      console.log("  Canales con DRM antiguo en Flussonic: " + rows.length);
+      console.log("  " + (apply ? "Quitando el bloque drm…" : "Vista previa (añade --apply para cambiarlo de verdad)"));
+      console.log("");
+      let cleaned = 0;
+      for (const r of rows) {
+        const name = String(r.flussonic_stream || r.flussonic_stream_name || "").trim();
+        if (!name) continue;
+        try {
+          const out = await removeDrmFromFlussonic({ name, streamId: r.stream_id, serverId: r.flussonic_server_id, action: apply ? "apply" : "preview" });
+          const estado = out.had_drm ? (apply ? "quitado" : "tiene drm") : "ya estaba limpio";
+          if (apply && out.had_drm) cleaned++;
+          console.log("    " + (out.ok ? "✅" : "❌") + " " + name.padEnd(34) + estado);
+        } catch (err) {
+          console.log("    ❌ " + name.padEnd(34) + err.message);
+        }
+      }
+      console.log("");
+      if (apply) console.log("  Listo: " + cleaned + " canal(es) reescritos sin drm. Comprueba que se ven en el reproductor.");
+      else console.log("  Nada cambiado todavía. Ejecuta: tvlister-admin devices undrm --apply");
+      console.log("");
+      return;
+    }
+
+    console.error("Uso: tvlister-admin devices [list|mode|line|block|allow|reset|undrm] [args]");
+    process.exit(1);
+    };
+
+    await main();
   '
 }
 
@@ -3333,9 +3151,9 @@ case "$ACTION" in
     shift
     cmd_streams_port "${1:-status}" "${2:-}"
     ;;
-  drm | claves | cas)
+  devices | aparatos | dispositivos)
     shift
-    cmd_drm "$@"
+    cmd_devices "${1:-list}" "${2:-}" "${3:-}" "$@"
     ;;
   access-code | access-codes | codigo | codigos)
     shift
@@ -3981,7 +3799,7 @@ case "$ACTION" in
     echo " 26) Probar la reproducción de un canal de punta a punta (streams-check)"
     echo " 27) Códigos de acceso al panel, estilo XUI.one (access-code)"
     echo " 28) Elegir el puerto de salida de los streams: 80 / 443 / 8095 (streams-port)"
-    echo " 29) DRM / claves: cifrar canales con el CAS de TVLister (drm)"
+    echo " 29) Registro de aparatos por MAC: cupo por línea (devices)"
     echo " 30) Dominios públicos: panel (Cloudflare) y video (directo) (dominios)"
     echo " 31) Certificado Let's Encrypt del dominio de video (acme)"
     echo "  0) Salir"
@@ -4021,7 +3839,7 @@ case "$ACTION" in
       26) "$0" streams-check ;;
       27) cmd_access_code "list" "" "" "" ;;
       28) "$0" streams-port ;;
-      29) "$0" drm ;;
+      29) "$0" devices ;;
       30) "$0" dominios ;;
       31) "$0" acme ;;
       *) exit 0 ;;

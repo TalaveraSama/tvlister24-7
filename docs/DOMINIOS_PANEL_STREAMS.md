@@ -4,7 +4,7 @@ Configuración exacta para el caso real:
 
 | Nombre | Papel | DNS (verificado) | Cloudflare |
 | --- | --- | --- | --- |
-| `tvadmin.alphadigitalnic.xyz` | Panel, API, login, WebTV, DRM | `104.21.66.70`, `172.67.168.15` → **IPs de Cloudflare** | **Naranja (proxied)** — correcto |
+| `tvadmin.alphadigitalnic.xyz` | Panel, API, login, WebTV | `104.21.66.70`, `172.67.168.15` → **IPs de Cloudflare** | **Naranja (proxied)** — correcto |
 | `live-stream.alphadigitalnic.xyz` | Playlist, `.m3u8`, `.ts`, VOD, EPG | `173.208.183.66` → **tu servidor** | **Gris (DNS only)** — correcto |
 
 Ese reparto es el bueno: el panel va por Cloudflare (peticiones pequeñas, caché, protección) y el
@@ -65,7 +65,7 @@ dominio por el que entran y **les responde con enlaces de ese mismo dominio**.
 | Nombre | Papel | DNS | Cloudflare |
 | --- | --- | --- | --- |
 | `tvadmin…` | Panel, API, login, WebTV | IPs de Cloudflare | **Naranja** |
-| `live-stream…` | Video (WebTV, app propia, DRM) | tu servidor | **Gris** |
+| `live-stream…` | Video (WebTV, app propia) | tu servidor | **Gris** |
 | `livex-stream…` | **Apps de terceros** (Xtream Codes / XUI.one) | tu servidor | **Gris** |
 
 ```bash
@@ -85,7 +85,8 @@ le devuelven.
 
 - La API es la misma que ya usan: `get.php`, `player_api.php`, `xmltv.php`, `panel_api.php`, Stalker.
 - Los códigos de acceso del panel **no** bloquean esas rutas (solo la web del panel).
-- Con DRM activo, la clave se sirve por `/drm/key/<token>` también en ese dominio (probado: 16 bytes).
+- El video va **sin cifrar** (DRM retirado en v2.6.15): lo que protege la cuenta es el
+  registro de aparatos por MAC y el límite de conexiones, y eso se resuelve en el panel.
 - El certificado de ese nombre va en el mismo 443: `tvlister-admin acme tvadmin… live-stream… livex-stream… correo`
   emite **un solo certificado** que cubre los tres.
 - Si el 443 lo atiende el nginx de XUI.one, `tvlister-admin cloudflare` añade ese nombre al
@@ -115,7 +116,7 @@ Si no lo dice, esas apps verían HTML en vez de JSON y hay que revisar el server
 | «Cloudflare acepta el 8443, así que el video puede ir por ahí» | Cierto que el 8443 está en la lista de puertos TLS de Cloudflare, pero **el proxy no está pensado para video continuo**: el plan self-serve lo prohíbe (ToS 2.8) y en la práctica añade buffering, cortes y riesgo de suspensión del dominio |
 | «Con naranja protejo la IP del servidor» | Para el video no: el reproductor abre conexiones largas y Cloudflare las corta o las limita. La IP se ve igual en los logs del cliente |
 | «Con naranja el video va más rápido» | Al contrario: el HLS se pide cada 2–6 s y el edge no lo cachea con sentido; se gana latencia y se pierde estabilidad |
-| «Entonces el video no tiene protección» | La tiene a nivel de aplicación: enlaces firmados, token por línea, límite de conexiones, bloqueo por IP/país y DRM. Lo que no hay es CDN de video |
+| «Entonces el video no tiene protección» | La tiene a nivel de aplicación: enlaces firmados, token por línea, límite de conexiones, bloqueo por IP/país y registro de aparatos por MAC. El video no va cifrado ni hay CDN de video |
 
 Si algún día **necesitas** Cloudflare delante del video, los productos que sí lo permiten son
 **Cloudflare Stream** (transcodifica y aloja el video, es de pago y cambia el reparto: tú subes el
@@ -264,7 +265,7 @@ Por eso el panel y el video pueden usar certificados distintos en el mismo 443:
 - `get.php` / `player_api.php` → `server_info.url` y todos los enlaces apuntan a
   `https://live-stream.alphadigitalnic.xyz`.
 - `xmltv.php` (EPG), login, WebTV y API siguen en `tvadmin…`.
-- Las claves DRM (`/drm/…`) salen por el dominio del panel, no por el de video.
+- No hay claves ni peticiones de licencia: el reproductor sólo pide el manifiesto y los segmentos.
 - **WebTV**: el portal pide el manifiesto al dominio del panel (petición pequeña y en `no-store`),
   pero el manifiesto se reescribe con URLs absolutas del dominio de video: **los segmentos y el
   video salen directos** por `live-stream`. Si ves tráfico de video en el panel, es que

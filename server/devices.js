@@ -37,9 +37,14 @@ export function normalizeDeviceId(raw) {
   return DEVICE_ID_RE.test(id) ? id : '';
 }
 
+// Ojo: `line_devices` la comparten el bloqueo de la app propia (esta API, filas
+// con auto_registered = 0) y el registro por MAC de server/deviceRegistry.js
+// (auto_registered = 1). Cada uno cuenta sólo las suyas para no pisarse.
 export function activeDeviceCount(lineId) {
   return db
-    .prepare("SELECT COUNT(*) AS c FROM line_devices WHERE line_id = ? AND status = 'active'")
+    .prepare(
+      "SELECT COUNT(*) AS c FROM line_devices WHERE line_id = ? AND status = 'active' AND COALESCE(auto_registered, 0) = 0"
+    )
     .get(Number(lineId)).c;
 }
 
@@ -48,7 +53,8 @@ export function listLineDevices(lineId) {
     .prepare(
       `SELECT id, device_id, device_name, platform, app_version, status,
               first_ip, last_ip, first_seen, last_seen, revoked_at
-         FROM line_devices WHERE line_id = ? ORDER BY status ASC, last_seen DESC`
+         FROM line_devices WHERE line_id = ? AND COALESCE(auto_registered, 0) = 0
+         ORDER BY status ASC, last_seen DESC`
     )
     .all(Number(lineId));
 }

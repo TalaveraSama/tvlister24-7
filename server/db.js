@@ -568,8 +568,7 @@ function runInitDbBody() {
   ensureColumn('wk2500_channels', 'flussonic_output_url', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('streams', 'flussonic_server_id', 'INTEGER');
   // El Flussonic troncal (el que recibe los canales y alimenta a VARIOS paneles)
-  // no se toca nunca: no se le manda DRM, ni se le cambian salidas. Si el panel
-  // le escribe `drm`, cifraría también la salida del otro cliente.
+  // no se toca nunca: no se le cambian salidas porque afectaría al otro panel.
   ensureColumn('flussonic_servers', 'origin_only', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('servers', 'origin_only', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'flussonic_stream_name', "TEXT DEFAULT ''");
@@ -662,7 +661,22 @@ function runInitDbBody() {
   // como siempre, sin pedir token de aparato. Se activa por línea desde el
   // panel cuando el cliente quiere que su cuenta viva en N aparatos fijos.
   ensureColumn('lines', 'device_lock', 'INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('lines', 'device_limit', 'INTEGER NOT NULL DEFAULT 1');
+  // 0 = usar `max_connections` como cupo de aparatos (lo normal). Un valor
+  // mayor fija un cupo distinto para esa línea.
+  ensureColumn('lines', 'device_limit', 'INTEGER NOT NULL DEFAULT 0');
+  // Bases antiguas: `device_limit` nacía en 1 para el bloqueo de la app propia.
+  // Esas líneas no lo eligieron, así que se pasan a 0 (usar sus conexiones).
+  try {
+    const doneLimit = db.prepare("SELECT value FROM settings WHERE key = 'device_limit_zeroed_v270'").get();
+    if (!doneLimit) {
+      db.prepare('UPDATE lines SET device_limit = 0 WHERE COALESCE(device_lock, 0) = 0 AND device_limit <= 1').run();
+      db.prepare(
+        "INSERT INTO settings (key, value) VALUES ('device_limit_zeroed_v270', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+      ).run();
+    }
+  } catch (err) {
+    console.warn('[db] No se pudo normalizar device_limit:', err.message);
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS line_devices (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -679,53 +693,42 @@ function runInitDbBody() {
       last_seen TEXT NOT NULL DEFAULT (datetime('now')),
       revoked_at TEXT,
       revoked_by TEXT NOT NULL DEFAULT '',
+      mac TEXT NOT NULL DEFAULT '',
+      device_type TEXT NOT NULL DEFAULT '',
+      brand TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      os TEXT NOT NULL DEFAULT '',
+      player TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      auto_registered INTEGER NOT NULL DEFAULT 0,
+      blocked INTEGER NOT NULL DEFAULT 0,
+      seen_count INTEGER NOT NULL DEFAULT 0,
       UNIQUE(line_id, device_id)
     );
     CREATE INDEX IF NOT EXISTS idx_line_devices_line ON line_devices(line_id, status);
   `);
+  // Bases ya existentes: mismas columnas del registro por MAC.
+  ensureColumn('line_devices', 'mac', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('line_devices', 'device_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('line_devices', 'brand', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('line_devices', 'model', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('line_devices', 'os', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('line_devices', 'player', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('line_devices', 'user_agent', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('line_devices', 'auto_registered', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('line_devices', 'blocked', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('line_devices', 'seen_count', 'INTEGER NOT NULL DEFAULT 0');
+  // El índice va después de las columnas: en una base antigua la tabla ya existía
+  // y `mac` se acaba de añadir.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_line_devices_mac ON line_devices(line_id, mac);');
   ensureColumn('users', 'xui_id', 'INTEGER');
-  // --- DRM / CAS (servidor de claves propio para Flussonic) ----------------
-  // Cada canal puede protegerse con AES-128 (HLS): Flussonic pide la clave a
-  // este panel (CAS) y entrega a los clientes una URL de clave que pasa por
-  // TVLister, donde se comprueba la línea. Ver server/drm.js.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS drm_streams (
-      stream_id INTEGER PRIMARY KEY,
-      enabled INTEGER NOT NULL DEFAULT 0,
-      mode TEXT NOT NULL DEFAULT 'off',
-      master_key TEXT NOT NULL DEFAULT '',
-      static_key TEXT NOT NULL DEFAULT '',
-      cas_token TEXT NOT NULL DEFAULT '',
-      key_token TEXT NOT NULL DEFAULT '',
-      kid TEXT NOT NULL DEFAULT '',
-      license_url TEXT NOT NULL DEFAULT '',
-      license_headers TEXT NOT NULL DEFAULT '{}',
-      flussonic_stream TEXT NOT NULL DEFAULT '',
-      notes TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS drm_key_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      stream_id INTEGER,
-      kind TEXT NOT NULL DEFAULT 'key',
-      key_number TEXT NOT NULL DEFAULT '',
-      ip TEXT NOT NULL DEFAULT '',
-      user_agent TEXT NOT NULL DEFAULT '',
-      line_id INTEGER,
-      ok INTEGER NOT NULL DEFAULT 1,
-      reason TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_drm_key_log_created ON drm_key_log(created_at DESC);
-  `);
-
-  // Widevine/PlayReady: las CLAVES DE CONTENIDO (aes_key + iv) las emite tu
-  // cuenta/proveedor Widevine; el panel las custodia y las entrega a Flussonic.
-  // Las licencias (la firma que abre el contenido) NO las puede emitir TVLister.
-  ensureColumn('drm_streams', 'cenc_aes_key', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('drm_streams', 'cenc_iv', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('drm_streams', 'cenc_content_id', "TEXT NOT NULL DEFAULT ''");
+  // --- Se retira el DRM ------------------------------------------------------
+  // El DRM (AES-128 propio, ClearKey y el proxy de licencias Widevine) se ha
+  // eliminado del panel: la protección pasa a ser el registro de aparatos por
+  // MAC (server/deviceRegistry.js). Antes de borrar las tablas se guarda la
+  // lista de canales que tenían `drm` empujado a Flussonic, para poder retirar
+  // ese bloque del servidor de video sin dejarlo cifrado y sin llave.
+  removeDrmTablesOnce();
 
   ensureColumn('channels_247', 'engine_mode', "TEXT NOT NULL DEFAULT 'virtual'");
   ensureColumn('epg_sources', 'program_count', 'INTEGER NOT NULL DEFAULT 0');
@@ -1231,6 +1234,62 @@ function seedInitialData() {
   insertSetting.run('flood_limit_per_min', '240');
   insertSetting.run('clean_panel_v22', 'true');
   insertSetting.run('demo_purged', 'true');
+}
+
+/**
+ * Una sola vez: guarda qué canales tenían DRM y borra las tablas del DRM.
+ *
+ * Si Flussonic se quedó con `drm aes128 keyserver=…`, su HLS saldría cifrado y
+ * sin servidor de claves (pantalla en negro). Por eso se apunta en
+ * `drm_legacy_streams` y `tvlister-admin devices undrm` (o el propio panel) puede
+ * retirar ese bloque por API.
+ */
+function removeDrmTablesOnce() {
+  try {
+    const done = db
+      .prepare("SELECT value FROM settings WHERE key = 'drm_removed_v270'")
+      .get();
+    if (done) return;
+
+    const hasStreams = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='drm_streams'")
+      .get();
+    if (hasStreams) {
+      let legacy = [];
+      try {
+        legacy = db
+          .prepare(
+            `SELECT d.stream_id, d.flussonic_stream, d.mode, s.name AS stream_name,
+                    s.flussonic_stream_name, s.flussonic_server_id
+               FROM drm_streams d LEFT JOIN streams s ON s.id = d.stream_id
+              WHERE d.enabled = 1`
+          )
+          .all();
+      } catch {
+        legacy = [];
+      }
+      if (legacy.length) {
+        const names = legacy
+          .map((r) => String(r.flussonic_stream || r.flussonic_stream_name || '').trim())
+          .filter(Boolean);
+        db.prepare(
+          "INSERT INTO settings (key, value) VALUES ('drm_legacy_streams', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        ).run(JSON.stringify({ at: new Date().toISOString(), streams: legacy, names }));
+        console.log(
+          `[db] DRM retirado: ${legacy.length} canal(es) tenían DRM activo. ` +
+            'Retira el bloque drm de Flussonic con: tvlister-admin devices undrm'
+        );
+      }
+    }
+
+    db.exec('DROP TABLE IF EXISTS drm_key_log;');
+    db.exec('DROP TABLE IF EXISTS drm_streams;');
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('drm_removed_v270', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run();
+  } catch (err) {
+    console.warn('[db] No se pudo retirar el DRM:', err.message);
+  }
 }
 
 initDb();
