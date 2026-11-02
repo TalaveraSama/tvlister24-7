@@ -77,6 +77,60 @@ una licencia Widevine por sí mismo, y quien diga lo contrario está vendiendo h
 5. Un reproductor con CDM Widevine (tu APK con Media3 lo tiene; los TV boxes chinos baratos a veces
    no).
 
+## 2b. Dos Flussonic en cadena: ¿dónde va el DRM?
+
+Caso real: un Flussonic **recibe los canales troncales** (p. ej. `69.30.212.194:2086`) y se los
+manda a **otro Flussonic**, y de ahí salen los clientes. La pregunta es dónde se cifra.
+
+**Regla:** el `drm aes128` va en el Flussonic que **empaqueta el HLS que consume el cliente** — el
+último de la cadena. No en el que recibe el troncal.
+
+```
+troncal ──► Flussonic A (recibe)  ──► Flussonic B (emite HLS) ──► cliente
+                  sin drm                drm aes128 keyserver=TVLister
+                  (o drm de transporte)  ▲                        │
+                                         └──── /drm/cas/<token> ──┘ pide la clave
+                                               /drm/key/<token> ◄──┘ y el cliente la pide aquí
+```
+
+Por qué:
+
+| Motivo | Detalle |
+| --- | --- |
+| **Dónde existe el vídeo segmentado** | El AES-128 de HLS cifra **segmentos**. Quien trocea es el empaquetador; en tu cadena, el último Flussonic |
+| **CPU** | Cifrar en el primero y volver a empaquetar en el segundo obliga a descifrar y recifrar en el medio: doble trabajo y más latencia |
+| **Troncal privado** | Si A→B va por red privada o por UDP interno, no necesita la clave de la línea (eso es para el abonado). Si cruza Internet, se protege con VPN o con un DRM de transporte aparte |
+| **Un solo punto de verdad** | La clave maestra vive en **TVLister** (`drm_streams.master_key`). Flussonic sólo la pide cada 10 minutos para cifrar; no la guarda ni la publica |
+
+**Requisito de red:** el Flussonic que cifra tiene que poder llamar al panel en
+`https://<dominio-del-video>/drm/cas/<token>` (443 abierto y, si usas `drm_cas_allow_ips`, con su IP
+pública en la lista). Si el panel no es alcanzable desde ese Flussonic, el cifrado no arranca y el
+HLS sale en negro.
+
+## 2c. Qué protege el panel de lo que publica (y qué no)
+
+TVLister no cifra porque **no empaqueta**: reenvía el HLS de Flussonic o redirige a él. Lo que hace
+el panel es ser el **único que reparte claves** y decidir quién las recibe:
+
+| Control | Dónde |
+| --- | --- |
+| Línea activa, no caducada y con cupo | `/live/<usuario>/<clave>/…` antes de servir nada |
+| Clave atada a la línea (`?t=<token firmado>`) | `action=get_drm` → `key_url`, `license_url`, `clearkey_url` |
+| Rotación cada 10 min (`?n=`) y revocación | `/drm/key/<token>`, `/drm/cas/<token>`, `tvlister-admin drm tokens` |
+| Auditoría de quién pidió cada clave | tabla `drm_key_log` |
+| Enlaces de WebTV firmados y caducables (6 h) | `play_url` → `/webtv_play/<token>` |
+| Límite de conexiones, IP/UA/país, aparato vinculado | anti-restreaming y `device_lock` (opt-in) |
+
+**El punto débil, y es honesto decirlo:** si el panel **redirige** el `.m3u8` al Flussonic
+(`proxy_direct_ts = false` con fuente pública), el cliente recibe el manifiesto del Flussonic y la
+URL de clave que trae es la estática del canal, sin token de línea. Quien copie ese enlace descifra
+sin pasar por el panel. Con `proxy_direct_ts = true` (Stream Shield, activado por defecto en
+instalaciones nuevas) el manifiesto pasa por el panel y sí se puede atar la clave a la línea.
+
+Para cerrarlo al 100%: canales con DRM siempre por el proxy del panel y `&t=<token de línea>`
+añadido a las URIs `/drm/key/`. Queda como mejora opt-in; no se aplica por defecto porque un
+reproductor que recorte la query de la clave dejaría de verse.
+
 ## 3. Qué recomiendo para tu caso (CATV + IPTV, 125 canales)
 
 **Fase 1 — hoy, gratis:** AES-128 emitido por el panel en todos los canales que salgan por HLS.
