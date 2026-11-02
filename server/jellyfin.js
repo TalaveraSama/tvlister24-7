@@ -244,19 +244,94 @@ export function mapJellyfinPath(rawPath, pathMap = getJellyfinConfig().pathMap) 
   return original;
 }
 
-/** Ruta local real del archivo, o '' si desde este servidor no se ve. */
-function resolveLocalMediaPath(jellyfinPath) {
-  const mapped = mapJellyfinPath(jellyfinPath);
-  const candidates = [mapped, String(jellyfinPath || '')].filter(Boolean);
+/**
+ * Mira por qué una ruta de Jellyfin no sirve: `ok`, `missing` (no existe en este
+ * servidor) o `forbidden` (existe pero el panel no puede leerla, permisos).
+ */
+export function explainLocalMediaPath(jellyfinPath, pathMap = getJellyfinConfig().pathMap) {
+  const original = String(jellyfinPath || '').trim();
+  if (!original) return { path: '', ok: false, reason: 'missing' };
+  const mapped = mapJellyfinPath(original, pathMap);
+  const candidates = [...new Set([mapped, original].filter(Boolean))];
+  let sawForbidden = false;
+  let sawDirectory = false;
   for (const candidate of candidates) {
     try {
       const st = fs.statSync(candidate);
-      if (st.isFile()) return fs.realpathSync(candidate);
-    } catch {
-      /* siguiente candidato */
+      if (!st.isFile()) {
+        sawDirectory = true;
+        continue;
+      }
+      // statSync pasa aunque el archivo no se pueda leer: se comprueba aparte,
+      // porque si no el panel diría «accesible» y el reproductor daría 500.
+      try {
+        fs.accessSync(candidate, fs.constants.R_OK);
+      } catch {
+        sawForbidden = true;
+        continue;
+      }
+      return { path: fs.realpathSync(candidate), ok: true, reason: 'ok' };
+    } catch (err) {
+      if (err?.code === 'EACCES' || err?.code === 'EPERM') sawForbidden = true;
     }
   }
-  return '';
+  if (!sawForbidden) {
+    const indexed = lookupFileIndex(path.basename(original));
+    if (indexed) return { path: indexed, ok: true, reason: 'index', viaIndex: true };
+  }
+  return { path: '', ok: false, reason: sawForbidden ? 'forbidden' : sawDirectory ? 'not_a_file' : 'missing' };
+}
+
+// Índice `nombre de archivo → ruta real` descubierto al detectar carpetas.
+// Sirve de respaldo cuando la equivalencia de prefijo no cubre todos los
+// archivos (mismo prefijo de Jellyfin con el contenido repartido en dos discos).
+const FILE_INDEX_KEY = 'jellyfin_file_index';
+const FILE_INDEX_LIMIT = 12000;
+let fileIndexCache = null;
+
+function loadFileIndex() {
+  if (fileIndexCache) return fileIndexCache;
+  try {
+    const raw = JSON.parse(getSetting(FILE_INDEX_KEY, '{}') || '{}');
+    fileIndexCache = raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    fileIndexCache = {};
+  }
+  return fileIndexCache;
+}
+
+/** Guarda el índice (sólo nombres de vídeo, acotado para no inflar los ajustes). */
+export function saveJellyfinFileIndex(entries) {
+  const clean = {};
+  let n = 0;
+  for (const [key, value] of Object.entries(entries || {})) {
+    if (n >= FILE_INDEX_LIMIT) break;
+    if (!key || !value) continue;
+    clean[String(key).toLowerCase()] = String(value);
+    n += 1;
+  }
+  if (n > 0) {
+    setSetting(FILE_INDEX_KEY, JSON.stringify(clean));
+    fileIndexCache = clean;
+  }
+  return n;
+}
+
+function lookupFileIndex(fileName) {
+  const key = String(fileName || '').toLowerCase();
+  if (!key) return '';
+  const hit = loadFileIndex()[key] || '';
+  if (!hit) return '';
+  try {
+    return fs.statSync(hit).isFile() ? hit : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Ruta local real del archivo, o '' si desde este servidor no se ve. */
+function resolveLocalMediaPath(jellyfinPath) {
+  return explainLocalMediaPath(jellyfinPath).path;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +394,9 @@ export function createMediaSymlink({ targetPath, title, year, kind = 'movies', c
     ? String(containerExt || path.extname(target))
     : `.${containerExt || path.extname(target).replace(/^\./, '')}`;
   const base = sanitizeName(title || path.basename(target, path.extname(target))) || 'video';
-  const yearTag = Number(year) > 1900 ? ` (${Number(year)})` : '';
+  // Muchos títulos ya traen el año («… 2025», «… (2024)»): no se repite.
+  const alreadyHasYear = new RegExp(`(?:19|20)\\d{2}`).test(base);
+  const yearTag = Number(year) > 1900 && !alreadyHasYear ? ` (${Number(year)})` : '';
 
   let attempt = 0;
   for (;;) {
@@ -587,38 +664,66 @@ export async function previewJellyfinImport({ libraryIds = [], contentMode = 'au
     episodes: 0,
     reachable: 0,
     unreachable: 0,
+    forbidden: 0,
+    prefixes: [],
     sample: []
+  };
+  const prefixStats = new Map(); // '/Media' -> {total, missing, forbidden}
+  const notePath = (p) => {
+    const info = explainLocalMediaPath(p);
+    if (info.ok) {
+      preview.reachable += 1;
+    } else {
+      preview.unreachable += 1;
+      if (info.reason === 'forbidden') preview.forbidden += 1;
+    }
+    const prefix = pathPrefix(p);
+    if (prefix) {
+      const st = prefixStats.get(prefix) || { prefix, total: 0, missing: 0, forbidden: 0 };
+      st.total += 1;
+      if (!info.ok) st.missing += 1;
+      if (info.reason === 'forbidden') st.forbidden += 1;
+      prefixStats.set(prefix, st);
+    }
+    return info;
   };
 
   for (const lib of selected) {
-    const isTv = lib.collectionType === 'tvshows' || /serie|series|tv/i.test(lib.name);
-    const isMovie = lib.collectionType === 'movies' || /movie|pelicula|película|film/i.test(lib.name);
-    const entry = { id: lib.id, name: lib.name, collectionType: lib.collectionType, movies: 0, series: 0, episodes: 0 };
+    const kind = libraryKind(lib);
+    const entry = {
+      id: lib.id,
+      name: lib.name,
+      collectionType: lib.collectionType,
+      kind,
+      movies: 0,
+      series: 0,
+      episodes: 0
+    };
     preview.libraries.push(entry);
+    if (kind === 'other') continue; // listas de reproducción, música, fotos…
 
-    if (wantMovies && (isMovie || (!isTv && contentMode === 'auto'))) {
+    if (wantMovies && kind === 'movies') {
       const movies = await fetchMovies(lib.id);
       entry.movies = movies.length;
       preview.movies += movies.length;
       for (const m of movies) {
         const p = itemPath(m);
-        const local = p ? resolveLocalMediaPath(p) : '';
-        if (local) preview.reachable += 1;
-        else preview.unreachable += 1;
+        const info = p ? notePath(p) : { path: '', ok: false, reason: 'missing' };
         if (preview.sample.length < sampleLimit) {
           preview.sample.push({
             kind: 'movie',
             title: String(m.Name || ''),
             year: Number(m.ProductionYear) || null,
             path: p,
-            localPath: local,
-            reachable: Boolean(local)
+            localPath: info.path,
+            reachable: info.ok,
+            reason: info.ok ? '' : info.reason
           });
         }
       }
     }
 
-    if (wantSeries && (isTv || (!isMovie && contentMode === 'auto'))) {
+    if (wantSeries && kind === 'series') {
       const shows = await fetchSeries(lib.id);
       entry.series = shows.length;
       preview.series += shows.length;
@@ -628,16 +733,15 @@ export async function previewJellyfinImport({ libraryIds = [], contentMode = 'au
         preview.episodes += eps.length;
         for (const ep of eps) {
           const p = itemPath(ep);
-          const local = p ? resolveLocalMediaPath(p) : '';
-          if (local) preview.reachable += 1;
-          else preview.unreachable += 1;
+          const info = p ? notePath(p) : { path: '', ok: false, reason: 'missing' };
           if (preview.sample.length < sampleLimit) {
             preview.sample.push({
               kind: 'episode',
               title: `${show.Name || ''} S${ep.ParentIndexNumber || 1}E${ep.IndexNumber || 1}`,
               path: p,
-              localPath: local,
-              reachable: Boolean(local)
+              localPath: info.path,
+              reachable: info.ok,
+              reason: info.ok ? '' : info.reason
             });
           }
         }
@@ -647,7 +751,340 @@ export async function previewJellyfinImport({ libraryIds = [], contentMode = 'au
 
   preview.symlinkDir = getJellyfinConfig().symlinkDir;
   preview.config = { url: getJellyfinConfig().url, pathMap: getJellyfinConfig().pathMap };
+  preview.prefixes = [...prefixStats.values()]
+    .filter((p) => p.missing > 0)
+    .sort((a, b) => b.missing - a.missing)
+    .slice(0, 6);
+  preview.needsMapping = preview.unreachable > 0 && preview.forbidden < preview.unreachable;
   return preview;
+}
+
+// ---------------------------------------------------------------------------
+// Detección de la carpeta real: Jellyfin (sobre todo en Docker) ve el disco con
+// otro prefijo (`/Media`, `/data/movies`…) que no existe igual en este servidor.
+// ---------------------------------------------------------------------------
+
+const SEARCH_ROOTS = [
+  '/media',
+  '/Media',
+  '/mnt',
+  '/srv',
+  '/data',
+  '/opt',
+  '/home',
+  '/var/lib',
+  '/volume1',
+  '/volume2',
+  '/storage'
+];
+
+const SCAN_SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '.cache',
+  'proc',
+  'sys',
+  'dev',
+  'run',
+  'snap',
+  'lost+found',
+  'streams_runtime',
+  'releases',
+  '__pycache__'
+]);
+
+function isReadableDir(dir) {
+  try {
+    if (!fs.statSync(dir).isDirectory()) return false;
+    fs.accessSync(dir, fs.constants.R_OK); // accessSync devuelve undefined: se comprueba aparte
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Directorios donde puede estar de verdad el contenido (sin duplicados). */
+function candidateSearchRoots(extra = []) {
+  const roots = [];
+  const push = (dir) => {
+    const clean = String(dir || '').trim();
+    if (clean && !roots.includes(clean)) roots.push(clean);
+  };
+  for (const dir of extra) push(dir);
+  // Carpetas de sincronización del propio panel: ahí ya hay VOD del cliente.
+  try {
+    for (const row of db.prepare('SELECT folder_path FROM vod_watch_folders').all()) push(row.folder_path);
+  } catch {
+    /* tabla aún no migrada */
+  }
+  for (const dir of SEARCH_ROOTS) push(dir);
+  return roots.filter(isReadableDir);
+}
+
+/**
+ * Raíces «probables» para una ruta de Jellyfin: se prueba a sustituir el primer
+ * tramo (`/Media`) por cada carpeta real conocida. Es el caso normal de Docker
+ * (`-v /home/xui/media:/Media`), sin recorrer el disco entero.
+ */
+function directReplacementBases(prefix, roots) {
+  const bases = [];
+  const last = prefix.split('/').filter(Boolean).pop() || 'media';
+  const names = [...new Set([last, last.toLowerCase()])];
+  for (const root of roots) {
+    bases.push(root);
+    for (const name of names) bases.push(path.join(root, name));
+  }
+  return [...new Set(bases)].filter(isReadableDir);
+}
+
+/**
+ * Índice `nombre de archivo → ruta real` recorriendo las carpetas candidatas.
+ * Acotado por tiempo y profundidad para no colgar el panel en discos grandes.
+ */
+function indexMediaFileNames(roots, { maxSeconds = 12, maxDepth = 7, limit = 60000 } = {}) {
+  const index = new Map();
+  const started = Date.now();
+  const deadline = started + maxSeconds * 1000;
+  const visited = new Set();
+  let scanned = 0;
+  let truncated = false;
+
+  const walk = (dir, depth) => {
+    if (truncated) return;
+    if (Date.now() > deadline || index.size >= limit) {
+      truncated = true;
+      return;
+    }
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (truncated) return;
+      if (Date.now() > deadline || index.size >= limit) {
+        truncated = true;
+        return;
+      }
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue; // no seguir enlaces (bucles)
+      if (entry.isDirectory()) {
+        if (depth >= maxDepth) continue;
+        if (SCAN_SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+        if (visited.has(full)) continue;
+        visited.add(full);
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!VIDEO_EXTENSIONS.has(ext)) continue;
+      scanned += 1;
+      const key = entry.name.toLowerCase();
+      const list = index.get(key);
+      if (list) {
+        if (list.length < 3) list.push(full);
+      } else {
+        index.set(key, [full]);
+      }
+    }
+  };
+
+  for (const root of roots) {
+    if (truncated) break;
+    walk(root, 0);
+  }
+  return { index, scanned, truncated, elapsedMs: Date.now() - started };
+}
+
+/**
+ * Rutas de Jellyfin (películas y episodios) de las bibliotecas indicadas.
+ * Se usa para la vista previa y para la detección de carpetas.
+ */
+async function collectJellyfinPaths({ libraryIds = [], contentMode = 'auto', maxShows = 60, maxMovies = 5000 } = {}) {
+  const libraries = await listJellyfinLibraries();
+  const ids = normalizeLibraryIds(libraryIds);
+  const selected = ids.length ? libraries.filter((l) => ids.includes(l.id)) : libraries;
+  const items = [];
+  for (const lib of selected) {
+    const kind = libraryKind(lib);
+    if (kind === 'other') continue;
+    if (contentMode !== 'series' && kind === 'movies') {
+      const movies = (await fetchMovies(lib.id)).slice(0, maxMovies);
+      for (const m of movies) {
+        items.push({ kind: 'movie', title: String(m.Name || ''), library: lib, path: itemPath(m) });
+      }
+    }
+    if (contentMode !== 'movies' && kind === 'series') {
+      const shows = (await fetchSeries(lib.id)).slice(0, maxShows);
+      for (const show of shows) {
+        const eps = await fetchEpisodes(show.Id);
+        for (const ep of eps) {
+          items.push({
+            kind: 'episode',
+            title: `${show.Name || ''} S${ep.ParentIndexNumber || 1}E${ep.IndexNumber || 1}`,
+            library: lib,
+            path: itemPath(ep)
+          });
+        }
+      }
+    }
+  }
+  return { libraries, selected, items };
+}
+
+/** Prefijo de una ruta de Jellyfin: `/Media/Peliculas/x.mkv` → `/Media`. */
+function pathPrefix(filePath) {
+  const segs = String(filePath || '').split('/').filter(Boolean);
+  return segs.length ? `/${segs[0]}` : '';
+}
+
+/**
+ * Averigua a qué carpeta real corresponde cada prefijo de Jellyfin.
+ *
+ * 1. Prueba sustituciones directas del prefijo por las carpetas conocidas
+ *    (`/Media` → `/media`, `/mnt/media`, `/home/xui/media`…).
+ * 2. Si no acierta, busca los archivos por su nombre en las carpetas candidatas.
+ * 3. Devuelve la mejor equivalencia por prefijo, con cuántos archivos resuelve.
+ */
+export async function detectJellyfinPathMappings({
+  libraryIds = [],
+  contentMode = 'auto',
+  extraRoots = [],
+  maxSeconds = 12
+} = {}) {
+  const started = Date.now();
+  const { items } = await collectJellyfinPaths({ libraryIds, contentMode });
+  const currentMap = getJellyfinConfig().pathMap;
+  const missing = items.filter((it) => it.path && !explainLocalMediaPath(it.path, currentMap).ok);
+
+  const byPrefix = new Map();
+  for (const it of missing) {
+    const prefix = pathPrefix(it.path);
+    if (!prefix) continue;
+    if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+    byPrefix.get(prefix).push(it);
+  }
+
+  const roots = candidateSearchRoots(extraRoots);
+  const proposals = [];
+  let scanInfo = null;
+  let index = null;
+
+  for (const [prefix, list] of byPrefix) {
+    const sample = list.slice(0, 40);
+    let best = null;
+
+    // --- 1) Sustitución directa del prefijo --------------------------------
+    for (const base of directReplacementBases(prefix, roots)) {
+      const map = [{ from: prefix, to: base }];
+      let hits = 0;
+      for (const it of sample) if (explainLocalMediaPath(it.path, map).ok) hits += 1;
+      if (hits === 0) continue;
+      // Cobertura completa sobre todos los archivos de ese prefijo.
+      let total = 0;
+      for (const it of list) if (explainLocalMediaPath(it.path, map).ok) total += 1;
+      if (!best || total > best.matched) best = { from: prefix, to: base, matched: total, total: list.length, method: 'direct' };
+      if (total === list.length) break;
+    }
+
+    // --- 2) Búsqueda por nombre de archivo --------------------------------
+    if (!best || best.matched < list.length) {
+      if (!index) {
+        scanInfo = indexMediaFileNames(roots, { maxSeconds });
+        index = scanInfo.index;
+      }
+      const votes = new Map();
+      for (const it of sample) {
+        const base = path.basename(it.path);
+        const found = index.get(base.toLowerCase());
+        if (!found || !found.length) continue;
+        const rest = it.path.slice(prefix.length); // "/Peliculas/x.mkv"
+        for (const full of found) {
+          if (!full.endsWith(rest)) continue;
+          const to = full.slice(0, full.length - rest.length).replace(/\/+$/, '') || '/';
+          if (!isReadableDir(to)) continue;
+          votes.set(to, (votes.get(to) || 0) + 1);
+        }
+      }
+      const ranked = [...votes.entries()].sort((a, b) => b[1] - a[1]);
+      for (const [to] of ranked.slice(0, 5)) {
+        const map = [{ from: prefix, to }];
+        let total = 0;
+        for (const it of list) if (explainLocalMediaPath(it.path, map).ok) total += 1;
+        if (!best || total > best.matched) best = { from: prefix, to, matched: total, total: list.length, method: 'search' };
+        if (total === list.length) break;
+      }
+    }
+
+    if (best && best.matched > 0) proposals.push(best);
+  }
+
+  const mapping = proposals.map((p) => ({ from: p.from, to: p.to }));
+
+  // Índice por nombre: cubre lo que las equivalencias no alcancen (el mismo
+  // prefijo de Jellyfin puede tener el contenido repartido en dos carpetas).
+  const indexEntries = {};
+  if (index) {
+    for (const [name, paths] of index) {
+      if (paths.length === 1) indexEntries[name] = paths[0];
+    }
+  }
+  const missingNames = new Set(
+    items
+      .filter((it) => it.path && !explainLocalMediaPath(it.path, [...currentMap, ...mapping]).ok)
+      .map((it) => path.basename(it.path).toLowerCase())
+  );
+  let indexedResolved = 0;
+  for (const name of missingNames) {
+    if (indexEntries[name]) indexedResolved += 1;
+  }
+  const indexUsed = Object.fromEntries(
+    Object.entries(indexEntries).filter(([name]) => missingNames.has(name))
+  );
+  const forbidden = missing.filter((it) => explainLocalMediaPath(it.path, currentMap).reason === 'forbidden').length;
+
+  if (Object.keys(indexEntries).length) saveJellyfinFileIndex(indexEntries);
+
+  return {
+    total: items.length,
+    unreachable: missing.length,
+    reachable: items.length - missing.length,
+    forbidden,
+    mapping,
+    proposals: proposals.sort((a, b) => b.matched - a.matched),
+    resolved: proposals.reduce((acc, p) => acc + p.matched, 0),
+    indexedFiles: Object.keys(indexEntries).length,
+    indexedResolved,
+    indexUsed: Object.keys(indexUsed).length,
+    roots,
+    scanned: scanInfo ? scanInfo.scanned : 0,
+    scanTruncated: scanInfo ? scanInfo.truncated : false,
+    elapsedMs: Date.now() - started,
+    hint:
+      proposals.length === 0
+        ? forbidden > 0
+          ? 'Los archivos existen pero el panel no puede leerlos: revisa propietario y permisos del usuario del servicio (chown/chmod).'
+          : 'No se encontraron los archivos en este servidor. Si Jellyfin está en otra máquina, activa «usar la URL de Jellyfin»; si el disco está montado aquí, indica la equivalencia a mano.'
+        : ''
+  };
+}
+
+/**
+ * Tipo real de una biblioteca de Jellyfin. `playlists` (y música, fotos, etc.)
+ * se omiten: son la misma película otra vez con otro Id y duplicarían el
+ * catálogo. Sólo `movies`/`boxsets` y `tvshows` se importan.
+ */
+function libraryKind(lib) {
+  const type = String(lib?.collectionType || '').toLowerCase();
+  const name = String(lib?.name || '');
+  if (type === 'tvshows') return 'series';
+  if (type === 'movies' || type === 'boxsets') return 'movies';
+  if (['playlists', 'music', 'homevideos', 'musicvideos', 'photos', 'livetv', 'books'].includes(type)) return 'other';
+  if (/serie|series|\btv\b/i.test(name)) return 'series';
+  if (/movie|pelicula|película|film|vod/i.test(name)) return 'movies';
+  return type ? 'other' : 'movies';
 }
 
 function ensureCategory(name, type) {
@@ -676,8 +1113,30 @@ export async function importFromJellyfin({
   autoTmdb = false,
   directFallback = null,
   fetchImages = true,
-  maxItems = 5000
+  maxItems = 5000,
+  autoDetectPaths = false,
+  searchRoots = []
 } = {}) {
+  // Jellyfin en Docker ve `/Media` y en el servidor está en otro sitio: si se
+  // pide, se detecta la carpeta real y se guarda la equivalencia antes de
+  // importar. Sin esto, una biblioteca entera se queda en «no accesible».
+  let detected = null;
+  if (autoDetectPaths) {
+    try {
+      detected = await detectJellyfinPathMappings({ libraryIds, contentMode, extraRoots: searchRoots });
+      if (detected.mapping.length) {
+        const merged = [...getJellyfinConfig().pathMap];
+        for (const rule of detected.mapping) {
+          const i = merged.findIndex((r) => r.from === rule.from);
+          if (i >= 0) merged[i] = rule;
+          else merged.push(rule);
+        }
+        saveJellyfinConfig({ pathMap: merged });
+      }
+    } catch {
+      detected = null;
+    }
+  }
   const cfg = getJellyfinConfig();
   const useDirect = directFallback === null ? cfg.directFallback : Boolean(directFallback);
   if (symlinkDir) saveJellyfinConfig({ symlinkDir });
@@ -753,10 +1212,10 @@ export async function importFromJellyfin({
   };
 
   for (const lib of selected) {
-    const isTv = lib.collectionType === 'tvshows' || /serie|series|tv/i.test(lib.name);
-    const isMovie = lib.collectionType === 'movies' || /movie|pelicula|película|film/i.test(lib.name);
+    const kind = libraryKind(lib);
+    if (kind === 'other') continue;
 
-    if (contentMode !== 'series' && (isMovie || (!isTv && contentMode === 'auto'))) {
+    if (contentMode !== 'series' && kind === 'movies') {
       const movies = (await fetchMovies(lib.id)).slice(0, maxItems);
       const movieCat = fallbackVodCat || (useLibraryAsCategory ? ensureCategory(`Jellyfin · ${lib.name}`, 'vod') : ensureCategory('Jellyfin Películas', 'vod'));
 
@@ -804,7 +1263,7 @@ export async function importFromJellyfin({
       }
     }
 
-    if (contentMode !== 'movies' && (isTv || (!isMovie && contentMode === 'auto'))) {
+    if (contentMode !== 'movies' && kind === 'series') {
       const shows = (await fetchSeries(lib.id)).slice(0, maxItems);
       const seriesCat = fallbackVodCat
         ? fallbackVodCat
@@ -914,6 +1373,27 @@ export async function importFromJellyfin({
 
   saveJellyfinConfig({ libraries: selected.map((l) => l.id) });
   const summary = { at: new Date().toISOString(), ...stats, errors: stats.errors.slice(0, 20) };
+  if (detected && detected.mapping.length) {
+    summary.detectedPaths = detected.mapping;
+    summary.detectedResolved = detected.resolved;
+  }
+  if (stats.skippedNoFile > 0 || stats.errors.length) {
+    // Diagnóstico para el panel: por qué se quedó fuera cada archivo.
+    const reasons = { missing: 0, forbidden: 0, not_a_file: 0 };
+    for (const lib of selected) {
+      if (contentMode !== 'series' && libraryKind(lib) === 'movies') {
+        for (const it of await fetchMovies(lib.id).catch(() => [])) {
+          const info = explainLocalMediaPath(itemPath(it));
+          if (!info.ok) reasons[info.reason] = (reasons[info.reason] || 0) + 1;
+        }
+      }
+    }
+    summary.unreachableReasons = reasons;
+    if (reasons.forbidden > 0) {
+      summary.hint =
+        'Hay archivos que existen pero el panel no puede leerlos. Ajusta propietario/permisos (chown al usuario del servicio o chmod 644).';
+    }
+  }
   setSetting('jellyfin_last_import', JSON.stringify(summary));
   return summary;
 }

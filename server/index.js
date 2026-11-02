@@ -129,6 +129,7 @@ import {
   testJellyfinConnection,
   listJellyfinLibraries,
   previewJellyfinImport,
+  detectJellyfinPathMappings,
   importFromJellyfin,
   createSymlinkForVod,
   createSymlinkForEpisode,
@@ -2776,6 +2777,33 @@ app.post('/api/jellyfin/preview', requireAuth, requireAdmin, async (req, res) =>
   }
 });
 
+// Busca en este servidor la carpeta real que corresponde a las rutas que
+// devuelve Jellyfin (`/Media` en Docker → `/home/xui/media` en el host).
+app.post('/api/jellyfin/detect-paths', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const result = await detectJellyfinPathMappings({
+      libraryIds: b.libraryIds || [],
+      contentMode: b.contentMode || 'auto',
+      extraRoots: Array.isArray(b.extraRoots) ? b.extraRoots : [],
+      maxSeconds: Math.min(30, Math.max(3, Number(b.maxSeconds) || 12))
+    });
+    if (b.apply && result.mapping.length) {
+      const merged = [...getJellyfinConfig().pathMap];
+      for (const rule of result.mapping) {
+        const i = merged.findIndex((r) => r.from === rule.from);
+        if (i >= 0) merged[i] = rule;
+        else merged.push(rule);
+      }
+      result.config = saveJellyfinConfig({ pathMap: merged });
+      result.applied = true;
+    }
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo detectar la carpeta de los archivos' });
+  }
+});
+
 app.post('/api/jellyfin/import', requireAuth, requireAdmin, async (req, res) => {
   try {
     const b = req.body || {};
@@ -2792,7 +2820,9 @@ app.post('/api/jellyfin/import', requireAuth, requireAdmin, async (req, res) => 
       defaultCategoryId: b.defaultCategoryId || null,
       autoTmdb: Boolean(b.autoTmdb),
       directFallback: typeof b.directFallback === 'boolean' ? b.directFallback : null,
-      fetchImages: b.fetchImages !== false
+      fetchImages: b.fetchImages !== false,
+      autoDetectPaths: b.autoDetectPaths === true,
+      searchRoots: Array.isArray(b.searchRoots) ? b.searchRoots.filter(Boolean) : []
     });
     res.json({ ok: true, stats });
   } catch (err) {

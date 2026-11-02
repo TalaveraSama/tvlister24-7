@@ -134,6 +134,7 @@ export default function VodPage({ onPreview }) {
     apiKey: '',
     symlinkDir: '',
     pathMapText: '',
+    searchRoot: '',
     contentMode: 'auto',
     createSymlink: true,
     useLibraryAsCategory: true,
@@ -143,6 +144,8 @@ export default function VodPage({ onPreview }) {
   const [jellyfinLibraries, setJellyfinLibraries] = useState([]);
   const [jellyfinSelected, setJellyfinSelected] = useState([]);
   const [jellyfinPreview, setJellyfinPreview] = useState(null);
+  const [jellyfinDetect, setJellyfinDetect] = useState(null);
+  const [jellyfinAutoDetect, setJellyfinAutoDetect] = useState(true);
   const [jellyfinBusy, setJellyfinBusy] = useState('');
   const [jellyfinMsg, setJellyfinMsg] = useState(null);
 
@@ -542,8 +545,45 @@ export default function VodPage({ onPreview }) {
   const openJellyfinModal = async () => {
     setJellyfinMsg(null);
     setJellyfinPreview(null);
+    setJellyfinDetect(null);
     setJellyfinModalOpen(true);
     if (jellyfinCfg.configured) await loadJellyfinLibraries();
+  };
+
+  const detectJellyfinPaths = async (apply = false) => {
+    setJellyfinBusy('detect');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/detect-paths', {
+        method: 'POST',
+        body: JSON.stringify({
+          libraryIds: jellyfinSelected,
+          contentMode: jellyfinForm.contentMode,
+          extraRoots: jellyfinForm.searchRoot ? [jellyfinForm.searchRoot] : [],
+          apply
+        })
+      });
+      setJellyfinDetect(res);
+      if (apply && res.config) {
+        setJellyfinCfg(res.config);
+        setJellyfinForm((prev) => ({
+          ...prev,
+          pathMapText: (res.config.pathMap || []).map((r) => `${r.from} => ${r.to}`).join('\n')
+        }));
+        setJellyfinMsg({
+          ok: true,
+          text:
+            res.mapping.length > 0
+              ? `Carpeta encontrada: ${res.mapping.map((r) => `${r.from} → ${r.to}`).join(', ')}. Vuelve a pulsar «Ver qué hay».`
+              : 'No se pudo deducir la carpeta real. Revisa la vista previa o indica la equivalencia a mano.'
+        });
+        await previewJellyfin();
+      }
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJellyfinBusy('');
+    }
   };
 
   const previewJellyfin = async () => {
@@ -576,7 +616,9 @@ export default function VodPage({ onPreview }) {
           symlinkDir: jellyfinForm.symlinkDir,
           useLibraryAsCategory: jellyfinForm.useLibraryAsCategory,
           autoTmdb: jellyfinForm.autoTmdb,
-          directFallback: jellyfinForm.directFallback
+          directFallback: jellyfinForm.directFallback,
+          autoDetectPaths: jellyfinAutoDetect,
+          searchRoots: jellyfinForm.searchRoot ? [jellyfinForm.searchRoot] : []
         })
       });
       const st = res.stats;
@@ -586,7 +628,8 @@ export default function VodPage({ onPreview }) {
           `Importado: ${st.moviesAdded} películas, ${st.seriesAdded} series y ${st.episodesAdded} episodios. ` +
           `${st.symlinks} enlaces creados en ${jellyfinForm.symlinkDir || jellyfinCfg.symlinkDir}` +
           (st.directUrls ? `, ${st.directUrls} por URL de Jellyfin` : '') +
-          (st.skippedNoFile ? `. ${st.skippedNoFile} sin archivo accesible (revisa el mapa de rutas)` : '') +
+          (st.detectedPaths?.length ? ` Rutas detectadas: ${st.detectedPaths.map((r) => `${r.from} → ${r.to}`).join(', ')}.` : '') +
+          (st.skippedNoFile ? `. ${st.skippedNoFile} sin archivo accesible${st.hint ? `: ${st.hint}` : ' (revisa el mapa de rutas)'}` : '') +
           (st.errors?.length ? `. ${st.errors.length} con error.` : '.')
       });
       setJellyfinPreview(null);
@@ -1017,6 +1060,21 @@ export default function VodPage({ onPreview }) {
                   Sólo hace falta si Jellyfin ve el disco con otro prefijo (docker, otro montaje…). Si el archivo ya
                   está accesible con la ruta que devuelve Jellyfin, déjalo vacío.
                 </p>
+                <label className="space-y-1 block">
+                  <span className="text-slate-400">
+                    Carpeta real de los vídeos en este servidor (opcional, para la búsqueda automática)
+                  </span>
+                  <input
+                    value={jellyfinForm.searchRoot}
+                    onChange={(e) => setJellyfinForm({ ...jellyfinForm, searchRoot: e.target.value })}
+                    placeholder="/home/xui/media"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                  />
+                  <span className="text-[10px] text-slate-500 block">
+                    Si sabes dónde están los archivos, ponlo aquí y pulsa «Buscar la carpeta real»: es instantáneo. Si lo
+                    dejas vacío, el panel revisa /media, /mnt, /srv, /opt, /home y /var/lib.
+                  </span>
+                </label>
               </div>
 
               {/* Bibliotecas */}
@@ -1112,6 +1170,20 @@ export default function VodPage({ onPreview }) {
                 <label className="flex items-start gap-2 cursor-pointer">
                   <input
                     type="checkbox"
+                    checked={jellyfinAutoDetect}
+                    onChange={(e) => setJellyfinAutoDetect(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 accent-sky-500"
+                  />
+                  <span className="text-slate-300">
+                    <span className="text-white font-semibold">Detectar la carpeta real sola</span> — si Jellyfin está
+                    en Docker y ve <span className="font-mono">/Media</span>, el panel busca dónde están esos archivos
+                    en este servidor y guarda la equivalencia antes de importar.
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
                     checked={jellyfinForm.useLibraryAsCategory}
                     onChange={(e) => setJellyfinForm({ ...jellyfinForm, useLibraryAsCategory: e.target.checked })}
                     className="w-4 h-4 mt-0.5 accent-sky-500"
@@ -1190,10 +1262,80 @@ export default function VodPage({ onPreview }) {
                     </div>
                   )}
                   {jellyfinPreview.unreachable > 0 && (
-                    <p className="text-[10px] text-amber-300/90">
-                      Los archivos «no accesibles» no se pueden enlazar: añade una equivalencia de ruta o activa la
-                      opción de usar la URL de Jellyfin.
-                    </p>
+                    <div className="space-y-2 pt-1 border-t border-slate-800">
+                      <p className="text-[10px] text-amber-300/90">
+                        {jellyfinPreview.forbidden > 0 && jellyfinPreview.forbidden >= jellyfinPreview.unreachable ? (
+                          <>
+                            Los archivos existen pero el panel no puede leerlos (<span className="font-mono">
+                              {jellyfinPreview.forbidden}
+                            </span>{' '}
+                            sin permiso). Ajusta el propietario del usuario del servicio:{' '}
+                            <span className="font-mono">sudo chown -R tvlister:tvlister CARPETA</span>.
+                          </>
+                        ) : (
+                          <>
+                            Jellyfin ve esos archivos con otra ruta (suele pasar si está en Docker). Pulsa{' '}
+                            <span className="text-amber-200 font-semibold">«Buscar la carpeta real»</span> y el panel
+                            encontrará dónde están en este servidor.
+                          </>
+                        )}
+                      </p>
+                      {jellyfinPreview.prefixes?.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {jellyfinPreview.prefixes.map((p) => (
+                            <span
+                              key={p.prefix}
+                              className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[10px]"
+                            >
+                              {p.prefix} · {p.missing} sin ubicar
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => detectJellyfinPaths(false)}
+                          disabled={jellyfinBusy === 'detect'}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 font-semibold border border-amber-500/30 disabled:opacity-50"
+                        >
+                          <Search className="w-3.5 h-3.5" />
+                          {jellyfinBusy === 'detect' ? 'Buscando…' : 'Buscar la carpeta real'}
+                        </button>
+                        {jellyfinDetect?.mapping?.length > 0 && (
+                          <button
+                            onClick={() => detectJellyfinPaths(true)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 font-semibold border border-emerald-500/30"
+                          >
+                            <Check className="w-3.5 h-3.5" /> Aplicar y guardar
+                          </button>
+                        )}
+                      </div>
+                      {jellyfinDetect && (
+                        <div className="text-[10px] text-slate-300 space-y-1">
+                          {jellyfinDetect.mapping?.length > 0 ? (
+                            jellyfinDetect.proposals.map((p) => (
+                              <div key={`${p.from}-${p.to}`} className="flex items-center gap-2">
+                                <span className="text-emerald-300">✓</span>
+                                <span className="font-mono">
+                                  {p.from} → {p.to}
+                                </span>
+                                <span className="text-slate-500">
+                                  {p.matched}/{p.total} archivos
+                                  {p.method === 'search' ? ' (buscados por nombre)' : ''}
+                                </span>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-amber-300/90">{jellyfinDetect.hint}</p>
+                          )}
+                          <p className="text-slate-500">
+                            Carpetas revisadas: {jellyfinDetect.roots?.join(', ')}
+                            {jellyfinDetect.scanned ? ` · ${jellyfinDetect.scanned} archivos indexados` : ''} ·{' '}
+                            {Math.round((jellyfinDetect.elapsedMs || 0) / 100) / 10}s
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}

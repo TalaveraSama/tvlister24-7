@@ -52,6 +52,34 @@ prefijo, se traduce con una línea por equivalencia:
 
 Si la ruta que devuelve Jellyfin ya existe en este servidor, el mapa se deja **vacío**.
 
+### Cuando la vista previa dice «0 archivos accesibles»
+
+Es el caso típico de **Jellyfin en Docker**: él ve `/Media/…` pero en el servidor ese contenido está
+en `/home/xui/media`, `/mnt/disco2/…`, etc. La importación lo resuelve de tres formas, en este
+orden:
+
+1. **Equivalencia ya guardada** (mapa de rutas) — instantáneo.
+2. **«Buscar la carpeta real»** (botón en la vista previa, o `POST /api/jellyfin/detect-paths`):
+   prueba a sustituir el primer tramo de la ruta por las carpetas reales del servidor
+   (`/media`, `/mnt`, `/srv`, `/opt`, `/home`, `/var/lib`, las carpetas de sincronización VOD del
+   panel y la que escribas en *«Carpeta real de los vídeos»*). Si con eso no acierta, indexa los
+   archivos de vídeo por nombre y busca cada título. Devuelve la equivalencia con cuántos archivos
+   resuelve (`5/5 archivos`) y un botón **«Aplicar y guardar»**.
+3. **«Detectar la carpeta real sola»** (casilla marcada por defecto): al pulsar **Importar**, el
+   panel hace esa detección, guarda la equivalencia y luego importa. Así no hay que saber nada de
+   rutas.
+
+Lo que no se pueda resolver por prefijo se busca **por nombre de archivo** en un índice que el
+panel guarda al detectar (`jellyfin_file_index`), útil cuando el mismo prefijo de Jellyfin tiene el
+contenido repartido en dos discos.
+
+Si los archivos **existen pero no se pueden leer** (permisos), la vista previa lo dice aparte
+(`sin permiso`) y no se crean enlaces: se arregla con
+`sudo chown -R tvlister:tvlister CARPETA` (o el usuario con el que corre el servicio).
+
+Las bibliotecas de tipo **lista de reproducción, música o fotos se omiten**: contienen las mismas
+películas con otro identificador y duplicarían el catálogo.
+
 ### Opciones de importación
 
 | Opción | Qué hace |
@@ -145,8 +173,9 @@ Todas requieren sesión de administrador.
 | `POST /api/jellyfin/config` | Guarda URL, clave, carpeta, mapa y respaldo directo. `testConnection: true` prueba la conexión |
 | `POST /api/jellyfin/test` | Prueba la conexión y devuelve nombre/versión |
 | `GET /api/jellyfin/libraries` | Bibliotecas con su `collectionType` y las seleccionadas |
-| `POST /api/jellyfin/preview` | `{libraryIds, contentMode}` → cuántas películas/series/episodios y cuántos archivos son accesibles |
-| `POST /api/jellyfin/import` | `{libraryIds, contentMode, createSymlink, symlinkDir, useLibraryAsCategory, autoTmdb, directFallback, fetchImages}` |
+| `POST /api/jellyfin/preview` | `{libraryIds, contentMode}` → cuántas películas/series/episodios, cuántos archivos son accesibles, por qué no lo son (`missing`/`forbidden`) y los prefijos sin ubicar |
+| `POST /api/jellyfin/detect-paths` | `{libraryIds, extraRoots[], apply, maxSeconds}` → equivalencias encontradas con cuántos archivos resuelve cada una |
+| `POST /api/jellyfin/import` | `{libraryIds, contentMode, createSymlink, symlinkDir, useLibraryAsCategory, autoTmdb, directFallback, fetchImages, autoDetectPaths, searchRoots[]}` |
 | `POST /api/vod/:id/symlink` | Crea el enlace de una película ya existente |
 | `POST /api/series/episodes/:epId/symlink` | Crea el enlace de un episodio |
 | `GET /api/vod/symlinks/status` | Estado de la carpeta y enlaces rotos |
@@ -165,7 +194,8 @@ acepta `Authorization: MediaBrowser Token="…"`).
 |---|---|
 | «Jellyfin rechazó la API Key (HTTP 401)» | Clave mal copiada o revocada: crear una nueva en Jellyfin |
 | «No se pudo conectar con Jellyfin» | URL, puerto (8096) o firewall; probar con `curl http://IP:8096/System/Info` |
-| Vista previa con muchos «no accesibles» | Falta el mapa de rutas o el disco no está montado en este servidor |
+| Vista previa con muchos «no accesibles» | Jellyfin usa otra ruta (Docker): pulsa **«Buscar la carpeta real»** o escribe la carpeta en *«Carpeta real de los vídeos»* |
+| «sin permiso» en la vista previa | El panel no puede leer los archivos: `chown`/`chmod` con el usuario del servicio |
 | `skippedNoFile` sube y no importa | Igual que arriba; o los archivos son de otra máquina (activar respaldo directo) |
 | Un título no aparece en el panel | Ya estaba importado (se cuenta en `moviesExisting`), o su biblioteca no estaba marcada |
 | El vídeo no arranca pero el título está | El archivo original se movió o se borró: el enlace queda roto. `jellyfin symlinks` lo informa |
