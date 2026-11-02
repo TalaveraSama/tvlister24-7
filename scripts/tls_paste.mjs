@@ -117,12 +117,14 @@ async function main() {
       .map((v) => v.replace(/\\,/g, ',').trim())
       .filter((v) => v.includes('.'))
       .pop();
-    const san = String(x509.subjectAltName || '')
+    const sans = String(x509.subjectAltName || '')
       .split(',')
       .map((v) => v.trim().replace(/^DNS:/, ''))
-      .filter((v) => v && !v.startsWith('*.'))
-      .pop();
-    host = cn || san || '';
+      .filter((v) => v && v.includes('.'));
+    // Un certificado comodín (el de Cloudflare suele ser *.dominio) se guarda
+    // como comodín: así cubre el panel y cualquier subdominio futuro de golpe.
+    const wildcard = sans.find((v) => v.startsWith('*.'));
+    host = wildcard || cn || sans[0] || '';
     if (host) console.log(`   (dominio tomado del certificado: ${host})`);
   }
   if (!host) {

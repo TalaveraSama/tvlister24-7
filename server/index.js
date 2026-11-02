@@ -159,6 +159,7 @@ import {
   removeCertificate
 } from './tlsManager.js';
 import { getDomains, setDomains, checkDomains } from './domains.js';
+import { acmeTokenFromPath, readAcmeToken } from './acme.js';
 import {
   buildFullBackupObject,
   createServerSnapshot,
@@ -210,6 +211,15 @@ app.use(
     return callback(null, sameHost ? { origin, credentials: true } : { origin: false });
   })
 );
+// Retos HTTP-01 de Let's Encrypt (certbot --webroot). Van antes que nada:
+// tienen que contestar en claro, también cuando el panel ocupa el puerto 80.
+app.get('/.well-known/acme-challenge/:token', (req, res) => {
+  const token = acmeTokenFromPath(`/.well-known/acme-challenge/${req.params.token}`);
+  const body = token ? readAcmeToken(token) : null;
+  if (body == null) return res.status(404).type('text/plain').send('reto no encontrado');
+  res.set('Cache-Control', 'no-store').type('text/plain').send(body);
+});
+
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 

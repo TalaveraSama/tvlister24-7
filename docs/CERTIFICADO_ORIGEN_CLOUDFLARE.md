@@ -84,10 +84,26 @@ Resultado:
 La clave privada queda en `600` (solo root) y **nunca** se devuelve por la API ni se muestra en el
 panel: la UI solo enseña dominio, emisor, vencimiento y de dónde salió.
 
+> **Si el certificado es comodín** (`*.alphadigitalnic.xyz`, lo más habitual en Cloudflare), se
+> guarda como comodín y cubre el panel y cualquier subdominio: en `tls list` aparece como
+> `*.alphadigitalnic.xyz`. No hay que instalar uno por nombre.
+
+> **Si el 80 lo ocupa el panel**, certbot `--standalone` falla con «Could not bind TCP port 80».
+> Usa `tvlister-admin acme <dominio> <correo>` (validación webroot): ver
+> [`LETSENCRYPT_WEBROOT.md`](LETSENCRYPT_WEBROOT.md).
+
 ## 3. El video, con Let's Encrypt (obligatorio)
 
 ```bash
-sudo certbot certonly --standalone -d live-stream.alphadigitalnic.xyz
+# Una sola orden: emite con webroot (el 80 lo tiene el panel) e instala el
+# certificado en el panel como certificado de ese dominio.
+sudo tvlister-admin acme live-stream.alphadigitalnic.xyz tu@correo.com
+```
+
+Equivalente a mano, si ya tenías el certificado emitido:
+
+```bash
+sudo certbot certonly --webroot -w /var/www/tvlister-acme -d live-stream.alphadigitalnic.xyz
 sudo tvlister-admin tls add live-stream.alphadigitalnic.xyz \
   /etc/letsencrypt/live/live-stream.alphadigitalnic.xyz/fullchain.pem \
   /etc/letsencrypt/live/live-stream.alphadigitalnic.xyz/privkey.pem

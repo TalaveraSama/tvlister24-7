@@ -3,6 +3,7 @@ import https from 'https';
 import net from 'net';
 import { db } from './db.js';
 import { loadTlsContext, tlsStatus, getServerTlsOptions } from './tlsManager.js';
+import { serveAcmeChallenge } from './acme.js';
 
 let expressApp = null;
 let mainPort = 8080;
@@ -96,6 +97,9 @@ function plainHttpServer() {
 // Servidor para el HTTP plano del puerto 80: manda a HTTPS conservando host y ruta.
 export function createHttpsRedirectServer() {
   return http.createServer((req, res) => {
+    // Los retos de Let's Encrypt se contestan en claro: redirigirlos rompería
+    // la validación HTTP-01 cuando el panel ocupa el puerto 80.
+    if (serveAcmeChallenge(req, res)) return;
     const host = String(req.headers.host || '').split(':')[0] || 'localhost';
     const target = `https://${host}${req.url || '/'}`;
     res.writeHead(301, {

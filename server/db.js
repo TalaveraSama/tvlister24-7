@@ -482,48 +482,47 @@ function runInitDbBody() {
   `);
 
   // ---- Migración: permitir el canal 1 (portadora de 44–50 MHz) -------------
-  // SQLite no deja alterar un CHECK, así que la tabla se reconstruye con los
-  // mismos datos. Sólo ocurre una vez, en bases creadas antes de la v1.2.x.
-  try {
-    const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='wk2500_channels'").get()?.sql || '';
-    if (ddl && /catv_ch\s*>=\s*2/.test(ddl)) {
-      const cols = db.prepare('PRAGMA table_info(wk2500_channels)').all().map((c) => c.name);
-      const list = cols.join(', ');
-      db.exec('PRAGMA foreign_keys = OFF;');
-      db.exec('BEGIN IMMEDIATE;');
-      try {
-        db.exec(`CREATE TABLE wk2500_channels_new (
-          catv_ch INTEGER PRIMARY KEY CHECK (catv_ch >= 1 AND catv_ch <= 125),
-          freq_mhz REAL NOT NULL,
-          band_label TEXT NOT NULL DEFAULT '',
-          stream_id INTEGER DEFAULT NULL,
-          custom_name TEXT NOT NULL DEFAULT '',
-          custom_source_url TEXT NOT NULL DEFAULT '',
-          unit_id INTEGER DEFAULT NULL,
-          udp_host TEXT NOT NULL DEFAULT '',
-          udp_port INTEGER NOT NULL DEFAULT 5002,
-          local_interface_ip TEXT NOT NULL DEFAULT '',
-          ttl INTEGER NOT NULL DEFAULT 16,
-          output_mode TEXT NOT NULL DEFAULT 'direct_spts',
-          muxrate_kbps INTEGER NOT NULL DEFAULT 0,
-          service_id INTEGER NOT NULL DEFAULT 1,
-          enabled INTEGER NOT NULL DEFAULT 0,
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );`);
-        db.exec(`INSERT INTO wk2500_channels_new (${list}) SELECT ${list} FROM wk2500_channels;`);
-        db.exec('DROP TABLE wk2500_channels;');
-        db.exec('ALTER TABLE wk2500_channels_new RENAME TO wk2500_channels;');
-        db.exec('COMMIT;');
-      } catch (err) {
-        db.exec('ROLLBACK;');
-        throw err;
-      } finally {
-        db.exec('PRAGMA foreign_keys = ON;');
-      }
+  // SQLite no deja alterar un CHECK. La tabla se reconstruye a partir de su
+  // propio DDL, cambiando SÓLO la restricción del canal: así se conservan todas
+  // las columnas que se hayan añadido después (pkt_size, rtp, freq_locked…).
+  // La versión anterior escribía a mano la lista de columnas y fallaba en bases
+  // ya migradas con "table wk2500_channels_new has no column named pkt_size",
+  // dejando el canal 1 deshabilitado para siempre.
+  const rebuildWk2500ForChannel1 = () => {
+    const ddl =
+      db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='wk2500_channels'").get()?.sql || '';
+    if (!ddl || !/catv_ch\s*>=\s*2\b/.test(ddl)) return false;
+
+    const cols = db.prepare('PRAGMA table_info(wk2500_channels)').all().map((c) => c.name);
+    if (!cols.length) return false;
+    const list = cols.map((c) => `"${c}"`).join(', ');
+
+    const rebuiltDdl = ddl
+      .replace(
+        /^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`[]?wk2500_channels["`\]]?/i,
+        'CREATE TABLE wk2500_channels_rebuilt'
+      )
+      .replace(/CHECK\s*\(\s*[^)]*catv_ch[^)]*\)/i, 'CHECK (catv_ch >= 1 AND catv_ch <= 125)');
+    if (!/wk2500_channels_rebuilt/.test(rebuiltDdl)) return false;
+
+    db.exec('PRAGMA foreign_keys = OFF;');
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.exec('DROP TABLE IF EXISTS wk2500_channels_rebuilt;');
+      db.exec(rebuiltDdl);
+      db.exec(`INSERT INTO wk2500_channels_rebuilt (${list}) SELECT ${list} FROM wk2500_channels;`);
+      db.exec('DROP TABLE wk2500_channels;');
+      db.exec('ALTER TABLE wk2500_channels_rebuilt RENAME TO wk2500_channels;');
+      db.exec('COMMIT;');
+      console.log('[db] Migración: canal 1 habilitado en wk2500_channels (reconstruida con sus columnas).');
+      return true;
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON;');
     }
-  } catch (err) {
-    console.error('[db] No se pudo habilitar el canal 1:', err?.message || err);
-  }
+  };
 
   const ensureColumn = (table, column, def) => {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
@@ -642,6 +641,13 @@ function runInitDbBody() {
   ensureColumn('wk2500_channels', 'pkt_size', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('wk2500_channels', 'rtp', 'INTEGER NOT NULL DEFAULT -1');
   ensureColumn('wk2500_channels', 'freq_locked', 'INTEGER NOT NULL DEFAULT 0');
+  // Con todas las columnas ya presentes, se puede reconstruir la tabla sin
+  // perder ninguna (y sin el error de "no column named pkt_size").
+  try {
+    rebuildWk2500ForChannel1();
+  } catch (err) {
+    console.error('[db] No se pudo habilitar el canal 1:', err?.message || err);
+  }
 
   ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('bouquets', 'xui_id', 'INTEGER');

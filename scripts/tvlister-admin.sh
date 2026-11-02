@@ -1397,6 +1397,13 @@ EOF
 server {
     listen 80;
     server_name ${domain};
+    # Retos de Let's Encrypt (certbot --webroot -w /var/www/tvlister-acme)
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/tvlister-acme;
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${port};
         proxy_set_header Host \$host;
@@ -1766,6 +1773,13 @@ server {
     client_max_body_size 250M;
 ${ssl_block}
 
+    # Retos de Let's Encrypt (certbot --webroot -w /var/www/tvlister-acme)
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/tvlister-acme;
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${port};
         proxy_http_version 1.1;
@@ -1806,6 +1820,14 @@ ${ssl_block}
     chunked_transfer_encoding on;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
+
+    # Retos de Let's Encrypt (certbot --webroot -w /var/www/tvlister-acme):
+    # el dominio de video también necesita su propio certificado.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/tvlister-acme;
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+    }
 
     location ~* \.m3u8\$ {
         proxy_pass http://127.0.0.1:${port};
@@ -3366,6 +3388,77 @@ case "$ACTION" in
       echo "ℹ️  ${PANEL_HOST} no responde como Cloudflare: no hace falta configurar sus rangos."
     fi
     ;;
+  acme)
+    # tvlister-admin acme <dominio> [email]   → Let's Encrypt con webroot
+    #
+    # El modo --standalone de certbot necesita escuchar en el 80 y falla cuando
+    # el panel (o nginx) ya lo ocupa. Con --webroot, certbot deja el token en
+    # /var/www/tvlister-acme y lo publica quien tenga el 80: el panel lo hace
+    # solo en /.well-known/acme-challenge/ (también a través del 80 con
+    # redirección), y los server blocks de nginx lo incluyen.
+    ACME_DOM="${2:-}"
+    ACME_EMAIL="${3:-}"
+    if [ -z "$ACME_DOM" ]; then
+      echo "Uso: tvlister-admin acme <dominio> [email]"
+      echo "Ej.: tvlister-admin acme live-stream.alphadigitalnic.xyz correo@dominio.com"
+      exit 1
+    fi
+    if ! command -v certbot >/dev/null 2>&1; then
+      echo "❌ certbot no está instalado."
+      echo "   Ubuntu/Debian: sudo apt update && sudo apt install -y certbot"
+      echo "   O con snap:    sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot"
+      exit 1
+    fi
+    mkdir -p /var/www/tvlister-acme/.well-known/acme-challenge
+    chmod 755 /var/www/tvlister-acme /var/www/tvlister-acme/.well-known /var/www/tvlister-acme/.well-known/acme-challenge 2>/dev/null || true
+
+    # ¿Quién tiene el 80? Para avisar de lo que hay que hacer si no es el panel.
+    WHO80=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:80$/ {print; exit}' || true)
+    echo "============================================================"
+    echo "  Certificado Let's Encrypt (webroot): ${ACME_DOM}"
+    echo "============================================================"
+    if [ -n "$WHO80" ]; then
+      echo "  Puerto 80: ${WHO80}"
+    else
+      echo "  Puerto 80: nadie está escuchando todavía."
+      echo "  Si el certificado falla, abre el 80 en el panel: tvlister-admin add-port 80 both"
+    fi
+
+    if [ -z "$ACME_EMAIL" ]; then
+      read -r -p "Correo para avisos de renovación: " ACME_EMAIL
+    fi
+    if [ -z "$ACME_EMAIL" ]; then
+      echo "❌ Falta el correo (Let's Encrypt lo exige para avisar de la caducidad)."
+      exit 1
+    fi
+
+    if certbot certonly --webroot -w /var/www/tvlister-acme -d "$ACME_DOM" \
+         --non-interactive --agree-tos -m "$ACME_EMAIL" --keep-until-expiring \
+         --deploy-hook "systemctl restart ${SERVICE_NAME:-tvlister24-7}"; then
+      LE_DIR="/etc/letsencrypt/live/${ACME_DOM}"
+      echo ""
+      echo "✅ Certificado emitido: ${LE_DIR}"
+      # Se instala en el panel como certificado de ese dominio (SNI), para que
+      # el 443 del propio panel lo use sin depender de nginx.
+      "$NODE_BIN" "$APP_DIR/scripts/tls_paste.mjs" --host "$ACME_DOM" \
+        --cert "${LE_DIR}/fullchain.pem" --key "${LE_DIR}/privkey.pem" \
+        --source "Let's Encrypt" || true
+      echo ""
+      echo "   Renovación automática: certbot ya deja un timer/cron; este hook"
+      echo "   reinicia el panel para que cargue el certificado nuevo."
+      echo "   Comprueba con: tvlister-admin tls list   ·   tvlister-admin dominios"
+    else
+      echo ""
+      echo "❌ certbot no pudo emitir el certificado."
+      echo "   Causas habituales:"
+      echo "   · El 80 no llega desde Internet (firewall/NAT): abre el puerto y repite."
+      echo "   · El 80 lo tiene nginx y su server block no publica el reto: añade"
+      echo "     location ^~ /.well-known/acme-challenge/ { root /var/www/tvlister-acme; }"
+      echo "     o vuelve a generar los bloques con: tvlister-admin cloudflare <panel> <video>"
+      echo "   · El DNS del dominio no apunta a este servidor todavía."
+      exit 1
+    fi
+    ;;
   tls)
     # tvlister-admin tls                       → estado (certificados por dominio y puertos)
     # tvlister-admin tls auto                  → volver a la detección automática
@@ -3708,7 +3801,7 @@ case "$ACTION" in
     echo "  8) Crear backup manual en /root (backup)"
     echo "  9) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
     echo " 10) Cambiar puerto principal TCP (set-port)"
-    echo " 11) Agregar puerto adicional simultáneo (add-port) · HTTPS 80/443 (tls)"
+    echo " 11) Agregar puerto adicional simultáneo (add-port) · HTTPS 80/443 (tls) · Let's Encrypt (acme)"
     echo " 12) Activar Servidor Ingesta RTMP/SRT/RTSP (install-ingest)"
     echo " 13) Actualizar panel desde GitHub sin perder datos (update)"
     echo " 14) Reiniciar motor TVLister 24/7 (restart)"
@@ -3730,9 +3823,10 @@ case "$ACTION" in
     echo " 28) Elegir el puerto de salida de los streams: 80 / 443 / 8095 (streams-port)"
     echo " 29) DRM / claves: cifrar canales con el CAS de TVLister (drm)"
     echo " 30) Dominios públicos: panel (Cloudflare) y video (directo) (dominios)"
+    echo " 31) Certificado Let's Encrypt del dominio de video (acme)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-30]: " opt
+    read -r -p "Selecciona una opción [0-31]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -3769,6 +3863,7 @@ case "$ACTION" in
       28) "$0" streams-port ;;
       29) "$0" drm ;;
       30) "$0" dominios ;;
+      31) "$0" acme ;;
       *) exit 0 ;;
     esac
     ;;

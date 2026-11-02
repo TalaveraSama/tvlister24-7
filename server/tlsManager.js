@@ -319,7 +319,8 @@ function safeDirName(host) {
  */
 export function installCertificate({ host, certPem, keyPem, source = 'consola' }) {
   const name = String(host || '').trim().toLowerCase();
-  if (!HOST_RE.test(name)) throw new Error(`Nombre inválido: "${host}". Ejemplo: tvadmin.alphadigitalnic.xyz`);
+  const baseName = name.startsWith('*.') ? name.slice(2) : name;
+  if (!HOST_RE.test(baseName)) throw new Error(`Nombre inválido: "${host}". Ejemplo: tvadmin.alphadigitalnic.xyz`);
 
   const cert = String(certPem || '').trim();
   const key = String(keyPem || '').trim();
@@ -333,7 +334,8 @@ export function installCertificate({ host, certPem, keyPem, source = 'consola' }
   }
 
   const meta = parsePair(cert, key);
-  if (!hostCoveredBy(name, meta)) {
+  const covered = name.startsWith('*.') ? hostCoveredBy(`x.${name.slice(2)}`, meta) : hostCoveredBy(name, meta);
+  if (!covered) {
     throw new Error(
       `El certificado no cubre ${name} (nombres: ${[meta.domain, ...meta.altNames].filter(Boolean).join(', ')}).`
     );

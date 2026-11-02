@@ -2806,3 +2806,28 @@ de Cloudflare (válido sólo con Cloudflare delante).
 
 **6. Directorio configurable.** `TVLISTER_TLS_DIR` mueve la base de certificados (pruebas e
 instalaciones no estándar).
+
+### v2.6.9: ACME webroot y migración del canal 1
+
+**1. Retos HTTP-01 propios.** `server/acme.js` define `ACME_ROOT` (`TVLISTER_ACME_DIR`, por defecto
+`/var/www/tvlister-acme`), `acmeTokenFromPath()` (sólo `[A-Za-z0-9_-]{8,128}`, sin traversal),
+`readAcmeToken()` y `serveAcmeChallenge()`. La ruta
+`GET /.well-known/acme-challenge/:token` se registra antes que todo lo demás en `server/index.js`, y
+el listener que redirige HTTP→HTTPS del puerto 80 la sirve también, sin redirigir.
+
+**2. `tvlister-admin acme <dominio> [correo]`.** Emite con `certbot certonly --webroot`
+(`/var/www/tvlister-acme`), instala el certificado en el panel con SNI (`tls_paste.mjs`) y deja
+`--deploy-hook` de reinicio. Muestra quién ocupa el 80 y qué hacer si el fallo es de nginx/DNS.
+
+**3. `cloudflare` publica el reto.** Los server blocks generados (panel y streams) incluyen
+`location ^~ /.well-known/acme-challenge/ { root /var/www/tvlister-acme; }`.
+
+**4. Certificados comodín.** `installCertificate()` acepta `*.dominio`, guarda el certificado bajo ese
+nombre y el SNI lo aplica a cualquier subdominio sin certificado propio; `tls_paste.mjs` deduce el
+comodín cuando el PEM no trae un CN con dominio.
+
+**5. Migración `wk2500_channels`.** `rebuildWk2500ForChannel1()` reconstruye la tabla a partir de su
+DDL (`sqlite_master`) sustituyendo solo el `CHECK` del canal, en vez de escribir a mano la lista de
+columnas. Se ejecuta **después** de `ensureColumn` de `pkt_size`, `rtp` y `freq_locked`, así que
+copia todas las columnas existentes y no pierde datos. Antes fallaba con
+`table wk2500_channels_new has no column named pkt_size` y dejaba el canal 1 deshabilitado.
