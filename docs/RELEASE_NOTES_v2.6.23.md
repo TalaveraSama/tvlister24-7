@@ -36,7 +36,7 @@ en uso» aunque no hubiera nadie reproduciendo.
 | `active_cons` en `register_device` | aparatos apuntados | **conexiones vivas** |
 | Almacenamiento en caché del rechazo | 60 s | **5 s** (en cuanto se libera una conexión, el cliente puede entrar) |
 | Al arrancar el panel | — | se vacían las conexiones huérfanas del proceso anterior |
-| Panel → *aparatos* de la línea | «N aparato(s) de M permitido(s)» | además «**N de M conexión(es) en uso**», en verde o en rojo |
+| Panel → *aparatos* de la línea | «N aparato(s) de M permitido(s)» | además «**N de M conexión(es) en uso**», en verde o en rojo, refrescándose sola cada 10 s |
 | `tvlister-admin devices` | «Activos ahora» (aparatos) | «**Conexiones en uso** (es lo que corta al entrar)» |
 
 Los aparatos se siguen registrando y se siguen viendo en el panel: lo único que cambia es que

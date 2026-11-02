@@ -109,6 +109,16 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
     };
   }, []);
 
+  // Con el modal de aparatos abierto, refrescar cada 10 s: las conexiones en uso
+  // suben y bajan solas y el administrador tiene que verlo sin pulsar nada.
+  useEffect(() => {
+    if (!devicesLineId) return undefined;
+    const t = setInterval(() => {
+      refreshDevices();
+    }, 10000);
+    return () => clearInterval(t);
+  }, [devicesLineId]);
+
   const openCreate = (deviceType = 'm3u') => {
     setEditingLine(null);
     setError('');
