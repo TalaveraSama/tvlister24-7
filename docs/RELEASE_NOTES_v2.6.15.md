@@ -97,3 +97,19 @@ tvlister-admin devices undrm [--apply]       # quita el DRM que quedó en Flusso
 - Alta manual de MAC y conexión real: la fila aprende tipo, marca y reproductor.
 - Cliente sin MAC (sólo `User-Agent`): entra por huella y no duplica filas al reconectar.
 - `get.php`, `player_api.php`, `xmltv.php`, `/live` y `output=ts` siguen respondiendo igual.
+
+## Instalación / actualización
+
+```bash
+# release con paquete adjunto
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.15/install.sh \
+  | sudo bash -s -- --tag v2.6.15
+
+# directo del tag (si el release no trae el paquete adjunto)
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.15/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.15
+```
+
+`install_release.sh` ahora tiene respaldo: si el `.tar.gz` del release no está disponible, descarga el
+árbol exacto del tag desde `codeload.github.com` y sigue (sin verificación SHA256 en ese caso, porque
+GitHub no publica checksum de esos archivos).

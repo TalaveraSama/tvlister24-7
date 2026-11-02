@@ -106,8 +106,18 @@ TMP_DIR=$(mktemp -d /tmp/tvlister-release.XXXXXX)
 # 2. Descargar el paquete y verificar el checksum
 # ------------------------------------------------------------------------------
 log "Descargando ${PKG} ..."
-curl -fL --retry 3 --connect-timeout 20 --progress-bar -o "${TMP_DIR}/${PKG}" "$PKG_URL" \
-  || fail "No se pudo descargar el paquete del release ${TAG}. Revisa tu conexión o el tag."
+SRC_TARBALL=0
+if ! curl -fL --retry 3 --connect-timeout 20 --progress-bar -o "${TMP_DIR}/${PKG}" "$PKG_URL"; then
+  # Respaldo: si el release no tiene el paquete adjunto (o falla la descarga), se
+  # usa el código exacto del tag, que GitHub genera solo. Así una release sigue
+  # siendo instalable aunque le falte el adjunto.
+  SRC_URL="https://codeload.github.com/${REPO}/tar.gz/refs/tags/${TAG}"
+  log "[AVISO] El release ${TAG} no tiene ${PKG} descargable; usando el árbol del tag."
+  curl -fL --retry 3 --connect-timeout 20 --progress-bar -o "${TMP_DIR}/${PKG}" "$SRC_URL" \
+    || fail "No se pudo descargar ni el paquete del release ni el árbol del tag ${TAG}."
+  SRC_TARBALL=1
+  VERIFY=0
+fi
 
 if [ "$VERIFY" -eq 1 ]; then
   SHA_URL="${DL}/${TAG}/SHA256SUMS"
@@ -135,6 +145,11 @@ tar -xzf "${TMP_DIR}/${PKG}" -C "$TMP_DIR"
 SRC_DIR=$(find "$TMP_DIR" -maxdepth 2 -name package.json -not -path '*/node_modules/*' -printf '%h\n' 2>/dev/null | head -n1)
 [ -n "$SRC_DIR" ] || fail "El paquete no contiene package.json (descarga corrupta)."
 [ -f "${SRC_DIR}/scripts/install_ubuntu.sh" ] || fail "El paquete no incluye scripts/install_ubuntu.sh."
+
+if [ "${SRC_TARBALL:-0}" = "1" ]; then
+  printf '%s\n' "$TAG" > "${SRC_DIR}/VERSION"
+  printf '%s\n' "tag-${TAG}" > "${SRC_DIR}/COMMIT"
+fi
 
 export TVLISTER_SOURCE_DIR="$SRC_DIR"
 export TVLISTER_RELEASE="$TAG"
