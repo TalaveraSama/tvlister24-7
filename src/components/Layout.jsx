@@ -20,7 +20,8 @@ import {
   Zap,
   Cpu,
   Activity,
-  KeyRound
+  KeyRound,
+  Lock
 } from 'lucide-react';
 
 export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpenWebTv, children }) {
@@ -44,6 +45,7 @@ export default function Layout({ user, activeTab, setActiveTab, onLogout, onOpen
     { id: 'xui-import', label: 'Importar XUI.one', icon: Database, badge: 'XUI', roles: ['admin'] },
     { id: 'ffmpeg-engine', label: 'Motor FFmpeg', icon: Activity, badge: 'ENGINE', roles: ['admin'] },
     { id: 'access-codes', label: 'Access Codes', icon: KeyRound, badge: 'PANEL', roles: ['admin'] },
+    { id: 'drm', label: 'DRM & Claves', icon: Lock, badge: 'CAS', roles: ['admin'] },
     { id: 'system', label: 'Admin del Sistema', icon: Server, roles: ['admin'] }
   ].filter((item) => item.roles.includes(user?.role || 'admin'));
 

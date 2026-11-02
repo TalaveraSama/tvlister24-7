@@ -110,6 +110,7 @@ import {
 import { computeRecommendation, applyRecommendation } from './tune.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
+import { drmRouter, drmAdminRouter } from './drm.js';
 import { headendRouter } from './headendManager.js';
 import { flussonic2312Router } from './flussonic2312Manager.js';
 import { wk2500Router, resumeEnabledWk2500Channels, stopAllWk2500Workers } from './wk2500Manager.js';
@@ -212,6 +213,11 @@ app.get('/api/health', (_req, res) => {
     res.status(500).json({ status: 'error', error: err.message });
   }
 });
+
+// DRM / CAS: Flussonic pide aquí las claves y el jugador las recibe por /drm/key.
+// Va antes de todo para que la puerta de códigos de acceso no lo bloquee.
+app.use(drmRouter);
+app.use(drmAdminRouter);
 
 // Mount Stalker / Ministra MAG STB Middleware (/c/, /stalker_portal/c/, /server/load.php)
 app.use(stalkerRouter);

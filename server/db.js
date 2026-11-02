@@ -647,6 +647,42 @@ function runInitDbBody() {
   ensureColumn('bouquets', 'xui_id', 'INTEGER');
   ensureColumn('lines', 'xui_id', 'INTEGER');
   ensureColumn('users', 'xui_id', 'INTEGER');
+  // --- DRM / CAS (servidor de claves propio para Flussonic) ----------------
+  // Cada canal puede protegerse con AES-128 (HLS): Flussonic pide la clave a
+  // este panel (CAS) y entrega a los clientes una URL de clave que pasa por
+  // TVLister, donde se comprueba la línea. Ver server/drm.js.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS drm_streams (
+      stream_id INTEGER PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      mode TEXT NOT NULL DEFAULT 'off',
+      master_key TEXT NOT NULL DEFAULT '',
+      static_key TEXT NOT NULL DEFAULT '',
+      cas_token TEXT NOT NULL DEFAULT '',
+      key_token TEXT NOT NULL DEFAULT '',
+      kid TEXT NOT NULL DEFAULT '',
+      license_url TEXT NOT NULL DEFAULT '',
+      license_headers TEXT NOT NULL DEFAULT '{}',
+      flussonic_stream TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS drm_key_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stream_id INTEGER,
+      kind TEXT NOT NULL DEFAULT 'key',
+      key_number TEXT NOT NULL DEFAULT '',
+      ip TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      line_id INTEGER,
+      ok INTEGER NOT NULL DEFAULT 1,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_drm_key_log_created ON drm_key_log(created_at DESC);
+  `);
+
   ensureColumn('channels_247', 'engine_mode', "TEXT NOT NULL DEFAULT 'virtual'");
   ensureColumn('epg_sources', 'program_count', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('epg_programs', 'source_id', 'INTEGER');

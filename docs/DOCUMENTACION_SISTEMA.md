@@ -2540,3 +2540,44 @@ server block del nginx (XUI.one o del sistema) lo atiende.
 Exenciones de la puerta de access codes: se añaden `/archive_seg/`, `/xui_images/` y
 `/vod_local_poster`; sin ellas, con un código activo, el timeshift y las carátulas devolvían la
 página del código.
+
+### v2.6.0: DRM con TVLister como CAS (servidor de claves) de Flussonic
+
+Módulo `server/drm.js`. Flussonic, con `drm aes128`, pide la clave a un servidor de claves y
+publica en el HLS la URL que éste le devuelve; TVLister ocupa ese papel, así que las claves pasan
+por nuestras líneas y quedan auditadas.
+
+Tablas nuevas: `drm_streams` (una fila por canal protegido) y `drm_key_log` (cada entrega de clave o
+licencia: canal, número, IP, línea, resultado).
+
+Rutas públicas (exentas de la puerta de access codes):
+
+| Ruta | Quién la llama | Qué hace |
+| --- | --- | --- |
+| `GET /drm/cas/:cas_token` | Flussonic | devuelve 16 bytes y la cabecera `X-Key-Url` |
+| `GET /drm/key/:key_token?n=<n>` | reproductor | entrega la clave del número de rotación pedido |
+| `GET /drm/clearkey/:key_token` | reproductor EME | misma clave en JSON ClearKey |
+| `POST /drm/license/:key_token?t=<token>` | reproductor | proxy a tu servidor Widevine/PlayReady |
+
+Derivación de claves: `HKDF-SHA256(master_key, salt=sha256("stream-<id>"), info="tvlister-drm:<id>:<n>")`
+recortado a 16 bytes. Por eso rota con cada `number` (Flussonic rota cada 10 min) sin almacenar
+claves. Con `static_key` (32 hex) se usa una clave fija, útil para probar.
+
+Protecciones: token por canal en cada URL (`cas_token` y `key_token`, rotables), IPs permitidas al
+CAS (`drm_cas_allow_ips`), interruptor global (`drm_enabled`), y en las licencias un token firmado
+por línea (`{scope:'drm_line', id}`) que se emite en la lista M3U.
+
+Lista M3U (`get.php`): para canales en modo `widevine`/`playready` se emiten
+`#KODIPROP:inputstream.adaptive.license_type` y `license_key=<nuestro proxy>?t=<token de la línea>`.
+En `aes128`/`sample_aes` no hace falta nada: el reproductor sigue la `EXT-X-KEY` que pone Flussonic.
+
+API de administración (`requireAuth` + `requireAdmin`): `GET /api/drm/overview`,
+`GET /api/drm/candidates`, `PUT /api/drm/settings`, `GET|PUT /api/drm/streams/:id`,
+`POST /api/drm/streams/:id/rotate`, `POST /api/drm/streams/:id/test`, `GET|DELETE /api/drm/log`,
+`POST /api/drm/streams/:id/flussonic` (preview / apply / remove del bloque `drm` en el stream de
+Flussonic vía API v3, mostrando antes exactamente lo que se va a enviar).
+
+CLI: `tvlister-admin drm [list|on|off|enable|disable|snippet|test|tokens|log] [canal] [modo]`
+(menú, opción 29). El canal se puede indicar por ID o por nombre.
+
+Nada de esto toca el camino UDP/CATV ni los argumentos de FFmpeg: sólo la salida HTTP de Flussonic.

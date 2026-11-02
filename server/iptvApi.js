@@ -6,6 +6,8 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
 import { getStreamBaseUrl } from './publicBase.js';
+import { signToken } from './auth.js';
+import { getActiveDrm, getDrmSettings } from './drm.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken } from './auth.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
@@ -586,6 +588,26 @@ iptvRouter.get('/get.php', (req, res) => {
   const epgUrl = `${baseUrl}/xmltv.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
   const linesOut = [`#EXTM3U x-tvg-url="${epgUrl}"`];
 
+  // DRM: los canales protegidos con Widevine/PlayReady necesitan que el
+  // reproductor sepa a qué servidor de licencias pedir la licencia. Se emiten
+  // las líneas #KODIPROP que entienden Kodi, OTT Navigator, TiviMate y la app
+  // DRM, apuntando a nuestro proxy (con token de ESTA línea) y no al Flussonic.
+  const drmSettings = getDrmSettings();
+  const drmLicenseBase = `${baseUrl}/drm/license`;
+  const lineDrmToken = drmSettings.enabled ? signToken({ scope: 'drm_line', id: auth.line.id }) : '';
+  const drmProps = (streamId) => {
+    if (!drmSettings.enabled) return [];
+    const drm = getActiveDrm(streamId);
+    if (!drm || !drm.key_token) return [];
+    if (drm.mode !== 'widevine' && drm.mode !== 'playready') return [];
+    const type = drm.mode === 'playready' ? 'com.microsoft.playready' : 'com.widevine.alpha';
+    const url = `${drmLicenseBase}/${drm.key_token}${lineDrmToken ? `?t=${encodeURIComponent(lineDrmToken)}` : ''}`;
+    return [
+      `#KODIPROP:inputstream.adaptive.license_type=${type}`,
+      `#KODIPROP:inputstream.adaptive.license_key=${url}`
+    ];
+  };
+
   let chNo = 1;
   for (const s of streams) {
     const catchupAttr =
@@ -593,6 +615,7 @@ iptvRouter.get('/get.php', (req, res) => {
         ? ` catchup="default" catchup-days="${s.tv_archive_days}" catchup-source="${baseUrl}/timeshift/${encodeURIComponent(username)}/${encodeURIComponent(password)}/{duration}/{Y}-{m}-{d}:{H}-{M}/${s.id}.m3u8"`
         : '';
     const pubLogo = resolvePublicPosterUrl(s.logo_url, baseUrl);
+    linesOut.push(...drmProps(s.id));
     linesOut.push(
       `#EXTINF:-1 tvg-chno="${chNo++}" tvg-id="${s.epg_channel_id || `stream-${s.id}`}" tvg-name="${s.name}" tvg-logo="${pubLogo}"${catchupAttr} group-title="${s.category_name}",${s.name}`
     );

@@ -38,6 +38,12 @@ const EXEMPT_EXACT = new Set([
 ]);
 
 const EXEMPT_PREFIXES = [
+  // DRM: el CAS lo llama Flussonic y la clave la pide el reproductor, no el
+  // navegador humano; el token del canal es la credencial.
+  '/drm/cas/',
+  '/drm/key/',
+  '/drm/clearkey/',
+  '/drm/license/',
   '/c/',
   '/stalker_portal/',
   '/live/',

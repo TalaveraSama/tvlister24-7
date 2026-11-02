@@ -460,6 +460,223 @@ cmd_streams_port() {
   fi
 }
 
+# ============================ DRM / CLAVES =================================
+# Uso:
+#   tvlister-admin drm                       estado de todos los canales
+#   tvlister-admin drm list
+#   tvlister-admin drm enable <canal> [aes128|sample_aes|widevine|playready]
+#   tvlister-admin drm disable <canal>
+#   tvlister-admin drm snippet <canal>       bloque para /etc/flussonic/flussonic.conf
+#   tvlister-admin drm test <canal>          comprueba que la clave sale y rota
+#   tvlister-admin drm tokens <canal>        rota las URLs del CAS y de la clave
+#   tvlister-admin drm log [n]               últimas peticiones de claves
+#
+# <canal> puede ser el ID numérico o el nombre exacto del canal.
+cmd_drm() {
+  local sub="${1:-list}" target="${2:-}" extra="${3:-}"
+  cd "$APP_DIR" || return 1
+  local fallback_host fallback_base
+  fallback_host=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [ -z "$fallback_host" ] && fallback_host="127.0.0.1"
+  fallback_base="http://${fallback_host}:$(get_current_port)"
+  DRM_SUB="$sub" DRM_TARGET="$target" DRM_EXTRA="$extra" DRM_BASE="$fallback_base" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb, db } from "./server/db.js";
+    import { deriveKey, getDrmRow, getDrmSettings } from "./server/drm.js";
+    initDb();
+
+    const sub = String(process.env.DRM_SUB || "list").toLowerCase();
+    const target = String(process.env.DRM_TARGET || "").trim();
+    const extra = String(process.env.DRM_EXTRA || "").trim();
+    const base = (() => {
+      const row = db.prepare("SELECT value FROM settings WHERE key = ?").get("public_stream_base");
+      if (row && /^https?:\/\//i.test(String(row.value || ""))) return String(row.value).replace(/\/+$/, "");
+      const panel = db.prepare("SELECT value FROM settings WHERE key = ?").get("panel_domain");
+      if (panel && panel.value) return "http://" + String(panel.value).replace(/^https?:\/\//, "");
+      return String(process.env.DRM_BASE || "").replace(/\/+$/, "") || "http://<tu-dominio>";
+    })();
+
+    const findStream = (needle) => {
+      if (!needle) return null;
+      if (/^\d+$/.test(needle)) {
+        const byId = db.prepare("SELECT * FROM streams WHERE id = ?").get(Number(needle));
+        if (byId) return byId;
+      }
+      return (
+        db.prepare("SELECT * FROM streams WHERE name = ? COLLATE NOCASE").get(needle) ||
+        db.prepare("SELECT * FROM streams WHERE name LIKE ? COLLATE NOCASE ORDER BY id LIMIT 1").get("%" + needle + "%") ||
+        null
+      );
+    };
+
+    const ensureRow = (streamId) => {
+      let row = getDrmRow(streamId);
+      if (!row) {
+        db.prepare("INSERT INTO drm_streams (stream_id) VALUES (?)").run(streamId);
+        row = getDrmRow(streamId);
+      }
+      return row;
+    };
+
+    const line = (label, value) => console.log("  " + label.padEnd(26) + value);
+
+    const printStatus = () => {
+      const settings = getDrmSettings();
+      console.log("============================================================");
+      console.log("  TVLister 24/7 — DRM / servidor de claves (CAS)");
+      console.log("============================================================");
+      line("DRM global", settings.enabled ? "ACTIVO" : "APAGADO  (tvlister-admin drm on)");
+      line("Base pública", base);
+      if (settings.casAllowIps) line("IPs permitidas al CAS", settings.casAllowIps);
+      console.log("");
+      const rows = db.prepare(
+        `SELECT d.*, s.name AS stream_name FROM drm_streams d
+         LEFT JOIN streams s ON s.id = d.stream_id ORDER BY d.enabled DESC, s.name COLLATE NOCASE`
+      ).all();
+      if (rows.length === 0) {
+        console.log("  Ningún canal con DRM todavía.");
+        console.log("  Activa uno con:  tvlister-admin drm enable <canal> aes128");
+      } else {
+        for (const row of rows) {
+          const state = row.enabled ? "ON " : "off";
+          console.log("  [" + state + "] #" + String(row.stream_id).padEnd(5) + (row.stream_name || "(borrado)").padEnd(26) + row.mode);
+          if (row.enabled) {
+            console.log("         CAS : " + base + "/drm/cas/" + row.cas_token);
+            console.log("         clave: " + base + "/drm/key/" + row.key_token);
+          }
+        }
+      }
+      const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const stats = db.prepare(
+        "SELECT kind, COUNT(*) total FROM drm_key_log WHERE created_at >= ? GROUP BY kind"
+      ).all(since);
+      if (stats.length) {
+        console.log("");
+        console.log("  Últimas 24 h: " + stats.map((s) => s.kind + "=" + s.total).join("  "));
+      }
+      console.log("============================================================");
+    };
+
+    const requireStream = () => {
+      const stream = findStream(target);
+      if (!stream) {
+        console.error("❌ No encuentro el canal \"" + target + "\". Mira los IDs con: tvlister-admin drm");
+        process.exit(1);
+      }
+      return stream;
+    };
+
+    if (sub === "list" || sub === "status") {
+      printStatus();
+    } else if (sub === "on" || sub === "off") {
+      db.prepare("INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .run("drm_enabled", sub === "on" ? "true" : "false");
+      console.log(sub === "on" ? "✅ DRM global ACTIVO." : "⛔ DRM global APAGADO: no se entregan claves.");
+    } else if (sub === "enable") {
+      const stream = requireStream();
+      const mode = (extra || "aes128").toLowerCase();
+      if (!["aes128", "sample_aes", "widevine", "playready"].includes(mode)) {
+        console.error("❌ Modo no válido: " + mode + " (aes128 | sample_aes | widevine | playready)");
+        process.exit(1);
+      }
+      const row = ensureRow(stream.id);
+      const crypto = await import("node:crypto");
+      let master = row.master_key;
+      if (!master) master = crypto.randomBytes(32).toString("hex");
+      const casToken = row.cas_token || crypto.randomBytes(24).toString("base64url");
+      const keyToken = row.key_token || crypto.randomBytes(24).toString("base64url");
+      db.prepare(
+        "UPDATE drm_streams SET enabled = 1, mode = ?, master_key = ?, cas_token = ?, key_token = ?, updated_at = ? WHERE stream_id = ?"
+      ).run(mode, master, casToken, keyToken, new Date().toISOString(), stream.id);
+      console.log("✅ DRM activado en #" + stream.id + " (" + stream.name + ") modo " + mode);
+      console.log("");
+      console.log("   CAS   : " + base + "/drm/cas/" + casToken);
+      console.log("   clave : " + base + "/drm/key/" + keyToken);
+      console.log("");
+      console.log("   En /etc/flussonic/flussonic.conf, dentro del stream:");
+      console.log("     drm " + mode + " keyserver=" + base + "/drm/cas/" + casToken);
+      console.log("");
+      console.log("   (tvlister-admin drm snippet " + stream.id + " te lo da listo para copiar)");
+    } else if (sub === "disable") {
+      const stream = requireStream();
+      db.prepare("UPDATE drm_streams SET enabled = 0, updated_at = ? WHERE stream_id = ?").run(
+        new Date().toISOString(),
+        stream.id
+      );
+      console.log("⛔ DRM desactivado en #" + stream.id + " (" + stream.name + ").");
+      console.log("   Ojo: si Flussonic sigue con la línea drm, seguirá cifrando. Quita también esa línea.");
+    } else if (sub === "snippet") {
+      const stream = requireStream();
+      const row = getDrmRow(stream.id);
+      if (!row) {
+        console.error("❌ Ese canal no tiene DRM configurado. Actívalo: tvlister-admin drm enable " + stream.id);
+        process.exit(1);
+      }
+      const name = row.flussonic_stream || stream.flussonic_stream_name || "<nombre_del_stream>";
+      console.log("stream " + name + " {");
+      console.log("  # ... tu input y protocolos actuales ...");
+      console.log("  drm " + (row.mode === "widevine" ? "widevine" : row.mode) +
+        " keyserver=" + (row.mode === "widevine" ? (row.license_url || "<tu_keyserver_widevine>") : base + "/drm/cas/" + row.cas_token));
+      console.log("}");
+    } else if (sub === "test") {
+      const stream = requireStream();
+      const row = getDrmRow(stream.id);
+      if (!row) {
+        console.error("❌ Ese canal no tiene DRM configurado.");
+        process.exit(1);
+      }
+      try {
+        const k1 = deriveKey(row, "1");
+        const k2 = deriveKey(row, "2");
+        console.log("  Canal   : #" + stream.id + " " + stream.name);
+        console.log("  Clave 1 : " + k1.toString("hex") + "  (" + k1.length + " bytes)");
+        console.log("  Clave 2 : " + k2.toString("hex") + "  (" + k2.length + " bytes)");
+        console.log(k1.equals(k2) ? "  ❌ NO rota (mismo número de clave)" : "  ✅ Rota por número de clave");
+      } catch (err) {
+        console.error("❌ " + err.message);
+        process.exit(1);
+      }
+    } else if (sub === "tokens") {
+      const stream = requireStream();
+      const row = getDrmRow(stream.id);
+      if (!row) {
+        console.error("❌ Ese canal no tiene DRM configurado.");
+        process.exit(1);
+      }
+      const crypto = await import("node:crypto");
+      const casToken = crypto.randomBytes(24).toString("base64url");
+      const keyToken = crypto.randomBytes(24).toString("base64url");
+      db.prepare("UPDATE drm_streams SET cas_token = ?, key_token = ?, updated_at = ? WHERE stream_id = ?").run(
+        casToken, keyToken, new Date().toISOString(), stream.id
+      );
+      console.log("✅ Tokens rotados en #" + stream.id + " (" + stream.name + ")");
+      console.log("   CAS nuevo  : " + base + "/drm/cas/" + casToken);
+      console.log("   clave nueva: " + base + "/drm/key/" + keyToken);
+      console.log("   Actualiza la línea drm de Flussonic con el CAS nuevo.");
+    } else if (sub === "log") {
+      const limit = Number(target) > 0 ? Math.min(Number(target), 200) : 25;
+      const rows = db.prepare("SELECT * FROM drm_key_log ORDER BY id DESC LIMIT ?").all(limit);
+      if (rows.length === 0) {
+        console.log("  Sin peticiones registradas todavía.");
+      } else {
+        console.log("  HORA                 TIPO    CANAL  Nº      IP                 OK");
+        for (const r of rows) {
+          console.log(
+            "  " + String(r.created_at).replace("T", " ").slice(0, 19).padEnd(20) +
+            String(r.kind).padEnd(8) +
+            ("#" + r.stream_id).padEnd(7) +
+            String(r.key_number).slice(0, 6).padEnd(8) +
+            String(r.ip).padEnd(19) +
+            (r.ok ? "sí" : "no " + (r.reason || ""))
+          );
+        }
+      }
+    } else {
+      console.error("Uso: tvlister-admin drm [list|on|off|enable|disable|snippet|test|tokens|log] [canal] [modo]");
+      process.exit(1);
+    }
+  '
+}
+
 cmd_access_code() {
   local action="${1:-list}" arg1="${2:-}" arg2="${3:-}" arg3="${4:-}"
   cd "$APP_DIR" || return 1
@@ -2875,6 +3092,10 @@ case "$ACTION" in
     shift
     cmd_streams_port "${1:-status}" "${2:-}"
     ;;
+  drm | claves | cas)
+    shift
+    cmd_drm "${1:-list}" "${2:-}" "${3:-}"
+    ;;
   access-code | access-codes | codigo | codigos)
     shift
     cmd_access_code "${1:-list}" "${2:-}" "${3:-}" "${4:-}"
@@ -3105,9 +3326,10 @@ case "$ACTION" in
     echo " 26) Probar la reproducción de un canal de punta a punta (streams-check)"
     echo " 27) Códigos de acceso al panel, estilo XUI.one (access-code)"
     echo " 28) Elegir el puerto de salida de los streams: 80 / 443 / 8095 (streams-port)"
+    echo " 29) DRM / claves: cifrar canales con el CAS de TVLister (drm)"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-28]: " opt
+    read -r -p "Selecciona una opción [0-29]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -3142,6 +3364,7 @@ case "$ACTION" in
       26) "$0" streams-check ;;
       27) cmd_access_code "list" "" "" "" ;;
       28) "$0" streams-port ;;
+      29) "$0" drm ;;
       *) exit 0 ;;
     esac
     ;;
