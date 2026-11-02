@@ -147,8 +147,10 @@ import {
   initMultiPortManager,
   addExtraPort,
   removeExtraPort,
-  listActivePorts
+  listActivePorts,
+  rebindAllPorts
 } from './multiPortManager.js';
+import { tlsStatus, setTlsPaths, invalidateTlsCache } from './tlsManager.js';
 import {
   buildFullBackupObject,
   createServerSnapshot,
@@ -4117,8 +4119,43 @@ app.get('/api/ports', requireAuth, (req, res) => {
 
 app.post('/api/ports', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const result = await addExtraPort(req.body?.port);
+    const result = await addExtraPort(req.body?.port, req.body?.scheme);
     res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Certificado TLS de los puertos 80/443 (sin exponer nunca la clave privada).
+app.get('/api/ports/tls', requireAuth, (req, res) => {
+  res.json(tlsStatus({ force: req.query.refresh === '1' }));
+});
+
+app.post('/api/ports/tls', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    if (req.body?.reset) {
+      setTlsPaths('', '');
+    } else {
+      const certPath = String(req.body?.certPath || '').trim();
+      const keyPath = String(req.body?.keyPath || '').trim();
+      if (!certPath || !keyPath) {
+        return res.status(400).json({ error: 'Indica la ruta del fullchain y la de la privkey.' });
+      }
+      setTlsPaths(certPath, keyPath);
+    }
+    const tls = tlsStatus({ force: true });
+    if (tls.available && (req.body?.rebind ?? true)) await rebindAllPorts();
+    res.json({ ...tls, ports: listActivePorts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/ports/rebind', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    invalidateTlsCache();
+    await rebindAllPorts();
+    res.json(listActivePorts());
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

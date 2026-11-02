@@ -3214,25 +3214,94 @@ case "$ACTION" in
     ;;
   add-port)
     EXTRA_P="${2:-}"
+    EXTRA_SCHEME="${3:-}"
     if [ -z "$EXTRA_P" ]; then
-      read -r -p "Ingresa el puerto adicional a habilitar (ej. 8880, 25461): " EXTRA_P
+      read -r -p "Ingresa el puerto adicional a habilitar (ej. 443, 8880, 25461): " EXTRA_P
     fi
     cmd_open_firewall "$EXTRA_P"
     cd "$APP_DIR"
-    EXTRA_PORT_VAL="$EXTRA_P" "$NODE_BIN" --no-warnings --input-type=module -e '
+    EXTRA_PORT_VAL="$EXTRA_P" EXTRA_SCHEME_VAL="$EXTRA_SCHEME" "$NODE_BIN" --no-warnings --input-type=module -e '
       import { db, initDb } from "./server/db.js";
       initDb();
       const p = Number(process.env.EXTRA_PORT_VAL);
       if (!Number.isInteger(p) || p < 80 || p > 65535) { console.error("Puerto inválido"); process.exit(1); }
+      const raw = String(process.env.EXTRA_SCHEME_VAL || "").trim().toLowerCase();
+      const scheme = ["http","https","both"].includes(raw)
+        ? raw
+        : (raw === "auto" || raw === "tls") ? "both"
+        : (p === 443) ? "https" : (p === 80) ? "both" : "http";
       const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
-      const set = new Set((row?.value || "").split(",").map(s => Number(s.trim())).filter(Boolean));
-      set.add(p);
-      const val = Array.from(set).sort((a,b)=>a-b).join(",");
+      const entries = new Map();
+      for (const tok of String(row?.value || "").split(/[,\s;]+/)) {
+        const [rp, rs] = tok.split(":");
+        const n = Number(rp);
+        if (Number.isInteger(n) && n) entries.set(n, rs || "");
+      }
+      entries.set(p, scheme);
+      const val = Array.from(entries.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([port, sch]) => `${port}:${sch || ((port === 443) ? "https" : (port === 80) ? "both" : "http")}`)
+        .join(",");
       db.prepare("INSERT INTO settings (key, value) VALUES (\x27extra_http_ports\x27, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(val);
       console.log("✅ Puertos adicionales configurados:", val);
+      if (scheme !== "http") {
+        console.log("   (el puerto " + p + " intentará TLS: si no hay certificado, el panel lo dirá al arrancar)");
+      }
     '
     systemctl restart "$SERVICE_NAME"
     echo "✅ Servicio reiniciado con el nuevo puerto activo."
+    ;;
+  tls)
+    # tvlister-admin tls                      → estado del certificado y puertos
+    # tvlister-admin tls <cert> <key>         → fijar rutas y reabrir puertos
+    # tvlister-admin tls auto                 → volver a la detección automática
+    cd "$APP_DIR"
+    if [ "${2:-}" = "auto" ]; then
+      "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { db, initDb } from "./server/db.js";
+        initDb();
+        db.prepare("DELETE FROM settings WHERE key IN (\x27tls_cert_path\x27,\x27tls_key_path\x27)").run();
+        console.log("✅ Rutas TLS borradas: se vuelve a buscar el certificado automáticamente.");
+      '
+      systemctl restart "$SERVICE_NAME"
+      exit 0
+    fi
+    if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
+      TLS_C="$2" TLS_K="$3" "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { db, initDb } from "./server/db.js";
+        import { setTlsPaths, tlsStatus } from "./server/tlsManager.js";
+        initDb();
+        try {
+          setTlsPaths(process.env.TLS_C, process.env.TLS_K);
+          const st = tlsStatus({ force: true });
+          if (!st.available) { console.error("❌", st.error); process.exit(1); }
+          console.log("✅ Certificado válido:", st.domain, "· vence", String(st.validTo).slice(0,10), "·", st.daysLeft, "días");
+        } catch (err) { console.error("❌", err.message); process.exit(1); }
+      ' || exit 1
+      systemctl restart "$SERVICE_NAME"
+      echo "✅ Panel reiniciado con el certificado indicado."
+      exit 0
+    fi
+    "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { db, initDb } from "./server/db.js";
+      import { tlsStatus } from "./server/tlsManager.js";
+      initDb();
+      const st = tlsStatus({ force: true });
+      if (st.available) {
+        console.log("🔒 Certificado:", st.domain);
+        console.log("   Fuente    :", st.source);
+        console.log("   Vence     :", String(st.validTo).slice(0,10), "(" + st.daysLeft + " días)");
+        console.log("   Cert      :", st.certPath);
+        console.log("   Clave     :", st.keyPath);
+        if (st.uncoveredDomains?.length) console.log("   ⚠️  No cubre:", st.uncoveredDomains.join(", "));
+      } else {
+        console.log("⚠️  Sin certificado TLS:", st.error);
+        console.log("   Instala uno (certbot/acme.sh) o fija las rutas: tvlister-admin tls /ruta/fullchain.pem /ruta/privkey.pem");
+      }
+      const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
+      console.log("🌐 Puertos :", row?.value || "(ninguno)");
+      console.log("   Para HTTPS: tvlister-admin add-port 443 https   ·   tvlister-admin add-port 80 both");
+    '
     ;;
   remove-port)
     REM_P="${2:-}"
@@ -3405,7 +3474,7 @@ case "$ACTION" in
     echo "  8) Crear backup manual en /root (backup)"
     echo "  9) Configurar Dominio Nginx + SSL Let's Encrypt (setup-ssl)"
     echo " 10) Cambiar puerto principal TCP (set-port)"
-    echo " 11) Agregar puerto adicional simultáneo (add-port)"
+    echo " 11) Agregar puerto adicional simultáneo (add-port) · HTTPS 80/443 (tls)"
     echo " 12) Activar Servidor Ingesta RTMP/SRT/RTSP (install-ingest)"
     echo " 13) Actualizar panel desde GitHub sin perder datos (update)"
     echo " 14) Reiniciar motor TVLister 24/7 (restart)"

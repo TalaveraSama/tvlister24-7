@@ -2729,3 +2729,31 @@ invocados desde `authenticateLine`: 20 fallos por IP en 10 min ⇒ `429` con `Re
 `device_limit`. UI: botón de teléfono en *Usuarios y Dispositivos*.
 
 **8. Contrato para la app.** `docs/SEGURIDAD_PLAYER_APP_INDICACIONES.md`.
+
+### v2.6.6: HTTPS propio del panel en el 80 y el 443
+
+**1. Modos de puerto.** `server/multiPortManager.js` guarda ahora `puerto:modo`
+(`extra_http_ports = 80:both,443:https,8880:http`). Modos: `http` (plano), `https` (sólo TLS) y
+`both` (TLS + HTTP en el mismo puerto). Sin modo, 443 → `https`, 80 → `both`, resto → `http`, así
+que las bases antiguas (`8880,25461`) siguen funcionando igual.
+
+**2. TLS y HTTP en el mismo socket.** `both` usa un `net.Server` que espera al primer trozo de la
+conexión y lo devuelve al flujo: si el primer byte es `0x16` lo entrega al servidor HTTPS; si no, al
+HTTP (con `resume()` explícito, que el servidor HTTP no lo hace al recibir un socket prestado). El
+TLS no lleva `resume()`: TLSSocket gestiona su propio flujo y reanudar después de envolver el socket
+rompía el handshake.
+
+**3. Certificado.** `server/tlsManager.js` busca en `TVLISTER_TLS_CERT/KEY`, en `tls_cert_path` /
+`tls_key_path`, en Let's Encrypt, en acme.sh y en `/etc/tvlister/tls`; valida el par con
+`tls.createSecureContext` y lee vigencia y SAN con `X509Certificate`. Nunca genera autofirmados: sin
+certificado el puerto HTTPS no se abre y se explica por qué.
+
+**4. API.** `GET /api/ports` (incluye `tls`), `GET /api/ports/tls`, `POST /api/ports/tls`
+`{certPath,keyPath}` o `{reset:true}`, `POST /api/ports/rebind`; `POST /api/ports` acepta
+`{port, scheme}`.
+
+**5. CLI.** `tvlister-admin add-port <puerto> [http|https|both]` y `tvlister-admin tls [auto | <cert> <key>]`.
+
+**6. UI.** Pestaña *Multi-Puertos HTTPS/HTTP*: selector de protocolo, botones `:443 HTTPS` y
+`:80 HTTPS+HTTP`, tarjeta del certificado (dominio, caducidad, fuente, dominios sin cubrir) y botón
+«Reabrir puertos TLS» para recargar tras renovar.

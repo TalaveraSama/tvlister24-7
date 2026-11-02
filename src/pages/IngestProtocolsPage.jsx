@@ -16,7 +16,10 @@ import {
   Activity,
   Network,
   FileCode2,
-  Gauge
+  Gauge,
+  Lock,
+  Unlock,
+  KeyRound
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -99,7 +102,11 @@ export default function IngestProtocolsPage() {
   // 4. Multi-Port State
   const [portsData, setPortsData] = useState({ primaryPort: 8080, extraPorts: [], allListeningPorts: [] });
   const [newPortInput, setNewPortInput] = useState('');
+  const [newPortScheme, setNewPortScheme] = useState('https');
   const [portBusy, setPortBusy] = useState(false);
+  const [tlsInfo, setTlsInfo] = useState(null);
+  const [tlsForm, setTlsForm] = useState({ certPath: '', keyPath: '' });
+  const [tlsBusy, setTlsBusy] = useState(false);
 
   const notify = (msg, type = 'ok') => {
     setToast({ msg, type });
@@ -130,6 +137,13 @@ export default function IngestProtocolsPage() {
         });
       }
       setPortsData(pList);
+      // Certificado de los puertos 80/443: viene con el mismo listado para que
+      // la tarjeta no parpadee al entrar en la pestaña.
+      const tlsState = pList?.tls;
+      if (tlsState) {
+        setTlsInfo(tlsState);
+        setTlsForm({ certPath: tlsState.certPath || '', keyPath: tlsState.keyPath || '' });
+      }
     } catch (err) {
       console.error(err);
     }
@@ -262,19 +276,75 @@ export default function IngestProtocolsPage() {
     handleResolveM4f();
   }, []);
 
-  const handleAddPort = async (portVal) => {
+  const loadTls = async (refresh = false) => {
+    try {
+      const info = await apiFetch(`/api/ports/tls${refresh ? '?refresh=1' : ''}`);
+      setTlsInfo(info);
+      setTlsForm({ certPath: info.certPath || '', keyPath: info.keyPath || '' });
+    } catch {
+      /* la tarjeta queda en «sin datos» */
+    }
+  };
+
+  const saveTlsPaths = async () => {
+    setTlsBusy(true);
+    try {
+      const info = await apiFetch('/api/ports/tls', {
+        method: 'POST',
+        body: JSON.stringify({ certPath: tlsForm.certPath, keyPath: tlsForm.keyPath })
+      });
+      setTlsInfo(info);
+      if (info.ports) setPortsData(info.ports);
+      notify(info.available ? 'Certificado cargado y puertos TLS reabiertos.' : info.error || 'Certificado no válido', info.available ? 'ok' : 'err');
+    } catch (err) {
+      notify(err.message, 'err');
+    } finally {
+      setTlsBusy(false);
+    }
+  };
+
+  const redetectTls = async () => {
+    setTlsBusy(true);
+    try {
+      const info = await apiFetch('/api/ports/tls?refresh=1');
+      setTlsInfo(info);
+      notify(info.available ? `Certificado encontrado: ${info.source}` : info.error || 'Sin certificado', info.available ? 'ok' : 'err');
+    } catch (err) {
+      notify(err.message, 'err');
+    } finally {
+      setTlsBusy(false);
+    }
+  };
+
+  const rebindPorts = async () => {
+    setPortBusy(true);
+    try {
+      const res = await apiFetch('/api/ports/rebind', { method: 'POST' });
+      setPortsData(res);
+      notify('Puertos TLS reabiertos con el certificado actual.');
+    } catch (err) {
+      notify(err.message, 'err');
+    } finally {
+      setPortBusy(false);
+    }
+  };
+
+  const handleAddPort = async (portVal, schemeVal) => {
     const p = Number(portVal || newPortInput);
     if (!p) return;
+    const scheme = schemeVal || newPortScheme;
     setPortBusy(true);
     try {
       const res = await apiFetch('/api/ports', {
         method: 'POST',
-        body: JSON.stringify({ port: p }),
+        body: JSON.stringify({ port: p, scheme }),
       });
       setPortsData(res);
       setNewPortInput('');
       if (res.status === 'listening') {
-        notify(`Puerto ${p} abierto y escuchando en vivo en 0.0.0.0:${p}`);
+        const proto = res.scheme === 'https' ? 'HTTPS' : res.scheme === 'both' ? 'HTTPS + HTTP' : 'HTTP';
+        notify(`Puerto ${p} abierto (${proto}) y escuchando en 0.0.0.0:${p}`);
+        if (res.tls) await loadTls();
       } else {
         notify(res.error || `No se pudo abrir el puerto ${p}`, 'err');
       }
@@ -341,7 +411,7 @@ export default function IngestProtocolsPage() {
           { id: 'mnf', label: 'Protocolo MNF v1 (Más Liviano que TS)', icon: Zap, badge: 'NUEVO' },
           { id: 'ingest', label: 'Servidor RTMP / SRT / RTSP', icon: Radio, badge: ingestStatus?.running ? 'ACTIVO' : null },
           { id: 'flussonic', label: 'Importar Flussonic & M4F', icon: ArrowRightLeft },
-          { id: 'ports', label: `Multi-Puertos HTTP (${portsData.allListeningPorts?.length || 1})`, icon: Network },
+          { id: 'ports', label: `Multi-Puertos HTTPS/HTTP (${portsData.allListeningPorts?.length || 1})`, icon: Network },
         ].map((t) => {
           const Icon = t.icon;
           const active = subTab === t.id;
@@ -993,18 +1063,108 @@ export default function IngestProtocolsPage() {
         </div>
       )}
 
-      {/* ==================== TAB 4: MULTI-PORT HTTP MANAGER ==================== */}
+      {/* ==================== TAB 4: MULTI-PORT HTTP/HTTPS MANAGER ==================== */}
       {subTab === 'ports' && (
         <div className="space-y-6">
           <div className="bg-[#0d1322] border border-slate-800 rounded-2xl p-5 space-y-4">
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
                 <Network className="w-5 h-5 text-cyan-400" />
-                Gestor Dinámico Multi-Puerto (HTTP / Xtream / HLS / TS / MNF / WebSocket)
+                Gestor Dinámico Multi-Puerto (HTTPS / HTTP / Xtream / HLS / TS / MNF)
               </h2>
               <p className="text-xs text-slate-400 mt-1">
-                Abre múltiples puertos TCP simultáneos en caliente sin reiniciar el puerto principal. Ideal para saltar bloqueos de ISPs (ej. 8080, 8880, 2052, 2082, 25461) compartiendo las mismas líneas y conexiones.
+                Abre puertos TCP simultáneos en caliente sin reiniciar el puerto principal, con TLS
+                propio en el panel. Así los reproductores que exigen el <strong>443</strong> (o que
+                rechazan HTTP) funcionan igual que los que usan 8080/8880, compartiendo las mismas
+                líneas y conexiones.
               </p>
+            </div>
+
+            {/* Certificado TLS */}
+            <div
+              className={`rounded-xl border p-4 space-y-3 ${
+                tlsInfo?.available ? 'bg-emerald-500/5 border-emerald-500/30' : 'bg-amber-500/5 border-amber-500/30'
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  {tlsInfo?.available ? (
+                    <Lock className="w-4 h-4 text-emerald-400 mt-0.5" />
+                  ) : (
+                    <Unlock className="w-4 h-4 text-amber-400 mt-0.5" />
+                  )}
+                  <div>
+                    <div className="text-sm font-bold text-white">
+                      {tlsInfo?.available ? 'Certificado HTTPS en uso' : 'Sin certificado HTTPS'}
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {tlsInfo?.available
+                        ? `${tlsInfo.domain} · vence ${String(tlsInfo.validTo || '').slice(0, 10)} · ${tlsInfo.daysLeft} días · ${tlsInfo.source}`
+                        : tlsInfo?.error || 'Cargando estado del certificado…'}
+                    </p>
+                    {tlsInfo?.available && (
+                      <p className="text-[10px] text-slate-500 mt-1 font-mono break-all">
+                        cert: {tlsInfo.certPath} · key: {tlsInfo.keyPath}
+                      </p>
+                    )}
+                    {tlsInfo?.available && tlsInfo.uncoveredDomains?.length > 0 && (
+                      <p className="text-[10px] text-amber-300 mt-1">
+                        El certificado no cubre: {tlsInfo.uncoveredDomains.join(', ')}
+                      </p>
+                    )}
+                    {(tlsInfo?.expiresSoon || tlsInfo?.expired) && (
+                      <p className={`text-[10px] mt-1 ${tlsInfo?.expired ? 'text-rose-300 font-semibold' : 'text-amber-300'}`}>
+                        {tlsInfo.hint}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={redetectTls}
+                    disabled={tlsBusy}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${tlsBusy ? 'animate-spin' : ''}`} /> Volver a detectar
+                  </button>
+                  <button
+                    onClick={rebindPorts}
+                    disabled={portBusy || !tlsInfo?.available}
+                    className="px-3 py-1.5 rounded-lg bg-cyan-600/25 hover:bg-cyan-600 text-cyan-200 hover:text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
+                    title="Reabre los puertos TLS con el certificado actual (tras renovarlo)"
+                  >
+                    <Lock className="w-3.5 h-3.5" /> Reabrir puertos TLS
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <input
+                  value={tlsForm.certPath}
+                  onChange={(e) => setTlsForm({ ...tlsForm, certPath: e.target.value })}
+                  placeholder="/etc/letsencrypt/live/midominio.com/fullchain.pem"
+                  className="px-3 py-2 rounded-lg bg-[#090d16] border border-slate-800 text-[11px] font-mono text-white"
+                />
+                <input
+                  value={tlsForm.keyPath}
+                  onChange={(e) => setTlsForm({ ...tlsForm, keyPath: e.target.value })}
+                  placeholder="/etc/letsencrypt/live/midominio.com/privkey.pem"
+                  className="px-3 py-2 rounded-lg bg-[#090d16] border border-slate-800 text-[11px] font-mono text-white"
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={saveTlsPaths}
+                  disabled={tlsBusy || !tlsForm.certPath || !tlsForm.keyPath}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"
+                >
+                  <KeyRound className="w-3.5 h-3.5" /> Guardar rutas y aplicar
+                </button>
+                <span className="text-[10px] text-slate-500">
+                  Si el certificado está en Let&apos;s Encrypt o acme.sh del dominio del panel, se
+                  detecta solo. Nunca se genera uno autofirmado. La clave privada no sale del servidor.
+                </span>
+              </div>
             </div>
 
             {/* Add Port Input & Presets */}
@@ -1016,23 +1176,49 @@ export default function IngestProtocolsPage() {
                   max="65535"
                   value={newPortInput}
                   onChange={(e) => setNewPortInput(e.target.value)}
-                  placeholder="Ingresa nuevo puerto TCP (ej. 8880)"
+                  placeholder="Puerto TCP (ej. 443)"
                   className="flex-1 px-3.5 py-2 rounded-xl bg-[#090d16] border border-slate-800 text-xs text-white"
                 />
+                <select
+                  value={newPortScheme}
+                  onChange={(e) => setNewPortScheme(e.target.value)}
+                  className="px-2.5 py-2 rounded-xl bg-[#090d16] border border-slate-800 text-xs text-white"
+                  title="Protocolo del puerto"
+                >
+                  <option value="https">Sólo HTTPS (TLS)</option>
+                  <option value="both">HTTPS + HTTP (mismo puerto)</option>
+                  <option value="http">Sólo HTTP (sin TLS)</option>
+                </select>
                 <button
                   onClick={() => handleAddPort()}
                   disabled={portBusy || !newPortInput}
                   className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  <Plus className="w-4 h-4" /> Abrir Puerto Ahora
+                  <Plus className="w-4 h-4" /> Abrir Puerto
                 </button>
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] text-slate-500 mr-1">Rápidos ISP:</span>
-                {[8880, 25461, 2082, 2086, 2095].map((preset) => (
+                <span className="text-[11px] text-slate-500 mr-1">Estándar / ISP:</span>
+                <button
+                  onClick={() => handleAddPort(443, 'https')}
+                  disabled={portBusy}
+                  className="px-2.5 py-1.5 rounded-lg bg-emerald-600/25 hover:bg-emerald-600 text-emerald-200 hover:text-white text-xs font-mono font-bold"
+                  title="HTTPS en el puerto estándar (requiere certificado)"
+                >
+                  :443 HTTPS
+                </button>
+                <button
+                  onClick={() => handleAddPort(80, 'both')}
+                  disabled={portBusy}
+                  className="px-2.5 py-1.5 rounded-lg bg-cyan-600/25 hover:bg-cyan-600 text-cyan-200 hover:text-white text-xs font-mono font-bold"
+                  title="HTTPS en el 80 y el HTTP plano redirige a HTTPS"
+                >
+                  :80 HTTPS+HTTP
+                </button>
+                {[8080, 8880, 25461].map((preset) => (
                   <button
                     key={preset}
-                    onClick={() => handleAddPort(preset)}
+                    onClick={() => handleAddPort(preset, tlsInfo?.available ? 'both' : 'http')}
                     disabled={portBusy}
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono"
                   >
@@ -1044,17 +1230,22 @@ export default function IngestProtocolsPage() {
 
             {/* Active Ports Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-              {/* Primary Port Card */}
               <div className="bg-[#090d16] border border-indigo-500/40 rounded-xl p-4 flex items-center justify-between">
                 <div>
                   <div className="text-[11px] text-indigo-300 font-semibold">PUERTO PRINCIPAL</div>
                   <div className="text-xl font-bold text-white font-mono mt-0.5">:{portsData.primaryPort}</div>
-                  <div className="text-[11px] text-emerald-400 mt-0.5">0.0.0.0:{portsData.primaryPort} (Activo)</div>
+                  <div className="text-[11px] text-emerald-400 mt-0.5">
+                    0.0.0.0:{portsData.primaryPort} (Activo)
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    {typeof window !== 'undefined' && window.location.protocol === 'https:'
+                      ? 'HTTPS (a través de tu nginx/proxy)'
+                      : 'HTTP directo del panel'}
+                  </div>
                 </div>
                 <Server className="w-6 h-6 text-indigo-400" />
               </div>
 
-              {/* Extra Ports Cards */}
               {(portsData.extraPorts || []).map((p) => (
                 <div
                   key={p.port}
@@ -1062,16 +1253,39 @@ export default function IngestProtocolsPage() {
                     p.status === 'listening' ? 'border-emerald-500/30' : 'border-rose-500/40'
                   }`}
                 >
-                  <div>
-                    <div className="text-[11px] text-slate-400 font-semibold">PUERTO ADICIONAL</div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] text-slate-400 font-semibold">PUERTO ADICIONAL</span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                          p.scheme === 'https'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : p.scheme === 'both'
+                              ? 'bg-cyan-500/20 text-cyan-300'
+                              : 'bg-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {p.scheme === 'https' ? 'HTTPS' : p.scheme === 'both' ? 'HTTPS+HTTP' : 'HTTP'}
+                      </span>
+                    </div>
                     <div className="text-xl font-bold text-white font-mono mt-0.5">:{p.port}</div>
-                    <div className={`text-[11px] mt-0.5 ${p.status === 'listening' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <div
+                      className={`text-[11px] mt-0.5 ${
+                        p.status === 'listening' ? 'text-emerald-400' : 'text-rose-400'
+                      }`}
+                    >
                       {p.status === 'listening' ? `Escuchando en 0.0.0.0:${p.port}` : p.error || 'Error'}
                     </div>
+                    {p.status === 'listening' && (
+                      <div className="text-[10px] text-slate-500 mt-1 font-mono break-all">
+                        {p.httpsUrl && <div>{p.httpsUrl}/</div>}
+                        {p.httpUrl && <div>{p.httpUrl}/</div>}
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() => handleRemovePort(p.port)}
-                    className="p-2 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
+                    className="p-2 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 shrink-0"
                     title="Cerrar puerto"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -1080,9 +1294,27 @@ export default function IngestProtocolsPage() {
               ))}
             </div>
 
-            <div className="bg-[#090d16] border border-slate-800 rounded-xl p-3.5 text-xs text-slate-400">
-              <strong className="text-slate-200">Tip Firewall Ubuntu VPS:</strong> Si usas UFW o iptables en tu VPS, también puedes abrir el puerto en el firewall del sistema ejecutando como root:{' '}
-              <code className="text-cyan-300 ml-1">sudo tvlister-admin add-port 8880</code>
+            <div className="bg-[#090d16] border border-slate-800 rounded-xl p-3.5 text-xs text-slate-400 space-y-1.5">
+              <p>
+                <strong className="text-slate-200">Cómo se atiende cada puerto:</strong> «Sólo HTTPS»
+                cifra todo. «HTTPS + HTTP» mira el primer byte de la conexión y atiende TLS o HTTP en
+                el mismo puerto; en el <strong className="text-slate-200">80</strong> el HTTP plano
+                contesta un 301 al mismo host por HTTPS, así ningún reproductor se queda fuera.
+              </p>
+              <p>
+                <strong className="text-slate-200">Puertos &lt; 1024:</strong> el servicio debe correr
+                como root o con <code className="text-cyan-300">CAP_NET_BIND_SERVICE</code>. Si no,
+                el panel lo dice al abrirlo («Permiso denegado»).
+              </p>
+              <p>
+                <strong className="text-slate-200">Firewall:</strong> además del panel, abre el puerto
+                en UFW con <code className="text-cyan-300">sudo tvlister-admin add-port 443</code>.
+              </p>
+              <p>
+                <strong className="text-slate-200">¿«Puerto ocupado» en el 443?</strong> Ya hay algo
+                escuchando ahí (el nginx de XUI, otro proxy). O lo liberas, o dejas que ese nginx
+                siga atendiendo el 443 y haga proxy al panel: no hacen falta los dos.
+              </p>
             </div>
           </div>
         </div>
