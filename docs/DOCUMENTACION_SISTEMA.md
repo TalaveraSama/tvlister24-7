@@ -163,6 +163,10 @@ Te permite crear tus propios canales temáticos continuos (por ejemplo: *Cine Ac
 **¿Qué hace?**
 Gestiona todo el catálogo bajo demanda dividido en dos pestañas: **Películas (Movies)** y **Series con Temporadas y Episodios**.
 * Soporta enlaces remotos (`http://` / `https://`) y **rutas de archivos locales en el disco del VPS** (ej. `/home/xui/content/movies/pelicula.mkv` o `/mnt/vod/pelicula.mp4`) con soporte nativo `HTTP 206 Byte-Range` para adelantar o retroceder sin espera.
+* **Importación desde Jellyfin** con enlaces simbólicos (*Create Symlink*): una insignia **Symlink** en la tarjeta indica que la fuente es un enlace, y **Jellyfin** que vino de esa biblioteca.
+
+**Desde Jellyfin (con «Create Symlink», como XUI.one):**
+El botón **«Jellyfin»** de la barra superior importa el catálogo de tu servidor Jellyfin (películas, otros VOD y series con episodios) y, para los archivos que están en el mismo disco, **crea enlaces simbólicos** dentro de la carpeta VOD (`vod/movies/<Título> (<año>)<ext>` y `vod/series/<Serie> - S01E01<ext>`). No se copia, no se mueve y no se recodifica nada; el original nunca se borra. Hay vista previa (cuántos archivos son accesibles), mapa de rutas para docker/otros montajes, categorías por biblioteca, carátulas firmadas y enganche al primer bouquet. Guía completa: [`docs/JELLYFIN_VOD.md`](JELLYFIN_VOD.md). En terminal: `tvlister-admin jellyfin status | test | import | symlinks`.
 
 **¿Cómo utilizarlo?**
 * **Para Películas:** En la pestaña *Películas*, pulsa **«Agregar Película»**, ingresa título, categoría VOD, URL o ruta local, póster, sinopsis, año, género, calificación y extensión (`mp4` / `mkv`).
