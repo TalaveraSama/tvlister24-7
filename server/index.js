@@ -107,6 +107,7 @@ import {
   getSegmentMissStats,
   getPrebufferStats
 } from './iptvApi.js';
+import { listLineDevices, publicDevice, revokeDevice, resetLineDevices, allowDeviceAgain } from './devices.js';
 import { computeRecommendation, applyRecommendation } from './tune.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
@@ -167,7 +168,38 @@ initDb();
 const app = express();
 app.set('trust proxy', true);
 
-app.use(cors({ origin: true, credentials: true }));
+// CORS: antes se reflejaba CUALQUIER origen con credenciales. Eso deja que una
+// web ajena hable con la API del panel desde el navegador del operador. Ahora:
+//   - endpoints de reproductor (Xtream/M3U/DRM): abiertos, porque van con
+//     credenciales de la línea o token firmado y los usan reproductores nativos,
+//     TVs y la app (que no mandan cabecera Origin).
+//   - API del panel: sólo el mismo host del panel (o los orígenes que se
+//     declaren en CORS_ALLOWED_ORIGINS), con credenciales.
+const PLAYER_CORS_PREFIXES = ['/player_api.php', '/panel_api.php', '/get.php', '/xmltv.php', '/live/', '/movie/', '/series/', '/mnf/', '/drm/', '/hls_proxy/', '/webtv', '/timeshift', '/archive_seg/'];
+const extraOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use(
+  cors((req, callback) => {
+    const path = String(req.path || '');
+    if (PLAYER_CORS_PREFIXES.some((p) => path.startsWith(p))) {
+      return callback(null, { origin: '*', credentials: false });
+    }
+    const origin = String(req.headers.origin || '');
+    if (!origin) return callback(null, { origin: false });
+    if (extraOrigins.includes(origin)) return callback(null, { origin, credentials: true });
+    // Mismo host (panel servido por sí mismo): se permite.
+    let sameHost = false;
+    try {
+      const o = new URL(origin);
+      sameHost = o.host === String(req.headers.host || '');
+    } catch {
+      sameHost = false;
+    }
+    return callback(null, sameHost ? { origin, credentials: true } : { origin: false });
+  })
+);
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
@@ -2934,10 +2966,18 @@ app.get('/api/lines', requireAuth, (req, res) => {
     sessionsByLine.set(ac.line_id, list);
   }
 
+  const deviceCountByLine = new Map(
+    db
+      .prepare("SELECT line_id, COUNT(*) AS c FROM line_devices WHERE status = 'active' GROUP BY line_id")
+      .all()
+      .map((r) => [r.line_id, r.c])
+  );
+
   res.json(
     rows.map((r) => {
       const active_sessions = sessionsByLine.get(r.id) || [];
       return {
+        device_count: deviceCountByLine.get(r.id) || 0,
         ...r,
         active_conns: active_sessions.length,
         active_sessions,
@@ -2956,6 +2996,69 @@ app.post('/api/lines/:id/kick', requireAuth, (req, res) => {
   }
   kickAllLineConnections(lineId);
   res.json({ ok: true });
+});
+
+// --- Aparatos por línea (anti-compartición) -------------------------------
+function loadLineForAdmin(req, res) {
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(Number(req.params.id));
+  if (!line) {
+    res.status(404).json({ error: 'Línea no encontrada.' });
+    return null;
+  }
+  if (req.user.role === 'reseller' && line.owner_id !== req.user.id) {
+    res.status(403).json({ error: 'No tienes permiso sobre esta línea.' });
+    return null;
+  }
+  return line;
+}
+
+app.get('/api/lines/:id/devices', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  res.json({
+    line: {
+      id: line.id,
+      username: line.username,
+      device_lock: Number(line.device_lock) === 1,
+      device_limit: Number(line.device_limit) || 1,
+      max_connections: line.max_connections
+    },
+    devices: listLineDevices(line.id).map(publicDevice)
+  });
+});
+
+app.post('/api/lines/:id/device-lock', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const enabled = req.body?.enabled ? 1 : 0;
+  const limit = Math.max(1, Math.min(20, Number(req.body?.limit) || Number(line.device_limit) || 1));
+  db.prepare('UPDATE lines SET device_lock = ?, device_limit = ? WHERE id = ?').run(enabled, limit, line.id);
+  res.json({ ok: true, device_lock: enabled === 1, device_limit: limit });
+});
+
+app.delete('/api/lines/:id/devices/:deviceId', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  // 'panel' = veto: ese aparato no se vuelve a vincular solo (el cliente tiene
+  // que llamar). Un reset masivo sí permite volver a vincularse.
+  const done = revokeDevice(line.id, req.params.deviceId, 'panel');
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, revoked: done, device_id: req.params.deviceId });
+});
+
+app.post('/api/lines/:id/devices/:deviceId/allow', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const ok = allowDeviceAgain(line.id, req.params.deviceId);
+  res.json({ ok, device_id: req.params.deviceId });
+});
+
+app.post('/api/lines/:id/devices/reset', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const n = resetLineDevices(line.id);
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, revoked: n });
 });
 
 app.post('/api/lines', requireAuth, (req, res) => {

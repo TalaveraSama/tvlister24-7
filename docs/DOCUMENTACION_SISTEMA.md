@@ -2695,3 +2695,37 @@ su propio token), evitando un salto extra panel→panel en cada petición de cla
 *DRM & Claves*: comprueba en vivo cada punto (URL oculta, enlaces firmados, anti-incrustación, sin
 caché, límite de intentos, contraseña oculta, vista previa sólo admin, DRM activo, base pública) y
 cuenta los canales que siguen sin DRM.
+
+### v2.6.5: aparatos por línea y seguridad de la app
+
+**1. `line_devices`.** Una fila por aparato: `line_id`, `device_id`, nombre, plataforma, versión de
+la app, IP de alta/último acceso, estado y quién lo revocó. `lines.device_lock` (0 por defecto) y
+`lines.device_limit` (1 por defecto). Acciones en `player_api.php`: `register_device`,
+`heartbeat`, `unlink_device`. Token = `signToken({scope:'device', id:línea, dev:fila, nonce})` con
+30 días; el `nonce` se regenera en cada alta, así que un token viejo del mismo aparato deja de valer.
+
+**2. Semántica de revocación.** Desvincular desde la app (`revoked_by = 'app'`) o reset masivo
+(`panel-reset`) permite volver a registrarse. Desvincular uno a uno desde el panel
+(`revoked_by = 'panel'`) es **veto**: ese `device_id` ya no se vincula solo; el operador puede
+«permitir de nuevo» desde el panel.
+
+**3. Aplicación del bloqueo.** `deviceGuard()` en `/live`, `/movie` y `/series` cuando
+`device_lock = 1`: acepta `X-Device-Token`, `Authorization: Device <token>` o `?device_token=`.
+`get.php`, `xmltv.php` y `player_api.php` (catálogo) no se ven afectados.
+
+**4. Fuerza bruta general.** `checkCredentialGate`/`noteCredentialFailure` en `server/auth.js`,
+invocados desde `authenticateLine`: 20 fallos por IP en 10 min ⇒ `429` con `Retry-After` durante
+10 min. Cubre `/live`, `/movie`, `/series`, `/get.php`, `/xmltv.php` y `player_api.php`.
+
+**5. `signToken` respeta el TTL.** Antes pisaba `exp` con 7 días; ahora `ttlMs` > `payload.exp` >
+7 días por defecto.
+
+**6. CORS con criterio.** Reproductor abierto (`/player_api.php`, `/get.php`, `/live/`, `/movie/`,
+`/series/`, `/drm/`, `/webtv*`…); API del panel sólo mismo host o `CORS_ALLOWED_ORIGINS`.
+
+**7. Endpoints de administración.** `GET /api/lines/:id/devices`, `POST /api/lines/:id/device-lock`,
+`DELETE /api/lines/:id/devices/:deviceId` (veto), `POST …/:deviceId/allow`,
+`POST /api/lines/:id/devices/reset`. `/api/lines` incluye `device_count`, `device_lock` y
+`device_limit`. UI: botón de teléfono en *Usuarios y Dispositivos*.
+
+**8. Contrato para la app.** `docs/SEGURIDAD_PLAYER_APP_INDICACIONES.md`.

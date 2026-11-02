@@ -62,6 +62,9 @@ setInterval(() => {
   for (const [k, v] of requestRates.entries()) {
     if (v.resetAt < now) requestRates.delete(k);
   }
+  for (const [k, v] of credFailures.entries()) {
+    if (v.resetAt < now && (!v.blockedUntil || v.blockedUntil < now)) credFailures.delete(k);
+  }
 }, 60_000).unref();
 
 export function checkLoginRateLimit(ip) {
@@ -78,17 +81,60 @@ export function checkLoginRateLimit(ip) {
   return { allowed: true };
 }
 
+// --- Fallos de credenciales de LÍNEA (HLS, M3U, player_api) ----------------
+// Antes sólo el login del panel y el de la WebTV tenían freno: contra
+// /get.php o /live se podían probar contraseñas de líneas sin límite. Este
+// contador es aparte del del panel y del portal, y sólo suma fallos reales.
+const credFailures = new Map(); // ip -> { count, resetAt, blockedUntil }
+const CRED_FAIL_WINDOW_MS = 10 * 60_000;
+const CRED_FAIL_MAX = 20;
+const CRED_BLOCK_MS = 10 * 60_000;
+
+export function checkCredentialGate(ip) {
+  const now = Date.now();
+  const entry = credFailures.get(ip);
+  if (!entry) return { allowed: true };
+  if (entry.blockedUntil && entry.blockedUntil > now) {
+    return { allowed: false, retrySec: Math.ceil((entry.blockedUntil - now) / 1000) };
+  }
+  if (entry.resetAt < now) {
+    credFailures.delete(ip);
+    return { allowed: true };
+  }
+  return { allowed: true };
+}
+
+export function noteCredentialFailure(ip) {
+  const now = Date.now();
+  const entry = credFailures.get(ip);
+  if (!entry || entry.resetAt < now) {
+    credFailures.set(ip, { count: 1, resetAt: now + CRED_FAIL_WINDOW_MS, blockedUntil: 0 });
+    return;
+  }
+  entry.count += 1;
+  if (entry.count >= CRED_FAIL_MAX) {
+    entry.blockedUntil = now + CRED_BLOCK_MS;
+    entry.resetAt = now + CRED_FAIL_WINDOW_MS;
+  }
+}
+
+export function clearCredentialFailures(ip) {
+  credFailures.delete(ip);
+}
+
 export function clearLoginRateLimit(ip) {
   loginAttempts.delete(ip);
 }
 
-export function signToken(payload) {
-  const data = Buffer.from(
-    JSON.stringify({
-      ...payload,
-      exp: Date.now() + 7 * 24 * 3600 * 1000
-    })
-  ).toString('base64url');
+const TOKEN_DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
+
+export function signToken(payload, ttlMs = null) {
+  // BUG corregido: `exp` del payload se pisaba con 7 días, así que los enlaces
+  // de reproducción "de 6 h" duraban una semana. Ahora manda ttlMs, luego el
+  // exp explícito del payload y, si no hay ninguno, los 7 días de siempre.
+  const { exp: explicitExp, ...rest } = payload || {};
+  const exp = explicitExp || Date.now() + (Number(ttlMs) || TOKEN_DEFAULT_TTL_MS);
+  const data = Buffer.from(JSON.stringify({ ...rest, exp })).toString('base64url');
   const sig = crypto.createHmac('sha256', SECRET_KEY).update(data).digest('base64url');
   return `${data}.${sig}`;
 }

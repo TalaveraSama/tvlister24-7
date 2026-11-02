@@ -47,6 +47,8 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
   const [editingLine, setEditingLine] = useState(null);
   const [linksLine, setLinksLine] = useState(null);
   const [sessionsLineId, setSessionsLineId] = useState(null);
+  const [devicesLineId, setDevicesLineId] = useState(null);
+  const [devicesState, setDevicesState] = useState({ loading: false, list: [], meta: null });
   const [copiedKey, setCopiedKey] = useState('');
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -186,6 +188,79 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
   const handleKickAllLine = async (line) => {
     if (!window.confirm(`¿Desconectar todas las sesiones activas de "${line.username}"?`)) return;
     await apiFetch(`/api/lines/${line.id}/kick`, { method: 'POST' });
+    await loadLinesOnly();
+  };
+
+  const openDevices = async (line) => {
+    setDevicesLineId(line.id);
+    setDevicesState({ loading: true, list: [], meta: null });
+    try {
+      const d = await apiFetch(`/api/lines/${line.id}/devices`);
+      setDevicesState({ loading: false, list: d.devices || [], meta: d.line });
+    } catch (err) {
+      setDevicesState({ loading: false, list: [], meta: null });
+      window.alert(err.message);
+    }
+  };
+
+  const refreshDevices = async () => {
+    if (!devicesLineId) return;
+    try {
+      const d = await apiFetch(`/api/lines/${devicesLineId}/devices`);
+      setDevicesState({ loading: false, list: d.devices || [], meta: d.line });
+    } catch {
+      /* polling silencioso */
+    }
+  };
+
+  const toggleDeviceLock = async (enabled) => {
+    if (!devicesLineId) return;
+    const limit = devicesState.meta?.device_limit || 1;
+    const r = await apiFetch(`/api/lines/${devicesLineId}/device-lock`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled, limit })
+    });
+    setDevicesState((prev) => ({
+      ...prev,
+      meta: { ...prev.meta, device_lock: r.device_lock, device_limit: r.device_limit }
+    }));
+    await loadLinesOnly();
+  };
+
+  const setDeviceLimit = async (next) => {
+    if (!devicesLineId) return;
+    const limit = Math.max(1, Math.min(20, Number(next) || 1));
+    const r = await apiFetch(`/api/lines/${devicesLineId}/device-lock`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled: devicesState.meta?.device_lock, limit })
+    });
+    setDevicesState((prev) => ({ ...prev, meta: { ...prev.meta, device_limit: r.device_limit } }));
+  };
+
+  const revokeDevice = async (deviceId) => {
+    if (!devicesLineId) return;
+    if (!window.confirm(`¿Desvincular el aparato "${deviceId}"? Su sesión se corta al instante.`))
+      return;
+    await apiFetch(`/api/lines/${devicesLineId}/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'DELETE'
+    });
+    await refreshDevices();
+    await loadLinesOnly();
+  };
+
+  const allowDevice = async (deviceId) => {
+    if (!devicesLineId) return;
+    await apiFetch(`/api/lines/${devicesLineId}/devices/${encodeURIComponent(deviceId)}/allow`, {
+      method: 'POST'
+    });
+    await refreshDevices();
+  };
+
+  const resetDevices = async () => {
+    if (!devicesLineId) return;
+    if (!window.confirm('¿Desvincular TODOS los aparatos de esta línea?')) return;
+    await apiFetch(`/api/lines/${devicesLineId}/devices/reset`, { method: 'POST' });
+    await refreshDevices();
     await loadLinesOnly();
   };
 
@@ -537,6 +612,21 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                             M3U / API
                           </button>
                           <button
+                            onClick={() => openDevices(l)}
+                            className={`p-1.5 rounded-lg ${
+                              l.device_lock
+                                ? 'bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300'
+                                : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                            }`}
+                            title={
+                              l.device_lock
+                                ? `Aparatos vinculados (bloqueo activo, ${l.device_count ?? 0})`
+                                : 'Aparatos / anti-compartición'
+                            }
+                          >
+                            <Smartphone className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => openEdit(l)}
                             className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
                             title="Editar línea"
@@ -885,6 +975,164 @@ export default function UsersDevicesPage({ user, onRefreshUser, onOpenXuiImport 
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Aparatos vinculados (anti-compartición) */}
+      {devicesLineId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-3xl rounded-2xl bg-[#0e1526] border border-slate-800 overflow-hidden shadow-2xl">
+            {(() => {
+              const lineInfo = lines.find((x) => x.id === devicesLineId);
+              const meta = devicesState.meta || {
+                device_lock: Boolean(lineInfo?.device_lock),
+                device_limit: lineInfo?.device_limit || 1
+              };
+              const active = devicesState.list.filter((d) => d.status === 'active');
+              return (
+                <>
+                  <div className="px-5 py-4 bg-[#131c31] border-b border-slate-800 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <Smartphone className="w-4 h-4 text-cyan-400" /> Aparatos de{' '}
+                        {lineInfo?.username || 'la línea'}
+                      </h3>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {active.length} vinculado(s) de {meta.device_limit} permitido(s) •{' '}
+                        {meta.device_lock ? 'bloqueo ACTIVO' : 'bloqueo desactivado'}
+                      </p>
+                    </div>
+                    <button onClick={() => setDevicesLineId(null)} className="text-slate-400 hover:text-white">
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
+                    <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-[#090e1a] border border-slate-800">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(meta.device_lock)}
+                          onChange={(e) => toggleDeviceLock(e.target.checked)}
+                          className="w-4 h-4 accent-cyan-500"
+                        />
+                        <span className="text-slate-200 font-semibold">
+                          Exigir aparato vinculado para reproducir
+                        </span>
+                      </label>
+                      <span className="text-[10px] text-slate-500">
+                        Afecta a /live, /movie y /series. La lista M3U y la API siguen abiertas.
+                      </span>
+                      <div className="ml-auto flex items-center gap-2">
+                        <span className="text-slate-400">Aparatos permitidos</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="20"
+                          value={meta.device_limit}
+                          onChange={(e) => setDeviceLimit(e.target.value)}
+                          className="w-16 px-2 py-1 rounded-lg bg-[#0e1526] border border-slate-800 text-white"
+                        />
+                      </div>
+                    </div>
+
+                    {devicesState.loading ? (
+                      <div className="p-6 text-center text-slate-400">Cargando aparatos…</div>
+                    ) : devicesState.list.length === 0 ? (
+                      <div className="p-8 text-center text-slate-400 bg-[#090e1a] rounded-xl border border-slate-800">
+                        Esta línea todavía no tiene aparatos vinculados. La app los registra sola con
+                        <span className="font-mono text-indigo-300"> action=register_device</span>.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {devicesState.list.map((d) => (
+                          <div
+                            key={d.device_id}
+                            className={`p-3 rounded-xl border flex flex-wrap items-center gap-3 ${
+                              d.status === 'active'
+                                ? 'bg-[#090e1a] border-emerald-500/25'
+                                : 'bg-[#090e1a] border-rose-500/25 opacity-70'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-white font-semibold truncate">
+                                {d.device_name || d.device_id}
+                              </div>
+                              <div className="font-mono text-[10px] text-slate-500 truncate">
+                                {d.device_id}
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
+                                {d.ip || 'sin IP'}
+                              </span>
+                              {d.platform && (
+                                <span className="px-2 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30 text-[10px]">
+                                  {d.platform}
+                                  {d.app_version ? ` ${d.app_version}` : ''}
+                                </span>
+                              )}
+                              <span className="text-[10px] text-slate-500">
+                                visto: {d.last_seen}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                  d.status === 'active'
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                }`}
+                              >
+                                {d.status === 'active' ? 'ACTIVO' : 'DESVINCULADO'}
+                              </span>
+                            </div>
+                            <div className="ml-auto">
+                              {d.status === 'active' ? (
+                                <button
+                                  onClick={() => revokeDevice(d.device_id)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 font-semibold"
+                                >
+                                  <PowerOff className="w-3.5 h-3.5" /> Desvincular
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => allowDevice(d.device_id)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 font-semibold"
+                                  title={`Desvinculado el ${d.revoked_at || ''} — permitir de nuevo`}
+                                >
+                                  <Check className="w-3.5 h-3.5" /> Permitir de nuevo
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">
+                      <p className="text-[10px] text-slate-500 max-w-lg">
+                        Al desvincular un aparato, su token deja de valer aunque no haya caducado y se
+                        cortan sus sesiones activas.
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={refreshDevices}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" /> Actualizar
+                        </button>
+                        <button
+                          onClick={resetDevices}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 font-semibold"
+                        >
+                          <PowerOff className="w-3.5 h-3.5" /> Desvincular todos
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}

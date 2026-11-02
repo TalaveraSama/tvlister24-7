@@ -8,7 +8,18 @@ import { db } from './db.js';
 import { getStreamBaseUrl } from './publicBase.js';
 import { signToken } from './auth.js';
 import { getActiveDrm, getDrmSettings } from './drm.js';
-import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit } from './auth.js';
+import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit, checkCredentialGate, noteCredentialFailure, clearCredentialFailures } from './auth.js';
+import {
+  registerDevice,
+  verifyDeviceToken,
+  revokeDevice,
+  touchDeviceByToken,
+  activeDeviceCount,
+  listLineDevices,
+  publicDevice,
+  normalizeDeviceId,
+  DEVICE_TOKEN_TTL_SECONDS
+} from './devices.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
 import { getOrCreateMnfSession, MnfToTsRemuxer } from './mnfProtocol.js';
 import { resolveIpGeoSync } from './geoIspResolver.js';
@@ -73,8 +84,24 @@ export { getBaseUrl, getStreamBaseUrl } from './publicBase.js';
 
 export function authenticateLine(username, password, req = null) {
   if (!username || !password) return { error: 'Credenciales requeridas', code: 401 };
+
+  // Puerta anti-fuerza bruta: cuenta fallos por IP (10 min, 20 intentos) y los
+  // aplica ANTES de mirar la contraseña. Un reproductor que acierta limpia el
+  // contador, así que la reproducción normal no se ve afectada.
+  const clientIp = req ? extractClientIp(req) : '';
+  if (clientIp) {
+    const gate = checkCredentialGate(clientIp);
+    if (!gate.allowed) {
+      return { error: `Demasiados intentos fallidos. Espera ${gate.retrySec} segundos.`, code: 429, retrySec: gate.retrySec };
+    }
+  }
+
   const line = db.prepare('SELECT * FROM lines WHERE username = ? AND password = ?').get(username, password);
-  if (!line) return { error: 'Usuario o contraseña inválidos', code: 401 };
+  if (!line) {
+    if (clientIp) noteCredentialFailure(clientIp);
+    return { error: 'Usuario o contraseña inválidos', code: 401 };
+  }
+  if (clientIp) clearCredentialFailures(clientIp);
   if (line.status !== 'active') return { error: 'Línea suspendida o bloqueada', code: 403 };
   if (line.exp_date && new Date(line.exp_date).getTime() < Date.now()) {
     return { error: 'Suscripción expirada', code: 403 };
@@ -783,10 +810,26 @@ iptvRouter.get(['/xmltv.php', '/xmltv.xml.gz'], (req, res) => {
 const handlePlayerApi = (req, res) => {
   const params = { ...req.query, ...req.body };
   const { username, password, action } = params;
+
+  // Fuerza bruta contra las líneas por la API del reproductor: mismas
+  // credenciales que la lista M3U, así que se frena igual que el login del
+  // panel. El freno se mira ANTES de autenticar (si se mirara sólo al fallar,
+  // el que acierta a la duodécima seguiría entrando y no frenaría nada).
+  const clientIp = extractClientIp(req);
+  const limit = checkLoginRateLimit(clientIp);
+  if (!limit.allowed) {
+    res.set('Retry-After', String(limit.retrySec));
+    return res.json({
+      user_info: { auth: 0, message: `Demasiados intentos. Espera ${limit.retrySec} segundos.` },
+      error: 'rate_limited',
+      retry_after: limit.retrySec
+    });
+  }
   const auth = authenticateLine(username, password, req);
   if (auth.error) {
     return res.json({ user_info: { auth: 0, message: auth.error } });
   }
+  clearLoginRateLimit(clientIp);
 
   const { line } = auth;
   const baseUrl = getStreamBaseUrl(req);
@@ -820,6 +863,78 @@ const handlePlayerApi = (req, res) => {
         time_now: new Date().toISOString()
       }
     });
+  }
+
+  // --- Aparatos (anti-compartición) ---------------------------------------
+  // La app se identifica UNA vez y guarda el token. A partir de ahí el panel
+  // sabe cuántos aparatos tiene la línea y puede desvincularlos sin cambiar la
+  // contraseña a nadie.
+  if (action === 'register_device') {
+    const reg = registerDevice(
+      line,
+      {
+        device_id: params.device_id,
+        device_name: params.device_name || params.model,
+        platform: params.platform || params.os,
+        app_version: params.app_version || params.version
+      },
+      clientIp
+    );
+    if (!reg.ok) {
+      return res.status(reg.code).json({
+        auth: 1,
+        registered: false,
+        error: reg.error,
+        message: reg.message
+      });
+    }
+    return res.json({
+      auth: 1,
+      registered: true,
+      device: reg.device,
+      device_token: reg.token,
+      token_ttl_seconds: reg.expires_in,
+      device_limit: reg.limit,
+      device_lock: Number(line.device_lock) === 1,
+      active_cons: String(activeDeviceCount(line.id)),
+      max_connections: String(line.max_connections)
+    });
+  }
+
+  if (action === 'heartbeat') {
+    const token = String(params.device_token || req.headers['x-device-token'] || '').trim();
+    if (!token) return res.status(400).json({ auth: 0, error: 'device_token_required', message: 'Falta device_token' });
+    const check = verifyDeviceToken(token, { lineId: line.id });
+    if (!check) return res.status(401).json({ auth: 0, error: 'device_invalid', message: 'Token de aparato inválido' });
+    if (check.revoked) {
+      return res.status(403).json({ auth: 0, error: 'device_revoked', message: 'Aparato desvinculado. Contacta con tu proveedor.' });
+    }
+    touchDeviceByToken(token, clientIp);
+    const activeConns = db
+      .prepare('SELECT COUNT(*) as c FROM active_connections WHERE line_id = ?')
+      .get(line.id).c;
+    return res.json({
+      auth: 1,
+      status: line.status,
+      exp_date: line.exp_date ? String(Math.floor(new Date(line.exp_date).getTime() / 1000)) : null,
+      server_time: Math.floor(Date.now() / 1000),
+      device: publicDevice(check.row),
+      active_cons: String(activeConns),
+      max_connections: String(line.max_connections),
+      device_lock: Number(line.device_lock) === 1
+    });
+  }
+
+  if (action === 'unlink_device') {
+    const deviceId = normalizeDeviceId(params.device_id);
+    const token = String(params.device_token || req.headers['x-device-token'] || '').trim();
+    const check = token ? verifyDeviceToken(token, { lineId: line.id }) : null;
+    if (!deviceId && !check) {
+      return res.status(400).json({ auth: 0, error: 'device_id_required', message: 'Falta device_id o device_token' });
+    }
+    const target = deviceId || check.row.device_id;
+    const done = revokeDevice(line.id, target, 'app');
+    return res.json({ auth: 1, unlinked: done, device_id: target });
   }
 
   // DRM: la app pide aquí la información de licencias de ESTA línea. Se
@@ -1701,11 +1816,29 @@ async function serveLiveForLine(req, res, { line, username, password, streamSpec
   return res.redirect(302, candidates[0] || stream.source_url);
 }
 
+// Guardia de aparato: sólo se aplica a las líneas con `device_lock = 1`. En las
+// demás (todas, por defecto) /live y la lista M3U siguen funcionando igual.
+function deviceGuard(req, line) {
+  if (Number(line.device_lock) !== 1) return { ok: true };
+  const token = String(req.headers['x-device-token'] || req.query.device_token || '').trim();
+  const bearer = String(req.headers.authorization || '');
+  const raw = token || (bearer.toLowerCase().startsWith('device ') ? bearer.slice(7).trim() : '');
+  if (!raw) {
+    return { ok: false, code: 403, error: 'device_required', message: 'Esta línea requiere un aparato vinculado (X-Device-Token).' };
+  }
+  const res = verifyDeviceToken(raw, { lineId: line.id, touch: true });
+  if (!res) return { ok: false, code: 403, error: 'device_invalid', message: 'Token de aparato inválido.' };
+  if (res.revoked) return { ok: false, code: 403, error: 'device_revoked', message: 'Aparato desvinculado. Contacta con tu proveedor.' };
+  return { ok: true, deviceId: res.deviceId };
+}
+
 // 4. Live Stream Delivery (/live/:username/:password/:streamSpec AND short Xtream /:username/:password/:numericId)
 iptvRouter.get('/live/:username/:password/:streamSpec', async (req, res) => {
   const { username, password, streamSpec } = req.params;
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).send(auth.error);
+  const guard = deviceGuard(req, auth.line);
+  if (!guard.ok) return res.status(guard.code).json({ error: guard.error, message: guard.message });
   return serveLiveForLine(req, res, { line: auth.line, username, password, streamSpec });
 });
 
@@ -1845,23 +1978,9 @@ iptvRouter.all('/movie/:username/:password/:vodSpec', (req, res) => {
   const { username, password, vodSpec } = req.params;
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).send(auth.error);
-
-  const vodId = Number(vodSpec.split('.')[0]);
-  const vod = db.prepare('SELECT * FROM vod_items WHERE id = ?').get(vodId);
-  if (!vod) return res.status(404).send('VOD no encontrado');
-  if (!isItemAllowedForLine(auth.line, 'vod', vod.id)) {
-    return res.status(403).send('Película VOD no incluida en tu paquete');
-  }
-
-  const edgeTarget = selectEdgeRedirect(req);
-  const conn = recordConnection(req, auth.line, 'vod', vod.id, vod.title, 'VOD', edgeTarget?.serverId || 1);
-  if (!conn.allowed) return res.status(429).send(conn.error);
-  if (edgeTarget) return res.redirect(302, edgeTarget.url);
-
-  if (vod.source_url.startsWith('/')) {
-    return serveLocalMediaFileWithRange(req, res, vod.source_url, conn.connId);
-  }
-  return res.redirect(302, vod.source_url);
+  const guard = deviceGuard(req, auth.line);
+  if (!guard.ok) return res.status(guard.code).json({ error: guard.error, message: guard.message });
+  return serveVodForLine(req, res, auth.line, Number(String(vodSpec).split('.')[0]));
 });
 
 // 5b. Series Episode Delivery (/series/:username/:password/:episodeSpec)
@@ -1870,31 +1989,9 @@ iptvRouter.all('/series/:username/:password/:episodeSpec', (req, res) => {
   const { username, password, episodeSpec } = req.params;
   const auth = authenticateLine(username, password, req);
   if (auth.error) return res.status(auth.code).send(auth.error);
-
-  const epId = Number(episodeSpec.split('.')[0]);
-  const ep = db
-    .prepare(
-      `SELECT e.*, s.title as series_title
-       FROM series_episodes e
-       LEFT JOIN series s ON s.id = e.series_id
-       WHERE e.id = ?`
-    )
-    .get(epId);
-  if (!ep) return res.status(404).send('Episodio no encontrado');
-  if (!isItemAllowedForLine(auth.line, 'series', ep.series_id)) {
-    return res.status(403).send('Serie no incluida en tu paquete');
-  }
-
-  const edgeTarget = selectEdgeRedirect(req);
-  const label = `${ep.series_title || 'Serie'} S${ep.season_num}E${ep.episode_num}`;
-  const conn = recordConnection(req, auth.line, 'series', ep.id, label, 'Series', edgeTarget?.serverId || 1);
-  if (!conn.allowed) return res.status(429).send(conn.error);
-  if (edgeTarget) return res.redirect(302, edgeTarget.url);
-
-  if (ep.source_url.startsWith('/')) {
-    return serveLocalMediaFileWithRange(req, res, ep.source_url, conn.connId);
-  }
-  return res.redirect(302, ep.source_url);
+  const guard = deviceGuard(req, auth.line);
+  if (!guard.ok) return res.status(guard.code).json({ error: guard.error, message: guard.message });
+  return serveEpisodeForLine(req, res, auth.line, Number(String(episodeSpec).split('.')[0]));
 });
 
 // 5c. TV Archive / Catchup & Timeshift Delivery

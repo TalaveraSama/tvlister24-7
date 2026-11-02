@@ -646,6 +646,32 @@ function runInitDbBody() {
   ensureColumn('bouquets', 'series_ids_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('bouquets', 'xui_id', 'INTEGER');
   ensureColumn('lines', 'xui_id', 'INTEGER');
+  // --- Anti-compartición: registro de aparatos por línea -------------------
+  // device_lock = 0 (por defecto) => la lista M3U y la app siguen funcionando
+  // como siempre, sin pedir token de aparato. Se activa por línea desde el
+  // panel cuando el cliente quiere que su cuenta viva en N aparatos fijos.
+  ensureColumn('lines', 'device_lock', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('lines', 'device_limit', 'INTEGER NOT NULL DEFAULT 1');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS line_devices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      line_id INTEGER NOT NULL,
+      device_id TEXT NOT NULL,
+      device_name TEXT NOT NULL DEFAULT '',
+      platform TEXT NOT NULL DEFAULT '',
+      app_version TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      token_nonce TEXT NOT NULL DEFAULT '',
+      first_ip TEXT NOT NULL DEFAULT '',
+      last_ip TEXT NOT NULL DEFAULT '',
+      first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+      revoked_at TEXT,
+      revoked_by TEXT NOT NULL DEFAULT '',
+      UNIQUE(line_id, device_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_line_devices_line ON line_devices(line_id, status);
+  `);
   ensureColumn('users', 'xui_id', 'INTEGER');
   // --- DRM / CAS (servidor de claves propio para Flussonic) ----------------
   // Cada canal puede protegerse con AES-128 (HLS): Flussonic pide la clave a
