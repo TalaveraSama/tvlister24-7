@@ -56,6 +56,56 @@ detecta solo (también vale acme.sh o el Origin Certificate si algún día separ
 - Renovación: `certbot renew --deploy-hook "systemctl restart tvlister24-7"`. Si el panel sirve el
   443, también vale **Reabrir puertos TLS** en la UI tras renovar.
 
+## Tercer dominio: las apps de siempre (Xtream Codes / XUI.one)
+
+Ya hay aplicaciones en producción que piden la lista y el video a
+**`livex-stream.alphadigitalnic.xyz`**. No hace falta tocar ninguna: el panel las reconoce por el
+dominio por el que entran y **les responde con enlaces de ese mismo dominio**.
+
+| Nombre | Papel | DNS | Cloudflare |
+| --- | --- | --- | --- |
+| `tvadmin…` | Panel, API, login, WebTV | IPs de Cloudflare | **Naranja** |
+| `live-stream…` | Video (WebTV, app propia, DRM) | tu servidor | **Gris** |
+| `livex-stream…` | **Apps de terceros** (Xtream Codes / XUI.one) | tu servidor | **Gris** |
+
+```bash
+sudo tvlister-admin dominios tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz livex-stream.alphadigitalnic.xyz
+```
+
+Qué cambia exactamente:
+
+| Petición entra por | `get.php` / `player_api.php` devuelven |
+| --- | --- |
+| `livex-stream…` | `https://livex-stream.alphadigitalnic.xyz/live/…` y `server_info.url` = ese dominio |
+| `live-stream…` o `tvadmin…` | `https://live-stream.alphadigitalnic.xyz/live/…` (lo de siempre) |
+
+Es decir: **el dominio de compatibilidad es una vista**, no un panel distinto. Misma base de datos,
+mismas líneas, mismos canales, mismos límites. Lo único que cambia es el host de los enlaces que se
+le devuelven.
+
+- La API es la misma que ya usan: `get.php`, `player_api.php`, `xmltv.php`, `panel_api.php`, Stalker.
+- Los códigos de acceso del panel **no** bloquean esas rutas (solo la web del panel).
+- Con DRM activo, la clave se sirve por `/drm/key/<token>` también en ese dominio (probado: 16 bytes).
+- El certificado de ese nombre va en el mismo 443: `tvlister-admin acme tvadmin… live-stream… livex-stream… correo`
+  emite **un solo certificado** que cubre los tres.
+- Si el 443 lo atiende el nginx de XUI.one, `tvlister-admin cloudflare` añade ese nombre al
+  `server_name` del bloque de streams automáticamente (lee el ajuste guardado).
+
+### Por qué no vale ponerlo detrás de Cloudflare
+
+Porque por ese dominio también sale el **video** que piden esas apps. Naranja = proxy = cortes y
+riesgo de suspensión. `tvlister-admin dominios` lo marca como fallo si lo detecta.
+
+### Cómo se comprueba que las apps seguirán funcionando
+
+```bash
+sudo tvlister-admin dominios        # mira los tres: cert, HTTP, si hay proxy, y si /player_api.php responde como Xtream
+```
+
+La última línea del dominio de compatibilidad dice
+`Xtream: /player_api.php responde (auth:0 con usuario de prueba) — las apps encontrarán la API`.
+Si no lo dice, esas apps verían HTML en vez de JSON y hay que revisar el server block/puerto.
+
 ## La pregunta del millón: ¿pongo el video en naranja? ¿Y el puerto 8443?
 
 **No.** Y el puerto no cambia nada: el problema no es el puerto, es el **proxy**.

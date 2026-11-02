@@ -4154,6 +4154,8 @@ app.post('/api/domains', requireAuth, requireAdmin, async (req, res) => {
     const saved = setDomains({
       panelDomain: req.body?.panelDomain,
       streamDomain: req.body?.streamDomain,
+      // Tercer dominio: apps de terceros (Xtream Codes / XUI.one) ya en producción.
+      compatDomain: req.body?.compatDomain,
       publicStreamBase: req.body?.publicStreamBase
     });
     let ports = null;

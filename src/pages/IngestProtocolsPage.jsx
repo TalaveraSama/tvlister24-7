@@ -106,7 +106,7 @@ export default function IngestProtocolsPage() {
   const [portBusy, setPortBusy] = useState(false);
   const [tlsInfo, setTlsInfo] = useState(null);
   const [domains, setDomains] = useState({ panelDomain: '', streamDomain: '', publicStreamBase: '' });
-  const [domainForm, setDomainForm] = useState({ panelDomain: '', streamDomain: '' });
+  const [domainForm, setDomainForm] = useState({ panelDomain: '', streamDomain: '', compatDomain: '' });
   const [domainCheck, setDomainCheck] = useState(null);
   const [domainBusy, setDomainBusy] = useState(false);
   const [tlsForm, setTlsForm] = useState({ certPath: '', keyPath: '' });
@@ -151,7 +151,11 @@ export default function IngestProtocolsPage() {
       }
       const doms = await apiFetch('/api/domains');
       setDomains(doms);
-      setDomainForm({ panelDomain: doms.panelDomain || '', streamDomain: doms.streamDomain || '' });
+      setDomainForm({
+        panelDomain: doms.panelDomain || '',
+        streamDomain: doms.streamDomain || '',
+        compatDomain: doms.compatDomain || ''
+      });
     } catch (err) {
       console.error(err);
     }
@@ -288,7 +292,11 @@ export default function IngestProtocolsPage() {
     try {
       const d = await apiFetch('/api/domains');
       setDomains(d);
-      setDomainForm({ panelDomain: d.panelDomain || '', streamDomain: d.streamDomain || '' });
+      setDomainForm({
+        panelDomain: d.panelDomain || '',
+        streamDomain: d.streamDomain || '',
+        compatDomain: d.compatDomain || ''
+      });
     } catch {
       /* sin datos: la tarjeta queda vacía */
     }
@@ -302,12 +310,16 @@ export default function IngestProtocolsPage() {
         body: JSON.stringify({
           panelDomain: domainForm.panelDomain,
           streamDomain: domainForm.streamDomain,
+          compatDomain: domainForm.compatDomain,
           openPorts: true
         })
       });
       setDomains(saved);
       if (saved.ports) setPortsData(saved.ports);
-      notify(`Dominios guardados: panel ${saved.panelDomain || '—'} · video ${saved.publicStreamBase || '—'}`);
+      notify(
+        `Dominios guardados: panel ${saved.panelDomain || '—'} · video ${saved.publicStreamBase || '—'}` +
+          (saved.compatDomain ? ` · apps ${saved.compatDomain}` : '')
+      );
       await loadTls(true);
     } catch (err) {
       notify(err.message, 'err');
@@ -1171,7 +1183,7 @@ export default function IngestProtocolsPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                 <div>
                   <label className="block text-[10px] text-amber-300/90 font-semibold mb-1">
                     PANEL (por Cloudflare · naranja)
@@ -1194,6 +1206,21 @@ export default function IngestProtocolsPage() {
                     className="w-full px-3 py-2 rounded-lg bg-[#090d16] border border-slate-800 text-[11px] font-mono text-white"
                   />
                 </div>
+                <div>
+                  <label className="block text-[10px] text-cyan-300/90 font-semibold mb-1">
+                    COMPATIBILIDAD — apps Xtream/XUI de terceros (directo · nube gris)
+                  </label>
+                  <input
+                    value={domainForm.compatDomain}
+                    onChange={(e) => setDomainForm({ ...domainForm, compatDomain: e.target.value })}
+                    placeholder="livex-stream.alphadigitalnic.xyz"
+                    className="w-full px-3 py-2 rounded-lg bg-[#090d16] border border-slate-800 text-[11px] font-mono text-white"
+                  />
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    Opcional. Quien entre por este dominio recibe la lista y el video con enlaces de
+                    este mismo dominio, sin cambiar nada en la app.
+                  </div>
+                </div>
               </div>
 
               {(domains.publicStreamBase || domains.streamPort) && (
@@ -1207,7 +1234,8 @@ export default function IngestProtocolsPage() {
                 <div className="space-y-2">
                   {[
                     { role: 'panel', label: 'Panel', data: domainCheck.panel },
-                    { role: 'streams', label: 'Video', data: domainCheck.streams }
+                    { role: 'streams', label: 'Video', data: domainCheck.streams },
+                    { role: 'compat', label: 'Apps', data: domainCheck.compat }
                   ].map(({ label, data }) =>
                     data ? (
                       <div

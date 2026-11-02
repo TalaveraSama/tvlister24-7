@@ -1803,11 +1803,25 @@ cmd_cloudflare() {
     stream_domain="stream.${domain}"
   fi
 
+  # Tercer dominio (apps Xtream de terceros, ya en producción). Si está
+  # guardado con `tvlister-admin dominios ... <compat>`, su server block se
+  # genera solo y las apps siguen entrando por donde entraron siempre.
+  local compat_domain=""
+  compat_domain=$(cd "$APP_DIR" && "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb, db } from "./server/db.js";
+    initDb();
+    console.log(String(db.prepare("SELECT value FROM settings WHERE key = ?").get("compat_domain")?.value || "").trim());
+  ' 2>/dev/null | tail -1)
+  case "$compat_domain" in *[!a-z0-9.-]*|'') compat_domain="" ;; esac
+
   echo "============================================================"
   echo "  TVLister 24/7 — Proxy inverso para Cloudflare"
   echo "============================================================"
   echo "  Panel   (por Cloudflare)  : ${domain}  ->  127.0.0.1:${port}"
   echo "  Streams (sin Cloudflare)  : ${stream_domain}  ->  127.0.0.1:${port}"
+  if [ -n "$compat_domain" ]; then
+    echo "  Compat. (apps Xtream)     : ${compat_domain}  ->  127.0.0.1:${port}"
+  fi
   echo ""
 
   # --- Rangos de Cloudflare (para la IP real y para confiar en el proxy) ----
@@ -1893,7 +1907,7 @@ EOF
 server {
     listen 80;
     $( [ -n "$ssl_block" ] && echo "listen 443 ssl;" )
-    server_name ${stream_domain};
+    server_name ${stream_domain}${compat_domain:+ $compat_domain};
 ${ssl_block}
 
     proxy_http_version 1.1;
@@ -3387,24 +3401,31 @@ case "$ACTION" in
     # propio subdominio en nube GRIS. Este comando guarda los ajustes y luego
     # comprueba DNS, certificado y quién atiende cada nombre, desde el servidor.
     cd "$APP_DIR"
-    D_PANEL="${2:-}" D_STREAM="${3:-}"
-    D_PANEL="$D_PANEL" D_STREAM="$D_STREAM" "$NODE_BIN" --no-warnings --input-type=module -e '
+    D_PANEL="${2:-}" D_STREAM="${3:-}" D_COMPAT="${4:-}"
+    D_PANEL="$D_PANEL" D_STREAM="$D_STREAM" D_COMPAT="$D_COMPAT" "$NODE_BIN" --no-warnings --input-type=module -e '
       import { initDb } from "./server/db.js";
       import { getDomains, setDomains, checkDomains } from "./server/domains.js";
       initDb();
       const panel = (process.env.D_PANEL || "").trim();
       const streams = (process.env.D_STREAM || "").trim();
-      if (panel || streams) {
+      const compat = (process.env.D_COMPAT || "").trim();
+      if (panel || streams || compat) {
         if (!panel || !streams) {
-          console.error("Uso: tvlister-admin dominios <dominio_panel> <dominio_video>");
-          console.error("Ej.:  tvlister-admin dominios tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz");
+          console.error("Uso: tvlister-admin dominios <dominio_panel> <dominio_video> [dominio_compatibilidad]");
+          console.error("Ej.:  tvlister-admin dominios tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz livex-stream.alphadigitalnic.xyz");
+          console.error("     (el tercero es para las apps Xtream de terceros que ya están en producción)");
           process.exit(1);
         }
         try {
-          const saved = setDomains({ panelDomain: panel, streamDomain: streams });
+          const saved = setDomains({ panelDomain: panel, streamDomain: streams, compatDomain: compat });
           console.log("✅ Guardado:");
           console.log("   Panel (Cloudflare) : " + saved.panelDomain);
           console.log("   Video (directo)    : " + saved.publicStreamBase);
+          console.log("   Compat. (apps)     : " + (saved.compatDomain || "(sin dominio de compatibilidad)"));
+          if (saved.compatDomain) {
+            console.log("                        Las apps que entren por " + saved.compatDomain);
+            console.log("                        reciben los enlaces por ese mismo dominio.");
+          }
           console.log("");
         } catch (err) {
           console.error("❌ " + err.message);
@@ -3422,7 +3443,12 @@ case "$ACTION" in
       const res = await checkDomains();
       const line = (e) => {
         if (!e) return;
-        const role = e.role === "panel" ? "PANEL (puede ir por Cloudflare)" : "VIDEO (nube gris)";
+        const role =
+          e.role === "panel"
+            ? "PANEL (puede ir por Cloudflare)"
+            : e.role === "compat"
+              ? "COMPATIBILIDAD (apps Xtream de terceros, nube gris)"
+              : "VIDEO (nube gris)";
         console.log((e.ok ? "  [OK]   " : "  [FALLA] ") + e.host + "  —  " + role);
         if (e.dns?.ipv4?.length) console.log("          DNS  : " + e.dns.ipv4.join(", "));
         if (e.certificate?.ok) {
@@ -3446,6 +3472,10 @@ case "$ACTION" in
       };
       line(res.panel);
       line(res.streams);
+      line(res.compat);
+      if (res.compat?.xtream?.ok) {
+        console.log("          Xtream: /player_api.php responde (auth:0 con usuario de prueba) — las apps encontrarán la API");
+      }
       console.log("");
       if (res.ok) {
         console.log("✅ Todo correcto: panel por Cloudflare y video directo, con certificado válido.");
@@ -3456,10 +3486,14 @@ case "$ACTION" in
         console.log("   Recordatorio:");
         console.log("   · DNS: A de " + (cur.panelDomain || "<panel>") + " a la IP del servidor, nube NARANJA.");
         console.log("   · DNS: A de " + (cur.streamDomain || "<video>") + " a la MISMA IP, nube GRIS (DNS only).");
-        console.log("   · Certificado en el origen (no hace falta uno para los dos nombres):");
+        if (cur.compatDomain) {
+          console.log("   · DNS: A de " + cur.compatDomain + " a la MISMA IP, nube GRIS (apps Xtream de terceros).");
+        }
+        console.log("   · Certificado en el origen (un solo certificado puede cubrir los tres):");
         console.log("       panel (detrás de Cloudflare): tvlister-admin tls origin");
-        console.log("       video (conexión directa)    : tvlister-admin acme " + (cur.streamDomain || "video") + " <correo>");
-        console.log("     Ambos conviven en el mismo 443 (SNI). Detalle: docs/CERTIFICADO_ORIGEN_CLOUDFLARE.md");
+        console.log("       video + compat (directos)   : tvlister-admin acme " +
+          [cur.streamDomain || "video", cur.compatDomain].filter(Boolean).join(" ") + " <correo>");
+        console.log("     Los tres conviven en el mismo 443 (SNI). Detalle: docs/CERTIFICADO_ORIGEN_CLOUDFLARE.md");
         process.exitCode = 1;
       }
     '

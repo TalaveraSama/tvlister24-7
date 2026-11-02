@@ -54,7 +54,13 @@ export function getTlsSettings() {
     keyPath: getSetting('tls_key_path'),
     domains: Array.from(
       new Set(
-        [getSetting('panel_domain'), getSetting('stream_domain'), getSetting('public_stream_base')]
+        [
+          getSetting('panel_domain'),
+          getSetting('stream_domain'),
+          getSetting('public_stream_base'),
+          // Tercer dominio: las apps Xtream de terceros entran por aquí.
+          getSetting('compat_domain')
+        ]
           .map((d) => String(d || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '').trim())
           .filter(Boolean)
       )

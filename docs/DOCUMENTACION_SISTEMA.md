@@ -2880,3 +2880,14 @@ sin asignar; y `assertWritableFlussonic()` bloquea cualquier escritura sobre un 
 `code = 'ORIGIN_ONLY'` (HTTP 409 en la API). `planBulkProtect()` excluye los canales del troncal, y
 el CLI añade `drm servers` y `drm troncal <id> [off]`. La UI de Flussonic 23.12 permite marcarlo y
 muestra la etiqueta TRONCAL.
+
+### v2.6.14: dominio de compatibilidad para apps Xtream/XUI de terceros
+
+Ajuste `compat_domain` (tercer dominio). `server/publicBase.js` decide la base de los enlaces con
+`getStreamBaseUrl(req)`: si el host de la petición es el dominio de compatibilidad, responde con ese
+dominio y su esquema real (`X-Forwarded-Proto`/`req.secure`, y https si ese nombre tiene certificado
+instalado); si no, `public_stream_base` como siempre. `server/domains.js` guarda y valida el tercer
+dominio (no puede ser el del panel), lo comprueba con rol `compat` (debe ir en nube gris, sin
+Cloudflare) y sondea `GET /player_api.php` para confirmar que la API Xtream responde. El nombre entra
+en la lista SNI del 443 (`tlsManager`), el CLI lo acepta como tercer argumento de `dominios` y
+`cloudflare` lo mete en el `server_name` del bloque de streams.

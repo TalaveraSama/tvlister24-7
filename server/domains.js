@@ -47,11 +47,16 @@ function setSetting(key, value) {
 export function getDomains() {
   const panelDomain = normalizeHost(getSetting('panel_domain'));
   const streamDomain = normalizeHost(getSetting('stream_domain'));
+  const compatDomain = normalizeHost(getSetting('compat_domain'));
   const base = getSetting('public_stream_base').replace(/\/+$/, '');
   const baseHost = base ? normalizeHost(base) : '';
   return {
     panelDomain,
     streamDomain: streamDomain || baseHost,
+    // Tercer dominio, para las apps de siempre (Xtream Codes / XUI.one): las que
+    // ya están en producción piden la lista y el video por aquí, y aquí se les
+    // contesta con ENLACES DE ESTE MISMO DOMINIO para no romperlas.
+    compatDomain,
     publicStreamBase: base,
     // Puerto de salida real del video: el de la base pública o, si no lo dice,
     // 443 para https y 80 para http (es lo que hace el navegador).
@@ -64,9 +69,10 @@ export function getDomains() {
   };
 }
 
-export function setDomains({ panelDomain, streamDomain, publicStreamBase }) {
+export function setDomains({ panelDomain, streamDomain, compatDomain, publicStreamBase }) {
   const panel = normalizeHost(panelDomain);
   const stream = normalizeHost(streamDomain);
+  const compat = normalizeHost(compatDomain);
 
   if (panel && !isValidHost(panel)) {
     throw new Error(`Dominio del panel inválido: "${panelDomain}". Ejemplo: tvadmin.alphadigitalnic.xyz`);
@@ -74,8 +80,15 @@ export function setDomains({ panelDomain, streamDomain, publicStreamBase }) {
   if (stream && !isValidHost(stream)) {
     throw new Error(`Dominio de los streams inválido: "${streamDomain}". Ejemplo: live-stream.alphadigitalnic.xyz`);
   }
+  if (compat && !isValidHost(compat)) {
+    throw new Error(`Dominio de compatibilidad inválido: "${compatDomain}". Ejemplo: livex-stream.alphadigitalnic.xyz`);
+  }
+  if (compat && panel && compat === panel) {
+    throw new Error('El dominio de compatibilidad no puede ser el del panel: las apps deben ir directas (nube gris), no por Cloudflare.');
+  }
 
   if (panel) setSetting('panel_domain', panel);
+  if (compat) setSetting('compat_domain', compat);
 
   if (stream) {
     setSetting('stream_domain', stream);
@@ -247,6 +260,41 @@ async function httpProbe(host, port = null) {
 }
 
 /**
+ * ¿Ese nombre contesta la API de Xtream Codes / XUI.one?
+ *
+ * Se llama a `/player_api.php` con un usuario inventado: si responde JSON con
+ * `user_info`, la app de terceros encontrará exactamente lo que espera
+ * (`auth: 0`), sin tocar ninguna línea real.
+ */
+async function probeXtreamApi(host, port = 443) {
+  const scheme = port === 80 ? 'http' : 'https';
+  const suffix = port && port !== 443 && port !== 80 ? `:${port}` : '';
+  const url = `${scheme}://${host}${suffix}/player_api.php?username=__tvlister_check__&password=__tvlister_check__`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, { signal: controller.signal, redirect: 'manual' });
+    const text = await res.text().catch(() => '');
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+    return {
+      ok: Boolean(json && json.user_info),
+      status: res.status,
+      looksXtream: Boolean(json && json.user_info),
+      sample: json && json.user_info ? Object.keys(json.user_info).slice(0, 6).join(',') : String(text).slice(0, 80)
+    };
+  } catch (err) {
+    return { ok: false, error: err.name === 'AbortError' ? 'Sin respuesta en 8 s' : err.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Comprueba un dominio con su papel: `panel` (puede ir por Cloudflare) o
  * `streams` (no debe ir por Cloudflare nunca).
  */
@@ -307,6 +355,7 @@ export async function checkHost(host, role) {
 
   // El puerto público es el que verán los clientes: el de la base del video si
   // lleva uno explícito; si no, el 443 de siempre.
+  const directRole = role === 'streams' || role === 'compat';
   const publicPort = role === 'streams' ? getDomains().streamPort || 443 : 443;
 
   // Sin DNS público no tiene sentido culpar al 443: se avisa de lo único que
@@ -337,12 +386,13 @@ export async function checkHost(host, role) {
   if (!originCert.ok) {
     const msg = `el ${originPort} de este servidor no responde para ${target} (${originCert.error})`;
     if (role === 'streams') problems.push(`El video se conecta directo: ${msg}.`);
+    else if (role === 'compat') problems.push(`Las apps Xtream entran directas: ${msg}.`);
     else warnings.push(`Cloudflare dará 521 mientras ${msg}.`);
   } else if (!originCert.coversHost) {
     problems.push(
       `El ${originPort} de este servidor presenta un certificado que NO cubre ${target} (${originCert.altNames.join(', ') || 'sin SAN'}).`
     );
-  } else if (!originCert.authorized && role === 'streams') {
+  } else if (!originCert.authorized && directRole) {
     // Sólo es un fallo si el certificado no lo puede validar nadie (autofirmado o
     // CA privada). Un problema de cadena en ESTE servidor (p. ej. una CA raíz que
     // Node no trae) se avisa sin afirmar que el reproductor lo rechazará.
@@ -361,6 +411,8 @@ export async function checkHost(host, role) {
     }
   }
 
+  let xtream = null;
+
   if (role === 'streams') {
     if (http.ok && http.viaCloudflare) {
       problems.push(
@@ -373,6 +425,20 @@ export async function checkHost(host, role) {
   } else if (role === 'panel') {
     if (http.ok && !http.viaCloudflare) {
       warnings.push('El panel no pasa por Cloudflare (nube gris). Funciona, pero pierdes su protección y su caché.');
+    }
+  } else if (role === 'compat') {
+    // Tercer dominio: lo usan apps de terceros que ya están en producción.
+    // Sirve API y video, así que también tiene que ir directo.
+    if (http.ok && http.viaCloudflare) {
+      problems.push(
+        'El dominio de compatibilidad está detrás del proxy de Cloudflare (nube naranja). Ponlo en GRIS (DNS only): por ahí también sale el video que piden esas apps.'
+      );
+    }
+    xtream = await probeXtreamApi(target, publicPort);
+    if (http.ok && !xtream.ok) {
+      problems.push(
+        `El dominio responde HTTP ${http.status}, pero /player_api.php no contesta como Xtream (${xtream.sample || xtream.error}). Las apps de terceros esperan esa API y la de get.php.`
+      );
     }
   }
 
@@ -388,6 +454,7 @@ export async function checkHost(host, role) {
     warnings,
     dns: dnsInfo,
     certificate: cert,
+    xtream,
     originCertificate: { ...originCert, port: originPort },
     http
   };
@@ -397,9 +464,10 @@ export async function checkDomains() {
   const domains = getDomains();
   const host = String(process.env.TVLISTER_PUBLIC_HOST || '').trim();
 
-  const [panel, streams] = await Promise.all([
+  const [panel, streams, compat] = await Promise.all([
     domains.panelDomain ? checkHost(domains.panelDomain, 'panel') : Promise.resolve(null),
-    domains.streamDomain ? checkHost(domains.streamDomain, 'streams') : Promise.resolve(null)
+    domains.streamDomain ? checkHost(domains.streamDomain, 'streams') : Promise.resolve(null),
+    domains.compatDomain ? checkHost(domains.compatDomain, 'compat') : Promise.resolve(null)
   ]);
 
   const problems = [];
@@ -411,6 +479,14 @@ export async function checkDomains() {
   if (domains.panelDomain && domains.streamDomain && domains.panelDomain === domains.streamDomain) {
     problems.push('El panel y el video usan el mismo dominio: el video acabaría pasando por Cloudflare.');
   }
+  if (domains.compatDomain) {
+    if (domains.compatDomain === domains.panelDomain) {
+      problems.push('El dominio de compatibilidad es el del panel: esas apps acabarían pasando por Cloudflare.');
+    }
+    if (domains.compatDomain === domains.streamDomain) {
+      warnings.push('El dominio de compatibilidad y el de video son el mismo: funciona, pero pierdes poder separarlos si una app da problemas.');
+    }
+  }
   if (domains.publicStreamBase && domains.streamDomain) {
     const baseHost = normalizeHost(domains.publicStreamBase);
     if (baseHost !== domains.streamDomain) {
@@ -421,7 +497,7 @@ export async function checkDomains() {
   // El prefijo con el dominio sólo cuando el texto no lo menciona ya: el
   // resumen final se lee mejor sin "dominio: dominio:443 …".
   const prefixed = (entry, text) => (text.includes(entry.host) ? text : `${entry.host}: ${text}`);
-  for (const entry of [panel, streams]) {
+  for (const entry of [panel, streams, compat]) {
     if (!entry) continue;
     problems.push(...entry.problems.map((p) => prefixed(entry, p)));
     warnings.push(...entry.warnings.map((w) => prefixed(entry, w)));
@@ -432,6 +508,7 @@ export async function checkDomains() {
     serverHost: host || null,
     panel,
     streams,
+    compat,
     ok: problems.length === 0,
     problems,
     warnings,
@@ -439,6 +516,7 @@ export async function checkDomains() {
     howTo: {
       panel: 'Cloudflare → DNS → registro A de panel_domain hacia la IP del servidor, nube NARANJA (proxy).',
       streams: 'Cloudflare → DNS → registro A de stream_domain hacia la MISMA IP, nube GRIS (DNS only).',
+      compat: 'Cloudflare → DNS → registro A de compat_domain hacia la MISMA IP, nube GRIS (DNS only): por ahí entran las apps Xtream de terceros y también piden video.',
       cert: 'Cada nombre necesita su certificado en el origen: tls origin (panel, detrás de Cloudflare) y acme <video> <correo> (video, CA pública). Conviven en el mismo 443 por SNI.'
     }
   };
