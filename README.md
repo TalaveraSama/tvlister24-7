@@ -4,6 +4,11 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 📖 **[Manual Completo del Panel, Guía de Uso y Tecnología (`docs/DOCUMENTACION_SISTEMA.md`)](docs/DOCUMENTACION_SISTEMA.md)**
 
+🔐 **DRM**: TVLister hace de **servidor de claves (CAS)** de Flussonic (AES-128 con rotación cada
+10 min) y de **proxy de licencias** Widevine/PlayReady. En el panel: *DRM & Claves*. En terminal:
+`tvlister-admin drm`. Integración en apps: **[`docs/INTEGRACION_DRM_APP.md`](docs/INTEGRACION_DRM_APP.md)**
+y contrato JSON en [`docs/drm_api_contract.json`](docs/drm_api_contract.json).
+
 ---
 
 ## Instalación Rápida en VPS Ubuntu / Debian (Coexistencia Segura con XUI.one)

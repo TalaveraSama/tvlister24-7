@@ -2581,3 +2581,25 @@ CLI: `tvlister-admin drm [list|on|off|enable|disable|snippet|test|tokens|log] [c
 (menú, opción 29). El canal se puede indicar por ID o por nombre.
 
 Nada de esto toca el camino UDP/CATV ni los argumentos de FFmpeg: sólo la salida HTTP de Flussonic.
+
+### v2.6.1: `action=get_drm` en `player_api.php` (contrato para las apps)
+
+La app necesita saber, por línea, qué canales están cifrados y con qué URL de licencia. Nuevo
+`action`:
+
+```
+GET {panel}/player_api.php?username=X&password=Y&action=get_drm
+→ { drm_enabled, line, token_ttl_seconds, streams:[ {
+      stream_id, source_stream_id, kind, drm_type, scheme, license_type,
+      license_url, clearkey_url, key_url, requires_eme } ] }
+```
+
+Sólo incluye los canales permitidos por la línea, **sin claves y sin las cabeceras secretas del
+servidor de licencias** (las inyecta el proxy del panel). `stream_id` es el mismo de
+`get_live_streams` (24/7 = `10000 + id`). El token `t` va firmado por línea con 7 días de vida
+(`token_ttl_seconds`); al caducar, la app vuelve a pedir este `action` para refrescarlo.
+
+Con esto una app Android (Media3/ExoPlayer) monta `DefaultDrmSessionManager` +
+`HttpMediaDrmCallback(license_url)` por canal, y para AES-128 no necesita ningún cambio (el motor
+sigue la `EXT-X-KEY`). Documento de integración completo, con código y pruebas de aceptación:
+`docs/INTEGRACION_DRM_APP.md`; contrato legible por máquina: `docs/drm_api_contract.json`.

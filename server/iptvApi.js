@@ -809,6 +809,43 @@ const handlePlayerApi = (req, res) => {
     });
   }
 
+  // DRM: la app pide aquí la información de licencias de ESTA línea. Se
+  // devuelve el token firmado (no las cabeceras secretas: el proxy de TVLister
+  // las inyecta) y sólo los canales que la línea tiene permitidos.
+  if (action === 'get_drm') {
+    const drmCfg = getDrmSettings();
+    const lineToken = drmCfg.enabled ? signToken({ scope: 'drm_line', id: line.id }) : '';
+    const baseDrm = getStreamBaseUrl(req);
+    const items = [];
+    const pushItem = (streamId, kind, virtualId = null) => {
+      if (!drmCfg.enabled) return;
+      const drm = getActiveDrm(streamId);
+      if (!drm || !drm.key_token) return;
+      const q = lineToken ? `?t=${encodeURIComponent(lineToken)}` : '';
+      const isEme = drm.mode === 'widevine' || drm.mode === 'playready';
+      items.push({
+        stream_id: virtualId ?? streamId,
+        source_stream_id: streamId,
+        kind,
+        drm_type: drm.mode,
+        scheme: isEme ? 'widevine' : 'aes128',
+        license_type: isEme ? (drm.mode === 'playready' ? 'com.microsoft.playready' : 'com.widevine.alpha') : '',
+        license_url: isEme ? `${baseDrm}/drm/license/${drm.key_token}${q}` : '',
+        clearkey_url: `${baseDrm}/drm/clearkey/${drm.key_token}${q}`,
+        key_url: `${baseDrm}/drm/key/${drm.key_token}${q}`,
+        requires_eme: isEme
+      });
+    };
+    for (const s of streams) pushItem(s.id, 'live');
+    for (const ch of channels247) pushItem(ch.id, 'channel247', 10000 + ch.id);
+    return res.json({
+      drm_enabled: drmCfg.enabled,
+      line: line.username,
+      token_ttl_seconds: 7 * 24 * 3600,
+      streams: items
+    });
+  }
+
   if (action === 'get_live_categories') {
     const usedCatIds = new Set([...streams.map((s) => s.category_id), ...channels247.map((c) => c.category_id)]);
     return res.json(
