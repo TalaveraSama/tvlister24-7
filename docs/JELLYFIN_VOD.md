@@ -146,24 +146,77 @@ Qué hace el panel:
 
 ### B) Montar el disco de Jellyfin aquí (para usar «Create Symlink» de verdad)
 
-Si el disco está accesible por red, móntalo y el panel crea enlaces como con XUI.one (no hay
-retransmisión, el vídeo sale directo del disco):
+El panel monta el recurso compartido en **este** servidor (NFS o SMB) y deja el enlace apuntando al
+archivo real del montaje. No hay retransmisión: el vídeo sale del disco, no de Jellyfin.
+
+#### Desde el panel
+
+1. Modal **Jellyfin** → bloque **«Disco de Jellyfin en este servidor (NFS / SMB)»**.
+2. Elige el protocolo y escribe el host y la carpeta:
+   - **NFS**: host `192.168.1.50` + carpeta exportada `/srv/media`.
+   - **SMB**: host `192.168.1.50` + recurso `Media` + usuario y contraseña.
+3. **Probar sin dejar nada** monta el recurso en una carpeta temporal, cuenta los vídeos y lo
+   desmonta. Si ahí ya salen los vídeos, el usuario/clave/ruta son correctos.
+4. **Montar y usar Create Symlink** hace el montaje definitivo en `/mnt/jellyfin-<host>` (o el punto
+   que escribas), lo deja en `/etc/fstab` y **detecta solo la equivalencia de rutas** que devuelve
+   Jellyfin (`/data` → carpeta montada). Después, importa con **Create Symlink** marcado.
+
+El estado queda a la vista: origen, punto de montaje, número de vídeos, si está en `/etc/fstab` y un
+ejemplo de archivo. **Desmontar** lo desmonta, quita su línea de `/etc/fstab` y borra las
+credenciales, así que no vuelve a montarse al reiniciar.
+
+#### Desde la terminal
+
+Estado del disco de Jellyfin montado (origen, punto, vídeos, `fstab`):
 
 ```bash
-# NFS (servidor Jellyfin: /etc/exports -> /srv/media 192.168.1.0/24(ro,sync))
-sudo apt install -y nfs-common
-sudo mkdir -p /mnt/jellyfin
-sudo mount -t nfs 192.168.1.50:/srv/media /mnt/jellyfin
-echo '192.168.1.50:/srv/media /mnt/jellyfin nfs ro,hard,_netdev 0 0' | sudo tee -a /etc/fstab
-
-# o SMB/CIFS (servidor Windows/NAS)
-sudo apt install -y cifs-utils
-sudo mount -t cifs //192.168.1.50/media /mnt/jellyfin -o ro,username=USUARIO,uid=$(id -u tvlister),gid=$(id -g tvlister)
+sudo tvlister-admin jellyfin mount
 ```
 
-Luego, en el modal, escribe la equivalencia (`/Media => /mnt/jellyfin`) o usa **«Buscar la carpeta
-real»**, y deja **«Create Symlink»** marcado. El servicio debe poder leer los archivos (el `uid`/`gid`
-del montaje o `chmod` en el origen).
+
+```bash
+# Estado (sin argumentos)
+sudo tvlister-admin jellyfin mount
+
+# NFS: host y carpeta exportada (punto de montaje opcional)
+sudo tvlister-admin jellyfin mount nfs 192.168.1.50 /srv/media
+
+# SMB: host, recurso, usuario y clave; con «-» la clave se pide por teclado
+sudo tvlister-admin jellyfin mount smb 192.168.1.50 Media usuario -
+
+# Probar sin dejar nada / desmontar / volver a montar
+sudo tvlister-admin jellyfin mount test nfs 192.168.1.50 /srv/media
+sudo tvlister-admin jellyfin mount umount
+sudo tvlister-admin jellyfin mount remount
+```
+
+Al montar, la consola busca la equivalencia de rutas y la guarda; luego
+`sudo tvlister-admin jellyfin import` crea los enlaces directamente.
+
+#### Qué deja en el sistema
+
+| Elemento | Valor |
+| --- | --- |
+| Punto de montaje | `/mnt/jellyfin-<host>` (o el que indiques) |
+| Opciones NFS | `ro,hard,_netdev,nosuid,nodev,noexec` (+`vers=` si lo indicas) |
+| Opciones SMB | `ro,_netdev,nosuid,nodev,noexec,iocharset=utf8,credentials=…` |
+| `/etc/fstab` | una línea terminada en `# tvlister:jellyfin` (copia del original en `fstab.tvlister-bak`) |
+| Credenciales SMB | `/etc/tvlister-cifs-<host>.cred` con permisos **600** |
+
+La contraseña de SMB **no** se guarda en `/etc/fstab` ni en la base de datos del panel.
+
+#### Requisitos
+
+- El panel debe correr como **root** (es el caso del servicio systemd). Si no, el panel lo avisa y el
+  montaje se hace con `sudo tvlister-admin jellyfin mount …`.
+- Clientes del sistema: `nfs-common` (NFS) o `cifs-utils` (SMB). Si faltan, el panel muestra el
+  comando exacto (`sudo apt install -y cifs-utils`) — no instala nada por su cuenta.
+- El servidor de archivos debe exportar/compartir la carpeta con permiso de lectura para el host del
+  panel.
+
+Si prefieres montarlo a mano, sigue siendo válido: monta donde quieras y escribe la equivalencia en
+el campo de rutas (`/Media => /mnt/jellyfin`). Lo que aporta el panel es que monta, guarda la línea
+de `fstab`, deduce la equivalencia y limpia todo al desmontar.
 
 ### Qué opción elegir
 
@@ -171,7 +224,7 @@ del montaje o `chmod` en el origen).
 | --- | --- | --- |
 | Coste de CPU del panel | mínimo (sólo copia bytes) | mínimo |
 | Ancho de banda del panel | **todo el vídeo pasa por él** | ninguno |
-| Requiere montar nada | no | sí (NFS/SMB) |
+| Requiere montar nada | no | sí (NFS/SMB, se hace desde el panel) |
 | Enlaces en la carpeta VOD | no | sí (como XUI.one) |
 | Si Jellyfin se cae | el VOD deja de verse | sigue viéndose (archivo directo) |
 
@@ -214,6 +267,7 @@ tvlister-admin jellyfin test        # conexión + bibliotecas disponibles
 tvlister-admin jellyfin import      # importa todas las bibliotecas configuradas
 tvlister-admin jellyfin import lib-movies,lib-tv
 tvlister-admin jellyfin symlinks    # rehace todos los enlaces (tras mover la carpeta)
+tvlister-admin jellyfin mount       # estado del disco montado (NFS/SMB)
 ```
 
 ---
@@ -235,6 +289,12 @@ Todas requieren sesión de administrador.
 | `POST /api/series/episodes/:epId/symlink` | Crea el enlace de un episodio |
 | `GET /api/vod/symlinks/status` | Estado de la carpeta y enlaces rotos |
 | `POST /api/vod/symlinks/rebuild` | Rehace todos los enlaces (`{dryRun:true}` para simular) |
+| `GET /api/jellyfin/mount` | Estado del disco montado: `mounted`, `readable`, vídeos, si está en `fstab` y capacidades del sistema |
+| `GET /api/jellyfin/mount/capabilities` | Si hay `mount.nfs`/`mount.cifs`, si corre como root y el comando de instalación que falta |
+| `POST /api/jellyfin/mount/test` | `{protocol, host, remotePath, user, password}` → monta en temporal, cuenta vídeos y desmonta |
+| `POST /api/jellyfin/mount` | Monta, deja la línea de `fstab`, guarda la configuración y detecta la equivalencia de rutas (`autoDetect:false` para no detectar) |
+| `POST /api/jellyfin/mount/remount` | Vuelve a montar con la configuración guardada (NAS reiniciado) |
+| `DELETE /api/jellyfin/mount` | Desmonta, quita su línea de `fstab` y borra las credenciales |
 
 La API de Jellyfin que se usa: `/System/Info`, `/Library/MediaFolders`,
 `/Items?ParentId=&Recursive=true&IncludeItemTypes=Movie|Series`, `/Shows/{id}/Episodes` y
@@ -248,7 +308,7 @@ acepta `Authorization: MediaBrowser Token="…"`).
 | Síntoma | Causa y solución |
 |---|---|
 | «Jellyfin rechazó la API Key (HTTP 401)» | Clave mal copiada o revocada: crear una nueva en Jellyfin |
-| Todos los archivos «no accesibles» y Jellyfin está en otra máquina | Marca **«Servir desde Jellyfin»** y vuelve a importar (o monta el disco, ver 3b) |
+| Todos los archivos «no accesibles» y Jellyfin está en otra máquina | Monta su disco desde el bloque **NFS / SMB** del modal (ver 3b) o marca **«Servir desde Jellyfin»** y vuelve a importar |
 | Un vídeo da 502 al reproducir | El panel no alcanza Jellyfin en ese momento: comprueba `curl http://IP_JELLYFIN:8096/System/Info` desde el servidor del panel |
 | «No se pudo conectar con Jellyfin» | URL, puerto (8096) o firewall; probar con `curl http://IP:8096/System/Info` |
 | Vista previa con muchos «no accesibles» | Jellyfin usa otra ruta (Docker): pulsa **«Buscar la carpeta real»** o escribe la carpeta en *«Carpeta real de los vídeos»* |
