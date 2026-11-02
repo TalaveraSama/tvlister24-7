@@ -3367,20 +3367,147 @@ case "$ACTION" in
     fi
     ;;
   tls)
-    # tvlister-admin tls                      → estado del certificado y puertos
-    # tvlister-admin tls <cert> <key>         → fijar rutas y reabrir puertos
-    # tvlister-admin tls auto                 → volver a la detección automática
+    # tvlister-admin tls                       → estado (certificados por dominio y puertos)
+    # tvlister-admin tls auto                  → volver a la detección automática
+    # tvlister-admin tls <cert> <key>          → fijar el certificado por defecto
+    # tvlister-admin tls origin                → PEGAR el Origin Certificate de Cloudflare
+    # tvlister-admin tls origin <cert> <key>   → lo mismo, desde ficheros
+    # tvlister-admin tls add <host> [<cert> <key>]   → certificado para ese nombre (SNI)
+    # tvlister-admin tls list                  → qué certificado tiene cada dominio
+    # tvlister-admin tls remove <host>         → quitar el de ese nombre
     cd "$APP_DIR"
-    if [ "${2:-}" = "auto" ]; then
-      "$NODE_BIN" --no-warnings --input-type=module -e '
-        import { db, initDb } from "./server/db.js";
-        initDb();
-        db.prepare("DELETE FROM settings WHERE key IN (\x27tls_cert_path\x27,\x27tls_key_path\x27)").run();
-        console.log("✅ Rutas TLS borradas: se vuelve a buscar el certificado automáticamente.");
-      '
-      systemctl restart "$SERVICE_NAME"
-      exit 0
-    fi
+    TLS_SUB="${2:-}"
+
+    restart_panel() {
+      systemctl restart "${SERVICE_NAME:-tvlister24-7}" >/dev/null 2>&1 \
+        && echo "✅ Panel reiniciado (los puertos TLS se abren con el certificado nuevo)."
+    }
+
+    case "$TLS_SUB" in
+      auto)
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { db, initDb } from "./server/db.js";
+          initDb();
+          db.prepare("DELETE FROM settings WHERE key IN (\x27tls_cert_path\x27,\x27tls_key_path\x27)").run();
+          console.log("✅ Rutas por defecto borradas: se vuelve a buscar el certificado automáticamente.");
+        '
+        restart_panel
+        exit 0
+        ;;
+      list)
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb } from "./server/db.js";
+          import { listCertificates, tlsStatus, getTlsSettings } from "./server/tlsManager.js";
+          initDb();
+          const st = tlsStatus({ force: true });
+          console.log("============================================================");
+          console.log("  Certificados del servidor");
+          console.log("============================================================");
+          if (st.available) {
+            console.log("  Por defecto : " + (st.domain || "?"));
+            console.log("                " + st.source);
+            console.log("                vence " + String(st.validTo).slice(0,10) + " (" + st.daysLeft + " días)" + (st.selfSigned ? " · AUTOFIRMADO" : ""));
+          } else {
+            console.log("  Por defecto : (ninguno) " + (st.error || ""));
+          }
+          const certs = listCertificates();
+          if (!certs.length) {
+            console.log("");
+            console.log("  Sin certificados por dominio. Para el panel detrás de Cloudflare:");
+            console.log("     tvlister-admin tls origin");
+          } else {
+            console.log("");
+            for (const c of certs) {
+              const emisor = /cloudflare/i.test(c.issuer) ? "Cloudflare Origin" : c.issuer;
+              console.log("  " + c.host);
+              console.log("     Emisor : " + emisor + (c.selfSigned ? " · AUTOFIRMADO" : ""));
+              console.log("     Vence  : " + String(c.validTo).slice(0,10) + " (" + c.daysLeft + " días)");
+              console.log("     Cert   : " + c.certPath + (c.editable ? "" : "  (detectado)"));
+              if (/cloudflare/i.test(c.issuer)) {
+                console.log("     ℹ️  Origin de Cloudflare: sólo vale con Cloudflare delante.");
+              }
+            }
+          }
+          const { domains } = getTlsSettings();
+          if (domains.length) {
+            console.log("");
+            console.log("  Dominios configurados : " + domains.join(", "));
+          }
+          console.log("");
+          console.log("  Añadir/cambiar uno   : tvlister-admin tls add <dominio>");
+          console.log("  Origin de Cloudflare : tvlister-admin tls origin");
+          console.log("  Quitar uno           : tvlister-admin tls remove <dominio>");
+        '
+        exit 0
+        ;;
+      remove)
+        TLS_HOST="${3:-}"
+        if [ -z "$TLS_HOST" ]; then
+          echo "Uso: tvlister-admin tls remove <dominio>"
+          exit 1
+        fi
+        TLS_HOST="$TLS_HOST" "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb } from "./server/db.js";
+          import { removeCertificate } from "./server/tlsManager.js";
+          initDb();
+          try {
+            const r = removeCertificate(process.env.TLS_HOST);
+            console.log("✅ Certificado de " + r.host + " eliminado.");
+          } catch (err) { console.error("❌ " + err.message); process.exit(1); }
+        ' || exit 1
+        restart_panel
+        exit 0
+        ;;
+      origin|add)
+        # Argumentos admitidos:
+        #   tls origin                          → pegar; dominio = panel_domain (o el del PEM)
+        #   tls origin <cert> <key>             → ficheros; dominio = panel_domain (o el del PEM)
+        #   tls origin <dominio>                → pegar
+        #   tls origin <dominio> <cert> <key>   → ficheros
+        #   tls add <dominio> [...]             → igual, para cualquier nombre
+        TLS_HOST="" TLS_C="" TLS_K=""
+        if [ -n "${3:-}" ] && [ -f "${3:-}" ]; then
+          TLS_C="$3"; TLS_K="${4:-}"
+        else
+          TLS_HOST="${3:-}"; TLS_C="${4:-}"; TLS_K="${5:-}"
+        fi
+        if [ -z "$TLS_HOST" ]; then
+          TLS_HOST="auto"
+        fi
+        if [ -n "$TLS_C" ] && [ -n "$TLS_K" ]; then
+          if [ ! -f "$TLS_C" ] || [ ! -f "$TLS_K" ]; then
+            echo "❌ No encuentro $TLS_C o $TLS_K"
+            exit 1
+          fi
+          "$NODE_BIN" "$APP_DIR/scripts/tls_paste.mjs" --host "$TLS_HOST" --cert "$TLS_C" --key "$TLS_K" \
+            --source "$( [ "$TLS_SUB" = "origin" ] && echo 'Cloudflare Origin' || echo 'consola' )" || exit 1
+        else
+          if [ -t 0 ]; then
+            echo "----------------------------------------------------------------"
+            echo " Certificado para: ${TLS_HOST}"
+            echo "----------------------------------------------------------------"
+            echo " Pega el CERTIFICADO (incluye -----BEGIN CERTIFICATE-----) y después"
+            echo " la CLAVE PRIVADA (-----BEGIN PRIVATE KEY-----). Se leen solos por sus"
+            echo " marcas; al terminar, pulsa Ctrl-D."
+            echo ""
+          fi
+          "$NODE_BIN" "$APP_DIR/scripts/tls_paste.mjs" --host "$TLS_HOST" \
+            --source "$( [ "$TLS_SUB" = "origin" ] && echo 'Cloudflare Origin' || echo 'consola' )" || exit 1
+        fi
+        # Si hay puertos TLS guardados, se reabren con el certificado nuevo.
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb } from "./server/db.js";
+          import { loadTlsContext } from "./server/tlsManager.js";
+          initDb();
+          const st = loadTlsContext({ force: true });
+          if (!st.ok) { console.error("❌ " + st.error); process.exit(1); }
+        ' || exit 1
+        restart_panel
+        echo "   Comprueba con: tvlister-admin tls list   ·   tvlister-admin dominios"
+        exit 0
+        ;;
+    esac
+
     if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
       TLS_C="$2" TLS_K="$3" "$NODE_BIN" --no-warnings --input-type=module -e '
         import { db, initDb } from "./server/db.js";
@@ -3393,17 +3520,17 @@ case "$ACTION" in
           console.log("✅ Certificado válido:", st.domain, "· vence", String(st.validTo).slice(0,10), "·", st.daysLeft, "días");
         } catch (err) { console.error("❌", err.message); process.exit(1); }
       ' || exit 1
-      systemctl restart "$SERVICE_NAME"
-      echo "✅ Panel reiniciado con el certificado indicado."
+      restart_panel
       exit 0
     fi
+
     "$NODE_BIN" --no-warnings --input-type=module -e '
       import { db, initDb } from "./server/db.js";
-      import { tlsStatus } from "./server/tlsManager.js";
+      import { tlsStatus, listCertificates } from "./server/tlsManager.js";
       initDb();
       const st = tlsStatus({ force: true });
       if (st.available) {
-        console.log("🔒 Certificado:", st.domain);
+        console.log("🔒 Certificado por defecto:", st.domain);
         console.log("   Fuente    :", st.source);
         console.log("   Vence     :", String(st.validTo).slice(0,10), "(" + st.daysLeft + " días)");
         console.log("   Cert      :", st.certPath);
@@ -3411,29 +3538,21 @@ case "$ACTION" in
         if (st.uncoveredDomains?.length) console.log("   ⚠️  No cubre:", st.uncoveredDomains.join(", "));
       } else {
         console.log("⚠️  Sin certificado TLS:", st.error);
-        console.log("   Instala uno (certbot/acme.sh) o fija las rutas: tvlister-admin tls /ruta/fullchain.pem /ruta/privkey.pem");
+        console.log("   Instala uno (certbot/acme.sh), fija rutas o pega el Origin de Cloudflare:");
+        console.log("     tvlister-admin tls origin");
+      }
+      const certs = listCertificates();
+      if (certs.length) {
+        console.log("");
+        console.log("   Certificados por dominio:");
+        for (const c of certs) console.log("     " + c.host + "  ·  vence " + String(c.validTo).slice(0,10) + " (" + c.daysLeft + "d)" + (/cloudflare/i.test(c.issuer) ? "  · Cloudflare Origin" : ""));
       }
       const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
+      console.log("");
       console.log("🌐 Puertos :", row?.value || "(ninguno)");
-      console.log("   Para HTTPS: tvlister-admin add-port 443 https   ·   tvlister-admin add-port 80 both");
+      console.log("   HTTPS 80/443 : tvlister-admin add-port 443 https  ·  tvlister-admin add-port 80 both");
+      console.log("   Añadir cert  : tvlister-admin tls origin | tls add <dominio> | tls list");
     '
-    ;;
-  remove-port)
-    REM_P="${2:-}"
-    if [ -z "$REM_P" ]; then
-      read -r -p "Ingresa el puerto adicional a cerrar: " REM_P
-    fi
-    cd "$APP_DIR"
-    REM_PORT_VAL="$REM_P" "$NODE_BIN" --no-warnings --input-type=module -e '
-      import { db, initDb } from "./server/db.js";
-      initDb();
-      const p = Number(process.env.REM_PORT_VAL);
-      const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
-      const val = (row?.value || "").split(",").map(s => Number(s.trim())).filter(n => n && n !== p).join(",");
-      db.prepare("INSERT INTO settings (key, value) VALUES (\x27extra_http_ports\x27, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(val);
-      console.log("✅ Puertos adicionales restantes:", val || "(ninguno)");
-    '
-    systemctl restart "$SERVICE_NAME"
     ;;
   list-ports)
     echo "Puerto Principal : $(get_current_port)"

@@ -111,6 +111,7 @@ export default function IngestProtocolsPage() {
   const [domainBusy, setDomainBusy] = useState(false);
   const [tlsForm, setTlsForm] = useState({ certPath: '', keyPath: '' });
   const [tlsBusy, setTlsBusy] = useState(false);
+  const [certs, setCerts] = useState([]);
 
   const notify = (msg, type = 'ok') => {
     setToast({ msg, type });
@@ -336,6 +337,8 @@ export default function IngestProtocolsPage() {
       const info = await apiFetch(`/api/ports/tls${refresh ? '?refresh=1' : ''}`);
       setTlsInfo(info);
       setTlsForm({ certPath: info.certPath || '', keyPath: info.keyPath || '' });
+      const list = await apiFetch('/api/ports/certs');
+      setCerts(list.certs || []);
     } catch {
       /* la tarjeta queda en «sin datos» */
     }
@@ -1326,6 +1329,36 @@ export default function IngestProtocolsPage() {
                   className="px-3 py-2 rounded-lg bg-[#090d16] border border-slate-800 text-[11px] font-mono text-white"
                 />
               </div>
+              {certs.length > 0 && (
+                <div className="rounded-lg bg-[#090d16] border border-slate-800 p-2.5 space-y-1">
+                  <div className="text-[10px] text-slate-400 font-semibold">
+                    CERTIFICADOS POR DOMINIO (SNI · mismo 443 para todos)
+                  </div>
+                  {certs.map((c) => (
+                    <div key={c.host} className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
+                      <span className="text-slate-200">{c.host}</span>
+                      <span className={c.daysLeft < 21 ? 'text-amber-300' : 'text-slate-500'}>
+                        {String(c.validTo || '').slice(0, 10)} ({c.daysLeft}d)
+                      </span>
+                      {/cloudflare/i.test(c.issuer || '') && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[9px] font-bold">
+                          ORIGIN CF
+                        </span>
+                      )}
+                      {c.selfSigned && (
+                        <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 text-[9px] font-bold">
+                          AUTOFIRMADO
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                  <div className="text-[9px] text-slate-500">
+                    Se instalan pegando el PEM en consola: <code className="text-cyan-300">tvlister-admin tls origin</code>{' '}
+                    (panel) · <code className="text-cyan-300">tvlister-admin tls add &lt;dominio&gt;</code> (video)
+                  </div>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={saveTlsPaths}

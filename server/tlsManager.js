@@ -26,7 +26,9 @@ import { db } from './db.js';
  * certificado, el puerto HTTPS no se abre y la UI dice exactamente qué falta.
  */
 
-const DEFAULT_PATHS = '/etc/tvlister/tls';
+// Directorio base de los certificados instalados a mano. Se puede mover con
+// TVLISTER_TLS_DIR (instalaciones no estándar y pruebas).
+const DEFAULT_PATHS = process.env.TVLISTER_TLS_DIR || '/etc/tvlister/tls';
 
 function getSetting(key) {
   try {
@@ -105,6 +107,52 @@ function candidatePairs() {
   return out;
 }
 
+
+function parsePair(cert, key) {
+  const x509 = new crypto.X509Certificate(cert);
+  const validTo = new Date(x509.validTo);
+  const daysLeft = Math.floor((validTo.getTime() - Date.now()) / 86_400_000);
+  const altNames = String(x509.subjectAltName || '')
+    .split(',')
+    .map((s) => s.trim().replace(/^DNS:/, ''))
+    .filter(Boolean);
+  // El CN "de verdad" es el que parece un dominio: un Origin de Cloudflare puede
+  // llevar delante CN=Cloudflare Origin SSL Certificate y el dominio detrás.
+  const cnCandidates = String(x509.subject)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('CN='))
+    .map((l) => l.slice(3).replace(/\\,/g, ',').trim());
+  const commonName = cnCandidates.find((c) => c.includes('.')) || cnCandidates[0] || '';
+  const issuer = String(x509.issuer);
+  return {
+    subject: String(x509.subject),
+    issuer,
+    domain: commonName,
+    altNames,
+    validFrom: new Date(x509.validFrom).toISOString(),
+    validTo: validTo.toISOString(),
+    daysLeft,
+    selfSigned: x509.subject === x509.issuer,
+    isCloudflareOrigin: /cloudflare origin|origin ssl/i.test(issuer)
+  };
+}
+
+function hostCoveredBy(host, meta) {
+  const target = String(host || '').toLowerCase();
+  if (!target) return false;
+  if (target === meta.domain.toLowerCase()) return true;
+  for (const name of meta.altNames) {
+    const n = name.toLowerCase();
+    if (n === target) return true;
+    if (n.startsWith('*.')) {
+      const suffix = n.slice(1);
+      if (target.endsWith(suffix) && !target.slice(0, -suffix.length).includes('.')) return true;
+    }
+  }
+  return false;
+}
+
 let cache = { at: 0, ctx: null };
 
 /**
@@ -118,19 +166,20 @@ export function loadTlsContext({ force = false } = {}) {
   for (const candidate of candidatePairs()) {
     const pair = readPair(candidate.certPath, candidate.keyPath);
     if (!pair) {
-      tried.push(candidate.certPath);
+      // Distinguir «no está» de «está pero no se puede leer»: si el panel corre
+      // como usuario sin permisos sobre /etc/tvlister, el mensaje lo dice.
+      let reason = '';
+      try {
+        if (fs.existsSync(candidate.certPath) && fs.existsSync(candidate.keyPath)) reason = ' (sin permiso de lectura)';
+      } catch {
+        reason = '';
+      }
+      tried.push(candidate.certPath + reason);
       continue;
     }
     try {
       const secureContext = tls.createSecureContext({ cert: pair.cert, key: pair.key });
-      const x509 = new crypto.X509Certificate(pair.cert);
-      const validTo = new Date(x509.validTo);
-      const daysLeft = Math.floor((validTo.getTime() - Date.now()) / 86_400_000);
-      const altNames = String(x509.subjectAltName || '')
-        .split(',')
-        .map((s) => s.trim().replace(/^DNS:/, ''))
-        .filter(Boolean);
-      const commonName = /CN=([^,\n]+)/.exec(String(x509.subject))?.[1] || '';
+      const meta = parsePair(pair.cert, pair.key);
       const ctx = {
         ok: true,
         secureContext,
@@ -139,14 +188,7 @@ export function loadTlsContext({ force = false } = {}) {
         certPath: candidate.certPath,
         keyPath: candidate.keyPath,
         source: candidate.source,
-        subject: String(x509.subject),
-        issuer: String(x509.issuer),
-        domain: commonName,
-        altNames,
-        validFrom: new Date(x509.validFrom).toISOString(),
-        validTo: validTo.toISOString(),
-        daysLeft,
-        selfSigned: x509.subject === x509.issuer,
+        ...meta,
         error: ''
       };
       cache = { at: Date.now(), ctx };
@@ -235,4 +277,224 @@ export function tlsStatus({ force = false } = {}) {
         ? 'El certificado caduca pronto: renuévalo (certbot renew / acme.sh --renew).'
         : ''
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Certificados por dominio (SNI)
+ *
+ * Un servidor con un solo certificado no sirve cuando el panel y el video
+ * usan CA distintas: el panel detrás de Cloudflare puede ir con un Origin
+ * Certificate (CA privada de Cloudflare, válida porque quien valida es
+ * Cloudflare), pero el dominio de video se conecta DIRECTO desde los
+ * reproductores y necesita una CA pública (Let's Encrypt). Con SNI, el mismo
+ * 443 entrega el certificado de cada nombre y los dos casos conviven.
+ * ------------------------------------------------------------------ */
+
+const CERT_ROOT = path.join(DEFAULT_PATHS, 'certs');
+const HOST_RE = /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
+
+function readExtraCerts() {
+  try {
+    const raw = getSetting('tls_certs');
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((e) => e && e.host && e.certPath && e.keyPath) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeExtraCerts(list) {
+  setSetting('tls_certs', JSON.stringify(list));
+  invalidateSniCache();
+}
+
+function safeDirName(host) {
+  return String(host || '').toLowerCase().replace(/[^a-z0-9.-]/g, '_').slice(0, 120) || 'cert';
+}
+
+/**
+ * Guarda un certificado pegado en consola (Cloudflare Origin Certificate,
+ * Let's Encrypt, acme.sh…) y lo asocia a un nombre.
+ */
+export function installCertificate({ host, certPem, keyPem, source = 'consola' }) {
+  const name = String(host || '').trim().toLowerCase();
+  if (!HOST_RE.test(name)) throw new Error(`Nombre inválido: "${host}". Ejemplo: tvadmin.alphadigitalnic.xyz`);
+
+  const cert = String(certPem || '').trim();
+  const key = String(keyPem || '').trim();
+  if (!cert.includes('BEGIN CERTIFICATE')) throw new Error('El certificado no parece un PEM (falta "BEGIN CERTIFICATE").');
+  if (!/BEGIN (RSA |EC |)PRIVATE KEY/.test(key)) throw new Error('La clave no parece un PEM (falta "BEGIN ... PRIVATE KEY").');
+
+  try {
+    tls.createSecureContext({ cert, key });
+  } catch (err) {
+    throw new Error(`El certificado y la clave no forman un par válido: ${err.message}`);
+  }
+
+  const meta = parsePair(cert, key);
+  if (!hostCoveredBy(name, meta)) {
+    throw new Error(
+      `El certificado no cubre ${name} (nombres: ${[meta.domain, ...meta.altNames].filter(Boolean).join(', ')}).`
+    );
+  }
+
+  const dir = path.join(CERT_ROOT, safeDirName(name));
+  const certPath = path.join(dir, 'fullchain.pem');
+  const keyPath = path.join(dir, 'privkey.pem');
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(certPath, `${cert}\n`, { mode: 0o600 });
+    fs.writeFileSync(keyPath, `${key}\n`, { mode: 0o600 });
+    fs.chmodSync(certPath, 0o600);
+    fs.chmodSync(keyPath, 0o600);
+  } catch (err) {
+    throw new Error(
+      `No se pudo guardar el certificado en ${dir} (${err.code || err.message}). ¿Ejecutaste con sudo?`
+    );
+  }
+
+  const list = readExtraCerts().filter((e) => e.host !== name);
+  list.push({ host: name, certPath, keyPath, source, addedAt: new Date().toISOString() });
+  writeExtraCerts(list);
+
+  // Si es el único certificado, también pasa a ser el de por defecto: así el
+  // panel arranca en HTTPS aunque no haya nada más configurado.
+  if (!getSetting('tls_cert_path')) setTlsPaths(certPath, keyPath);
+  invalidateTlsCache();
+
+  return { host: name, certPath, keyPath, ...meta };
+}
+
+export function removeCertificate(host) {
+  const name = String(host || '').trim().toLowerCase();
+  const list = readExtraCerts();
+  const entry = list.find((e) => e.host === name);
+  if (!entry) throw new Error(`No hay certificado instalado para ${name}.`);
+  writeExtraCerts(list.filter((e) => e.host !== name));
+  for (const file of [entry.certPath, entry.keyPath]) {
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // si ya no está, da igual
+    }
+  }
+  // Si era el certificado por defecto, se deja de apuntar a un fichero borrado.
+  if (getSetting('tls_cert_path') === entry.certPath) {
+    delSetting('tls_cert_path');
+    delSetting('tls_key_path');
+  }
+  invalidateTlsCache();
+  return { host: name, removed: true };
+}
+
+export function listCertificates() {
+  const out = [];
+  const seen = new Set();
+
+  for (const entry of readExtraCerts()) {
+    const pair = readPair(entry.certPath, entry.keyPath);
+    if (!pair) continue;
+    const meta = parsePair(pair.cert, pair.key);
+    seen.add(entry.host);
+    out.push({ host: entry.host, certPath: entry.certPath, keyPath: entry.keyPath, source: entry.source, editable: true, ...meta });
+  }
+
+  // Certificados detectados solos (Let's Encrypt / acme.sh) para los dominios
+  // del panel y del video: se muestran aunque no se hayan instalado a mano.
+  const { domains } = getTlsSettings();
+  for (const candidate of candidatePairs()) {
+    if (!candidate.certPath.startsWith('/etc/letsencrypt') && !candidate.certPath.includes('.acme.sh')) continue;
+    const pair = readPair(candidate.certPath, candidate.keyPath);
+    if (!pair) continue;
+    const meta = parsePair(pair.cert, pair.key);
+    const host = domains.find((d) => hostCoveredBy(d, meta));
+    if (!host || seen.has(host)) continue;
+    seen.add(host);
+    out.push({ host, certPath: candidate.certPath, keyPath: candidate.keyPath, source: candidate.source, editable: false, ...meta });
+  }
+
+  return out;
+}
+
+function sniContextFor(host) {
+  const name = String(host || '').toLowerCase().replace(/\.$/, '').split(':')[0];
+  if (!name) return null;
+
+  const ctxFor = (certPath, keyPath) => {
+    const pair = readPair(certPath, keyPath);
+    if (!pair) return null;
+    try {
+      return tls.createSecureContext({ cert: pair.cert, key: pair.key });
+    } catch {
+      return null;
+    }
+  };
+
+  // 1) Coincidencia exacta instalada a mano
+  const exact = readExtraCerts().find((e) => e.host === name);
+  if (exact) {
+    const ctx = ctxFor(exact.certPath, exact.keyPath);
+    if (ctx) return ctx;
+  }
+
+  // 2) Certificado detectado (Let's Encrypt/acme.sh) que cubra el nombre
+  for (const candidate of candidatePairs()) {
+    if (!candidate.certPath.startsWith('/etc/letsencrypt') && !candidate.certPath.includes('.acme.sh')) continue;
+    const pair = readPair(candidate.certPath, candidate.keyPath);
+    if (!pair) continue;
+    const meta = parsePair(pair.cert, pair.key);
+    if (hostCoveredBy(name, meta)) {
+      const ctx = ctxFor(candidate.certPath, candidate.keyPath);
+      if (ctx) return ctx;
+    }
+  }
+
+  // 3) Comodín instalado a mano (*.dominio.com)
+  for (const entry of readExtraCerts()) {
+    const pair = readPair(entry.certPath, entry.keyPath);
+    if (!pair) continue;
+    const meta = parsePair(pair.cert, pair.key);
+    if (hostCoveredBy(name, meta)) {
+      const ctx = ctxFor(entry.certPath, entry.keyPath);
+      if (ctx) return ctx;
+    }
+  }
+
+  return null;
+}
+
+let sniCache = { at: 0 };
+
+function invalidateSniCache() {
+  sniCache = { at: 0 };
+}
+
+/**
+ * Opciones listas para `https.createServer`: certificado por defecto + SNICallback
+ * para que cada nombre reciba el suyo. Si solo hay un certificado, se comporta
+ * como siempre.
+ */
+export function getServerTlsOptions({ force = false } = {}) {
+  const ctx = loadTlsContext({ force });
+  if (!ctx.ok) return null;
+
+  const options = {
+    cert: ctx.cert,
+    key: ctx.key,
+    SNICallback: (servername, cb) => {
+      try {
+        const sc = sniContextFor(servername);
+        if (sc) return cb(null, sc);
+        return cb(null, null); // null ⇒ Node usa el certificado por defecto
+      } catch (err) {
+        return cb(err);
+      }
+    }
+  };
+  return options;
+}
+
+export function certForHost(host) {
+  return sniContextFor(host) ? true : false;
 }

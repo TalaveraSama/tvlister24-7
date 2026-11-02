@@ -150,7 +150,14 @@ import {
   listActivePorts,
   rebindAllPorts
 } from './multiPortManager.js';
-import { tlsStatus, setTlsPaths, invalidateTlsCache } from './tlsManager.js';
+import {
+  tlsStatus,
+  setTlsPaths,
+  invalidateTlsCache,
+  listCertificates,
+  installCertificate,
+  removeCertificate
+} from './tlsManager.js';
 import { getDomains, setDomains, checkDomains } from './domains.js';
 import {
   buildFullBackupObject,
@@ -4179,6 +4186,48 @@ app.post('/api/ports/tls', requireAuth, requireAdmin, async (req, res) => {
     const tls = tlsStatus({ force: true });
     if (tls.available && (req.body?.rebind ?? true)) await rebindAllPorts();
     res.json({ ...tls, ports: listActivePorts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Certificados por dominio (SNI). Se pueden pegar desde la consola
+// (`tvlister-admin tls origin`) o desde aquí; la clave nunca se devuelve.
+app.get('/api/ports/certs', requireAuth, (req, res) => {
+  res.json({
+    certs: listCertificates().map(({ keyPath, ...rest }) => rest),
+    default: tlsStatus()
+  });
+});
+
+app.post('/api/ports/certs', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const cert = String(req.body?.cert || '');
+    const key = String(req.body?.key || '');
+    if (!cert.includes('BEGIN CERTIFICATE') || !key.includes('PRIVATE KEY')) {
+      return res.status(400).json({ error: 'Pega el certificado y la clave privada completos (PEM).' });
+    }
+    const saved = installCertificate({
+      host: req.body?.host,
+      certPem: cert,
+      keyPem: key,
+      source: String(req.body?.source || 'panel')
+    });
+    invalidateTlsCache();
+    await rebindAllPorts();
+    const { keyPath, ...safe } = saved;
+    res.json({ ok: true, cert: safe, ports: listActivePorts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/ports/certs/:host', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const removed = removeCertificate(req.params.host);
+    invalidateTlsCache();
+    await rebindAllPorts();
+    res.json({ ok: true, ...removed, ports: listActivePorts() });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

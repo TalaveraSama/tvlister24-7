@@ -2780,3 +2780,29 @@ la vez porque todos parecen Cloudflare.
 
 **5. UI.** Tarjeta con los dos campos, «Guardar y abrir 80/443» y «Comprobar», con el resultado por
 dominio: DNS, certificado, HTTP y la etiqueta CLOUDFLARE cuando el video está mal proxificado.
+
+### v2.6.8: certificados por dominio (SNI) e instalación desde consola
+
+**1. `tvlister-admin tls origin|add|list|remove`.** `origin` instala el Origin Certificate de
+Cloudflare para el dominio del panel; `add <dominio>` instala el de cualquier otro nombre; ambos
+aceptan pegado por consola, ficheros o tubería. `list` enseña qué certificado tiene cada dominio y
+`remove` lo borra.
+
+**2. `scripts/tls_paste.mjs`.** Lee los bloques PEM por sus marcas (admite cadena de certificados),
+valida pareja y cobertura antes de escribir, guarda en
+`/etc/tvlister/tls/certs/<dominio>/{fullchain,privkey}.pem` (clave `600`) y avisa si es un Origin
+de Cloudflare (válido sólo con Cloudflare delante).
+
+**3. SNI.** `server/tlsManager.js` guarda la lista en el ajuste `tls_certs` y expone
+`getServerTlsOptions()` con `SNICallback`: coincidencia exacta instalada, certificado detectado
+(Let's Encrypt/acme.sh) que cubra el nombre, comodín instalado y, si nada encaja, el de por defecto.
+`multiPortManager` crea los servidores HTTPS con esas opciones.
+
+**4. API.** `GET /api/ports/certs` (sin rutas de clave), `POST /api/ports/certs` `{host, cert, key}`,
+`DELETE /api/ports/certs/:host`; las dos mutaciones reabren los puertos con el certificado nuevo.
+
+**5. UI.** La tarjeta del certificado lista los certificados por dominio con vencimiento, marca
+`ORIGIN CF` y aviso de autofirmado, y recuerda los comandos de consola.
+
+**6. Directorio configurable.** `TVLISTER_TLS_DIR` mueve la base de certificados (pruebas e
+instalaciones no estándar).

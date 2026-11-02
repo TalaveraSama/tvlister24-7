@@ -27,6 +27,11 @@ que el panel sepa que ese es su dominio de video.** Es lo que hacen los pasos 3 
   suspender el dominio. Compruébalo con `tvlister-admin dominios`.
 - Sin registro `AAAA` en `live-stream` es lo correcto (solo IPv4, apunta al origen).
 
+> **Si usas el Origin Certificate de Cloudflare para el panel**, salta al documento
+> [`CERTIFICADO_ORIGEN_CLOUDFLARE.md`](CERTIFICADO_ORIGEN_CLOUDFLARE.md): se pega por consola con
+> `tvlister-admin tls origin` y el video se queda con Let's Encrypt, los dos en el mismo 443 (SNI).
+> El paso 2 de abajo es para el caso de **un solo certificado para todo**.
+
 ## Paso 2. Certificado que cubra **los dos** nombres
 
 El mismo 443 va a atender `tvadmin` (cuando conecta Cloudflare) y `live-stream` (cuando conecta el

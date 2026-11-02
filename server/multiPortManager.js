@@ -2,7 +2,7 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 import { db } from './db.js';
-import { loadTlsContext, tlsStatus } from './tlsManager.js';
+import { loadTlsContext, tlsStatus, getServerTlsOptions } from './tlsManager.js';
 
 let expressApp = null;
 let mainPort = 8080;
@@ -181,19 +181,22 @@ function bindPort(entry) {
     let listenable;
     let tlsServer = null;
     let plainSrv = null;
+    const tlsOpts = wantsTls && tlsCtx.ok ? getServerTlsOptions() : null;
 
     try {
       if (scheme === 'http') {
         listenable = plainHttpServer();
       } else if (scheme === 'https') {
-        tlsServer = https.createServer({ cert: tlsCtx.cert, key: tlsCtx.key }, expressApp);
+        // SNI: cada dominio recibe su certificado (Origin de Cloudflare para el
+        // panel, Let's Encrypt para el video) y el resto, el de por defecto.
+        tlsServer = https.createServer(tlsOpts, expressApp);
         tlsServer.keepAliveTimeout = 65000;
         tlsServer.headersTimeout = 66000;
         if (upgradeHandler) tlsServer.on('upgrade', upgradeHandler);
         listenable = tlsServer;
         record.tls = true;
       } else {
-        tlsServer = https.createServer({ cert: tlsCtx.cert, key: tlsCtx.key }, expressApp);
+        tlsServer = https.createServer(tlsOpts, expressApp);
         tlsServer.keepAliveTimeout = 65000;
         tlsServer.headersTimeout = 66000;
         if (upgradeHandler) tlsServer.on('upgrade', upgradeHandler);
