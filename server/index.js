@@ -138,6 +138,15 @@ import {
   cleanupVodSymlink,
   cleanupEpisodeSymlink
 } from './jellyfin.js';
+import {
+  mountCapabilities,
+  testJellyfinShare,
+  mountJellyfinShare,
+  unmountJellyfinShare,
+  remountJellyfinShare,
+  getMountStatus,
+  getJellyfinMountConfig
+} from './jellyfinMount.js';
 import { computeRecommendation, applyRecommendation } from './tune.js';
 import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
 import { stalkerRouter } from './stalkerPortal.js';
@@ -2801,6 +2810,90 @@ app.post('/api/jellyfin/detect-paths', requireAuth, requireAdmin, async (req, re
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(400).json({ error: err.message || 'No se pudo detectar la carpeta de los archivos' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Disco de Jellyfin montado en este servidor (NFS / SMB)
+//
+// Con Jellyfin en otra máquina el panel no ve los archivos y «Create Symlink»
+// no tiene a qué apuntar. Estas rutas montan el recurso compartido (NFS o
+// SMB), dejan la línea en `/etc/fstab` y guardan la equivalencia de rutas que
+// devuelve Jellyfin → carpeta montada. El vídeo no pasa por Jellyfin.
+// ---------------------------------------------------------------------------
+
+app.get('/api/jellyfin/mount', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...getMountStatus(), config: getJellyfinMountConfig() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/jellyfin/mount/capabilities', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...mountCapabilities() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/jellyfin/mount/test', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...testJellyfinShare(req.body || {}) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/jellyfin/mount', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const result = mountJellyfinShare(b);
+    // Con el disco montado se busca la equivalencia de rutas y se guarda: así
+    // «Create Symlink» funciona sin que el usuario escriba nada más.
+    let mapping = null;
+    if (b.autoDetect !== false) {
+      try {
+        mapping = await detectJellyfinPathMappings({
+          libraryIds: Array.isArray(b.libraryIds) ? b.libraryIds : [],
+          contentMode: b.contentMode || 'auto',
+          extraRoots: [result.mountPoint],
+          maxSeconds: 25
+        });
+        if (mapping.mapping.length) {
+          const merged = [...getJellyfinConfig().pathMap];
+          for (const rule of mapping.mapping) {
+            const i = merged.findIndex((r) => r.from === rule.from);
+            if (i >= 0) merged[i] = rule;
+            else merged.push(rule);
+          }
+          mapping.applied = true;
+          mapping.jellyfinConfig = saveJellyfinConfig({ pathMap: merged });
+        }
+      } catch (err) {
+        mapping = { error: err.message };
+      }
+    }
+    res.json({ ok: true, ...result, mapping, jellyfinConfig: getJellyfinConfig() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/jellyfin/mount/remount', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...remountJellyfinShare() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/jellyfin/mount', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...unmountJellyfinShare() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

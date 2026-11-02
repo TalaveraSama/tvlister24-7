@@ -3754,6 +3754,155 @@ case "$ACTION" in
           for (const e of st.errors.slice(0, 20)) console.log("   x", e.title || e.id || "", e.error || e);
         '
         ;;
+      mount | disco)
+        # Disco de Jellyfin en ESTE servidor (NFS o SMB). Es lo que hace que
+        # «Create Symlink» apunte a un archivo real: el vídeo lo sirve el panel
+        # desde el disco montado, sin pasar por Jellyfin ni por el relé.
+        #
+        # Uso:
+        #   tvlister-admin jellyfin mount                     → estado
+        #   tvlister-admin jellyfin mount nfs <host> <export> [punto]
+        #   tvlister-admin jellyfin mount smb <host> <recurso> <usuario> <clave|-> [punto]
+        #   tvlister-admin jellyfin mount test nfs <host> <export>
+        #   tvlister-admin jellyfin mount test smb <host> <recurso> <usuario> <clave|->
+        #   tvlister-admin jellyfin mount umount | remount
+        jf_action="${3:-status}"
+        jf_kind=""
+        JF_HOST=""; JF_PATH=""; JF_POINT=""; JF_USER=""; JF_PASS=""
+        case "$jf_action" in
+          nfs|NFS)
+            jf_kind="nfs"; jf_action="mount"
+            JF_HOST="${4:-}"; JF_PATH="${5:-}"; JF_POINT="${6:-}"
+            ;;
+          smb|SMB|cifs)
+            jf_kind="smb"; jf_action="mount"
+            JF_HOST="${4:-}"; JF_PATH="${5:-}"; JF_USER="${6:-}"; JF_PASS="${7:-}"; JF_POINT="${8:-}"
+            ;;
+          test|probar)
+            jf_kind="${4:-}"
+            if [ "$jf_kind" = "smb" ] || [ "$jf_kind" = "SMB" ] || [ "$jf_kind" = "cifs" ]; then
+              jf_kind="smb"
+              JF_HOST="${5:-}"; JF_PATH="${6:-}"; JF_USER="${7:-}"; JF_PASS="${8:-}"; JF_POINT="${9:-}"
+            else
+              jf_kind="nfs"
+              JF_HOST="${5:-}"; JF_PATH="${6:-}"; JF_POINT="${7:-}"
+            fi
+            jf_action="test"
+            ;;
+          umount|desmontar) jf_action="umount" ;;
+          remount|remontar) jf_action="remount" ;;
+          status|estado) jf_action="status" ;;
+          *)
+            echo "Uso: tvlister-admin jellyfin mount [status]"
+            echo "     tvlister-admin jellyfin mount nfs <host> <export> [punto]"
+            echo "     tvlister-admin jellyfin mount smb <host> <recurso> <usuario> <clave|-> [punto]"
+            echo "     tvlister-admin jellyfin mount test nfs|smb …"
+            echo "     tvlister-admin jellyfin mount umount | remount"
+            exit 1
+            ;;
+        esac
+
+        # La contraseña se puede escribir como «-» para que no quede en el
+        # historial ni en la lista de procesos: se pide por teclado sin eco.
+        if [ "$jf_kind" = "smb" ] && [ "${jf_action}" = "mount" ]; then
+          if [ -z "${JF_USER:-}" ]; then
+            read -rp "Usuario SMB: " JF_USER
+          fi
+          if [ -z "${JF_PASS:-}" ] || [ "${JF_PASS}" = "-" ]; then
+            read -rsp "Contraseña SMB: " JF_PASS
+            echo
+          fi
+        fi
+
+        JF_ACTION="$jf_action" JF_KIND="$jf_kind" JF_HOST="$JF_HOST" JF_PATH="$JF_PATH" \
+        JF_POINT="$JF_POINT" JF_USER="$JF_USER" JF_PASS="$JF_PASS" \
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+          import { initDb } from "./server/db.js";
+          import {
+            mountJellyfinShare, testJellyfinShare, unmountJellyfinShare,
+            remountJellyfinShare, getMountStatus
+          } from "./server/jellyfinMount.js";
+          import { detectJellyfinPathMappings, getJellyfinConfig, saveJellyfinConfig } from "./server/jellyfin.js";
+          initDb();
+          const env = process.env;
+          const action = env.JF_ACTION || "status";
+          const params = {
+            protocol: env.JF_KIND || "nfs",
+            host: env.JF_HOST || "",
+            remotePath: env.JF_PATH || "",
+            user: env.JF_USER || "",
+            password: env.JF_PASS || "",
+            mountPoint: env.JF_POINT || ""
+          };
+
+          if (action === "status") {
+            const st = getMountStatus();
+            const caps = st.capabilities;
+            console.log("Discos NFS :", caps.nfs ? "sí" : "NO — " + caps.install.nfs);
+            console.log("Discos SMB :", caps.cifs ? "sí" : "NO — " + caps.install.cifs);
+            if (!st.configured) {
+              console.log("Montaje    : (sin configurar)");
+              console.log("Ejemplo    : tvlister-admin jellyfin mount nfs 192.168.1.50 /srv/media");
+              process.exit(0);
+            }
+            console.log("Montaje    :", st.mounted ? "montado" : "NO montado", st.mounted && !st.readable ? "(sin permiso de lectura)" : "");
+            console.log("Origen     :", st.source, "(" + st.protocol + ")");
+            console.log("Punto      :", st.mountPoint);
+            console.log("En fstab   :", st.inFstab ? "sí (persistente tras reiniciar)" : "no");
+            console.log("Vídeos     :", st.files);
+            if (st.sample) console.log("Ejemplo    :", st.sample);
+            process.exit(0);
+          }
+
+          if (action === "test") {
+            const r = testJellyfinShare(params);
+            console.log("✅ Se pudo montar y leer:", r.files, "vídeos de", r.source);
+            console.log("   Se desmontó la prueba; no se ha dejado nada configurado.");
+            process.exit(0);
+          }
+
+          if (action === "remount") {
+            const r = remountJellyfinShare();
+            console.log("✅ Montado de nuevo:", r.source, "→", r.mountPoint, "(" + r.files + " vídeos)");
+            process.exit(0);
+          }
+
+          if (action === "umount") {
+            const r = unmountJellyfinShare();
+            console.log(r.umounted ? "✅ Desmontado" : "ℹ️ No estaba montado", r.mountPoint || "");
+            console.log("   Línea de /etc/fstab quitada:", r.fstabRemoved ? "sí" : "no", "| credenciales:", r.credentialRemoved ? "borradas" : "no había");
+            process.exit(0);
+          }
+
+          const r = mountJellyfinShare(params);
+          console.log("✅ Montado", r.source, "en", r.mountPoint);
+          console.log("   Vídeos visibles :", r.files, r.sample ? "(" + r.sample + ")" : "");
+          console.log("   Opciones        :", r.options);
+          console.log("   /etc/fstab      :", r.fstab);
+          if (r.config && r.config.credentialPath) console.log("   Credenciales    :", r.config.credentialPath, "(600)");
+
+          // Equivalencia de rutas Jellyfin → carpeta montada (para Create Symlink).
+          let det = null;
+          try {
+            det = await detectJellyfinPathMappings({ extraRoots: [r.mountPoint], maxSeconds: 25 });
+          } catch (err) {
+            console.log("   Mapa de rutas   : no se pudo consultar Jellyfin (" + err.message + ").");
+            process.exit(0);
+          }
+          if (det.mapping.length) {
+            const merged = [...getJellyfinConfig().pathMap];
+            for (const rule of det.mapping) {
+              const i = merged.findIndex((x) => x.from === rule.from);
+              if (i >= 0) merged[i] = rule; else merged.push(rule);
+            }
+            saveJellyfinConfig({ pathMap: merged });
+            console.log("   Mapa de rutas   :", merged.map((x) => x.from + " => " + x.to).join(", "));
+            console.log("   Archivos resueltos:", det.resolved, "/", det.total);
+          } else {
+            console.log("   Mapa de rutas   : no se pudo deducir; usa «Buscar la carpeta real» en el panel.");
+          }
+        '
+        ;;
       symlinks | enlaces)
         "$NODE_BIN" --no-warnings --input-type=module -e '
           import { db, initDb } from "./server/db.js";
@@ -3766,7 +3915,7 @@ case "$ACTION" in
         '
         ;;
       *)
-        echo "Uso: tvlister-admin jellyfin [status|test|import [ids]|symlinks]"
+        echo "Uso: tvlister-admin jellyfin [status|test|import [ids]|symlinks|mount ...]"
         ;;
     esac
     ;;

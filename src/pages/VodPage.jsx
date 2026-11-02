@@ -21,7 +21,9 @@ import {
   Server,
   Link2,
   PlugZap,
-  Check
+  Check,
+  Network,
+  Unplug
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -148,6 +150,17 @@ export default function VodPage({ onPreview }) {
   const [jellyfinAutoDetect, setJellyfinAutoDetect] = useState(true);
   const [jellyfinBusy, setJellyfinBusy] = useState('');
   const [jellyfinMsg, setJellyfinMsg] = useState(null);
+  // Disco de Jellyfin montado en este servidor (NFS/SMB)
+  const [jfMount, setJfMount] = useState(null);
+  const [jfMountBusy, setJfMountBusy] = useState('');
+  const [jfMountForm, setJfMountForm] = useState({
+    protocol: 'nfs',
+    host: '',
+    remotePath: '',
+    user: '',
+    password: '',
+    mountPoint: ''
+  });
 
   const loadAll = async () => {
     const [v, c, sr] = await Promise.all([
@@ -542,11 +555,117 @@ export default function VodPage({ onPreview }) {
     }
   };
 
+  const loadJfMount = async () => {
+    try {
+      const res = await apiFetch('/api/jellyfin/mount');
+      setJfMount(res);
+    } catch {
+      /* el rol reseller no ve esta sección */
+    }
+  };
+
+  const jfMountPayload = () => ({
+    protocol: jfMountForm.protocol,
+    host: jfMountForm.host.trim(),
+    remotePath: jfMountForm.remotePath.trim(),
+    user: jfMountForm.user.trim(),
+    password: jfMountForm.password,
+    mountPoint: jfMountForm.mountPoint.trim()
+  });
+
+  const testJfMount = async () => {
+    setJfMountBusy('test');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/mount/test', {
+        method: 'POST',
+        body: JSON.stringify(jfMountPayload())
+      });
+      setJellyfinMsg({
+        ok: true,
+        text: `Se pudo montar y leer: ${res.files} vídeos en ${res.source}. La prueba se desmontó.`
+      });
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJfMountBusy('');
+    }
+  };
+
+  const doJfMount = async () => {
+    setJfMountBusy('mount');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/mount', {
+        method: 'POST',
+        body: JSON.stringify({ ...jfMountPayload(), libraryIds: jellyfinSelected })
+      });
+      setJfMount(res);
+      const map = res.mapping?.mapping || [];
+      const cfg = res.jellyfinConfig || null;
+      if (cfg) {
+        setJellyfinCfg(cfg);
+        setJellyfinForm((prev) => ({
+          ...prev,
+          pathMapText: (cfg.pathMap || []).map((r) => `${r.from} => ${r.to}`).join('\n')
+        }));
+      }
+      setJellyfinMsg({
+        ok: true,
+        text:
+          `Montado ${res.source} en ${res.mountPoint} (${res.files} vídeos). Ya es persistente tras reiniciar.` +
+          (map.length
+            ? ` Rutas emparejadas: ${map.map((m) => `${m.from} => ${m.to}`).join(', ')}.`
+            : ' No se pudo deducir la equivalencia de rutas: revísala abajo o usa «Buscar la carpeta real».')
+      });
+      setJellyfinPreview(null);
+      setJellyfinDetect(null);
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJfMountBusy('');
+    }
+  };
+
+  const unmountJf = async () => {
+    setJfMountBusy('umount');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/mount', { method: 'DELETE' });
+      await loadJfMount();
+      setJellyfinMsg({
+        ok: true,
+        text: `Desmontado${res.mountPoint ? ` ${res.mountPoint}` : ''}. Se quitó la línea de /etc/fstab${
+          res.credentialRemoved ? ' y las credenciales' : ''
+        }, así que no volverá a montarse al reiniciar.`
+      });
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJfMountBusy('');
+    }
+  };
+
+  const remountJf = async () => {
+    setJfMountBusy('remount');
+    setJellyfinMsg(null);
+    try {
+      const res = await apiFetch('/api/jellyfin/mount/remount', { method: 'POST', body: '{}' });
+      await loadJfMount();
+      setJellyfinMsg({ ok: true, text: `Montado otra vez: ${res.source} → ${res.mountPoint} (${res.files} vídeos).` });
+    } catch (err) {
+      setJellyfinMsg({ ok: false, text: err.message });
+    } finally {
+      setJfMountBusy('');
+    }
+  };
+
   const openJellyfinModal = async () => {
     setJellyfinMsg(null);
     setJellyfinPreview(null);
     setJellyfinDetect(null);
     setJellyfinModalOpen(true);
+    await loadJfMount();
     if (jellyfinCfg.configured) await loadJellyfinLibraries();
   };
 
@@ -1081,6 +1200,171 @@ export default function VodPage({ onPreview }) {
                     dejas vacío, el panel revisa /media, /mnt, /srv, /opt, /home y /var/lib.
                   </span>
                 </label>
+              </div>
+
+              {/* Disco de Jellyfin montado en este servidor */}
+              <div className="p-3 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Network className="w-4 h-4 text-violet-400" />
+                  <span className="font-semibold text-white">Disco de Jellyfin en este servidor (NFS / SMB)</span>
+                  {jfMount?.mounted && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      Montado
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Si Jellyfin está en otra máquina, aquí no hay archivo que enlazar. Monta su carpeta (NFS o SMB) y
+                  «Create Symlink» apuntará al archivo real del montaje: el vídeo lo sirve el panel desde el disco, sin
+                  pasar por Jellyfin. El montaje se deja en <span className="font-mono">/etc/fstab</span> para que siga
+                  activo después de reiniciar.
+                </p>
+
+                {jfMount?.capabilities && jfMount.capabilities.root === false && (
+                  <p className="text-[10px] text-amber-300">
+                    El panel no corre como root, así que no puede montar. Ejecuta el montaje desde la consola con{' '}
+                    <span className="font-mono">sudo tvlister-admin jellyfin mount …</span>.
+                  </p>
+                )}
+                {jfMount?.capabilities && jfMountForm.protocol === 'nfs' && !jfMount.capabilities.nfs && (
+                  <p className="text-[10px] text-amber-300 font-mono">
+                    Falta el cliente NFS: {jfMount.capabilities.install.nfs}
+                  </p>
+                )}
+                {jfMount?.capabilities && jfMountForm.protocol === 'smb' && !jfMount.capabilities.cifs && (
+                  <p className="text-[10px] text-amber-300 font-mono">
+                    Falta el cliente SMB: {jfMount.capabilities.install.cifs}
+                  </p>
+                )}
+
+                {jfMount?.configured && (
+                  <div className="p-2 rounded-lg bg-[#0e1526] border border-slate-800 space-y-1">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-400">
+                      <span className="font-mono text-slate-200">{jfMount.source}</span>
+                      <span>
+                        → <span className="font-mono text-slate-200">{jfMount.mountPoint}</span>
+                      </span>
+                      <span className={jfMount.mounted ? 'text-emerald-300' : 'text-amber-300'}>
+                        {jfMount.mounted ? 'montado' : 'sin montar'}
+                      </span>
+                      <span>{jfMount.files} vídeos</span>
+                      <span>{jfMount.inFstab ? 'en /etc/fstab' : 'no está en /etc/fstab'}</span>
+                    </div>
+                    {jfMount.sample && (
+                      <div className="text-[10px] text-slate-500 font-mono truncate">{jfMount.sample}</div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {jfMount.mounted ? (
+                        <button
+                          onClick={unmountJf}
+                          disabled={Boolean(jfMountBusy)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 font-semibold disabled:opacity-50"
+                        >
+                          <Unplug className="w-3.5 h-3.5" /> Desmontar
+                        </button>
+                      ) : (
+                        <button
+                          onClick={remountJf}
+                          disabled={Boolean(jfMountBusy)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 font-semibold disabled:opacity-50"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" /> Volver a montar
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <label className="space-y-1">
+                    <span className="text-slate-400">Protocolo</span>
+                    <select
+                      value={jfMountForm.protocol}
+                      onChange={(e) => setJfMountForm({ ...jfMountForm, protocol: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white"
+                    >
+                      <option value="nfs">NFS (Linux / Synology / unRAID)</option>
+                      <option value="smb">SMB / CIFS (Windows, NAS)</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-slate-400">Host</span>
+                    <input
+                      value={jfMountForm.host}
+                      onChange={(e) => setJfMountForm({ ...jfMountForm, host: e.target.value })}
+                      placeholder="192.168.1.50"
+                      className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-slate-400">
+                      {jfMountForm.protocol === 'nfs' ? 'Carpeta exportada' : 'Recurso compartido'}
+                    </span>
+                    <input
+                      value={jfMountForm.remotePath}
+                      onChange={(e) => setJfMountForm({ ...jfMountForm, remotePath: e.target.value })}
+                      placeholder={jfMountForm.protocol === 'nfs' ? '/srv/media' : 'Media'}
+                      className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                    />
+                  </label>
+                </div>
+
+                {jfMountForm.protocol === 'smb' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label className="space-y-1">
+                      <span className="text-slate-400">Usuario</span>
+                      <input
+                        value={jfMountForm.user}
+                        onChange={(e) => setJfMountForm({ ...jfMountForm, user: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-slate-400">Contraseña</span>
+                      <input
+                        type="password"
+                        value={jfMountForm.password}
+                        onChange={(e) => setJfMountForm({ ...jfMountForm, password: e.target.value })}
+                        placeholder="se guarda en un archivo 600, nunca en /etc/fstab"
+                        className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                      />
+                    </label>
+                  </div>
+                )}
+
+                <label className="space-y-1 block">
+                  <span className="text-slate-400">Punto de montaje (vacío = automático)</span>
+                  <input
+                    value={jfMountForm.mountPoint}
+                    onChange={(e) => setJfMountForm({ ...jfMountForm, mountPoint: e.target.value })}
+                    placeholder="/mnt/jellyfin-192.168.1.50"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0e1526] border border-slate-800 text-white font-mono"
+                  />
+                </label>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={doJfMount}
+                    disabled={Boolean(jfMountBusy) || !jfMountForm.host || !jfMountForm.remotePath}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 font-semibold disabled:opacity-50"
+                  >
+                    <HardDrive className="w-3.5 h-3.5" />
+                    {jfMountBusy === 'mount' ? 'Montando…' : 'Montar y usar Create Symlink'}
+                  </button>
+                  <button
+                    onClick={testJfMount}
+                    disabled={Boolean(jfMountBusy) || !jfMountForm.host || !jfMountForm.remotePath}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-50"
+                  >
+                    <PlugZap className="w-3.5 h-3.5" />
+                    {jfMountBusy === 'test' ? 'Probando…' : 'Probar sin dejar nada'}
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Desde la consola: <span className="font-mono">sudo tvlister-admin jellyfin mount nfs 192.168.1.50 /srv/media</span>{' '}
+                  · <span className="font-mono">jellyfin mount smb NAS Media usuario -</span> (la «-» pide la clave sin
+                  dejarla en el historial).
+                </p>
               </div>
 
               {/* Bibliotecas */}
