@@ -26,8 +26,14 @@ import {
   syncLocalVodFolder,
   listWatchFolders,
   deleteWatchFolder,
-  startVodFolderAutoSyncScheduler
+  startVodFolderAutoSyncScheduler,
+  classifyVodGenresByTmdb
 } from './vodSyncTmdb.js';
+import {
+  getGenreCategoryConfigForUi,
+  saveGenreCategoryConfig,
+  listVodCategories
+} from './vodGenres.js';
 import {
   signToken,
   firewallMiddleware,
@@ -3059,6 +3065,7 @@ app.post('/api/vod/folders/sync', requireAuth, requireAdmin, async (req, res) =>
       folderPath: b.folderPath,
       contentMode: b.contentMode || 'auto',
       defaultCategoryId: b.defaultCategoryId || null,
+      categoryMode: b.categoryMode || 'subfolders',
       useSubfoldersAsCategories: b.useSubfoldersAsCategories !== false,
       autoTmdb: b.autoTmdb !== false,
       autoSyncMinutes: Number(b.autoSyncMinutes) || 0,
@@ -3074,6 +3081,40 @@ app.post('/api/vod/folders/sync', requireAuth, requireAdmin, async (req, res) =>
 app.delete('/api/vod/folders/:id', requireAuth, requireAdmin, (req, res) => {
   deleteWatchFolder(req.params.id);
   res.json({ ok: true });
+});
+
+// --- Categorías por género de TMDB (Acción, Comedia, Terror, Thriller…) ------
+app.get('/api/vod/genres/config', requireAuth, requireAdmin, (req, res) => {
+  const tmdb = getTmdbConfig();
+  res.json({
+    ...getGenreCategoryConfigForUi(),
+    categories: listVodCategories(),
+    // Nunca la clave: sólo si está configurada y en qué idioma.
+    tmdb: { configured: tmdb.configured, language: tmdb.language }
+  });
+});
+
+app.post('/api/vod/genres/config', requireAuth, requireAdmin, (req, res) => {
+  const { aliasesText, priorityText, resetAliases } = req.body || {};
+  const cfg = saveGenreCategoryConfig({ aliasesText, priorityText, resetAliases: Boolean(resetAliases) });
+  res.json({ ok: true, ...cfg });
+});
+
+// Vista previa (dryRun, por defecto) y aplicación real de la separación por
+// género: { dryRun, limit, media: 'movies'|'series'|'both', refresh }.
+app.post('/api/vod/genres/classify', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const result = await classifyVodGenresByTmdb({
+      media: b.media || 'both',
+      limit: b.limit || 120,
+      dryRun: b.dryRun !== false,
+      refresh: Boolean(b.refresh)
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo separar el catálogo por género de TMDB' });
+  }
 });
 
 // ==================== SERIES (SEASONS & EPISODES) ====================

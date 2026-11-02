@@ -357,6 +357,7 @@ function runInitDbBody() {
       content_mode TEXT NOT NULL DEFAULT 'auto',
       default_category_id INTEGER,
       use_subfolders_as_categories INTEGER NOT NULL DEFAULT 1,
+      category_mode TEXT NOT NULL DEFAULT 'subfolders',
       auto_tmdb INTEGER NOT NULL DEFAULT 1,
       auto_sync_minutes INTEGER NOT NULL DEFAULT 0,
       remove_missing INTEGER NOT NULL DEFAULT 0,
@@ -638,8 +639,16 @@ function runInitDbBody() {
   ensureColumn('vod_items', 'xui_id', 'INTEGER');
   ensureColumn('vod_items', 'backdrop_url', "TEXT DEFAULT ''");
   ensureColumn('vod_items', 'tmdb_id', "TEXT DEFAULT ''");
+  // Géneros que devolvió TMDB para la ficha, en su orden (JSON). Es lo que
+  // permite separar el catálogo en Acción / Comedia / Terror / Thriller… sin
+  // volver a preguntar a TMDB en cada pasada.
+  ensureColumn('vod_items', 'tmdb_genres', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('series', 'xui_id', 'INTEGER');
   ensureColumn('series', 'tmdb_id', "TEXT DEFAULT ''");
+  ensureColumn('series', 'tmdb_genres', "TEXT NOT NULL DEFAULT ''");
+  // Cómo se reparten las categorías al sincronizar una carpeta:
+  // subfolders (por carpeta) · tmdb_genres (por género de TMDB) · single (una sola).
+  ensureColumn('vod_watch_folders', 'category_mode', "TEXT NOT NULL DEFAULT 'subfolders'");
   ensureColumn('series_episodes', 'xui_id', 'INTEGER');
   ensureColumn('categories', 'xui_id', 'INTEGER');
   // WK2500: cada equipo declara su modelo real (32 / 64 / 125 canales de salida).

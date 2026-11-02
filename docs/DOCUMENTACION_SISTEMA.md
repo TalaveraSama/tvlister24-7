@@ -2988,3 +2988,34 @@ Detalles que cambian el comportamiento en producción:
 Compatibilidad: el modo por defecto del registro sigue siendo `monitor` (sólo registra), la lista
 M3U, `/live/:usuario/:clave/…`, `/player_api.php`, MAG/Stalker y Enigma2 no cambian, y el tope de
 conexiones simultáneas se sigue aplicando en `recordConnection` como siempre.
+
+### v2.6.24: el sincronizador separa el catálogo por género de TMDB
+
+El cliente pidió que las películas se repartan en **Acción, Comedia, Terror, Thriller, Románticas…**
+«en base a lo que diga TMDB», no por el nombre de la carpeta. El sincronizador de carpetas del VOD
+tiene ahora un selector de categorías y una pasada de clasificación para el catálogo que ya existe.
+
+| Pieza | Detalle |
+| --- | --- |
+| Ajuste `vod_watch_folders.category_mode` | `subfolders` (**por defecto**, cada carpeta es una categoría) · `tmdb_genres` (género de TMDB) · `single` (una sola categoría) |
+| De dónde sale el género | `GET /movie/{id}` · `/tv/{id}` de TMDB, en el idioma del panel (`tmdb_language`, por defecto `es-MX`) |
+| Género elegido | El **primero** de la ficha de TMDB (orden de relevancia) |
+| Prioridad | Ajuste `vod_genre_priority` (JSON): el primer género de la lista que tenga el título manda |
+| Renombrado | Ajuste `vod_genre_aliases` (JSON). De fábrica `Suspense→Thriller`, `Suspenso→Thriller`, `Romance→Románticas` |
+| Categorías | Se crean solas en `categories` con `type` `vod`/`series` y `sort_order` 60; se reutilizan por nombre (sin distinguir mayúsculas) |
+| Columnas nuevas | `vod_items.tmdb_genres`, `series.tmdb_genres` (JSON con los géneros en orden; `'[]'` = «TMDB no tiene género») |
+| Lotes | `POST /api/vod/genres/classify` procesa `limit` (120 por defecto, máximo 500) por tipo; la interfaz encadena hasta 10 lotes por clic |
+| Sin TMDB | Se avisa en el resultado del sync (`stats.warnings`) y las películas entran por carpeta / categoría única, nunca sin categoría |
+
+Configuración y clasificación:
+
+| Ruta | Qué hace |
+| --- | --- |
+| `GET /api/vod/genres/config` | alias, prioridad, categorías de VOD y `tmdb.configured` (nunca la clave) |
+| `POST /api/vod/genres/config` | `{ aliasesText, priorityText, resetAliases }` |
+| `POST /api/vod/genres/classify` | `{ dryRun, media, limit, refresh }`; `dryRun` por defecto (vista previa sin escribir) |
+
+El reparto por género **no toca el archivo, el póster, la sinopsis, la URL de reproducción ni la
+lista M3U**: sólo cambia `category_id`, el texto de `genre` y guarda `tmdb_genres` para no repetir
+consultas. Comprobación automática: `node scripts/test_vod_genres.mjs` (TMDB simulado, base temporal
+y recorrido completo del sincronizador).

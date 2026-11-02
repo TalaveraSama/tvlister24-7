@@ -3,6 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { db } from './db.js';
+import { resolveGenreCategoryName, summarizeGenrePlan } from '../src/lib/vodGenres.js';
+import { ensureVodCategory, getGenreCategoryConfig } from './vodGenres.js';
 
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.mkv', '.avi', '.m4v', '.mov', '.webm', '.ts', '.m2ts', '.mpg', '.mpeg', '.flv'
@@ -153,6 +155,10 @@ export function saveTmdbConfig({ apiKey, language }) {
   return getTmdbConfig();
 }
 
+// Se puede apuntar a un TMDB de pruebas con TVLISTER_TMDB_BASE_URL (lo usan los
+// tests); en producción siempre es el de verdad.
+const TMDB_BASE_URL = (process.env.TVLISTER_TMDB_BASE_URL || 'https://api.themoviedb.org/3').replace(/\/+$/, '');
+
 async function tmdbRequest(endpoint, queryParams = {}) {
   const { apiKey, language } = getTmdbConfig();
   if (!apiKey) {
@@ -160,7 +166,7 @@ async function tmdbRequest(endpoint, queryParams = {}) {
   }
 
   const isBearerV4 = apiKey.startsWith('eyJ') || apiKey.length > 60;
-  const url = new URL(`https://api.themoviedb.org/3${endpoint}`);
+  const url = new URL(`${TMDB_BASE_URL}${endpoint}`);
   if (!isBearerV4) {
     url.searchParams.set('api_key', apiKey);
   }
@@ -202,7 +208,9 @@ function mapTmdbItem(item, mediaType = 'movie') {
   const yearMatch = dateStr.match(/^(\d{4})/);
   const genres = Array.isArray(item.genre_ids)
     ? item.genre_ids.map((id) => TMDB_GENRE_MAP_ES[id]).filter(Boolean)
-    : [];
+    : Array.isArray(item.genres)
+      ? item.genres.map((g) => String(g?.name ?? g ?? '').trim()).filter(Boolean)
+      : [];
 
   return {
     tmdb_id: String(item.id || ''),
@@ -212,6 +220,9 @@ function mapTmdbItem(item, mediaType = 'movie') {
     release_year: yearMatch ? Number(yearMatch[1]) : 2024,
     rating: item.vote_average ? Number(Number(item.vote_average).toFixed(1)) : 8.0,
     genre: genres.length > 0 ? genres.slice(0, 3).join(', ') : 'General',
+    // Lista en el orden de TMDB (el primero es el género principal): es lo que
+    // decide la categoría cuando el sincronizador separa por género.
+    genres: genres.slice(0, 8),
     plot: String(item.overview || '').trim(),
     poster_url: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : '',
     backdrop_url: item.backdrop_path ? `https://image.tmdb.org/t/p/w1280${item.backdrop_path}` : '',
@@ -240,6 +251,176 @@ export async function searchTmdb({ query, type = 'movie', year = null }) {
   }
 
   return results.slice(0, 12).map((r) => mapTmdbItem(r, endpoint === '/search/tv' ? 'tv' : 'movie'));
+}
+
+/**
+ * Géneros de una ficha concreta de TMDB, en el orden que devuelve TMDB.
+ * El endpoint de detalle los trae ya traducidos al idioma configurado del
+ * panel («Acción», «Thriller»/«Suspense», «Románticas»/«Romance»…).
+ */
+export async function getTmdbGenres(tmdbId, mediaType = 'movie') {
+  const id = Number(String(tmdbId ?? '').trim());
+  if (!Number.isFinite(id) || id <= 0) return [];
+  const isTv = mediaType === 'series' || mediaType === 'tv';
+  const data = await tmdbRequest(isTv ? `/tv/${id}` : `/movie/${id}`);
+  if (!Array.isArray(data?.genres)) return [];
+  return data.genres.map((g) => String(g?.name ?? '').trim()).filter(Boolean);
+}
+
+/** Géneros de una película ya encontrada en la búsqueda (detalle o, si falla, la búsqueda). */
+async function genresForHit(hit, mediaType = 'movie') {
+  if (!hit) return [];
+  try {
+    const fromDetails = await getTmdbGenres(hit.tmdb_id, mediaType);
+    if (fromDetails.length > 0) return fromDetails;
+  } catch {
+    // Si el detalle falla se usan los genre_ids de la búsqueda.
+  }
+  return Array.isArray(hit.genres) ? hit.genres : [];
+}
+
+function parseStoredGenres(raw) {
+  try {
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr.map((g) => String(g ?? '').trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Clasifica el catálogo que YA está en la base por género de TMDB.
+ *
+ * Es la pieza que usa el panel («Separar por género de TMDB») para las
+ * películas que se importaron antes de activar la separación por género: busca
+ * cada título en TMDB (o reutiliza su `tmdb_id`), guarda los géneros en
+ * `tmdb_genres` y mueve la fila a la categoría que toque.
+ *
+ * - `dryRun` (por defecto) sólo cuenta lo que haría, sin escribir nada.
+ * - `limit` acota las consultas por lote (TMDB tiene cuota; 120 por lote).
+ * - `refresh` vuelve a consultar TMDB aunque la fila ya tenga géneros.
+ * - `media`: `movies`, `series` o `both`.
+ */
+export async function classifyVodGenresByTmdb({
+  media = 'both',
+  limit = 120,
+  dryRun = true,
+  refresh = false
+} = {}) {
+  const cfg = getTmdbConfig();
+  if (!cfg.configured) {
+    throw new Error('Configura primero tu API Key de TMDB (themoviedb.org) para separar el catálogo por género.');
+  }
+  const genreConfig = getGenreCategoryConfig();
+  const cap = Math.max(1, Math.min(500, Number(limit) || 120));
+  const result = { ok: true, dryRun: Boolean(dryRun), limit: cap, media };
+
+  if (media !== 'series') {
+    result.movies = await classifyTable({
+      table: 'vod_items',
+      categoryType: 'vod',
+      mediaType: 'movie',
+      cap,
+      dryRun: Boolean(dryRun),
+      refresh: Boolean(refresh),
+      genreConfig
+    });
+  }
+  if (media !== 'movies') {
+    result.series = await classifyTable({
+      table: 'series',
+      categoryType: 'series',
+      mediaType: 'series',
+      cap,
+      dryRun: Boolean(dryRun),
+      refresh: Boolean(refresh),
+      genreConfig
+    });
+  }
+  return result;
+}
+
+async function classifyTable({ table, categoryType, mediaType, cap, dryRun, refresh, genreConfig }) {
+  // `table`/`categoryType` son constantes internas, nunca datos del cliente.
+  // `tmdb_genres = '[]'` significa «ya se preguntó a TMDB y no tiene género»:
+  // no se vuelve a preguntar (si se corrige el título, se usa `refresh`).
+  const pendingWhere = refresh ? '1 = 1' : "(tmdb_genres IS NULL OR tmdb_genres = '')";
+  const rows = db
+    .prepare(
+      `SELECT id, title, release_year, tmdb_id, tmdb_genres FROM ${table}
+        WHERE ${pendingWhere} ORDER BY id ASC LIMIT ?`
+    )
+    .all(cap);
+  const pendingBefore = db
+    .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${pendingWhere}`)
+    .get().c;
+
+  const plan = [];
+  let classified = 0;
+  let notFound = 0;
+  let failed = 0;
+
+  const updRow = db.prepare(
+    `UPDATE ${table}
+        SET tmdb_genres = ?, tmdb_id = ?, genre = ?, category_id = ?
+      WHERE id = ?`
+  );
+  // Sin géneros en TMDB se deja constancia para no repetir la consulta en cada
+  // lote (el título se queda en la categoría que ya tenía).
+  const markChecked = db.prepare(`UPDATE ${table} SET tmdb_genres = '[]' WHERE id = ?`);
+
+  for (const row of rows) {
+    let genres = refresh ? [] : parseStoredGenres(row.tmdb_genres);
+    let tmdbId = String(row.tmdb_id ?? '').trim();
+    let hit = null;
+    try {
+      if (genres.length === 0) {
+        if (!tmdbId) {
+          const cleaned = cleanTitleString(row.title);
+          const hits = await searchTmdb({
+            query: cleaned.title,
+            type: mediaType === 'series' ? 'series' : 'movie',
+            year: cleaned.year || row.release_year
+          });
+          hit = hits[0] || null;
+          tmdbId = String(hit?.tmdb_id ?? '').trim();
+        }
+        genres = hit ? await genresForHit(hit, mediaType) : await getTmdbGenres(tmdbId, mediaType);
+      }
+    } catch {
+      failed += 1;
+      continue;
+    }
+
+    const category = resolveGenreCategoryName(genres, genreConfig);
+    if (!category) {
+      notFound += 1;
+      plan.push({ id: row.id, title: row.title, genres, category: '' });
+      if (!dryRun) markChecked.run(row.id);
+      continue;
+    }
+
+    classified += 1;
+    plan.push({ id: row.id, title: row.title, genres, category });
+    if (!dryRun) {
+      const categoryId = ensureVodCategory(category, categoryType);
+      updRow.run(JSON.stringify(genres), tmdbId || String(row.tmdb_id ?? ''), genres.slice(0, 3).join(', '), categoryId, row.id);
+    }
+  }
+
+  return {
+    table: table === 'series' ? 'series' : 'movies',
+    checked: rows.length,
+    classified,
+    notFound,
+    failed,
+    // Cuántas quedan por revisar después de este lote. En la vista previa no se
+    // marca nada, así que sólo descuentan las que sí tienen género.
+    remaining: Math.max(0, pendingBefore - (dryRun ? classified : rows.length)),
+    pendingBefore,
+    items: plan,
+    categories: summarizeGenrePlan(plan)
+  };
 }
 
 export async function enrichMissingVodWithTmdb({ overwriteAll = false, limit = 150 } = {}) {
@@ -554,6 +735,10 @@ export async function syncLocalVodFolder({
   folderPath,
   contentMode = 'auto',
   defaultCategoryId = null,
+  // 'subfolders'  = cada carpeta del disco es una categoría (lo de siempre)
+  // 'tmdb_genres' = cada película va a la categoría de su género según TMDB
+  // 'single'      = todo a una sola categoría
+  categoryMode = 'subfolders',
   useSubfoldersAsCategories = true,
   autoTmdb = true,
   autoSyncMinutes = 0,
@@ -563,6 +748,16 @@ export async function syncLocalVodFolder({
   const { rootFolder, files } = scanMediaDirectoryFiles(folderPath, contentMode);
   const tmdbCfg = getTmdbConfig();
   const shouldFetchTmdb = Boolean(autoTmdb && tmdbCfg.configured);
+  const mode = ['subfolders', 'tmdb_genres', 'single'].includes(categoryMode) ? categoryMode : 'subfolders';
+  // Separar por género necesita TMDB sí o sí: sin clave se cae al modo carpeta
+  // y se avisa en el resumen, en vez de dejar las películas sin categoría.
+  const shouldClassifyGenres = mode === 'tmdb_genres' && tmdbCfg.configured;
+  const warnings = [];
+  if (mode === 'tmdb_genres' && !tmdbCfg.configured) {
+    warnings.push(
+      'Para separar por género hace falta la API Key de TMDB: las películas entraron por carpeta (o por la categoría única).'
+    );
+  }
 
   const findCat = db.prepare('SELECT id FROM categories WHERE LOWER(name) = LOWER(?) AND type = ? LIMIT 1');
   const insCat = db.prepare('INSERT INTO categories (name, type, sort_order) VALUES (?, ?, 50)');
@@ -588,6 +783,9 @@ export async function syncLocalVodFolder({
     episodesExisting: 0,
     removedMissing: 0,
     tmdbEnriched: 0,
+    genreClassified: 0,
+    categoryMode: mode,
+    warnings,
   };
 
   const newVodIds = [];
@@ -628,7 +826,7 @@ export async function syncLocalVodFolder({
         }
 
         const catId =
-          useSubfoldersAsCategories && item.subfolderCategory
+          mode === 'subfolders' && useSubfoldersAsCategories && item.subfolderCategory
             ? ensureCategory(item.subfolderCategory, 'vod')
             : fallbackVodCat;
 
@@ -660,7 +858,7 @@ export async function syncLocalVodFolder({
           seriesId = Number(sr.id);
         } else {
           const catId =
-            useSubfoldersAsCategories && item.subfolderCategory
+            mode === 'subfolders' && useSubfoldersAsCategories && item.subfolderCategory
               ? ensureCategory(item.subfolderCategory, 'series')
               : fallbackSeriesCat;
           const sInfo = insSeries.run(item.seriesTitle, catId, item.sidecarPoster || '');
@@ -719,16 +917,19 @@ export async function syncLocalVodFolder({
     }
 
     if (saveWatchFolder) {
-      const summaryText = `+${stats.moviesAdded} películas, +${stats.episodesAdded} episodios (${stats.scannedFiles} archivos)`;
+      const summaryText =
+        `+${stats.moviesAdded} películas, +${stats.episodesAdded} episodios (${stats.scannedFiles} archivos)` +
+        (mode === 'tmdb_genres' ? `, ${stats.genreClassified} por género TMDB` : '');
       db.prepare(`
         INSERT INTO vod_watch_folders (
           folder_path, content_mode, default_category_id, use_subfolders_as_categories,
-          auto_tmdb, auto_sync_minutes, remove_missing, last_scan_at, last_scan_summary
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+          category_mode, auto_tmdb, auto_sync_minutes, remove_missing, last_scan_at, last_scan_summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
         ON CONFLICT(folder_path) DO UPDATE SET
           content_mode = excluded.content_mode,
           default_category_id = excluded.default_category_id,
           use_subfolders_as_categories = excluded.use_subfolders_as_categories,
+          category_mode = excluded.category_mode,
           auto_tmdb = excluded.auto_tmdb,
           auto_sync_minutes = excluded.auto_sync_minutes,
           remove_missing = excluded.remove_missing,
@@ -739,6 +940,7 @@ export async function syncLocalVodFolder({
         contentMode,
         defaultCategoryId ? Number(defaultCategoryId) : null,
         useSubfoldersAsCategories ? 1 : 0,
+        mode,
         autoTmdb ? 1 : 0,
         Math.max(0, Number(autoSyncMinutes) || 0),
         removeMissing ? 1 : 0,
@@ -756,21 +958,52 @@ export async function syncLocalVodFolder({
     throw err;
   }
 
-  // Outside SQLite transaction: enrich newly discovered movies & series against TMDB (up to 60 per sync pass)
-  if (shouldFetchTmdb && (newlyInsertedMoviesForTmdb.length > 0 || newlyInsertedSeriesForTmdb.length > 0)) {
+  // Fuera de la transacción de SQLite: TMDB (hasta 60 fichas por pasada). Se
+  // hace una sola búsqueda por título y sirve para las dos cosas: carátula y
+  // sinopsis, y —si el cliente separa por género— la categoría de la película.
+  const genreConfig = shouldClassifyGenres ? getGenreCategoryConfig() : null;
+  if (
+    (shouldFetchTmdb || shouldClassifyGenres) &&
+    (newlyInsertedMoviesForTmdb.length > 0 || newlyInsertedSeriesForTmdb.length > 0)
+  ) {
     const updM = db.prepare(`
       UPDATE vod_items
          SET poster_url = COALESCE(NULLIF(?, ''), poster_url),
              backdrop_url = ?, plot = ?, genre = ?, release_year = ?, rating = ?, tmdb_id = ?
        WHERE id = ?
     `);
+    const updMGenre = db.prepare('UPDATE vod_items SET tmdb_genres = ?, genre = ?, category_id = ? WHERE id = ?');
+
     for (const m of newlyInsertedMoviesForTmdb.slice(0, 60)) {
       try {
         const hits = await searchTmdb({ query: m.title, type: 'movie', year: m.year });
-        if (hits.length > 0) {
-          const b = hits[0];
-          updM.run(b.poster_url, b.backdrop_url, b.plot, b.genre, b.release_year || m.year, b.rating, b.tmdb_id, m.id);
+        const best = hits[0];
+        if (!best) continue;
+        if (shouldFetchTmdb) {
+          updM.run(
+            best.poster_url,
+            best.backdrop_url,
+            best.plot,
+            best.genre,
+            best.release_year || m.year,
+            best.rating,
+            best.tmdb_id,
+            m.id
+          );
           stats.tmdbEnriched++;
+        }
+        if (shouldClassifyGenres) {
+          const genres = await genresForHit(best, 'movie');
+          const category = resolveGenreCategoryName(genres, genreConfig);
+          if (genres.length > 0 && category) {
+            updMGenre.run(
+              JSON.stringify(genres),
+              genres.slice(0, 3).join(', '),
+              ensureVodCategory(category, 'vod'),
+              m.id
+            );
+            stats.genreClassified++;
+          }
         }
       } catch {
         // ignore single lookup error
@@ -783,17 +1016,54 @@ export async function syncLocalVodFolder({
              backdrop_url = ?, plot = ?, genre = ?, release_year = ?, rating = ?, tmdb_id = ?
        WHERE id = ?
     `);
+    const updSGenre = db.prepare('UPDATE series SET tmdb_genres = ?, genre = ?, category_id = ? WHERE id = ?');
     for (const s of newlyInsertedSeriesForTmdb.slice(0, 30)) {
       try {
         const hits = await searchTmdb({ query: s.title, type: 'series' });
-        if (hits.length > 0) {
-          const b = hits[0];
-          updS.run(b.poster_url, b.backdrop_url, b.plot, b.genre, b.release_year || 2024, b.rating, b.tmdb_id, s.id);
+        const best = hits[0];
+        if (!best) continue;
+        if (shouldFetchTmdb) {
+          updS.run(
+            best.poster_url,
+            best.backdrop_url,
+            best.plot,
+            best.genre,
+            best.release_year || 2024,
+            best.rating,
+            best.tmdb_id,
+            s.id
+          );
           stats.tmdbEnriched++;
+        }
+        if (shouldClassifyGenres) {
+          const genres = await genresForHit(best, 'series');
+          const category = resolveGenreCategoryName(genres, genreConfig);
+          if (genres.length > 0 && category) {
+            updSGenre.run(
+              JSON.stringify(genres),
+              genres.slice(0, 3).join(', '),
+              ensureVodCategory(category, 'series'),
+              s.id
+            );
+            stats.genreClassified++;
+          }
         }
       } catch {
         // ignore
       }
+    }
+  }
+
+  // El resumen de la carpeta se escribió dentro de la transacción, antes de
+  // hablar con TMDB: se actualiza con el número real de clasificadas.
+  if (saveWatchFolder && mode === 'tmdb_genres') {
+    try {
+      const summaryText =
+        `+${stats.moviesAdded} películas, +${stats.episodesAdded} episodios (${stats.scannedFiles} archivos)` +
+        `, ${stats.genreClassified} por género TMDB`;
+      db.prepare('UPDATE vod_watch_folders SET last_scan_summary = ? WHERE folder_path = ?').run(summaryText, rootFolder);
+    } catch {
+      // si la carpeta no se pudo guardar, no hay nada que actualizar
     }
   }
 
@@ -828,6 +1098,7 @@ export function startVodFolderAutoSyncScheduler() {
             folderPath: f.folder_path,
             contentMode: f.content_mode,
             defaultCategoryId: f.default_category_id,
+            categoryMode: f.category_mode || 'subfolders',
             useSubfoldersAsCategories: Boolean(f.use_subfolders_as_categories),
             autoTmdb: Boolean(f.auto_tmdb),
             autoSyncMinutes: f.auto_sync_minutes,

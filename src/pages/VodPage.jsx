@@ -28,7 +28,10 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
-  ArrowDownWideNarrow
+  ArrowDownWideNarrow,
+  Tags,
+  Wand2,
+  AlertTriangle
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 import {
@@ -172,6 +175,40 @@ function DownloadCloudIcon({ busy }) {
   return busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />;
 }
 
+function GenrePlanBlock({ title, plan }) {
+  if (!plan) return null;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2 text-[11px] text-slate-400">
+        <span className="font-semibold text-slate-200">{title}</span>
+        <span>
+          {plan.checked} revisadas • {plan.classified} con género
+          {plan.notFound > 0 ? ` • ${plan.notFound} sin resultado en TMDB` : ''}
+          {plan.remaining > 0 ? ` • ${plan.remaining} pendientes` : ''}
+        </span>
+      </div>
+      {plan.categories.length === 0 ? (
+        <div className="text-[11px] text-slate-500">
+          Ningún título de este lote tiene género en TMDB todavía.
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {plan.categories.map((c) => (
+            <span
+              key={c.name}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-200"
+            >
+              <Tags className="w-3 h-3" />
+              {c.name}
+              <span className="text-amber-400/80 font-mono">{c.count}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function VodPage({ onPreview }) {
   const [subTab, setSubTab] = useState('movies'); // 'movies' | 'series'
   const [items, setItems] = useState([]);
@@ -226,6 +263,9 @@ export default function VodPage({ onPreview }) {
   const [folderForm, setFolderForm] = useState({
     folderPath: '/mnt/peliculas',
     contentMode: 'auto',
+    // Cómo se reparten las categorías: por carpeta del disco, por género de
+    // TMDB (Acción, Comedia, Terror, Thriller, Románticas…) o una sola.
+    categoryMode: 'subfolders',
     useSubfoldersAsCategories: true,
     autoTmdb: true,
     autoSyncMinutes: 0,
@@ -236,6 +276,14 @@ export default function VodPage({ onPreview }) {
   const [previewScan, setPreviewScan] = useState(null);
   const [folderBusy, setFolderBusy] = useState(false);
   const [folderMsg, setFolderMsg] = useState(null);
+
+  // Categorías por género de TMDB (dentro del sincronizador de carpetas)
+  const [genreCfg, setGenreCfg] = useState({ aliasesText: '', priorityText: '', tmdb: { configured: false } });
+  const [genreAliasesText, setGenreAliasesText] = useState('');
+  const [genrePriorityText, setGenrePriorityText] = useState('');
+  const [genrePreview, setGenrePreview] = useState(null);
+  const [genreBusy, setGenreBusy] = useState('');
+  const [genreMsg, setGenreMsg] = useState(null);
 
   // Jellyfin (VOD y series con «Create Symlink», como XUI.one)
   const [jellyfinModalOpen, setJellyfinModalOpen] = useState(false);
@@ -307,6 +355,10 @@ export default function VodPage({ onPreview }) {
       setTmdbCfg(cfg);
       setTmdbLangInput(cfg.language || 'es-MX');
       setWatchFolders(wf);
+      const gcfg = await apiFetch('/api/vod/genres/config');
+      setGenreCfg(gcfg);
+      setGenreAliasesText(gcfg.aliasesText || '');
+      setGenrePriorityText(gcfg.priorityText || '');
       const jf = await apiFetch('/api/jellyfin/config');
       setJellyfinCfg(jf);
       setJellyfinForm((prev) => ({
@@ -603,9 +655,14 @@ export default function VodPage({ onPreview }) {
         body: JSON.stringify(payload)
       });
       const st = res.stats;
+      const genreNote =
+        st.categoryMode === 'tmdb_genres'
+          ? ` ${st.genreClassified} clasificadas en su categoría por género de TMDB.`
+          : '';
+      const warn = (st.warnings || []).length ? ` Aviso: ${st.warnings.join(' ')}` : '';
       setFolderMsg({
-        ok: true,
-        text: `Sincronización exitosa en ${st.rootFolder}: ${st.moviesAdded} películas nuevas, ${st.seriesAdded} series (+${st.episodesAdded} episodios), ${st.tmdbEnriched} carátulas TMDB descargadas (${st.moviesExisting + st.episodesExisting} ya existían).`
+        ok: (st.warnings || []).length === 0,
+        text: `Sincronización exitosa en ${st.rootFolder}: ${st.moviesAdded} películas nuevas, ${st.seriesAdded} series (+${st.episodesAdded} episodios), ${st.tmdbEnriched} carátulas TMDB descargadas (${st.moviesExisting + st.episodesExisting} ya existían).${genreNote}${warn}`
       });
       setPreviewScan(null);
       await loadAll();
@@ -619,6 +676,101 @@ export default function VodPage({ onPreview }) {
   const handleDeleteWatchFolder = async (id) => {
     await apiFetch(`/api/vod/folders/${id}`, { method: 'DELETE' });
     loadAll();
+  };
+
+  // ==================== CATEGORÍAS POR GÉNERO DE TMDB ====================
+  const saveGenreRules = async () => {
+    const cfg = await apiFetch('/api/vod/genres/config', {
+      method: 'POST',
+      body: JSON.stringify({ aliasesText: genreAliasesText, priorityText: genrePriorityText })
+    });
+    setGenreCfg(cfg);
+    setGenreAliasesText(cfg.aliasesText || '');
+    setGenrePriorityText(cfg.priorityText || '');
+    return cfg;
+  };
+
+  const handleSaveGenreRules = async () => {
+    setGenreBusy('save');
+    setGenreMsg(null);
+    try {
+      await saveGenreRules();
+      setGenreMsg({ ok: true, text: 'Reglas guardadas: se aplicarán al sincronizar y al reclasificar.' });
+    } catch (err) {
+      setGenreMsg({ ok: false, text: err.message });
+    } finally {
+      setGenreBusy('');
+    }
+  };
+
+  // `apply = false` sólo cuenta lo que haría (no escribe nada en la base).
+  //
+  // Al aplicar va por lotes de 120 para que la petición no se eternice: si el
+  // catálogo es grande, encadena hasta 10 lotes por clic (1.200 títulos) y deja
+  // el resto para el siguiente, con el avance a la vista.
+  const runGenreClassify = async (apply) => {
+    setGenreBusy(apply ? 'apply' : 'preview');
+    setGenreMsg(null);
+    try {
+      await saveGenreRules();
+      let last = null;
+      if (!apply) {
+        last = await apiFetch('/api/vod/genres/classify', {
+          method: 'POST',
+          body: JSON.stringify({ dryRun: true, media: 'both', limit: 120 })
+        });
+      } else {
+        let movies = 0;
+        let series = 0;
+        for (let batch = 1; batch <= 10; batch += 1) {
+          const res = await apiFetch('/api/vod/genres/classify', {
+            method: 'POST',
+            body: JSON.stringify({ dryRun: false, media: 'both', limit: 120 })
+          });
+          last = res;
+          const m = res.movies || {};
+          const sr = res.series || {};
+          movies += m.classified || 0;
+          series += sr.classified || 0;
+          const remaining = (m.remaining || 0) + (sr.remaining || 0);
+          setGenreMsg({
+            ok: true,
+            text: `Separando por género de TMDB… lote ${batch}: ${movies} películas y ${series} series clasificadas. Quedan ${remaining}.`
+          });
+          if (remaining <= 0) break;
+          if ((m.classified || 0) + (sr.classified || 0) === 0) break;
+        }
+        const m = last?.movies || {};
+        const sr = last?.series || {};
+        const remaining = (m.remaining || 0) + (sr.remaining || 0);
+        const notFound = (m.notFound || 0) + (sr.notFound || 0);
+        setGenreMsg({
+          ok: true,
+          text:
+            `Separadas por género de TMDB: ${movies} películas y ${series} series. ` +
+            (remaining > 0
+              ? `Quedan ${remaining} títulos por revisar: pulsa «Aplicar» otra vez para seguir.`
+              : 'No queda ningún título pendiente.') +
+            (notFound > 0 ? ` En este lote ${notFound} no tienen género en TMDB y siguen en su categoría.` : '')
+        });
+        await loadAll();
+      }
+      setGenrePreview(last);
+      await loadGenreCfgOnly();
+    } catch (err) {
+      setGenreMsg({ ok: false, text: err.message });
+    } finally {
+      setGenreBusy('');
+    }
+  };
+
+  const loadGenreCfgOnly = async () => {
+    try {
+      const cfg = await apiFetch('/api/vod/genres/config');
+      setGenreCfg(cfg);
+    } catch {
+      // sin permisos de administrador
+    }
   };
 
   // ==================== JELLYFIN ====================
@@ -2194,11 +2346,44 @@ export default function VodPage({ onPreview }) {
                   </div>
                 </div>
 
+                <div className="p-3 rounded-xl bg-[#0e1526] border border-slate-800 space-y-1">
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    Categorías de las películas y series
+                  </label>
+                  <select
+                    value={folderForm.categoryMode}
+                    onChange={(e) => setFolderForm({ ...folderForm, categoryMode: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
+                  >
+                    <option value="subfolders">Por carpeta del disco (cada subcarpeta = una categoría)</option>
+                    <option value="tmdb_genres">Por género de TMDB (Acción, Comedia, Terror, Thriller, Románticas…)</option>
+                    <option value="single">Una sola categoría para todo</option>
+                  </select>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    {folderForm.categoryMode === 'tmdb_genres' ? (
+                      <>
+                        Cada título va a la categoría del <b className="text-amber-300">género que dice TMDB</b> en su
+                        ficha (el principal). Las categorías se crean solas y se reutilizan; lo que TMDB no encuentre se
+                        queda en la categoría de respaldo.
+                      </>
+                    ) : folderForm.categoryMode === 'single' ? (
+                      <>Todo el contenido de la carpeta entra en una única categoría, sin importar el género.</>
+                    ) : (
+                      <>La categoría sale del nombre de la carpeta donde está el archivo (lo de siempre).</>
+                    )}
+                  </p>
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-                  <label className="flex items-center gap-2 p-2.5 rounded-xl bg-[#0e1526] border border-slate-800 cursor-pointer">
+                  <label
+                    className={`flex items-center gap-2 p-2.5 rounded-xl bg-[#0e1526] border border-slate-800 cursor-pointer ${
+                      folderForm.categoryMode !== 'subfolders' ? 'opacity-40' : ''
+                    }`}
+                  >
                     <input
                       type="checkbox"
-                      checked={folderForm.useSubfoldersAsCategories}
+                      disabled={folderForm.categoryMode !== 'subfolders'}
+                      checked={folderForm.categoryMode === 'subfolders' && folderForm.useSubfoldersAsCategories}
                       onChange={(e) => setFolderForm({ ...folderForm, useSubfoldersAsCategories: e.target.checked })}
                     />
                     <span className="text-slate-300">Subcarpetas = Categorías</span>
@@ -2242,6 +2427,126 @@ export default function VodPage({ onPreview }) {
                     {folderBusy ? 'Sincronizando...' : 'Sincronizar Carpeta Ahora'}
                   </button>
                 </div>
+              </div>
+
+              {/* Separar el catálogo por género de TMDB */}
+              <div className="p-4 rounded-xl bg-[#090e1a] border border-amber-500/25 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <Tags className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-semibold text-white">Separar el catálogo por género de TMDB</div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Con «Por género de TMDB» elegido arriba, lo nuevo entra ya en su categoría. Para las películas y
+                      series que <b className="text-slate-300">ya están importadas</b>, usa la vista previa y luego
+                      «Aplicar»: se consulta la ficha de cada título en TMDB y se mueve a Acción, Comedia, Terror,
+                      Thriller, Románticas…
+                    </p>
+                  </div>
+                </div>
+
+                {!genreCfg.tmdb?.configured && (
+                  <div className="flex items-start gap-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-[11px]">
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <div>
+                      Falta la API Key de TMDB. Sin ella no se puede saber el género.{' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFolderModalOpen(false);
+                          setTmdbModalOpen(true);
+                        }}
+                        className="underline font-semibold hover:text-white"
+                      >
+                        Configurar TMDB
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {genreMsg && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-[11px] ${
+                      genreMsg.ok
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                        : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                    }`}
+                  >
+                    {genreMsg.text}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      Prioridad de categorías (opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={genrePriorityText}
+                      onChange={(e) => setGenrePriorityText(e.target.value)}
+                      placeholder="Románticas, Terror, Acción"
+                      className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Si un título tiene varios géneros, gana el primero de esta lista. Vacío = el género principal de
+                      TMDB.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Renombrar géneros (opcional)</label>
+                    <textarea
+                      rows={3}
+                      value={genreAliasesText}
+                      onChange={(e) => setGenreAliasesText(e.target.value)}
+                      placeholder={'Suspense = Thriller\nRomance = Románticas'}
+                      className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono text-[11px]"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">Una regla por línea: «género de TMDB = categoría».</p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={Boolean(genreBusy)}
+                    onClick={handleSaveGenreRules}
+                    className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold"
+                  >
+                    {genreBusy === 'save' ? 'Guardando...' : 'Guardar Reglas'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(genreBusy) || !genreCfg.tmdb?.configured}
+                    onClick={() => runGenreClassify(false)}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-indigo-300 font-semibold border border-indigo-500/30"
+                  >
+                    <Search className="w-3.5 h-3.5" />
+                    {genreBusy === 'preview' ? 'Consultando TMDB...' : 'Vista Previa'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(genreBusy) || !genreCfg.tmdb?.configured}
+                    onClick={() => runGenreClassify(true)}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-900 font-bold"
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    {genreBusy === 'apply' ? 'Separando...' : 'Aplicar a Películas y Series'}
+                  </button>
+                </div>
+
+                {genrePreview && (
+                  <div className="space-y-3 p-3 rounded-xl bg-[#0e1526] border border-slate-800">
+                    <div className="text-[11px] text-slate-400">
+                      {genrePreview.dryRun ? 'Vista previa (no se ha cambiado nada)' : 'Resultado aplicado'} · lote de{' '}
+                      {genrePreview.limit} títulos por tipo
+                    </div>
+                    <GenrePlanBlock title="Películas" plan={genrePreview.movies} />
+                    <GenrePlanBlock title="Series" plan={genrePreview.series} />
+                    <div className="text-[10px] text-slate-500">
+                      Las categorías se crean solas si no existen y se reutilizan si ya están (no se duplican nombres).
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Preview Scan Results */}
@@ -2289,7 +2594,13 @@ export default function VodPage({ onPreview }) {
                       <div>
                         <div className="font-mono text-white font-semibold">{wf.folder_path}</div>
                         <div className="text-[11px] text-slate-400">
-                          Modo: {wf.content_mode} • Auto-Sync: {wf.auto_sync_minutes > 0 ? `cada ${wf.auto_sync_minutes} min` : 'Manual'}
+                          Modo: {wf.content_mode} • Categorías:{' '}
+                          {wf.category_mode === 'tmdb_genres'
+                            ? 'género de TMDB'
+                            : wf.category_mode === 'single'
+                              ? 'una sola'
+                              : 'por carpeta'}{' '}
+                          • Auto-Sync: {wf.auto_sync_minutes > 0 ? `cada ${wf.auto_sync_minutes} min` : 'Manual'}
                           {wf.last_scan_summary ? ` • Último: ${wf.last_scan_summary}` : ''}
                         </div>
                       </div>
@@ -2299,6 +2610,7 @@ export default function VodPage({ onPreview }) {
                             handleSyncFolderNow({
                               folderPath: wf.folder_path,
                               contentMode: wf.content_mode,
+                              categoryMode: wf.category_mode || 'subfolders',
                               useSubfoldersAsCategories: Boolean(wf.use_subfolders_as_categories),
                               autoTmdb: Boolean(wf.auto_tmdb),
                               autoSyncMinutes: wf.auto_sync_minutes,
