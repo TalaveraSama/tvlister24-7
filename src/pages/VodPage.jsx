@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Film,
   Plus,
@@ -23,9 +23,24 @@ import {
   PlugZap,
   Check,
   Network,
-  Unplug
+  Unplug,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  ArrowDownWideNarrow
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
+import {
+  VOD_PAGE_SIZES,
+  readVodPageSize,
+  saveVodPageSize,
+  pageWindow,
+  pageCount,
+  clampPage,
+  slicePage,
+  pageRange
+} from '../lib/vodPaging.js';
 
 const EMPTY_VOD = {
   title: '',
@@ -55,6 +70,104 @@ const EMPTY_SERIES = {
   rating: 8.5
 };
 
+/**
+ * Pie de la lista: cuántos se ven, tamaño de página y navegación.
+ * `unit` es «películas» o «series» para que el texto se lea natural.
+ */
+function VodPager({ page, pageSize, total, unit, onPage, onPageSize }) {
+  const { from, to, page: current, totalPages } = pageRange(page, pageSize, total);
+
+  return (
+    <div className="flex flex-col gap-2 rounded-2xl border border-slate-800/80 bg-[#0e1526] px-4 py-3 text-[11px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-slate-500">Mostrar</span>
+        <select
+          value={pageSize}
+          onChange={(e) => onPageSize(Number(e.target.value))}
+          className="rounded-lg border border-slate-700/80 bg-[#090e1a] px-2 py-1 font-mono text-[11px] text-slate-200 focus:border-indigo-500 focus:outline-none"
+          title="Cuántas carátulas por página"
+        >
+          {VOD_PAGE_SIZES.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <span className="text-slate-500">por página</span>
+        <span className="text-slate-600">·</span>
+        <span className="text-slate-300 font-medium">
+          {from}–{to} de {total} {unit}
+        </span>
+        <span className="text-slate-600">·</span>
+        <span className="text-slate-500">
+          Página {current} de {totalPages}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onPage(1)}
+          disabled={current <= 1}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/60 text-slate-300 transition hover:text-white disabled:opacity-35"
+          title="Primera página"
+        >
+          <ChevronsLeft className="w-3.5 h-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => onPage(current - 1)}
+          disabled={current <= 1}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/60 text-slate-300 transition hover:text-white disabled:opacity-35"
+          title="Página anterior"
+        >
+          <ChevronLeft className="w-3.5 h-3.5" />
+        </button>
+
+        {pageWindow(current, totalPages).map((item) =>
+          typeof item === 'number' ? (
+            <button
+              key={item}
+              type="button"
+              onClick={() => onPage(item)}
+              className={`inline-flex h-7 min-w-[28px] items-center justify-center rounded-lg border px-1.5 font-mono text-[11px] transition ${
+                item === current
+                  ? 'border-indigo-500/60 bg-indigo-600 text-white'
+                  : 'border-slate-700/70 bg-slate-800/60 text-slate-300 hover:text-white'
+              }`}
+            >
+              {item}
+            </button>
+          ) : (
+            <span key={item} className="px-0.5 text-slate-600">
+              …
+            </span>
+          )
+        )}
+
+        <button
+          type="button"
+          onClick={() => onPage(current + 1)}
+          disabled={current >= totalPages}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/60 text-slate-300 transition hover:text-white disabled:opacity-35"
+          title="Página siguiente"
+        >
+          <ChevronRight className="w-3.5 h-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => onPage(totalPages)}
+          disabled={current >= totalPages}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/60 text-slate-300 transition hover:text-white disabled:opacity-35"
+          title="Última página"
+        >
+          <ChevronsRight className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function DownloadCloudIcon({ busy }) {
   return busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />;
 }
@@ -65,6 +178,11 @@ export default function VodPage({ onPreview }) {
   const [seriesList, setSeriesList] = useState([]);
   const [categories, setCategories] = useState([]);
   const [searchFilter, setSearchFilter] = useState('');
+  // Lista paginada: sin esto, con cientos de títulos la página no acababa.
+  const [pageSize, setPageSize] = useState(readVodPageSize);
+  const [moviePage, setMoviePage] = useState(1);
+  const [seriesPage, setSeriesPage] = useState(1);
+  const listTopRef = useRef(null);
 
   // Movie modal
   const [modalOpen, setModalOpen] = useState(false);
@@ -832,6 +950,44 @@ export default function VodPage({ onPreview }) {
     s.genre?.toLowerCase().includes(searchFilter.toLowerCase())
   );
 
+  const moviePages = pageCount(filteredMovies.length, pageSize);
+  const seriesPages = pageCount(filteredSeries.length, pageSize);
+  // Si la lista se acorta (búsqueda o borrado), la página actual no puede
+  // quedar fuera de rango.
+  const safeMoviePage = clampPage(moviePage, filteredMovies.length, pageSize);
+  const safeSeriesPage = clampPage(seriesPage, filteredSeries.length, pageSize);
+  const pagedMovies = slicePage(filteredMovies, safeMoviePage, pageSize);
+  const pagedSeries = slicePage(filteredSeries, safeSeriesPage, pageSize);
+
+  // Al buscar o cambiar de pestaña se vuelve a la primera página.
+  useEffect(() => {
+    setMoviePage(1);
+    setSeriesPage(1);
+  }, [searchFilter, subTab]);
+
+  const changePageSize = (size) => {
+    setPageSize(size);
+    setMoviePage(1);
+    setSeriesPage(1);
+    saveVodPageSize(window.localStorage, size);
+  };
+
+  const scrollToList = () => {
+    // `scrollIntoView` existe en todos los navegadores actuales; el `?.` evita
+    // romper la paginación en un WebView antiguo que no lo tenga.
+    listTopRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
+
+  const goToMoviePage = (page) => {
+    setMoviePage(Math.min(Math.max(1, page), moviePages));
+    scrollToList();
+  };
+
+  const goToSeriesPage = (page) => {
+    setSeriesPage(Math.min(Math.max(1, page), seriesPages));
+    scrollToList();
+  };
+
   return (
     <div className="space-y-5">
       {/* Header Toolbar */}
@@ -935,190 +1091,260 @@ export default function VodPage({ onPreview }) {
 
       {/* MOVIES TAB */}
       {subTab === 'movies' && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-5">
-          {filteredMovies.map((v) => (
-            <div
-              key={v.id}
-              className="rounded-2xl bg-[#0e1526] border border-slate-800/80 overflow-hidden flex flex-col justify-between group"
-            >
-              <div>
-                <div className="aspect-[2/3] bg-slate-900 relative overflow-hidden">
-                  {v.poster_url ? (
-                    <img
-                      src={v.poster_url}
-                      alt={v.title}
-                      loading="lazy"
-                      className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                    />
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-slate-600">
-                      <Film className="w-10 h-10" />
-                      <span className="text-[11px]">Sin carátula</span>
-                    </div>
-                  )}
-                  <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded bg-black/80 text-amber-300 text-xs font-bold flex items-center gap-1">
-                    <Star className="w-3 h-3 fill-amber-300" /> {v.rating}
-                  </div>
-                  <div className="absolute bottom-2.5 left-2.5 px-2 py-0.5 rounded bg-indigo-600/90 text-white text-[10px] font-bold uppercase">
-                    {v.container_ext} • {v.release_year}
-                  </div>
-                  <div className="absolute top-2.5 left-2.5 flex flex-col items-start gap-1">
-                    {v.source_url?.startsWith('/') && (
-                      <div className="px-2 py-0.5 rounded bg-emerald-600/90 text-white text-[10px] font-bold flex items-center gap-1">
-                        <HardDrive className="w-3 h-3" /> {v.symlink_path ? 'Symlink' : 'Disco'}
-                      </div>
-                    )}
-                    {v.source_provider === 'jellyfin' && (
-                      <div className="px-2 py-0.5 rounded bg-sky-600/90 text-white text-[10px] font-bold flex items-center gap-1">
-                        <Server className="w-3 h-3" /> Jellyfin
-                      </div>
-                    )}
-                    {String(v.source_url || '').startsWith('jellyfin://') && (
-                      <div className="px-2 py-0.5 rounded bg-cyan-700/90 text-white text-[10px] font-bold flex items-center gap-1">
-                        <PlugZap className="w-3 h-3" /> Remoto
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="p-3.5">
-                  <h3 className="font-bold text-white text-sm truncate" title={v.title}>{v.title}</h3>
-                  <div className="text-[11px] text-indigo-300 mt-0.5 truncate">
-                    {v.category_name || 'Películas'} • {v.genre}
-                  </div>
-                  <p className="text-xs text-slate-400 mt-1.5 line-clamp-2">{v.plot}</p>
-                </div>
-              </div>
-
-              <div className="px-3.5 py-2.5 bg-[#090e1a] border-t border-slate-800/80 flex items-center justify-between text-xs">
-                <span className="text-slate-400 flex items-center gap-1">
-                  <Clock className="w-3.5 h-3.5" /> {Math.round((v.duration_sec || 5400) / 60)} min
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() =>
-                      onPreview({
-                        id: v.id,
-                        kind: 'vod',
-                        title: `${v.title} (${v.release_year})`,
-                        url: v.source_url
-                      })
-                    }
-                    className="p-1.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600 text-indigo-300 hover:text-white transition"
-                    title="Reproducir VOD"
-                  >
-                    <Play className="w-3.5 h-3.5" />
-                  </button>
-                  {v.source_url?.startsWith('/') && !v.symlink_path && (
-                    <button
-                      onClick={() => createSymlinkForItem(v.id)}
-                      className="p-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/30 text-sky-300"
-                      title="Crear symlink en la carpeta VOD (como XUI.one)"
-                    >
-                      <Link2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                  <button
-                    onClick={() => openEdit(v)}
-                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
-                    title="Editar / Buscar TMDB"
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => handleDelete(v.id)}
-                    className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300"
-                    title="Eliminar"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
+        <div ref={listTopRef} className="scroll-mt-24 space-y-4">
+          {filteredMovies.length === 0 ? (
+            <div className="rounded-2xl border border-slate-800/80 bg-[#0e1526] px-6 py-16 text-center">
+              <Film className="mx-auto mb-3 h-9 w-9 text-slate-700" />
+              <p className="text-sm font-semibold text-slate-300">
+                {items.length === 0 ? 'Todavía no hay películas' : 'Ninguna película coincide con la búsqueda'}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {items.length === 0
+                  ? 'Añádelas con «Agregar Película VOD», sincronizando una carpeta o desde Jellyfin.'
+                  : `No hay resultados para «${searchFilter}».`}
+              </p>
+              {items.length > 0 && (
+                <button
+                  onClick={() => setSearchFilter('')}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                >
+                  <X className="h-3.5 w-3.5" /> Quitar filtro
+                </button>
+              )}
             </div>
-          ))}
-        </div>
-      )}
-
-      {/* SERIES TAB */}
-      {subTab === 'series' && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-          {filteredSeries.map((sr) => {
-            const epCount = sr.episodes?.length || 0;
-            const seasonsCount = new Set((sr.episodes || []).map((e) => e.season_num)).size;
-            return (
+          ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-5">
+            {pagedMovies.map((v) => (
               <div
-                key={sr.id}
+                key={v.id}
                 className="rounded-2xl bg-[#0e1526] border border-slate-800/80 overflow-hidden flex flex-col justify-between group"
               >
                 <div>
                   <div className="aspect-[2/3] bg-slate-900 relative overflow-hidden">
-                    {sr.poster_url ? (
+                    {v.poster_url ? (
                       <img
-                        src={sr.poster_url}
-                        alt={sr.title}
+                        src={v.poster_url}
+                        alt={v.title}
                         loading="lazy"
                         className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center">
-                        <Tv className="w-10 h-10 text-slate-700" />
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-slate-600">
+                        <Film className="w-10 h-10" />
+                        <span className="text-[11px]">Sin carátula</span>
                       </div>
                     )}
                     <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded bg-black/80 text-amber-300 text-xs font-bold flex items-center gap-1">
-                      <Star className="w-3 h-3 fill-amber-300" /> {sr.rating}
+                      <Star className="w-3 h-3 fill-amber-300" /> {v.rating}
                     </div>
-                    <div className="absolute bottom-2.5 left-2.5 px-2.5 py-0.5 rounded bg-violet-600/90 text-white text-[10px] font-bold uppercase">
-                      {seasonsCount} Temp • {epCount} Episodios
+                    <div className="absolute bottom-2.5 left-2.5 px-2 py-0.5 rounded bg-indigo-600/90 text-white text-[10px] font-bold uppercase">
+                      {v.container_ext} • {v.release_year}
+                    </div>
+                    <div className="absolute top-2.5 left-2.5 flex flex-col items-start gap-1">
+                      {v.source_url?.startsWith('/') && (
+                        <div className="px-2 py-0.5 rounded bg-emerald-600/90 text-white text-[10px] font-bold flex items-center gap-1">
+                          <HardDrive className="w-3 h-3" /> {v.symlink_path ? 'Symlink' : 'Disco'}
+                        </div>
+                      )}
+                      {v.source_provider === 'jellyfin' && (
+                        <div className="px-2 py-0.5 rounded bg-sky-600/90 text-white text-[10px] font-bold flex items-center gap-1">
+                          <Server className="w-3 h-3" /> Jellyfin
+                        </div>
+                      )}
+                      {String(v.source_url || '').startsWith('jellyfin://') && (
+                        <div className="px-2 py-0.5 rounded bg-cyan-700/90 text-white text-[10px] font-bold flex items-center gap-1">
+                          <PlugZap className="w-3 h-3" /> Remoto
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="p-4">
-                    <h3 className="font-bold text-white text-sm truncate">{sr.title}</h3>
-                    <div className="text-[11px] text-violet-300 mt-0.5">
-                      {sr.category_name || 'Series'} • {sr.genre} ({sr.release_year})
+                  <div className="p-3.5">
+                    <h3 className="font-bold text-white text-sm truncate" title={v.title}>{v.title}</h3>
+                    <div className="text-[11px] text-indigo-300 mt-0.5 truncate">
+                      {v.category_name || 'Películas'} • {v.genre}
                     </div>
-                    <p className="text-xs text-slate-400 mt-2 line-clamp-2">{sr.plot}</p>
+                    <p className="text-xs text-slate-400 mt-1.5 line-clamp-2">{v.plot}</p>
                   </div>
                 </div>
 
-                <div className="px-4 py-3 bg-[#090e1a] border-t border-slate-800/80 flex items-center justify-between text-xs">
-                  <button
-                    onClick={() => {
-                      setEpisodesModalSeries(sr);
-                      setEpForm({
-                        season_num: 1,
-                        episode_num: (sr.episodes?.length || 0) + 1,
-                        title: '',
-                        source_url: '',
-                        duration_sec: 2400,
-                        container_ext: 'mp4',
-                        plot: ''
-                      });
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600/25 hover:bg-violet-600 text-violet-200 hover:text-white font-semibold transition"
-                  >
-                    <ListVideo className="w-3.5 h-3.5" />
-                    Episodios ({epCount})
-                  </button>
-
+                <div className="px-3.5 py-2.5 bg-[#090e1a] border-t border-slate-800/80 flex items-center justify-between text-xs">
+                  <span className="text-slate-400 flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5" /> {Math.round((v.duration_sec || 5400) / 60)} min
+                  </span>
                   <div className="flex items-center gap-1.5">
                     <button
-                      onClick={() => openEditSeries(sr)}
+                      onClick={() =>
+                        onPreview({
+                          id: v.id,
+                          kind: 'vod',
+                          title: `${v.title} (${v.release_year})`,
+                          url: v.source_url
+                        })
+                      }
+                      className="p-1.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600 text-indigo-300 hover:text-white transition"
+                      title="Reproducir VOD"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                    </button>
+                    {v.source_url?.startsWith('/') && !v.symlink_path && (
+                      <button
+                        onClick={() => createSymlinkForItem(v.id)}
+                        className="p-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/30 text-sky-300"
+                        title="Crear symlink en la carpeta VOD (como XUI.one)"
+                      >
+                        <Link2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => openEdit(v)}
                       className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                      title="Editar / Buscar TMDB"
                     >
                       <Edit3 className="w-3.5 h-3.5" />
                     </button>
                     <button
-                      onClick={() => handleDeleteSeries(sr.id)}
+                      onClick={() => handleDelete(v.id)}
                       className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300"
+                      title="Eliminar"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
               </div>
-            );
-          })}
+            ))}
+          </div>
+          )}
+
+          {filteredMovies.length > pageSize && (
+            <VodPager
+              page={safeMoviePage}
+              pageSize={pageSize}
+              total={filteredMovies.length}
+              unit="películas"
+              onPage={goToMoviePage}
+              onPageSize={changePageSize}
+            />
+          )}
+        </div>
+      )}
+
+      {/* SERIES TAB */}
+      {subTab === 'series' && (
+        <div ref={listTopRef} className="scroll-mt-24 space-y-4">
+          {filteredSeries.length === 0 ? (
+            <div className="rounded-2xl border border-slate-800/80 bg-[#0e1526] px-6 py-16 text-center">
+              <Tv className="mx-auto mb-3 h-9 w-9 text-slate-700" />
+              <p className="text-sm font-semibold text-slate-300">
+                {seriesList.length === 0 ? 'Todavía no hay series' : 'Ninguna serie coincide con la búsqueda'}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {seriesList.length === 0
+                  ? 'Créalas con «Crear Nueva Serie» o impórtalas desde Jellyfin.'
+                  : `No hay resultados para «${searchFilter}».`}
+              </p>
+              {seriesList.length > 0 && (
+                <button
+                  onClick={() => setSearchFilter('')}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                >
+                  <X className="h-3.5 w-3.5" /> Quitar filtro
+                </button>
+              )}
+            </div>
+          ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            {pagedSeries.map((sr) => {
+              const epCount = sr.episodes?.length || 0;
+              const seasonsCount = new Set((sr.episodes || []).map((e) => e.season_num)).size;
+              return (
+                <div
+                  key={sr.id}
+                  className="rounded-2xl bg-[#0e1526] border border-slate-800/80 overflow-hidden flex flex-col justify-between group"
+                >
+                  <div>
+                    <div className="aspect-[2/3] bg-slate-900 relative overflow-hidden">
+                      {sr.poster_url ? (
+                        <img
+                          src={sr.poster_url}
+                          alt={sr.title}
+                          loading="lazy"
+                          className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <Tv className="w-10 h-10 text-slate-700" />
+                        </div>
+                      )}
+                      <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded bg-black/80 text-amber-300 text-xs font-bold flex items-center gap-1">
+                        <Star className="w-3 h-3 fill-amber-300" /> {sr.rating}
+                      </div>
+                      <div className="absolute bottom-2.5 left-2.5 px-2.5 py-0.5 rounded bg-violet-600/90 text-white text-[10px] font-bold uppercase">
+                        {seasonsCount} Temp • {epCount} Episodios
+                      </div>
+                    </div>
+
+                    <div className="p-4">
+                      <h3 className="font-bold text-white text-sm truncate">{sr.title}</h3>
+                      <div className="text-[11px] text-violet-300 mt-0.5">
+                        {sr.category_name || 'Series'} • {sr.genre} ({sr.release_year})
+                      </div>
+                      <p className="text-xs text-slate-400 mt-2 line-clamp-2">{sr.plot}</p>
+                    </div>
+                  </div>
+
+                  <div className="px-4 py-3 bg-[#090e1a] border-t border-slate-800/80 flex items-center justify-between text-xs">
+                    <button
+                      onClick={() => {
+                        setEpisodesModalSeries(sr);
+                        setEpForm({
+                          season_num: 1,
+                          episode_num: (sr.episodes?.length || 0) + 1,
+                          title: '',
+                          source_url: '',
+                          duration_sec: 2400,
+                          container_ext: 'mp4',
+                          plot: ''
+                        });
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600/25 hover:bg-violet-600 text-violet-200 hover:text-white font-semibold transition"
+                    >
+                      <ListVideo className="w-3.5 h-3.5" />
+                      Episodios ({epCount})
+                    </button>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => openEditSeries(sr)}
+                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteSeries(sr.id)}
+                        className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          )}
+
+          {filteredSeries.length > pageSize && (
+            <VodPager
+              page={safeSeriesPage}
+              pageSize={pageSize}
+              total={filteredSeries.length}
+              unit="series"
+              onPage={goToSeriesPage}
+              onPageSize={changePageSize}
+            />
+          )}
         </div>
       )}
 
