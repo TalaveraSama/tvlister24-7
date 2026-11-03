@@ -3047,7 +3047,7 @@ Garantías:
 
 | Ruta | Qué hace |
 | --- | --- |
-| `GET /api/vod/categories/usage` | categorías de VOD/series con `movies`, `series`, `total` y `empty` |
+| `GET /api/vod/categories/usage` | categorías de VOD/series con `movies`, `series`, `total` y `empty`, más `subfolderFolders` (carpetas que recrearán sus categorías al escanear) |
 | `POST /api/vod/categories/purge` | `{ ids: [..], moveToId }`; sin `moveToId` sólo borra vacías |
 
 Comprobación automática:
