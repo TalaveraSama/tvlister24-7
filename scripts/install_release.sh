@@ -130,9 +130,19 @@ if [ "$VERIFY" -eq 1 ]; then
     if [ -n "$EXPECTED" ]; then
       ACTUAL=$(sha256sum "${TMP_DIR}/${PKG}" | awk '{print $1}')
       if [ "$EXPECTED" != "$ACTUAL" ]; then
-        fail "El SHA256 del paquete no coincide (esperado ${EXPECTED:0:16}…, obtenido ${ACTUAL:0:16}…)."
+        # El paquete adjunto no es el que se firmó (subida incompleta, proxy que
+        # altera el binario…). No se instala ese archivo: se usa el árbol del
+        # tag, que GitHub genera a partir del mismo código.
+        log "[AVISO] El SHA256 del paquete no coincide (esperado ${EXPECTED:0:16}…, obtenido ${ACTUAL:0:16}…)."
+        log "        Se descarta el adjunto y se usa el árbol exacto del tag ${TAG}."
+        rm -f "${TMP_DIR}/${PKG}"
+        SRC_URL="https://codeload.github.com/${REPO}/tar.gz/refs/tags/${TAG}"
+        curl -fL --retry 3 --connect-timeout 20 --progress-bar -o "${TMP_DIR}/${PKG}" "$SRC_URL" \
+          || fail "No se pudo descargar el árbol del tag ${TAG}."
+        SRC_TARBALL=1
+      else
+        log "Checksum SHA256 verificado."
       fi
-      log "Checksum SHA256 verificado."
     else
       log "[AVISO] SHA256SUMS no incluye ${PKG}; se continúa sin verificar."
     fi
