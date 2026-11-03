@@ -67,10 +67,11 @@ const usageA = {
     { id: 1, name: 'Ciencia Ficcion', type: 'vod', sort_order: 1, movies: 1, series: 0, total: 1, empty: false },
     { id: 2, name: 'triller', type: 'vod', sort_order: 2, movies: 0, series: 0, total: 0, empty: true },
     { id: 3, name: 'Acción', type: 'vod', sort_order: 3, movies: 4, series: 0, total: 4, empty: false },
-    { id: 4, name: 'accion', type: 'vod', sort_order: 4, movies: 0, series: 0, total: 0, empty: true }
+    { id: 4, name: 'accion', type: 'vod', sort_order: 4, movies: 0, series: 0, total: 0, empty: true },
+    { id: 5, name: 'Movies', type: 'vod', sort_order: 5, movies: 0, series: 0, total: 0, empty: true, master: true }
   ],
-  total: 4,
-  empty: 2,
+  total: 5,
+  empty: 3,
   withContent: 2,
   subfolderFolders: [{ id: 9, path: '/srv/pelis/Ciencia Ficcion', category_mode: 'subfolders' }]
 };
@@ -97,9 +98,11 @@ globalThis.fetch = async (url, options = {}) => {
   let data;
   if (key === 'GET /api/vod/categories/usage') {
     usageCalls += 1;
-    data = usageCalls === 1 ? usageA : usageB;
+    data = usageCalls === 2 || usageCalls === 4 ? usageB : usageA;
   } else if (key === 'POST /api/vod/categories/purge') {
     data = { ok: true, deleted: 2, deletedNames: ['Ciencia Ficcion', 'triller'], moved: { movies: 1, series: 0 }, moveToId: 3 };
+  } else if (key === 'POST /api/vod/folders/master-mode') {
+    data = { ok: true, updated: 2, folders: [], categories: { movies: { id: 3, name: 'Movies' } } };
   } else {
     data = base[key] ?? {};
   }
@@ -156,7 +159,7 @@ const review = byText('button', 'Revisar categorías');
 ok(!!review, 'existe «Revisar categorías»');
 if (review) await click(review);
 ok(calls.some((c) => c.key === 'GET /api/vod/categories/usage'), 'pide el uso por categoría');
-ok(text().includes('4 categoría(s)') && text().includes('2 vacía(s)'), 'resume cuántas hay y cuántas están vacías');
+ok(text().includes('5 categoría(s)') && text().includes('3 vacía(s)'), 'resume cuántas hay y cuántas están vacías');
 ok(text().includes('volverá a crear sus categorías'), 'avisa de las carpetas que recrearán las categorías');
 
 const boxes = [...document.querySelectorAll('input[type="checkbox"]')].filter((b) =>
@@ -165,6 +168,7 @@ const boxes = [...document.querySelectorAll('input[type="checkbox"]')].filter((b
 const boxFor = (name) => boxes.find((b) => b.closest('label').textContent.includes(name));
 ok(boxFor('triller')?.checked === true && boxFor('accion')?.checked === true, 'las vacías vienen marcadas');
 ok(boxFor('Acción')?.checked === false && boxFor('Ciencia Ficcion')?.checked === false, 'las que tienen contenido no');
+ok(boxFor('Movies')?.checked === false && boxFor('Movies')?.disabled === true, 'la maestra «Movies» no se puede marcar');
 
 await tick(boxFor('Ciencia Ficcion'), true);
 ok(text().includes('Mover el contenido de las categorías con títulos a:'), 'pide destino al marcar una con contenido');
@@ -187,6 +191,21 @@ ok(sent?.body?.moveToId === 3, 'envía la categoría de destino');
 ok(text().includes('Borradas 2 categoría(s)'), 'informa de lo borrado');
 ok(text().includes('Se movieron 1 películas'), 'informa de lo movido');
 ok(usageCalls === 2, 'recarga el uso después de borrar');
+
+// ==================== Categoría maestra «Movies» ====================
+const modeSelect = [...document.querySelectorAll('select')].find((s) =>
+  [...s.options].some((o) => o.textContent.includes('Categoría maestra'))
+);
+ok(!!modeSelect, 'el sincronizador ofrece la categoría maestra');
+ok(modeSelect?.options?.[0]?.textContent?.includes('Movies'), 'la opción por defecto es «Categoría maestra · Movies»');
+ok(![...(modeSelect?.options || [])].some((o) => o.textContent.includes('Por carpeta del disco')), '«por carpeta del disco» ya no se ofrece');
+
+await click(byText('button', 'Revisar categorías'));
+const masterBtn = byText('button', 'categoría maestra «Movies»');
+ok(!!masterBtn, 'el aviso trae el botón para pasar a la maestra');
+if (masterBtn) await click(masterBtn);
+ok(calls.some((c) => c.key === 'POST /api/vod/folders/master-mode'), 'crea/usa la maestra y cambia las carpetas');
+ok(text().includes('pasaron a la categoría maestra «Movies»'), 'confirma cuántas carpetas cambiaron');
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log('');

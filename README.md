@@ -17,7 +17,15 @@ cada título entra en su categoría —**Acción, Comedia, Terror, Thriller, Rom
 según la ficha de TMDB, con prioridad y renombrado configurables (una comedia romántica puede ir a
 «Románticas»). Para el catálogo que ya está importado hay **vista previa** (sin tocar nada) y un
 botón **Aplicar** que lo recoloca por lotes, creando las categorías que falten. Si TMDB no encuentra
-un título, se queda en la categoría que tenía y no se repite la consulta. Y si al pasar a géneros
+un título, se queda en la categoría que tenía y no se repite la consulta.
+
+🏷️ **Todo lo que entra por carpeta cae en la categoría maestra `Movies` (v2.6.27)**: la opción «por
+carpeta del disco», que creaba una categoría por subcarpeta (`Ciencia Ficcion/`, `triller/`…), ya no se
+ofrece. Al sincronizar una carpeta eliges **Categoría maestra · Movies** (las series van a `Series`) o
+**Por género de TMDB**. `Movies` y `Series` no se pueden borrar, y las categorías viejas se limpian
+desde la misma pantalla o con `tvlister-admin vod-cats master` + `vod-cats clean --all --move-to "Movies"`.
+
+Y si al pasar a géneros
 quedaron categorías «de carpeta» (<i>Ciencia Ficcion</i>, <i>triller</i>, <i>accion</i>…), el mismo
 modal tiene **Categorías del catálogo: borrar las que sobran**: muestra cuánto tiene cada una, borra
 las vacías y, si alguna conserva títulos, los mueve antes a la categoría que elijas (nunca queda una
@@ -66,15 +74,15 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 
 ```bash
 # última versión publicada
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.26/scripts/install_release.sh \
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.27/scripts/install_release.sh \
   | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.26/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.26
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.27/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.27
 ```
 
 Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el
@@ -112,7 +120,7 @@ Comandos principales:
 - `tvlister-admin enable-cron` — Programar backup diario automático a las 03:00 AM (retención 7 días).
 - `tvlister-admin setup-ssl tv.midominio.com` — Configurar proxy inverso Nginx + HTTPS Let's Encrypt.
 - `tvlister-admin set-port 8895` — Cambiar puerto TCP y abrir firewall (`UFW` + `iptables`).
-- `tvlister-admin vod-cats` — Ver cuántas películas/series tiene cada categoría y borrar las que sobran (las que crearon las carpetas). `vod-cats clean` borra las vacías; `vod-cats clean --all --move-to "Acción"` mueve el contenido a esa categoría y borra el resto.
+- `tvlister-admin vod-cats` — Ver cuántas películas/series tiene cada categoría y borrar las que sobran (las que crearon las carpetas). `vod-cats master` crea `Movies`/`Series` y pasa a la maestra las carpetas en modo antiguo; `vod-cats clean` borra las vacías; `vod-cats clean --all --move-to "Movies"` mueve el contenido a la maestra y borra el resto.
 - `tvlister-admin update` — Actualizar desde GitHub sin perder base de datos ni puerto.
 - `tvlister-admin release [vX.Y.Z]` — Instalar/actualizar desde un release publicado (paquete con checksum).
 

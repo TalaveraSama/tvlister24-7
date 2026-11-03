@@ -314,8 +314,9 @@ tvlister-admin clean
 
 # Categorías de películas/series: ver cuánto tiene cada una y borrar las que crearon las carpetas
 tvlister-admin vod-cats
+tvlister-admin vod-cats master
 tvlister-admin vod-cats clean
-tvlister-admin vod-cats clean --all --move-to "Acción"
+tvlister-admin vod-cats clean --all --move-to "Movies"
 
 # Programar respaldo automático todos los días a las 03:00 AM en /root (retención 7 días)
 tvlister-admin enable-cron
@@ -1142,8 +1143,8 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.26/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.26
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.27/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.27
 ```
 
 La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
@@ -3021,6 +3022,34 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
 - El 80 y el 443 se registran solos como puertos estándar del gestor multi-puerto (una sola vez: si
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
+
+### v2.6.27: la categoría maestra es `Movies`
+
+El cliente aclaró que las categorías por subcarpeta fueron un error: lo que entra por carpeta tiene
+que caer en una **categoría maestra llamada `Movies`** (las series, en `Series`), como en XUI.one.
+
+| Dónde | Qué hace |
+| --- | --- |
+| Modal *Sincronizar Carpeta* → **Categorías de las películas y series** | Opción por defecto **«Categoría maestra · Movies (todo junto)»**. «Por carpeta del disco» ya no se ofrece; sólo aparece si esa carpeta ya estaba en ese modo, marcada como *antiguo*. |
+| Categorías `Movies` / `Series` | Se crean solas al sincronizar o con `POST /api/vod/categories/master`. **No se pueden borrar**: salen con la etiqueta *maestra* y la casilla bloqueada. |
+| Aviso de carpetas en modo antiguo | Botón **«Usar la categoría maestra «Movies»»** que las pasa a `single` y las deja apuntando a la maestra. |
+
+Limpieza completa del catálogo (dos pasos):
+
+```bash
+tvlister-admin vod-cats master                                  # crea Movies/Series y cambia las carpetas
+tvlister-admin vod-cats clean --all --move-to "Movies" --yes     # mueve todo a Movies y borra el resto
+```
+
+| Ruta | Qué hace |
+| --- | --- |
+| `GET` / `POST` `/api/vod/categories/master` | crea (si faltan) y devuelve los ids de `Movies` y `Series`; el `GET` añade las carpetas en modo antiguo |
+| `POST /api/vod/folders/master-mode` | pasa a la maestra todas las carpetas con `category_mode = 'subfolders'` |
+| `GET /api/vod/categories/usage` | cada categoría incluye `master: true/false` |
+| `POST /api/vod/categories/purge` | rechaza las maestras (`400`) con mensaje explícito |
+
+Comprobación automática: `node scripts/test_vod_category_cleanup.mjs` (39 comprobaciones) y
+`node scripts/test_vod_category_ui.mjs` (25, renderizando la pantalla con jsdom).
 
 ### v2.6.26: borrar las categorías que crearon las carpetas
 

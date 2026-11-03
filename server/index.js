@@ -34,7 +34,11 @@ import {
   saveGenreCategoryConfig,
   listVodCategories,
   vodCategoryUsage,
-  purgeVodCategories
+  purgeVodCategories,
+  ensureMasterCategories,
+  listSubfolderModeFolders,
+  switchFoldersToMasterMode,
+  MASTER_CATEGORY_NAMES
 } from './vodGenres.js';
 import {
   signToken,
@@ -3148,6 +3152,54 @@ app.post('/api/vod/categories/purge', requireAuth, requireAdmin, (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message || 'No se pudieron borrar las categorías' });
+  }
+});
+
+// Categorías maestras: «Movies» y «Series». Es a donde va todo lo que entra por
+// carpeta sin repartirse por género, en lugar de una categoría por subcarpeta.
+app.get('/api/vod/categories/master', requireAuth, requireAdmin, (req, res) => {
+  const ids = ensureMasterCategories();
+  res.json({
+    ok: true,
+    categories: {
+      movies: { id: ids.movies, name: MASTER_CATEGORY_NAMES.vod },
+      series: { id: ids.series, name: MASTER_CATEGORY_NAMES.series }
+    },
+    subfolderFolders: listSubfolderModeFolders()
+  });
+});
+
+app.post('/api/vod/categories/master', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const ids = ensureMasterCategories();
+    res.json({
+      ok: true,
+      categories: {
+        movies: { id: ids.movies, name: MASTER_CATEGORY_NAMES.vod },
+        series: { id: ids.series, name: MASTER_CATEGORY_NAMES.series }
+      }
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudieron crear las categorías maestras' });
+  }
+});
+
+// Las carpetas que siguen creando una categoría por subcarpeta pasan a la
+// maestra («Movies»/«Series») sin tocar los títulos ya importados.
+app.post('/api/vod/folders/master-mode', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const result = switchFoldersToMasterMode();
+    res.json({
+      ok: true,
+      updated: result.updated,
+      folders: result.folders,
+      categories: {
+        movies: { id: result.categories.movies, name: MASTER_CATEGORY_NAMES.vod },
+        series: { id: result.categories.series, name: MASTER_CATEGORY_NAMES.series }
+      }
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudieron cambiar las carpetas' });
   }
 });
 

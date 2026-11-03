@@ -114,6 +114,70 @@ export function ensureVodCategory(name, type = 'vod') {
   return Number(info.lastInsertRowid);
 }
 
+// Categorías maestras: la casa de todo lo que entra por carpeta cuando no se
+// reparte por género. Antes cada subcarpeta creaba su propia categoría y la
+// lista se llenaba de duplicados («Ciencia Ficcion», «triller», «accion»…).
+export const MASTER_CATEGORY_NAMES = { vod: 'Movies', series: 'Series' };
+
+/** Devuelve el id de «Movies» (o «Series»), creándola si no existe. */
+export function ensureMasterCategory(type = 'vod') {
+  const kind = type === 'series' ? 'series' : 'vod';
+  return ensureVodCategory(MASTER_CATEGORY_NAMES[kind], kind);
+}
+
+/** Las dos maestras, para dejarlas listas antes de usarlas. */
+export function ensureMasterCategories() {
+  return { movies: ensureMasterCategory('vod'), series: ensureMasterCategory('series') };
+}
+
+/** Carpetas monitoreadas que siguen creando una categoría por subcarpeta. */
+export function listSubfolderModeFolders() {
+  try {
+    return db
+      .prepare(
+        "SELECT id, folder_path, content_mode, category_mode FROM vod_watch_folders WHERE LOWER(COALESCE(category_mode,'')) = 'subfolders' ORDER BY folder_path"
+      )
+      .all()
+      .map((f) => ({
+        id: Number(f.id),
+        path: f.folder_path,
+        content_mode: f.content_mode,
+        category_mode: f.category_mode
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pasa a la categoría maestra todas las carpetas que estaban creando una
+ * categoría por subcarpeta. No toca el contenido ya importado: para eso está
+ * `purgeVodCategories` con `moveToId` a «Movies».
+ */
+export function switchFoldersToMasterMode() {
+  const masters = ensureMasterCategories();
+  const folders = listSubfolderModeFolders();
+  const upd = db.prepare(
+    "UPDATE vod_watch_folders SET category_mode = 'single', default_category_id = ? WHERE id = ?"
+  );
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    for (const f of folders) {
+      const target = String(f.content_mode || '').toLowerCase() === 'series' ? masters.series : masters.movies;
+      upd.run(target, f.id);
+    }
+    db.exec('COMMIT;');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+  return { updated: folders.length, folders, categories: masters };
+}
+
 /** Categorías de películas/series que existen hoy (para el panel). */
 export function listVodCategories() {
   return db
@@ -158,7 +222,8 @@ export function vodCategoryUsage() {
       movies,
       series,
       total: movies + series,
-      empty: movies + series === 0
+      empty: movies + series === 0,
+      master: isMasterCategoryName(c.name)
     };
   });
 
@@ -185,6 +250,12 @@ export function vodCategoryUsage() {
   };
 }
 
+/** «Movies» y «Series» son la casa del catálogo: no se borran nunca. */
+export function isMasterCategoryName(name) {
+  const n = String(name || '').trim().toLowerCase();
+  return n === MASTER_CATEGORY_NAMES.vod.toLowerCase() || n === MASTER_CATEGORY_NAMES.series.toLowerCase();
+}
+
 /**
  * Borra categorías de películas/series.
  *
@@ -204,6 +275,12 @@ export function purgeVodCategories({ ids, moveToId } = {}) {
     .prepare(`SELECT id, name, type FROM categories WHERE id IN (${marks}) AND ${CATEGORY_SCOPE}`)
     .all(...clean);
   if (!rows.length) throw new Error('Esas categorías no existen (o no son de películas/series)');
+  const masterRows = rows.filter((r) => isMasterCategoryName(r.name));
+  if (masterRows.length) {
+    throw new Error(
+      `«${MASTER_CATEGORY_NAMES.vod}» y «${MASTER_CATEGORY_NAMES.series}» son las categorías maestras y no se pueden borrar`
+    );
+  }
 
   const idsOk = rows.map((r) => Number(r.id));
   const target =

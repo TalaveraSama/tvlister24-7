@@ -263,9 +263,10 @@ export default function VodPage({ onPreview }) {
   const [folderForm, setFolderForm] = useState({
     folderPath: '/mnt/peliculas',
     contentMode: 'auto',
-    // Cómo se reparten las categorías: por carpeta del disco, por género de
-    // TMDB (Acción, Comedia, Terror, Thriller, Románticas…) o una sola.
-    categoryMode: 'subfolders',
+    // Cómo se reparten las categorías: categoría maestra «Movies» (todo junto),
+    // por género de TMDB (Acción, Comedia, Terror, Thriller, Románticas…) o el
+    // modo antiguo «una carpeta = una categoría», que ya no se ofrece.
+    categoryMode: 'single',
     useSubfoldersAsCategories: true,
     autoTmdb: true,
     autoSyncMinutes: 0,
@@ -790,7 +791,7 @@ export default function VodPage({ onPreview }) {
     try {
       const res = await apiFetch('/api/vod/categories/usage');
       setCatUsage(res);
-      setCatSelected((res.categories || []).filter((c) => c.empty).map((c) => c.id));
+      setCatSelected((res.categories || []).filter((c) => c.empty && !c.master).map((c) => c.id));
       setCatMoveTo('');
     } catch (err) {
       setCatMsg({ ok: false, text: err.message });
@@ -799,8 +800,42 @@ export default function VodPage({ onPreview }) {
     }
   };
 
-  const toggleCatSelected = (id) =>
+  // Las carpetas que siguen creando una categoría por subcarpeta pasan a la
+  // maestra (Movies / Series). No mueve títulos: eso lo hace el borrado con destino.
+  const handleFoldersToMaster = async () => {
+    if (catBusy) return;
+    setCatBusy('master');
+    setCatMsg(null);
+    try {
+      const res = await apiFetch('/api/vod/folders/master-mode', { method: 'POST', body: JSON.stringify({}) });
+      const n = res.updated || 0;
+      setCatMsg({
+        ok: true,
+        text:
+          n > 0
+            ? `${n} carpeta(s) pasaron a la categoría maestra «Movies» (las de series, a «Series»). Ya no volverán a crear categorías por subcarpeta.`
+            : 'No había carpetas en el modo antiguo: todas usan ya la categoría maestra o los géneros de TMDB.'
+      });
+      const wf = await apiFetch('/api/vod/folders');
+      setWatchFolders(wf);
+      const refreshed = await apiFetch('/api/vod/categories/usage');
+      setCatUsage(refreshed);
+      // Deja el borrado a punto: las vacías marcadas y «Movies» como destino.
+      const master = (refreshed.categories || []).find((c) => String(c.name).toLowerCase() === 'movies');
+      setCatSelected((refreshed.categories || []).filter((c) => c.empty && !c.master).map((c) => c.id));
+      setCatMoveTo(master ? String(master.id) : '');
+    } catch (err) {
+      setCatMsg({ ok: false, text: err.message });
+    } finally {
+      setCatBusy('');
+    }
+  };
+
+  const toggleCatSelected = (id) => {
+    const cat = (catUsage?.categories || []).find((c) => c.id === id);
+    if (cat?.master) return; // «Movies» y «Series» no se borran
     setCatSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
 
   const handlePurgeCategories = async () => {
     if (!catSelected.length || catBusy) return;
@@ -2436,9 +2471,11 @@ export default function VodPage({ onPreview }) {
                     onChange={(e) => setFolderForm({ ...folderForm, categoryMode: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
                   >
-                    <option value="subfolders">Por carpeta del disco (cada subcarpeta = una categoría)</option>
+                    <option value="single">Categoría maestra · Movies (todo junto)</option>
                     <option value="tmdb_genres">Por género de TMDB (Acción, Comedia, Terror, Thriller, Románticas…)</option>
-                    <option value="single">Una sola categoría para todo</option>
+                    {folderForm.categoryMode === 'subfolders' && (
+                      <option value="subfolders">Por carpeta del disco (antiguo: una categoría por subcarpeta)</option>
+                    )}
                   </select>
                   <p className="text-[11px] text-slate-400 leading-relaxed">
                     {folderForm.categoryMode === 'tmdb_genres' ? (
@@ -2448,27 +2485,31 @@ export default function VodPage({ onPreview }) {
                         queda en la categoría de respaldo.
                       </>
                     ) : folderForm.categoryMode === 'single' ? (
-                      <>Todo el contenido de la carpeta entra en una única categoría, sin importar el género.</>
+                      <>
+                        Todo entra en la categoría maestra <b className="text-emerald-300">Movies</b> (las series en{' '}
+                        <b className="text-emerald-300">Series</b>), sin importar el género ni el nombre de la
+                        subcarpeta. Es lo que ven los clientes como «Movies» en XUI.one.
+                      </>
                     ) : (
-                      <>La categoría sale del nombre de la carpeta donde está el archivo (lo de siempre).</>
+                      <>
+                        Modo antiguo: la categoría sale del nombre de la carpeta donde está el archivo. Sigue
+                        funcionando para esta carpeta, pero volverá a crear categorías por subcarpeta.
+                      </>
                     )}
                   </p>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-                  <label
-                    className={`flex items-center gap-2 p-2.5 rounded-xl bg-[#0e1526] border border-slate-800 cursor-pointer ${
-                      folderForm.categoryMode !== 'subfolders' ? 'opacity-40' : ''
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      disabled={folderForm.categoryMode !== 'subfolders'}
-                      checked={folderForm.categoryMode === 'subfolders' && folderForm.useSubfoldersAsCategories}
-                      onChange={(e) => setFolderForm({ ...folderForm, useSubfoldersAsCategories: e.target.checked })}
-                    />
-                    <span className="text-slate-300">Subcarpetas = Categorías</span>
-                  </label>
+                  {folderForm.categoryMode === 'subfolders' && (
+                    <label className="flex items-center gap-2 p-2.5 rounded-xl bg-[#0e1526] border border-slate-800 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={folderForm.useSubfoldersAsCategories}
+                        onChange={(e) => setFolderForm({ ...folderForm, useSubfoldersAsCategories: e.target.checked })}
+                      />
+                      <span className="text-slate-300">Subcarpetas = Categorías</span>
+                    </label>
+                  )}
 
                   <label className="flex items-center gap-2 p-2.5 rounded-xl bg-[#0e1526] border border-slate-800 cursor-pointer">
                     <input
@@ -2676,8 +2717,15 @@ export default function VodPage({ onPreview }) {
                             .join(' · ')}
                           {catUsage.subfolderFolders.length > 3 ? ' …' : ''}
                         </span>
-                        . Cámbialas a «Por género de TMDB» o «Una sola categoría» en Ajustes de la carpeta si no las
-                        quieres de vuelta.
+                        .{' '}
+                        <button
+                          type="button"
+                          onClick={handleFoldersToMaster}
+                          disabled={Boolean(catBusy)}
+                          className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 disabled:opacity-40 text-amber-100 font-semibold"
+                        >
+                          {catBusy === 'master' ? 'Cambiando…' : 'Usar la categoría maestra «Movies»'}
+                        </button>
                       </div>
                     )}
                     <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-800 bg-[#0e1526] divide-y divide-slate-800">
@@ -2693,11 +2741,19 @@ export default function VodPage({ onPreview }) {
                         >
                           <input
                             type="checkbox"
-                            checked={catSelected.includes(c.id)}
+                            disabled={Boolean(c.master)}
+                            checked={!c.master && catSelected.includes(c.id)}
                             onChange={() => toggleCatSelected(c.id)}
-                            className="accent-rose-500"
+                            className="accent-rose-500 disabled:opacity-40"
                           />
-                          <span className="flex-1 truncate font-semibold text-slate-200">{c.name}</span>
+                          <span className="flex-1 truncate font-semibold text-slate-200">
+                            {c.name}
+                            {c.master && (
+                              <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300 text-[10px] font-bold uppercase tracking-wide">
+                                maestra
+                              </span>
+                            )}
+                          </span>
                           <span className={c.empty ? 'text-slate-500' : 'text-amber-300'}>
                             {c.movies} película(s) · {c.series} serie(s)
                           </span>
@@ -2822,8 +2878,8 @@ export default function VodPage({ onPreview }) {
                           {wf.category_mode === 'tmdb_genres'
                             ? 'género de TMDB'
                             : wf.category_mode === 'single'
-                              ? 'una sola'
-                              : 'por carpeta'}{' '}
+                              ? 'maestra (Movies)'
+                              : 'por carpeta (antiguo)'}{' '}
                           • Auto-Sync: {wf.auto_sync_minutes > 0 ? `cada ${wf.auto_sync_minutes} min` : 'Manual'}
                           {wf.last_scan_summary ? ` • Último: ${wf.last_scan_summary}` : ''}
                         </div>

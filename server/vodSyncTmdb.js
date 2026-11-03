@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { db } from './db.js';
 import { resolveGenreCategoryName, summarizeGenrePlan } from '../src/lib/vodGenres.js';
-import { ensureVodCategory, getGenreCategoryConfig } from './vodGenres.js';
+import { ensureVodCategory, getGenreCategoryConfig, MASTER_CATEGORY_NAMES } from './vodGenres.js';
 
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.mkv', '.avi', '.m4v', '.mov', '.webm', '.ts', '.m2ts', '.mpg', '.mpeg', '.flv'
@@ -770,8 +770,13 @@ export async function syncLocalVodFolder({
     return Number(res.lastInsertRowid);
   };
 
-  const fallbackVodCat = defaultCategoryId ? Number(defaultCategoryId) : ensureCategory('Películas en Disco', 'vod');
-  const fallbackSeriesCat = defaultCategoryId ? Number(defaultCategoryId) : ensureCategory('Series en Disco', 'series');
+  // Sin categoría elegida a mano, todo entra en la maestra: «Movies» y «Series».
+  const fallbackVodCat = defaultCategoryId
+    ? Number(defaultCategoryId)
+    : ensureCategory(MASTER_CATEGORY_NAMES.vod, 'vod');
+  const fallbackSeriesCat = defaultCategoryId
+    ? Number(defaultCategoryId)
+    : ensureCategory(MASTER_CATEGORY_NAMES.series, 'series');
 
   const stats = {
     rootFolder,

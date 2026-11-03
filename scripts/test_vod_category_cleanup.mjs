@@ -24,7 +24,8 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tvcat-'));
 process.env.TVLISTER_DB_PATH = path.join(dir, 'test.db');
 
 const { initDb, db } = await import('../server/db.js');
-const { vodCategoryUsage, purgeVodCategories } = await import('../server/vodGenres.js');
+const { vodCategoryUsage, purgeVodCategories, ensureMasterCategories, switchFoldersToMasterMode, MASTER_CATEGORY_NAMES } =
+  await import('../server/vodGenres.js');
 initDb();
 
 // ==================== 1. Escenario ====================
@@ -139,6 +140,34 @@ eq('Acción queda con 5 películas y 1 serie', [
   db.prepare('SELECT COUNT(*) n FROM vod_items WHERE category_id = ?').get(cAccion).n,
   db.prepare('SELECT COUNT(*) n FROM series WHERE category_id = ?').get(cAccion).n
 ], [5, 1]);
+
+// ==================== 8. Categoría maestra «Movies» ====================
+const masters = ensureMasterCategories();
+eq('la maestra de películas se llama Movies', db.prepare('SELECT name FROM categories WHERE id = ?').get(masters.movies).name, 'Movies');
+eq('la maestra de series se llama Series', db.prepare('SELECT name FROM categories WHERE id = ?').get(masters.series).name, 'Series');
+let masterThrew = '';
+try {
+  purgeVodCategories({ ids: [masters.movies], moveToId: cAccion });
+} catch (err) {
+  masterThrew = err.message;
+}
+ok('«Movies» no se puede borrar', /maestras/.test(masterThrew), masterThrew);
+
+const mastersAgain = ensureMasterCategories();
+eq('no se duplican al pedirlas otra vez', [mastersAgain.movies, mastersAgain.series], [masters.movies, masters.series]);
+
+// Una carpeta de películas y otra de series, ambas en el modo antiguo.
+db.prepare("INSERT INTO vod_watch_folders (folder_path, content_mode, category_mode) VALUES ('/srv/peli', 'movies', 'subfolders')").run();
+db.prepare("INSERT INTO vod_watch_folders (folder_path, content_mode, category_mode) VALUES ('/srv/serie', 'series', 'subfolders')").run();
+const switched = switchFoldersToMasterMode();
+ok('pasa las carpetas antiguas a la maestra', switched.updated === 3, JSON.stringify(switched.updated));
+const peliFolder = db.prepare("SELECT category_mode, default_category_id FROM vod_watch_folders WHERE folder_path = '/srv/peli'").get();
+const serieFolder = db.prepare("SELECT category_mode, default_category_id FROM vod_watch_folders WHERE folder_path = '/srv/serie'").get();
+eq('la carpeta de películas usa Movies', [peliFolder.category_mode, Number(peliFolder.default_category_id)], ['single', masters.movies]);
+eq('la carpeta de series usa Series', [serieFolder.category_mode, Number(serieFolder.default_category_id)], ['single', masters.series]);
+const tmpFolder = db.prepare("SELECT category_mode FROM vod_watch_folders WHERE folder_path = '/tmp/series'").get();
+eq('la carpeta anterior también cambia de modo', tmpFolder.category_mode, 'single');
+eq('ya no quedan carpetas en modo antiguo', switchFoldersToMasterMode().updated, 0);
 
 console.log('');
 if (fails) {

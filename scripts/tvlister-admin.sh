@@ -3040,7 +3040,10 @@ cmd_catv() {
 # Uso:
 #   tvlister-admin vod-cats                          qué hay en cada categoría
 #   tvlister-admin vod-cats clean                    borra las categorías vacías
-#   tvlister-admin vod-cats clean --all --move-to "Acción"
+#   tvlister-admin vod-cats master                   crea «Movies» y «Series» y pasa
+#                                                    a la maestra las carpetas que
+#                                                    creaban una categoría por subcarpeta
+#   tvlister-admin vod-cats clean --all --move-to "Movies"
 #                                                    mueve TODO el contenido a esa
 #                                                    categoría y borra el resto
 #
@@ -3054,16 +3057,37 @@ cmd_vod_cats() {
     case "$1" in
       list|estado|status) action="list" ;;
       clean|limpiar|borrar|purge) action="clean" ;;
+      master|maestra|maestras) action="master" ;;
       --all|--todas) all=1 ;;
       --yes|-y) yes=1 ;;
       --move-to) shift; move_to="${1:-}" ;;
       --move-to=*) move_to="${1#*=}" ;;
-      *) echo "[ERROR] Opción desconocida: $1"; echo "Uso: tvlister-admin vod-cats [clean [--all] [--move-to \"Categoría\"] [--yes]]"; return 1 ;;
+      *) echo "[ERROR] Opción desconocida: $1"; echo "Uso: tvlister-admin vod-cats [list | master | clean [--all] [--move-to \"Categoría\"] [--yes]]"; return 1 ;;
     esac
     shift
   done
 
   cd "$APP_DIR" || return 1
+
+  if [ "$action" = "master" ]; then
+    "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { initDb } from "./server/db.js";
+      import { ensureMasterCategories, switchFoldersToMasterMode, MASTER_CATEGORY_NAMES } from "./server/vodGenres.js";
+      initDb();
+      const ids = ensureMasterCategories();
+      const res = switchFoldersToMasterMode();
+      console.log("✅ Categorías maestras listas: " + MASTER_CATEGORY_NAMES.vod + " (id " + ids.movies + ") y " + MASTER_CATEGORY_NAMES.series + " (id " + ids.series + ")");
+      if (res.updated > 0) {
+        console.log("   " + res.updated + " carpeta(s) pasaron a la categoría maestra:");
+        for (const f of res.folders) console.log("   · " + f.path);
+      } else {
+        console.log("   No había carpetas en modo «por carpeta del disco».");
+      }
+      console.log("   Para juntar los títulos que quedaron en las categorías viejas:");
+      console.log("   tvlister-admin vod-cats clean --all --move-to " + MASTER_CATEGORY_NAMES.vod);
+    '
+    return $?
+  fi
 
   if [ "$action" = "list" ]; then
     VOD_ACTION=list "$NODE_BIN" --no-warnings --input-type=module -e '
@@ -3078,13 +3102,21 @@ cmd_vod_cats() {
         console.log("  (no hay ninguna)");
       } else {
         for (const c of u.categories) {
-          const estado = c.empty ? "vacía" : `${c.total} título(s)`;
+          const estado = c.master ? "maestra" + (c.empty ? " (vacía)" : ` (${c.total} título(s))`) : c.empty ? "vacía" : `${c.total} título(s)`;
           console.log("  " + String(c.name).slice(0, 30).padEnd(32) + String(c.movies).padStart(4) + " pel. " + String(c.series).padStart(4) + " ser.   " + estado);
         }
       }
       console.log("------------------------------------------------------------");
       console.log(`  ${u.total} categoría(s) · ${u.empty} vacía(s) · ${u.withContent} con contenido`);
       console.log("");
+      const master = u.categories.find((c) => String(c.name).toLowerCase() === "movies");
+      const masterSeries = u.categories.find((c) => String(c.name).toLowerCase() === "series");
+      console.log(
+        "  Categoría maestra : " +
+          (master
+            ? "Movies (" + master.total + " título(s))" + (masterSeries ? " · Series (" + masterSeries.total + ")" : "")
+            : "no existe todavía → tvlister-admin vod-cats master")
+      );
       console.log("  Borrar las vacías : tvlister-admin vod-cats clean");
       console.log("  Mover y borrar    : tvlister-admin vod-cats clean --all --move-to \"Acción\"");
       if (u.subfolderFolders.length) {
@@ -3116,7 +3148,9 @@ cmd_vod_cats() {
       moveToId = dest.id;
     }
     const all = String(process.env.VOD_ALL || "") === "1";
-    const targets = (all ? u.categories : u.categories.filter((c) => c.empty)).filter((c) => c.id !== moveToId);
+    const targets = (all ? u.categories : u.categories.filter((c) => c.empty))
+      .filter((c) => !c.master)
+      .filter((c) => c.id !== moveToId);
     if (!targets.length) {
       console.log("No hay categorías que borrar con esos criterios.");
       process.exit(0);
@@ -3138,7 +3172,8 @@ cmd_vod_cats() {
   ' 2>&1) || { printf '%s\n' "$plan"; return 1; }
   printf '%s\n' "$plan"
   n=$(printf '%s\n' "$plan" | sed -n 's/^BORRAR://p' | head -n1)
-  case "${n:-0}" in ''|*[!0-9]*) n=0 ;; esac
+  [ -n "$n" ] || n=0
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
   if [ "$n" -le 0 ]; then
     return 0
   fi
@@ -3166,7 +3201,9 @@ cmd_vod_cats() {
       moveToId = dest.id;
     }
     const all = String(process.env.VOD_ALL || "") === "1";
-    const targets = (all ? u.categories : u.categories.filter((c) => c.empty)).filter((c) => c.id !== moveToId);
+    const targets = (all ? u.categories : u.categories.filter((c) => c.empty))
+      .filter((c) => !c.master)
+      .filter((c) => c.id !== moveToId);
     try {
       const res = purgeVodCategories({ ids: targets.map((c) => c.id), moveToId });
       console.log("");
@@ -4311,7 +4348,7 @@ case "$ACTION" in
     echo " 29) Registro de aparatos por MAC: cupo por línea (devices)"
     echo " 30) Dominios públicos: panel (Cloudflare) y video (directo) (dominios)"
     echo " 31) Certificado Let's Encrypt del dominio de video (acme)"
-    echo " 32) Categorías de películas/series: borrar las que crearon las carpetas (vod-cats)"
+    echo " 32) Categorías de películas/series: maestra «Movies» y borrar las de carpeta (vod-cats)"
     echo "  0) Salir"
     echo "============================================================"
     read -r -p "Selecciona una opción [0-31]: " opt
