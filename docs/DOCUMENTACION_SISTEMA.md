@@ -3045,9 +3045,15 @@ Garantías:
 | `GET /api/vod/categories/usage` | categorías de VOD/series con `movies`, `series`, `total` y `empty` |
 | `POST /api/vod/categories/purge` | `{ ids: [..], moveToId }`; sin `moveToId` sólo borra vacías |
 
-Comprobación automática: `node scripts/test_vod_category_cleanup.mjs` (base temporal: borrar vacías,
-bloqueo de las que tienen contenido, movimiento a otra categoría, carpetas monitoreadas y protecciones)
-más la interfaz renderizada con jsdom.
+Comprobación automática:
+
+```
+node scripts/test_vod_category_cleanup.mjs   # base temporal: borrar vacías, bloqueo de las que tienen
+                                             # contenido, movimiento, carpetas monitoreadas y protecciones
+node scripts/test_vod_category_ui.mjs        # la tarjeta real de la pantalla, renderizada con jsdom
+```
+
+La prueba de interfaz necesita `jsdom` (`npm i -D jsdom`); si no está, se omite sin fallar.
 
 ### v2.6.24: el sincronizador separa el catálogo por género de TMDB
 
