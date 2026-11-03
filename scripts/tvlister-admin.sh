@@ -3036,6 +3036,147 @@ cmd_catv() {
   esac
 }
 
+# ==================== CATEGORÍAS DEL CATÁLOGO (PELÍCULAS/SERIES) ============
+# Uso:
+#   tvlister-admin vod-cats                          qué hay en cada categoría
+#   tvlister-admin vod-cats clean                    borra las categorías vacías
+#   tvlister-admin vod-cats clean --all --move-to "Acción"
+#                                                    mueve TODO el contenido a esa
+#                                                    categoría y borra el resto
+#
+# Las subcarpetas del disco (Ciencia Ficcion/, triller/, accion/…) crearon sus
+# propias categorías al sincronizar. Si el catálogo ya está separado por género
+# de TMDB, esas categorías sobran: este comando las quita sin dejar películas ni
+# series sin categoría (el contenido se mueve antes si hace falta).
+cmd_vod_cats() {
+  local action="list" move_to="" all=0 yes=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      list|estado|status) action="list" ;;
+      clean|limpiar|borrar|purge) action="clean" ;;
+      --all|--todas) all=1 ;;
+      --yes|-y) yes=1 ;;
+      --move-to) shift; move_to="${1:-}" ;;
+      --move-to=*) move_to="${1#*=}" ;;
+      *) echo "[ERROR] Opción desconocida: $1"; echo "Uso: tvlister-admin vod-cats [clean [--all] [--move-to \"Categoría\"] [--yes]]"; return 1 ;;
+    esac
+    shift
+  done
+
+  cd "$APP_DIR" || return 1
+
+  if [ "$action" = "list" ]; then
+    VOD_ACTION=list "$NODE_BIN" --no-warnings --input-type=module -e '
+      import { initDb } from "./server/db.js";
+      import { vodCategoryUsage } from "./server/vodGenres.js";
+      initDb();
+      const u = vodCategoryUsage();
+      console.log("============================================================");
+      console.log("  Categorías de Películas y Series");
+      console.log("============================================================");
+      if (!u.categories.length) {
+        console.log("  (no hay ninguna)");
+      } else {
+        for (const c of u.categories) {
+          const estado = c.empty ? "vacía" : `${c.total} título(s)`;
+          console.log("  " + String(c.name).slice(0, 30).padEnd(32) + String(c.movies).padStart(4) + " pel. " + String(c.series).padStart(4) + " ser.   " + estado);
+        }
+      }
+      console.log("------------------------------------------------------------");
+      console.log(`  ${u.total} categoría(s) · ${u.empty} vacía(s) · ${u.withContent} con contenido`);
+      console.log("");
+      console.log("  Borrar las vacías : tvlister-admin vod-cats clean");
+      console.log("  Mover y borrar    : tvlister-admin vod-cats clean --all --move-to \"Acción\"");
+    '
+    return $?
+  fi
+
+  local plan n
+  plan=$(VOD_ACTION=plan VOD_MOVE="$move_to" VOD_ALL="$all" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb } from "./server/db.js";
+    import { vodCategoryUsage } from "./server/vodGenres.js";
+    initDb();
+    const u = vodCategoryUsage();
+    const moveRaw = String(process.env.VOD_MOVE || "").trim();
+    let moveToId = null;
+    if (moveRaw) {
+      const dest = (/^\d+$/.test(moveRaw) ? u.categories.find((c) => c.id === Number(moveRaw)) : null) ||
+        u.categories.find((c) => c.name.toLowerCase() === moveRaw.toLowerCase());
+      if (!dest) {
+        console.error(`[ERROR] No existe la categoría de destino «${moveRaw}».`);
+        console.error("        Ver la lista con: tvlister-admin vod-cats");
+        process.exit(1);
+      }
+      moveToId = dest.id;
+    }
+    const all = String(process.env.VOD_ALL || "") === "1";
+    const targets = (all ? u.categories : u.categories.filter((c) => c.empty)).filter((c) => c.id !== moveToId);
+    if (!targets.length) {
+      console.log("No hay categorías que borrar con esos criterios.");
+      process.exit(0);
+    }
+    const blocked = targets.filter((c) => c.total > 0);
+    if (blocked.length && !moveToId) {
+      console.error("[ERROR] Estas categorías todavía tienen contenido:");
+      for (const c of blocked) console.error(`   · ${c.name} — ${c.movies} película(s), ${c.series} serie(s)`);
+      console.error("");
+      console.error("        Elige a qué categoría moverlo antes de borrarlas:");
+      console.error("        tvlister-admin vod-cats clean --all --move-to \"Acción\"");
+      process.exit(1);
+    }
+    console.log(`BORRAR:${targets.length}`);
+    for (const c of targets) {
+      const destino = moveToId && c.total > 0 ? `  → se mueve${c.total === 1 ? "" : "n"} ${c.total} título${c.total === 1 ? "" : "s"}` : "";
+      console.log(`  · ${c.name} — ${c.movies} película(s), ${c.series} serie(s)${destino}`);
+    }
+  ' 2>&1) || { printf '%s\n' "$plan"; return 1; }
+  printf '%s\n' "$plan"
+  n=$(printf '%s\n' "$plan" | sed -n 's/^BORRAR://p' | head -n1)
+  case "${n:-0}" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -le 0 ]; then
+    return 0
+  fi
+
+  if [ "$yes" -ne 1 ]; then
+    local ok=""
+    read -r -p "¿Borrar ${n} categoría(s)? [s/N] " ok || ok=""
+    case "$ok" in
+      s|S|si|sí|y|Y) ;;
+      *) echo "Cancelado. No se ha borrado nada."; return 0 ;;
+    esac
+  fi
+
+  VOD_ACTION=apply VOD_MOVE="$move_to" VOD_ALL="$all" "$NODE_BIN" --no-warnings --input-type=module -e '
+    import { initDb } from "./server/db.js";
+    import { vodCategoryUsage, purgeVodCategories } from "./server/vodGenres.js";
+    initDb();
+    const u = vodCategoryUsage();
+    const moveRaw = String(process.env.VOD_MOVE || "").trim();
+    let moveToId = null;
+    if (moveRaw) {
+      const dest = (/^\d+$/.test(moveRaw) ? u.categories.find((c) => c.id === Number(moveRaw)) : null) ||
+        u.categories.find((c) => c.name.toLowerCase() === moveRaw.toLowerCase());
+      if (!dest) { console.error("[ERROR] No existe la categoría de destino."); process.exit(1); }
+      moveToId = dest.id;
+    }
+    const all = String(process.env.VOD_ALL || "") === "1";
+    const targets = (all ? u.categories : u.categories.filter((c) => c.empty)).filter((c) => c.id !== moveToId);
+    try {
+      const res = purgeVodCategories({ ids: targets.map((c) => c.id), moveToId });
+      console.log("");
+      console.log(`✅ Borradas ${res.deleted} categoría(s): ${res.deletedNames.join(", ")}`);
+      if (res.moved.movies || res.moved.series) {
+        const destino = moveToId ? u.categories.find((c) => c.id === moveToId)?.name : "";
+        console.log(`   Movidas ${res.moved.movies} película(s) y ${res.moved.series} serie(s)${destino ? " a «" + destino + "»" : ""}.`);
+      }
+      console.log("   El panel ya muestra el catálogo sin esas categorías.");
+    } catch (e) {
+      console.error("❌ " + e.message);
+      process.exit(1);
+    }
+  '
+}
+
 cmd_tune() {
   # Configuración recomendada según el hardware real de este servidor.
   # Uso: tvlister-admin tune [show|apply]
@@ -3709,6 +3850,10 @@ case "$ACTION" in
       console.log("   Añadir cert  : tvlister-admin tls origin | tls add <dominio> | tls list");
     '
     ;;
+  vod-cats | categorias-vod | vod-categories)
+    shift
+    cmd_vod_cats "$@"
+    ;;
   list-ports)
     MAIN_P="$(get_current_port)"
     echo "Puerto Principal : ${MAIN_P} (HTTP)"
@@ -4155,6 +4300,7 @@ case "$ACTION" in
     echo " 29) Registro de aparatos por MAC: cupo por línea (devices)"
     echo " 30) Dominios públicos: panel (Cloudflare) y video (directo) (dominios)"
     echo " 31) Certificado Let's Encrypt del dominio de video (acme)"
+    echo " 32) Categorías de películas/series: borrar las que crearon las carpetas (vod-cats)"
     echo "  0) Salir"
     echo "============================================================"
     read -r -p "Selecciona una opción [0-31]: " opt
@@ -4195,6 +4341,7 @@ case "$ACTION" in
       29) "$0" devices ;;
       30) "$0" dominios ;;
       31) "$0" acme ;;
+      32) cmd_vod_cats list ;;
       *) exit 0 ;;
     esac
     ;;

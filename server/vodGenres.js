@@ -120,3 +120,129 @@ export function listVodCategories() {
     .prepare("SELECT id, name, type, sort_order FROM categories WHERE type IN ('vod', 'series') ORDER BY sort_order ASC, name ASC")
     .all();
 }
+
+// ============================================================================
+// LIMPIEZA DE CATEGORÍAS DEL CATÁLOGO
+// ============================================================================
+//
+// Al sincronizar en modo «por carpeta del disco» cada subcarpeta crea su
+// categoría (Ciencia Ficcion/, triller/, accion/…). Si después se cambia a
+// «por género de TMDB», esas categorías se quedan ahí vacías o con las pocas
+// películas que TMDB no supo clasificar. Estas dos funciones listan lo que hay
+// y borran lo que sobra sin dejar películas ni series huérfanas.
+
+const CATEGORY_SCOPE = "type IN ('vod', 'series')";
+
+/** Cuántas películas y series tiene cada categoría de VOD/series. */
+export function vodCategoryUsage() {
+  const cats = db
+    .prepare(`SELECT id, name, type, sort_order FROM categories WHERE ${CATEGORY_SCOPE} ORDER BY sort_order ASC, name ASC`)
+    .all();
+  const movieRows = db
+    .prepare('SELECT category_id, COUNT(*) AS n FROM vod_items WHERE category_id IS NOT NULL GROUP BY category_id')
+    .all();
+  const seriesRows = db
+    .prepare('SELECT category_id, COUNT(*) AS n FROM series WHERE category_id IS NOT NULL GROUP BY category_id')
+    .all();
+  const moviesByCat = new Map(movieRows.map((r) => [Number(r.category_id), Number(r.n)]));
+  const seriesByCat = new Map(seriesRows.map((r) => [Number(r.category_id), Number(r.n)]));
+
+  const categories = cats.map((c) => {
+    const movies = moviesByCat.get(Number(c.id)) || 0;
+    const series = seriesByCat.get(Number(c.id)) || 0;
+    return {
+      id: Number(c.id),
+      name: c.name,
+      type: c.type,
+      sort_order: Number(c.sort_order) || 0,
+      movies,
+      series,
+      total: movies + series,
+      empty: movies + series === 0
+    };
+  });
+
+  return {
+    categories,
+    total: categories.length,
+    empty: categories.filter((c) => c.empty).length,
+    withContent: categories.filter((c) => !c.empty).length
+  };
+}
+
+/**
+ * Borra categorías de películas/series.
+ *
+ * - Sin `moveToId` sólo se borran las vacías: si alguna tiene contenido se
+ *   devuelve `ok:false` con la lista de bloqueadas (nunca se dejan huérfanas).
+ * - Con `moveToId` se mueve antes el contenido (películas, series y el destino
+ *   por defecto de las carpetas monitoreadas) y luego se borran.
+ */
+export function purgeVodCategories({ ids, moveToId } = {}) {
+  const clean = Array.from(
+    new Set((Array.isArray(ids) ? ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0))
+  );
+  if (!clean.length) throw new Error('No hay categorías seleccionadas');
+
+  const marks = clean.map(() => '?').join(',');
+  const rows = db
+    .prepare(`SELECT id, name, type FROM categories WHERE id IN (${marks}) AND ${CATEGORY_SCOPE}`)
+    .all(...clean);
+  if (!rows.length) throw new Error('Esas categorías no existen (o no son de películas/series)');
+
+  const idsOk = rows.map((r) => Number(r.id));
+  const target =
+    moveToId === null || moveToId === undefined || String(moveToId).trim() === '' ? null : Number(moveToId);
+  if (target && idsOk.includes(target)) {
+    throw new Error('La categoría de destino no puede ser una de las que se van a borrar');
+  }
+  if (target && !db.prepare('SELECT id FROM categories WHERE id = ?').get(target)) {
+    throw new Error(`La categoría de destino (id ${target}) no existe`);
+  }
+
+  const usage = vodCategoryUsage().categories.filter((c) => idsOk.includes(c.id));
+  const blocked = usage.filter((c) => c.total > 0);
+  if (blocked.length && !target) {
+    return { ok: false, blocked, deleted: 0, deletedNames: [], moved: { movies: 0, series: 0 } };
+  }
+
+  const ph = idsOk.map(() => '?').join(',');
+  const onlyOk = idsOk.filter((id) => id !== target);
+  const phOk = onlyOk.map(() => '?').join(',');
+  let movedMovies = 0;
+  let movedSeries = 0;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    if (target) {
+      movedMovies = Number(
+        db.prepare(`UPDATE vod_items SET category_id = ? WHERE category_id IN (${ph})`).run(target, ...idsOk).changes || 0
+      );
+      movedSeries = Number(
+        db.prepare(`UPDATE series SET category_id = ? WHERE category_id IN (${ph})`).run(target, ...idsOk).changes || 0
+      );
+    }
+    // Carpetas monitoreadas: su categoría por defecto pasa al destino (o se
+    // queda sin ella). Así el siguiente sync no apunta a una categoría borrada.
+    db.prepare(`UPDATE vod_watch_folders SET default_category_id = ? WHERE default_category_id IN (${ph})`).run(
+      target,
+      ...idsOk
+    );
+    const deleted = Number(db.prepare(`DELETE FROM categories WHERE id IN (${phOk})`).run(...onlyOk).changes || 0);
+    db.exec('COMMIT;');
+    return {
+      ok: true,
+      deleted,
+      deletedNames: rows.filter((r) => Number(r.id) !== target).map((r) => r.name),
+      moved: { movies: movedMovies, series: movedSeries },
+      moveToId: target
+    };
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}

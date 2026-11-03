@@ -32,7 +32,9 @@ import {
 import {
   getGenreCategoryConfigForUi,
   saveGenreCategoryConfig,
-  listVodCategories
+  listVodCategories,
+  vodCategoryUsage,
+  purgeVodCategories
 } from './vodGenres.js';
 import {
   signToken,
@@ -3120,6 +3122,32 @@ app.post('/api/vod/genres/classify', requireAuth, requireAdmin, async (req, res)
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message || 'No se pudo separar el catálogo por género de TMDB' });
+  }
+});
+
+// --- Limpieza de categorías del catálogo -----------------------------------
+// Las categorías creadas por las subcarpetas del disco (Ciencia Ficcion/,
+// triller/, accion/…) se quedan cuando el catálogo pasa a separarse por género
+// de TMDB. Aquí se ven cuántas películas/series tiene cada una y se borran las
+// que sobran, moviendo antes el contenido si se pide un destino.
+app.get('/api/vod/categories/usage', requireAuth, requireAdmin, (req, res) => {
+  res.json(vodCategoryUsage());
+});
+
+app.post('/api/vod/categories/purge', requireAuth, requireAdmin, (req, res) => {
+  const { ids, moveToId } = req.body || {};
+  try {
+    const result = purgeVodCategories({ ids, moveToId });
+    if (!result.ok) {
+      const lista = result.blocked.map((c) => `${c.name} (${c.total})`).join(', ');
+      return res.status(409).json({
+        ...result,
+        error: `Estas categorías todavía tienen contenido: ${lista}. Elige a qué categoría moverlo antes de borrarlas.`
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudieron borrar las categorías' });
   }
 });
 

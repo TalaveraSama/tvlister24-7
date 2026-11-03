@@ -284,6 +284,12 @@ export default function VodPage({ onPreview }) {
   const [genrePreview, setGenrePreview] = useState(null);
   const [genreBusy, setGenreBusy] = useState('');
   const [genreMsg, setGenreMsg] = useState(null);
+  // Limpieza de categorías del catálogo (las que crearon las subcarpetas).
+  const [catUsage, setCatUsage] = useState(null);
+  const [catSelected, setCatSelected] = useState([]);
+  const [catMoveTo, setCatMoveTo] = useState('');
+  const [catBusy, setCatBusy] = useState('');
+  const [catMsg, setCatMsg] = useState(null);
 
   // Jellyfin (VOD y series con «Create Symlink», como XUI.one)
   const [jellyfinModalOpen, setJellyfinModalOpen] = useState(false);
@@ -772,6 +778,81 @@ export default function VodPage({ onPreview }) {
       // sin permisos de administrador
     }
   };
+
+  // ==================== LIMPIEZA DE CATEGORÍAS ====================
+  // Al sincronizar «por carpeta del disco» cada subcarpeta creó su categoría.
+  // Al pasar a «por género de TMDB» esas categorías sobran: aquí se ve cuánto
+  // tiene cada una y se borran; si alguna conserva títulos, se mueven antes a
+  // la categoría que elija el cliente (nunca se queda una película huérfana).
+  const loadCategoryUsage = async () => {
+    setCatBusy('load');
+    setCatMsg(null);
+    try {
+      const res = await apiFetch('/api/vod/categories/usage');
+      setCatUsage(res);
+      setCatSelected((res.categories || []).filter((c) => c.empty).map((c) => c.id));
+      setCatMoveTo('');
+    } catch (err) {
+      setCatMsg({ ok: false, text: err.message });
+    } finally {
+      setCatBusy('');
+    }
+  };
+
+  const toggleCatSelected = (id) =>
+    setCatSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const handlePurgeCategories = async () => {
+    if (!catSelected.length || catBusy) return;
+    const selected = (catUsage?.categories || []).filter((c) => catSelected.includes(c.id));
+    const needsMove = selected.some((c) => !c.empty);
+    if (needsMove && !catMoveTo) {
+      setCatMsg({ ok: false, text: 'Elige a qué categoría mover el contenido de las que no están vacías.' });
+      return;
+    }
+    const destino = (catUsage?.categories || []).find((c) => String(c.id) === String(catMoveTo));
+    const listado = selected.map((c) => `· ${c.name} (${c.movies} películas, ${c.series} series)`).join('\n');
+    const pregunta =
+      `¿Borrar ${selected.length} categoría(s)?\n\n${listado}` +
+      (needsMove ? `\n\nEl contenido se moverá a «${destino?.name || ''}».` : '');
+    if (!window.confirm(pregunta)) return;
+
+    setCatBusy('purge');
+    setCatMsg(null);
+    try {
+      const res = await apiFetch('/api/vod/categories/purge', {
+        method: 'POST',
+        body: JSON.stringify({
+          ids: catSelected,
+          moveToId: catMoveTo ? Number(catMoveTo) : null
+        })
+      });
+      const movidos = (res.moved?.movies || 0) + (res.moved?.series || 0);
+      setCatMsg({
+        ok: true,
+        text:
+          `Borradas ${res.deleted} categoría(s).` +
+          (movidos > 0
+            ? ` Se movieron ${res.moved.movies} películas y ${res.moved.series} series a «${destino?.name || 'la categoría elegida'}».`
+            : '')
+      });
+      setCatSelected([]);
+      setCatMoveTo('');
+      setCatUsage(null);
+      await loadAll();
+      const refreshed = await apiFetch('/api/vod/categories/usage');
+      setCatUsage(refreshed);
+    } catch (err) {
+      setCatMsg({ ok: false, text: err.message });
+    } finally {
+      setCatBusy('');
+    }
+  };
+
+  // Derivados de la limpieza de categorías.
+  const selectedCats = (catUsage?.categories || []).filter((c) => catSelected.includes(c.id));
+  const needsMoveTo = selectedCats.some((c) => !c.empty);
+  const moveTargets = (catUsage?.categories || []).filter((c) => !catSelected.includes(c.id));
 
   // ==================== JELLYFIN ====================
   const parsePathMapText = (text) =>
@@ -2545,6 +2626,134 @@ export default function VodPage({ onPreview }) {
                     <div className="text-[10px] text-slate-500">
                       Las categorías se crean solas si no existen y se reutilizan si ya están (no se duplican nombres).
                     </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Limpieza de categorías del catálogo */}
+              <div className="p-4 rounded-xl bg-[#090e1a] border border-rose-500/25 space-y-3">
+                <div className="flex items-start gap-2">
+                  <Tags className="w-4 h-4 text-rose-300 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-semibold text-white">Categorías del catálogo: borrar las que sobran</div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Las subcarpetas del disco crearon sus propias categorías (<i>Ciencia Ficcion</i>,{' '}
+                      <i>triller</i>, <i>accion</i>…) y siguen ahí aunque el catálogo ya esté separado por género de
+                      TMDB. Revisa cuánto tiene cada una y borra las que no uses: lo que todavía tenga títulos se mueve
+                      antes a la categoría que elijas, así ninguna película se queda sin categoría.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={loadCategoryUsage}
+                    disabled={Boolean(catBusy)}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 font-semibold text-[12px]"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${catBusy === 'load' ? 'animate-spin' : ''}`} />
+                    {catBusy === 'load' ? 'Revisando...' : 'Revisar categorías'}
+                  </button>
+                  {catUsage && (
+                    <span className="text-[11px] text-slate-400">
+                      {catUsage.total} categoría(s) · <b className="text-slate-200">{catUsage.empty}</b> vacía(s) ·{' '}
+                      <b className="text-amber-300">{catUsage.withContent}</b> con contenido
+                    </span>
+                  )}
+                </div>
+
+                {catUsage && (
+                  <div className="space-y-2">
+                    <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-800 bg-[#0e1526] divide-y divide-slate-800">
+                      {catUsage.categories.length === 0 && (
+                        <div className="p-3 text-center text-[11px] text-slate-500">
+                          No hay categorías de películas ni de series.
+                        </div>
+                      )}
+                      {catUsage.categories.map((c) => (
+                        <label
+                          key={c.id}
+                          className="flex items-center gap-2 px-3 py-2 text-[11px] cursor-pointer hover:bg-slate-800/40"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={catSelected.includes(c.id)}
+                            onChange={() => toggleCatSelected(c.id)}
+                            className="accent-rose-500"
+                          />
+                          <span className="flex-1 truncate font-semibold text-slate-200">{c.name}</span>
+                          <span className={c.empty ? 'text-slate-500' : 'text-amber-300'}>
+                            {c.movies} película(s) · {c.series} serie(s)
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">
+                            {c.type}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+
+                    {needsMoveTo && (
+                      <div>
+                        <label className="block text-[11px] text-amber-300 font-semibold mb-1">
+                          Mover el contenido de las categorías con títulos a:
+                        </label>
+                        <select
+                          value={catMoveTo}
+                          onChange={(e) => setCatMoveTo(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white text-[12px]"
+                        >
+                          <option value="">— elegir categoría de destino —</option>
+                          {moveTargets.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name} ({c.total} título(s))
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] text-slate-400">
+                        {catSelected.length === 0
+                          ? 'Marca las categorías que quieras borrar.'
+                          : `${catSelected.length} seleccionada(s).`}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCatSelected([]);
+                            setCatMoveTo('');
+                          }}
+                          disabled={!catSelected.length || Boolean(catBusy)}
+                          className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 text-[12px] font-semibold"
+                        >
+                          Quitar selección
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handlePurgeCategories}
+                          disabled={!catSelected.length || Boolean(catBusy) || (needsMoveTo && !catMoveTo)}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white font-bold text-[12px]"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {catBusy === 'purge' ? 'Borrando...' : `Borrar ${catSelected.length} categoría(s)`}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {catMsg && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-[11px] ${
+                      catMsg.ok
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                        : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                    }`}
+                  >
+                    {catMsg.text}
                   </div>
                 )}
               </div>

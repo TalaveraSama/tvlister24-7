@@ -3014,6 +3014,38 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.26: borrar las categorías que crearon las carpetas
+
+Al sincronizar «por carpeta del disco», cada subcarpeta crea su categoría (`Ciencia Ficcion/`,
+`triller/`, `accion/`…). Si después se pasa a «por género de TMDB», **esas categorías se quedan**:
+vacías las más, y con las pocas películas que TMDB no supo clasificar las demás. Ahora se borran
+desde el propio panel o por terminal, **sin dejar nada huérfano**.
+
+| Dónde | Qué hace |
+| --- | --- |
+| Modal *Sincronizar Carpeta* → **Categorías del catálogo: borrar las que sobran** | «Revisar categorías» lista todas las de películas/series con cuántas tiene cada una. Las **vacías vienen marcadas**; si marcas alguna con contenido aparece el selector **Mover el contenido a** y sólo entonces se habilita el borrado. |
+| `tvlister-admin vod-cats` | Lo mismo por terminal: tabla con películas/series por categoría. |
+| `tvlister-admin vod-cats clean` | Borra las vacías (enseña la lista y pide confirmación; `--yes` para automatizar). |
+| `tvlister-admin vod-cats clean --all --move-to "Acción"` | Consolida **todo** en «Acción» y borra el resto. |
+
+Garantías:
+
+- **Nunca se borra una categoría con contenido** si no se indica destino: la API responde `409` con la
+  lista de las que bloquean.
+- Al mover, se actualizan `vod_items.category_id`, `series.category_id` y el
+  `default_category_id` de las carpetas monitoreadas, todo en una transacción.
+- Sólo se tocan categorías `type` `vod`/`series`: las de canales en vivo no aparecen ni se borran.
+- El destino no puede ser una de las categorías que se van a borrar.
+
+| Ruta | Qué hace |
+| --- | --- |
+| `GET /api/vod/categories/usage` | categorías de VOD/series con `movies`, `series`, `total` y `empty` |
+| `POST /api/vod/categories/purge` | `{ ids: [..], moveToId }`; sin `moveToId` sólo borra vacías |
+
+Comprobación automática: `node scripts/test_vod_category_cleanup.mjs` (base temporal: borrar vacías,
+bloqueo de las que tienen contenido, movimiento a otra categoría, carpetas monitoreadas y protecciones)
+más la interfaz renderizada con jsdom.
+
 ### v2.6.24: el sincronizador separa el catálogo por género de TMDB
 
 El cliente pidió que las películas se repartan en **Acción, Comedia, Terror, Thriller, Románticas…**
