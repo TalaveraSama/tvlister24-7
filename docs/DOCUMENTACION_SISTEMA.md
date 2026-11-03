@@ -312,6 +312,11 @@ tvlister-admin import-xui /home/xui/backups/respaldo.sql.gz
 # Dejar el panel 100% limpio (borra catálogo y líneas, conserva Super Admin y FFmpeg)
 tvlister-admin clean
 
+# Categorías de películas/series: ver cuánto tiene cada una y borrar las que crearon las carpetas
+tvlister-admin vod-cats
+tvlister-admin vod-cats clean
+tvlister-admin vod-cats clean --all --move-to "Acción"
+
 # Programar respaldo automático todos los días a las 03:00 AM en /root (retención 7 días)
 tvlister-admin enable-cron
 
