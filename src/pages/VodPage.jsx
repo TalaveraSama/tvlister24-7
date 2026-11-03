@@ -665,7 +665,9 @@ export default function VodPage({ onPreview }) {
       const genreNote =
         st.categoryMode === 'tmdb_genres'
           ? ` ${st.genreClassified} clasificadas en su categoría por género de TMDB.`
-          : '';
+          : st.categoryMode === 'single'
+            ? ' Todo entró en la categoría maestra (Movies / Series).'
+            : '';
       const warn = (st.warnings || []).length ? ` Aviso: ${st.warnings.join(' ')}` : '';
       setFolderMsg({
         ok: (st.warnings || []).length === 0,
