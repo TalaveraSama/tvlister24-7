@@ -1137,9 +1137,12 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.25/install.sh \
-  | sudo bash -s -- --tag v2.6.25
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.26/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.26
 ```
+
+La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
+el árbol del tag desde `codeload.github.com` y sigue con el mismo código.
 
 El panel escucha de fábrica en el **80** (HTTP) y, con certificado, en el **443** (HTTPS).
 Para cargar el certificado y abrir el 443: `tvlister-admin tls <fullchain.pem> <privkey.pem>`.

@@ -11,7 +11,7 @@
 #
 # Fijando una versión concreta:
 #
-#   curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.3.0/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/vX.Y.Z/scripts/install_release.sh \
 #     | bash -s -- --tag vX.Y.Z
 #
 # Opciones:
@@ -55,8 +55,10 @@ while [ $# -gt 0 ]; do
       cat <<'USAGE'
 TVLister 24/7 — instalador desde release
 
+  curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/vX.Y.Z/scripts/install_release.sh \
+    | sudo bash -s -- --tag vX.Y.Z
+  (o el atajo del release, cuando trae adjuntos:)
   curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
-  curl -fsSL .../releases/download/vX.Y.Z/install.sh | sudo bash -s -- --tag vX.Y.Z
 
 Opciones:
   --tag <vX.Y.Z>   Instala una versión exacta (por defecto: la última publicada)

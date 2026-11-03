@@ -65,24 +65,23 @@ sudo tvlister-admin tls                                        # estado del cert
 Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin clonar ramas:
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
+# última versión publicada
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.26/scripts/install_release.sh \
+  | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.25/install.sh \
-  | sudo bash -s -- --tag v2.6.25
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.26/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.26
 ```
+
+Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el
+instalador baja el árbol exacto del tag. También existe el atajo clásico
+`https://github.com/TalaveraSama/tvlister24-7/releases/…/install.sh` cuando el release lleva adjuntos.
 
 El puerto por defecto es el `80`; `--port <n>` sólo hace falta si quieres forzar otro.
-
-Si un release no tiene el paquete adjunto (o su descarga falla), el instalador usa el árbol del tag:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.25/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.25
-```
 
 También puedes instalarlo desde la consola del propio servidor:
 
