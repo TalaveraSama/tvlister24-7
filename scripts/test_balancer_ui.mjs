@@ -87,6 +87,15 @@ globalThis.fetch = async (url, options = {}) => {
   let data = {};
   if (key === 'GET /api/system') data = system();
   else if (key === 'GET /api/system/ffmpeg-efficiency') data = {};
+  else if (key === 'GET /api/servers/streams')
+    data = {
+      nodes: [
+        { id: 1, name: 'Maestro', is_main: true, streams: 20 },
+        { id: 2, name: 'Balancer MX-2', is_main: false, streams: 40 }
+      ]
+    };
+  else if (key === 'POST /api/servers/balance-streams')
+    data = { ok: true, total: 60, assigned: { 2: 60 }, nodes: [{ id: 1, name: 'Maestro', is_main: true, streams: 0 }, { id: 2, name: 'Balancer MX-2', is_main: false, streams: 60 }] };
   else if (key === 'GET /api/system/readiness')
     data = { checks: [], streamShieldActive: true, actionNeeded: false, pendingWarnings: 0 };
   else if (key === 'POST /api/servers/install') {
@@ -169,6 +178,21 @@ ok(text().includes('Instalación en 10.0.0.9'), 'muestra el progreso de la insta
 ok(text().includes('Terminada') || text().includes('Instalando'), 'el panel sigue el estado del trabajo');
 ok(calls.some((c) => c.key === 'GET /api/servers/install/job123'), 'consulta el log del trabajo');
 ok(text().includes('Balancer MX-2'), 'el nodo aparece en la lista');
+
+// --- Reparto de canales entre nodos -------------------------------------
+ok(text().includes('Reparto de canales entre nodos'), 'la tarjeta de reparto está a la vista');
+ok(text().includes('Maestro: 20 canal(es)'), 'muestra cuántos canales tiene el maestro', text().match(/Maestro: \d+ canal\(es\)/)?.[0]);
+ok(text().includes('Balancer MX-2: 40 canal(es)') || text().includes('40 canal(es)'), 'muestra los canales de cada nodo');
+
+const balanceBtn = byText('button', 'Repartir automáticamente');
+ok(!!balanceBtn, 'existe el botón de reparto automático');
+if (balanceBtn) await click(balanceBtn);
+await act(async () => {
+  await new Promise((r) => setTimeout(r, 300));
+});
+ok(calls.some((c) => c.key === 'POST /api/servers/balance-streams'), 'llama al reparto automático');
+ok(text().includes('Repartidos 60 canales'), 'informa cuántos canales repartió', text().match(/Repartidos[^.]*/)?.[0]);
+ok(text().includes('60 canal(es)'), 'el resumen refleja el reparto');
 
 console.log(fails.length === 0 ? '\nTODO OK' : `\n${fails.length} fallo(s)`);
 process.exit(fails.length === 0 ? 0 : 1);

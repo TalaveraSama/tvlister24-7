@@ -10,6 +10,7 @@ import zlib from 'node:zlib';
 import { db, DB_PATH, initDb, hashPassword, verifyPassword, resetPanelCatalog, withSqliteBusyRetry } from './db.js';
 import { egressMeterMiddleware, getEgressMbps } from './bandwidthMeter.js';
 import { createInstallJob, appendInstallLog, finishInstallJob, getInstallJob, runRemoteInstall, buildInstallCommand } from './balancerInstall.js';
+import { distributeStreamsAcrossNodes, streamAssignmentSummary } from './nodeAffinity.js';
 import {
   inspectLocalXuiEnvironment,
   previewXuiImport,
@@ -4436,11 +4437,83 @@ app.get('/api/servers/install/:jobId', requireAuth, requireAdmin, (req, res) => 
   res.json({ ...job, server: srv || null });
 });
 
+// ==================== REPARTO DE CANALES ENTRE NODOS ====================
+// Cada nodo pide al maestro una copia por canal distinto que sirva. Con 10 VPS
+// sirviendo los 148 canales, el maestro subiría 148 × bitrate × 10. Asignando
+// canales por nodo, cada uno pide sólo los suyos.
+app.get('/api/servers/streams', requireAuth, requireAdmin, (_req, res) => {
+  res.json({ nodes: streamAssignmentSummary() });
+});
+
+app.post('/api/servers/:id/streams', requireAuth, requireAdmin, (req, res) => {
+  const serverId = Number(req.params.id) || 0;
+  if (serverId === 1) {
+    return res.status(400).json({ error: 'El nodo maestro no recibe asignaciones: los canales sin nodo los sirve él.' });
+  }
+  const srv = db.prepare('SELECT * FROM servers WHERE id = ? AND is_main = 0').get(serverId);
+  if (!srv) return res.status(404).json({ error: 'Nodo no encontrado.' });
+
+  const { streamIds, mode = 'set', categoryId } = req.body || {};
+  let ids = Array.isArray(streamIds) ? streamIds.map(Number).filter((n) => n > 0) : [];
+  if ((!ids.length || mode === 'all') && Number(categoryId) > 0) {
+    ids = db.prepare('SELECT id FROM streams WHERE category_id = ?').all(Number(categoryId)).map((r) => r.id);
+  }
+  if (!ids.length && mode !== 'all' && mode !== 'clear-all') {
+    return res.status(400).json({ error: 'Indica los canales (streamIds) o una categoría.' });
+  }
+
+  const upd = db.prepare('UPDATE streams SET server_id = ? WHERE id = ?');
+  if (mode === 'clear-all') {
+    const info = db.prepare('UPDATE streams SET server_id = 1 WHERE server_id = ?').run(serverId);
+    return res.json({ ok: true, cleared: info.changes, server_id: serverId });
+  }
+  if (mode === 'all') {
+    ids = db.prepare('SELECT id FROM streams').all().map((r) => r.id);
+  }
+  const apply = mode === 'clear' ? 1 : serverId;
+  let changed = 0;
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    for (const id of ids) {
+      const info = upd.run(apply, id);
+      changed += info.changes || 0;
+    }
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    return res.status(500).json({ error: err.message || 'No se pudieron asignar los canales.' });
+  }
+  res.json({ ok: true, assigned: apply === 1 ? 0 : changed, released: apply === 1 ? changed : 0, server_id: serverId, nodes: streamAssignmentSummary() });
+});
+
+// Reparte todos los canales por turnos entre los balancers, ponderando por su
+// capacidad (800 Mbps = 2 turnos, 400 Mbps = 1).
+app.post('/api/servers/balance-streams', requireAuth, requireAdmin, (req, res) => {
+  const { streamIds = null, serverIds = null, reset = false } = req.body || {};
+  try {
+    if (reset) {
+      db.prepare('UPDATE streams SET server_id = 1').run();
+      return res.json({ ok: true, reset: true, nodes: streamAssignmentSummary() });
+    }
+    const result = distributeStreamsAcrossNodes({
+      streamIds: Array.isArray(streamIds) ? streamIds.map(Number).filter(Boolean) : null,
+      serverIds: Array.isArray(serverIds) ? serverIds.map(Number).filter(Boolean) : null
+    });
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ...result, nodes: streamAssignmentSummary() });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo repartir el catálogo.' });
+  }
+});
+
 app.delete('/api/servers/:id', requireAuth, requireAdmin, (req, res) => {
   const srv = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.params.id));
   if (srv?.is_main) return res.status(400).json({ error: 'No se puede eliminar el Nodo Maestro Principal.' });
+  // Los canales que servía vuelven al maestro: si no, quedarían apuntando a un
+  // nodo que ya no existe.
+  const released = db.prepare('UPDATE streams SET server_id = 1 WHERE server_id = ?').run(Number(req.params.id));
   db.prepare('DELETE FROM servers WHERE id = ?').run(Number(req.params.id));
-  res.json({ ok: true });
+  res.json({ ok: true, released_streams: released.changes || 0 });
 });
 
 function normalizeTranscodeProfilePayload(b = {}, existing = null) {

@@ -555,6 +555,8 @@ function runInitDbBody() {
   ensureColumn('servers', 'install_log', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('servers', 'installed_at', 'TEXT');
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
+  // Nodo balancer que sirve el canal (1 = lo sirve el maestro).
+  ensureColumn('streams', 'server_id', 'INTEGER DEFAULT 1');
   ensureColumn('streams', 'xui_id', 'INTEGER');
   // --- VOD desde Jellyfin (enlaces simbólicos, como el «Create Symlink» de XUI) --
   ensureColumn('vod_items', 'source_provider', "TEXT NOT NULL DEFAULT 'manual'");

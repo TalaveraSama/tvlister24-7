@@ -8,6 +8,7 @@ import { db } from './db.js';
 import { getStreamBaseUrl } from './publicBase.js';
 import { getEgressMbps } from './bandwidthMeter.js';
 import { pickTarget } from './lbSelector.js';
+import { getStreamHomeNodeId, isHomeNodeUsable } from './nodeAffinity.js';
 import { resolveDeviceForLine } from './deviceRegistry.js';
 import { signToken } from './auth.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit, checkCredentialGate, noteCredentialFailure, clearCredentialFailures } from './auth.js';
@@ -357,8 +358,25 @@ function rewriteHlsManifestForProxy(manifestText, manifestFinalUrl, proxyPrefix,
  * - `lb_master_offload_pct` (0 = repartir siempre; 70 = el maestro sólo suelta
  *   clientes al pasar del 70 %).
  */
-function selectEdgeRedirect(req) {
+function selectEdgeRedirect(req, opts = {}) {
   if (String(req.query.edge_origin || '') === '1') return null;
+
+  const streamId = Number(opts.streamId) || 0;
+
+  // Afinidad canal -> nodo: si el canal está asignado a un balancer sano, TODOS
+  // sus clientes van ahí (así cada nodo pide sólo sus canales al maestro y su
+  // 1 Gbps se suma de verdad). Si el nodo está lleno o caído, sigue el reparto.
+  if (streamId > 0) {
+    const homeId = getStreamHomeNodeId(streamId);
+    if (homeId) {
+      const home = db.prepare('SELECT * FROM servers WHERE id = ?').get(homeId);
+      if (isHomeNodeUsable(home)) {
+        const protoHome = home.https_port && req.protocol === 'https' ? 'https' : 'http';
+        const portHome = protoHome === 'https' ? home.https_port : home.port || 8096;
+        return { serverId: home.id, url: `${protoHome}://${home.host}:${portHome}${req.originalUrl}` };
+      }
+    }
+  }
 
   const settings = Object.fromEntries(
     db
@@ -1568,8 +1586,10 @@ async function serveLiveForLine(req, res, { line, username, password, streamSpec
     return res.status(403).send('Canal no incluido en el paquete contratado');
   }
 
-  // Edge Load Balancer Smart Routing (if an active Edge node has a live heartbeat)
-  const edgeTarget = selectEdgeRedirect(req);
+  // Edge Load Balancer Smart Routing (afinidad del canal + reparto por carga)
+  const edgeTarget = selectEdgeRedirect(req, {
+    streamId: numericId > 10000 || rawId.startsWith('ch247_') ? 0 : numericId
+  });
   if (edgeTarget) {
     if (numericId > 10000 || rawId.startsWith('ch247_')) {
       const chId = rawId.startsWith('ch247_') ? Number(rawId.replace('ch247_', '')) : numericId - 10000;

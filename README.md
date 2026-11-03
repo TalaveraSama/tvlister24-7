@@ -19,6 +19,11 @@ según la ficha de TMDB, con prioridad y renombrado configurables (una comedia r
 botón **Aplicar** que lo recoloca por lotes, creando las categorías que falten. Si TMDB no encuentra
 un título, se queda en la categoría que tenía y no se repite la consulta.
 
+🗺️ **Reparto de canales entre nodos (v2.6.30)**: con varios balancers, el panel reparte **qué canales sirve cada
+VPS** (ponderado por su NIC). Así cada nodo pide al maestro sólo sus canales y el 1 Gbps del maestro no se
+multiplica por cada nodo. Si el nodo asignado se llena o se cae, el canal vuelve al reparto normal sin cortar
+al cliente. Botón **Repartir automáticamente** en *Sistema → Nodos Edge Load Balancer*.
+
 ⚡ **Los balancers suman ancho de banda de verdad (v2.6.29)**: en *Sistema → Nodos Edge Load Balancer*
 escribes la IP y la clave del VPS y **el panel lo instala solo** por SSH. Cada nodo **cachea los segmentos**
 (100 clientes del mismo canal = 1 descarga) y sirve los bytes él mismo, así su 1 Gbps **se suma** al del
@@ -86,15 +91,15 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 
 ```bash
 # última versión publicada
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.29/scripts/install_release.sh \
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.30/scripts/install_release.sh \
   | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.29/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.29
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.30/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.30
 ```
 
 Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el

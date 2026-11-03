@@ -71,6 +71,10 @@ export default function ServersSecurityPage() {
   const [balJob, setBalJob] = useState(null); // { jobId, host, status, log }
   const [balManual, setBalManual] = useState('');
   const [balError, setBalError] = useState('');
+  // Reparto de canales entre nodos (afinidad canal -> balancer).
+  const [assign, setAssign] = useState([]);
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [assignMsg, setAssignMsg] = useState(null);
 
   const [newAdmin, setNewAdmin] = useState({ username: '', password: '', email: '', notes: '' });
   const [pwdTargetId, setPwdTargetId] = useState(1);
@@ -139,6 +143,19 @@ export default function ServersSecurityPage() {
 
   useEffect(() => {
     loadAll();
+  }, []);
+
+  const loadAssign = async () => {
+    try {
+      const res = await apiFetch('/api/servers/streams');
+      setAssign(res.nodes || []);
+    } catch {
+      /* sin permisos o panel viejo */
+    }
+  };
+
+  useEffect(() => {
+    loadAssign();
   }, []);
 
   const flash = (msg) => {
@@ -281,6 +298,57 @@ export default function ServersSecurityPage() {
       clearInterval(timer);
     };
   }, [balJob?.jobId, balJob?.status]);
+
+  // Reparte todos los canales por turnos entre los balancers (ponderado por su
+  // capacidad). Así cada nodo pide al maestro sólo sus canales.
+  const autoBalanceStreams = async () => {
+    setAssignBusy(true);
+    setAssignMsg(null);
+    try {
+      const res = await apiFetch('/api/servers/balance-streams', { method: 'POST', body: JSON.stringify({}) });
+      setAssign(res.nodes || []);
+      setAssignMsg({ ok: true, text: `Repartidos ${res.total} canales entre ${res.nodes?.length ? res.nodes.length - 1 : 0} balancer(es).` });
+      loadAll();
+    } catch (err) {
+      setAssignMsg({ ok: false, text: err.message || 'No se pudo repartir el catálogo.' });
+    } finally {
+      setAssignBusy(false);
+    }
+  };
+
+  const assignAllToNode = async (nodeId) => {
+    setAssignBusy(true);
+    setAssignMsg(null);
+    try {
+      const res = await apiFetch(`/api/servers/${nodeId}/streams`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'all' })
+      });
+      setAssign(res.nodes || []);
+      setAssignMsg({ ok: true, text: `Todos los canales asignados a este nodo (${res.assigned}).` });
+    } catch (err) {
+      setAssignMsg({ ok: false, text: err.message });
+    } finally {
+      setAssignBusy(false);
+    }
+  };
+
+  const releaseNodeStreams = async (nodeId) => {
+    setAssignBusy(true);
+    setAssignMsg(null);
+    try {
+      const res = await apiFetch(`/api/servers/${nodeId}/streams`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'clear-all' })
+      });
+      setAssign(res.nodes || []);
+      setAssignMsg({ ok: true, text: `Canales devueltos al maestro (${res.cleared}).` });
+    } catch (err) {
+      setAssignMsg({ ok: false, text: err.message });
+    } finally {
+      setAssignBusy(false);
+    }
+  };
 
   const addServer = async (e) => {
     e.preventDefault();
@@ -1074,6 +1142,75 @@ export default function ServersSecurityPage() {
                   {(sys.servers || []).filter((x) => !x.is_main).length} balancer(es) registrados
                 </span>
               </div>
+            </div>
+
+            <div className="rounded-xl bg-[#090e1a] border border-slate-800 p-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-white">Reparto de canales entre nodos</div>
+                  <p className="text-[11px] text-slate-400">
+                    Cada nodo pide al maestro <b>una copia por canal</b> que sirva. Repartiendo los canales, el maestro sube
+                    una vez por canal en total y no multiplica su 1 Gbps por cada balancer.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={assignBusy || (sys.servers || []).filter((x) => !x.is_main).length === 0}
+                    onClick={autoBalanceStreams}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-semibold text-[11px]"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Repartir automáticamente
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {(assign || []).map((n) => (
+                  <span
+                    key={n.id}
+                    className={`px-2 py-1 rounded-lg border font-mono text-[11px] ${
+                      n.is_main ? 'border-slate-700 text-slate-300 bg-[#0b1120]' : 'border-indigo-500/30 text-indigo-200 bg-indigo-500/10'
+                    }`}
+                  >
+                    {n.is_main ? 'Maestro' : n.name}: <b>{n.streams}</b> canal(es)
+                    {!n.is_main && (
+                      <>
+                        {' '}
+                        <button
+                          type="button"
+                          onClick={() => assignAllToNode(n.id)}
+                          className="underline hover:text-white"
+                          title="Poner todos los canales en este nodo"
+                        >
+                          todos
+                        </button>
+                        {' · '}
+                        <button
+                          type="button"
+                          onClick={() => releaseNodeStreams(n.id)}
+                          className="underline hover:text-white"
+                          title="Devolver sus canales al maestro"
+                        >
+                          liberar
+                        </button>
+                      </>
+                    )}
+                  </span>
+                ))}
+              </div>
+
+              {assignMsg && (
+                <div
+                  className={`p-2 rounded-lg border text-[11px] ${
+                    assignMsg.ok
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                      : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                  }`}
+                >
+                  {assignMsg.text}
+                </div>
+              )}
             </div>
 
             <form onSubmit={installBalancer} className="rounded-xl bg-[#090e1a] border border-slate-800 p-3 space-y-2 text-xs">

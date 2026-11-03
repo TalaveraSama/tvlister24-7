@@ -1143,8 +1143,8 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.29/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.29
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.30/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.30
 ```
 
 La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
@@ -3022,6 +3022,27 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
 - El 80 y el 443 se registran solos como puertos estándar del gestor multi-puerto (una sola vez: si
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
+
+### v2.6.30: reparto de canales entre nodos (afinidad)
+
+Cada nodo pide al maestro **una copia por canal distinto** que sirva. Con 10 VPS sirviendo los 148 canales, el
+maestro subiría `148 × bitrate × 10`. La afinidad lo resuelve: cada canal pertenece a un nodo.
+
+| Pieza | Detalle |
+| --- | --- |
+| `streams.server_id` | Nodo dueño del canal; `1` o vacío = maestro |
+| `server/nodeAffinity.js` | `distributeStreamsAcrossNodes()` (turnos ponderados por NIC), `streamAssignmentSummary()`, `getStreamHomeNodeId()`, `isHomeNodeUsable()` |
+| `selectEdgeRedirect(req, { streamId })` | Afinidad primero; si el nodo está lleno/caído/sin latido, reparto normal |
+| `DELETE /api/servers/:id` | Devuelve sus canales al maestro (`released_streams`) |
+
+| Ruta | Qué hace |
+| --- | --- |
+| `GET /api/servers/streams` | Canales por nodo (maestro incluido) |
+| `POST /api/servers/:id/streams` | `{ streamIds }` · `{ mode: 'all' }` · `{ mode: 'clear-all' }` · `{ categoryId }` |
+| `POST /api/servers/balance-streams` | `{}` reparte · `{ serverIds }` · `{ reset: true }` todo al maestro |
+
+Prueba: `scripts/test_node_affinity.mjs` (reparto ponderado, afinidad sobre carga, nodo caído → reparto,
+redirect real 302 al nodo asignado y vuelta al maestro si cae, borrado del nodo).
 
 ### v2.6.29: balancers que suman ancho de banda e instalador desde el panel
 
