@@ -3109,7 +3109,16 @@ app.get('/api/vod/genres/config', requireAuth, requireAdmin, (req, res) => {
 app.post('/api/vod/genres/config', requireAuth, requireAdmin, (req, res) => {
   const { aliasesText, priorityText, resetAliases } = req.body || {};
   const cfg = saveGenreCategoryConfig({ aliasesText, priorityText, resetAliases: Boolean(resetAliases) });
-  res.json({ ok: true, ...cfg });
+  // La respuesta tiene la misma forma que el GET: si faltara `tmdb`, la pantalla
+  // se quedaría creyendo que no hay API Key al guardar las reglas (y desactivaría
+  // «Vista Previa» / «Aplicar» aunque la clave esté puesta).
+  const tmdb = getTmdbConfig();
+  res.json({
+    ok: true,
+    ...cfg,
+    categories: listVodCategories(),
+    tmdb: { configured: tmdb.configured, language: tmdb.language }
+  });
 });
 
 // Vista previa (dryRun, por defecto) y aplicación real de la separación por

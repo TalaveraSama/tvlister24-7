@@ -565,6 +565,20 @@ export default function VodPage({ onPreview }) {
     setTmdbResults([]);
   };
 
+  // La tarjeta «Separar el catálogo por género de TMDB» lee si hay API Key una
+  // sola vez, al abrir la pantalla. Si la clave se guarda o se importa después,
+  // la tarjeta seguía avisando «Falta la API Key» y bloqueaba «Vista Previa» y
+  // «Aplicar». Esto refresca ese estado y borra el error anterior.
+  const refreshGenreTmdbState = async (configured) => {
+    try {
+      const cfg = await apiFetch('/api/vod/genres/config');
+      if (cfg && typeof cfg === 'object') setGenreCfg((prev) => ({ ...prev, ...cfg }));
+      if (cfg?.tmdb?.configured || configured) setGenreMsg(null);
+    } catch {
+      // sin permisos de administrador: se deja como está
+    }
+  };
+
   const handleSaveTmdbSettings = async (e) => {
     e.preventDefault();
     setTmdbBusy(true);
@@ -579,6 +593,7 @@ export default function VodPage({ onPreview }) {
       setTmdbCfg((prev) => ({ ...prev, ...res }));
       setTmdbKeyInput('');
       setTmdbMsg({ ok: true, text: 'Conexión con TMDB (themoviedb.org) verificada y guardada.' });
+      await refreshGenreTmdbState(res.configured);
     } catch (err) {
       setTmdbMsg({ ok: false, text: err.message });
     } finally {
@@ -594,6 +609,7 @@ export default function VodPage({ onPreview }) {
       setTmdbCfg((prev) => ({ ...prev, ...res }));
       setTmdbLangInput(res.language || 'es-MX');
       setTmdbMsg({ ok: true, text: `API Key importada desde XUI.one (${res.apiKeyMasked}).` });
+      await refreshGenreTmdbState(res.configured);
     } catch (err) {
       setTmdbMsg({ ok: false, text: err.message });
     } finally {
@@ -693,7 +709,10 @@ export default function VodPage({ onPreview }) {
       method: 'POST',
       body: JSON.stringify({ aliasesText: genreAliasesText, priorityText: genrePriorityText })
     });
-    setGenreCfg(cfg);
+    // Se fusiona (no se reemplaza): el POST sólo devuelve las reglas y, si algún
+    // día no trae `tmdb`, borraría el estado de la API Key y la tarjeta diría
+    // «Falta la API Key de TMDB» con la clave ya puesta.
+    setGenreCfg((prev) => ({ ...prev, ...cfg }));
     setGenreAliasesText(cfg.aliasesText || '');
     setGenrePriorityText(cfg.priorityText || '');
     return cfg;
@@ -2572,7 +2591,8 @@ export default function VodPage({ onPreview }) {
                   <div className="flex items-start gap-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-[11px]">
                     <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                     <div>
-                      Falta la API Key de TMDB. Sin ella no se puede saber el género.{' '}
+                      Falta la API Key de TMDB. Sin ella no se puede saber el género. Si ya la tienes en XUI.one,
+                      entra en «Configurar TMDB» y usa «Importar desde XUI.one».{' '}
                       <button
                         type="button"
                         onClick={() => {

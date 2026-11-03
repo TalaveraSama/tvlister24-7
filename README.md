@@ -19,6 +19,12 @@ según la ficha de TMDB, con prioridad y renombrado configurables (una comedia r
 botón **Aplicar** que lo recoloca por lotes, creando las categorías que falten. Si TMDB no encuentra
 un título, se queda en la categoría que tenía y no se repite la consulta.
 
+🔑 **«Falta la API Key de TMDB» con la clave ya puesta (v2.6.28)**: la tarjeta de géneros perdía el
+estado de la clave al guardar las reglas y no se refrescaba al guardarla en el modal, así que bloqueaba
+**Vista Previa** y **Aplicar**. Ya no: el `POST` de reglas devuelve el mismo estado que el `GET` y la
+tarjeta se refresca sola al guardar o importar la clave. Si tu clave está en XUI.one, el modal tiene
+**Importar Clave desde XUI.one**.
+
 🏷️ **Todo lo que entra por carpeta cae en la categoría maestra `Movies` (v2.6.27)**: la opción «por
 carpeta del disco», que creaba una categoría por subcarpeta (`Ciencia Ficcion/`, `triller/`…), ya no se
 ofrece. Al sincronizar una carpeta eliges **Categoría maestra · Movies** (las series van a `Series`) o
@@ -74,15 +80,15 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 
 ```bash
 # última versión publicada
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.27/scripts/install_release.sh \
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.28/scripts/install_release.sh \
   | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.27/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.27
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.28/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.28
 ```
 
 Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el

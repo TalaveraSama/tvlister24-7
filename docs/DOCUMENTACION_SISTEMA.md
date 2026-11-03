@@ -1143,8 +1143,8 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.27/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.27
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.28/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.28
 ```
 
 La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
@@ -3022,6 +3022,23 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
 - El 80 y el 443 se registran solos como puertos estándar del gestor multi-puerto (una sola vez: si
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
+
+### v2.6.28: el aviso «Falta la API Key de TMDB» con la clave puesta
+
+La tarjeta *Separar el catálogo por género de TMDB* decía que faltaba la clave aunque estuviera
+guardada, y dejaba **Vista Previa** y **Aplicar** desactivados.
+
+| Causa | Arreglo |
+| --- | --- |
+| `POST /api/vod/genres/config` devolvía sólo las reglas; la pantalla reemplazaba su estado y perdía `tmdb.configured` | El `POST` devuelve la misma forma que el `GET` (`reglas + categories + tmdb`) y la pantalla **fusiona** el estado (`{...prev, ...cfg}`) |
+| Guardar o importar la clave en el modal no refrescaba la tarjeta (se leía sólo al abrir la pantalla) | `refreshGenreTmdbState()` vuelve a pedir `GET /api/vod/genres/config` y limpia el error anterior |
+| El error rojo de un intento previo se quedaba visible | Se borra en cuanto `tmdb.configured` es verdadero |
+
+El aviso ámbar ahora indica que la clave se puede traer de XUI.one con **Importar Clave desde XUI.one**
+(`POST /api/tmdb/import-from-xui`, lee `tmdb_api_key` de la tabla `settings` de XUI.one).
+
+Pruebas: `scripts/test_vod_genre_tmdb_state.mjs` (panel real + TMDB de mentira) y
+`scripts/test_vod_genre_tmdb_ui.mjs` (jsdom, regresión de los dos caminos que perdían el estado).
 
 ### v2.6.27: la categoría maestra es `Movies`
 
