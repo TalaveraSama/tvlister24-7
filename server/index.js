@@ -8,6 +8,8 @@ import cors from 'cors';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { db, DB_PATH, initDb, hashPassword, verifyPassword, resetPanelCatalog, withSqliteBusyRetry } from './db.js';
+import { egressMeterMiddleware, getEgressMbps } from './bandwidthMeter.js';
+import { createInstallJob, appendInstallLog, finishInstallJob, getInstallJob, runRemoteInstall, buildInstallCommand } from './balancerInstall.js';
 import {
   inspectLocalXuiEnvironment,
   previewXuiImport,
@@ -249,6 +251,10 @@ try {
 const app = express();
 app.set('trust proxy', true);
 
+// Cuánto está sirviendo el propio maestro: lo usa el balanceador para decidir
+// entre atender él mismo o mandar a un nodo (y para no mandar a un nodo lleno).
+app.use(egressMeterMiddleware);
+
 // CORS: antes se reflejaba CUALQUIER origen con credenciales. Eso deja que una
 // web ajena hable con la API del panel desde el navegador del operador. Ahora:
 //   - endpoints de reproductor (Xtream/M3U/DRM): abiertos, porque van con
@@ -368,13 +374,24 @@ app.post('/api/lb/heartbeat', (req, res) => {
   const srv = db.prepare('SELECT * FROM servers WHERE api_token = ? AND is_main = 0').get(token);
   if (!srv) return res.status(403).json({ error: 'Token de Nodo Edge inválido' });
 
-  const { cpu_usage = 0, ram_usage = 0, active_conns = 0, http_port } = req.body || {};
+  const {
+    cpu_usage = 0,
+    ram_usage = 0,
+    active_conns = 0,
+    http_port,
+    bandwidth_mbps,
+    cache_hit_pct,
+    edge_version
+  } = req.body || {};
   db.prepare(
     `UPDATE servers SET
        status = 'online',
        cpu_usage = ?,
        ram_usage = ?,
        active_conns = ?,
+       bandwidth_mbps = ?,
+       cache_hit_pct = ?,
+       edge_version = ?,
        port = COALESCE(?, port),
        last_heartbeat_at = datetime('now')
      WHERE id = ?`
@@ -382,11 +399,33 @@ app.post('/api/lb/heartbeat', (req, res) => {
     Number(cpu_usage) || 0,
     Number(ram_usage) || 0,
     Number(active_conns) || 0,
+    Number(bandwidth_mbps) || 0,
+    Number(cache_hit_pct) || 0,
+    String(edge_version || ''),
     http_port ? Number(http_port) : null,
     srv.id
   );
 
-  res.json({ ok: true, server_id: srv.id });
+  // Dominios cuyo tráfico debe quedarse en el nodo (para que el cliente no se
+  // escape al dominio de vídeo del maestro y el balancer sirva de verdad).
+  const rewriteHosts = new Set();
+  try {
+    rewriteHosts.add(new URL(`http://${srv.host}`).host);
+  } catch {
+    /* host raro: se ignora */
+  }
+  const streamBase = String(
+    db.prepare("SELECT value FROM settings WHERE key = 'public_stream_base'").get()?.value || ''
+  ).trim();
+  if (streamBase) {
+    try {
+      rewriteHosts.add(new URL(streamBase).host);
+    } catch {
+      /* valor inválido en ajustes: se ignora */
+    }
+  }
+
+  res.json({ ok: true, server_id: srv.id, rewrite_hosts: [...rewriteHosts] });
 });
 
 app.get('/api/lb/edge-agent.js', (req, res) => {
@@ -3978,7 +4017,11 @@ app.get('/api/system', requireAuth, (req, res) => {
     snapshots: listServerSnapshots(),
     dbSizeKb,
     listenPort: PORT,
-    telemetry: getHostTelemetry()
+    telemetry: getHostTelemetry(),
+    // Lo que está sirviendo el maestro ahora mismo y su tope declarado: es lo
+    // que usa el balanceador para decidir cuándo repartir a los nodos.
+    egressMbps: getEgressMbps(),
+    masterMaxBandwidthMbps: Number(settings.master_max_bandwidth_mbps) || 800
   });
 });
 
@@ -4251,15 +4294,16 @@ app.post('/api/servers', requireAuth, requireAdmin, (req, res) => {
     lb_mode = 'load',
     max_clients = 2500,
     region_countries = '',
-    isp_match = ''
+    isp_match = '',
+    max_bandwidth_mbps = 800
   } = req.body || {};
   if (!name || !host) return res.status(400).json({ error: 'Nombre y Host/IP del servidor requeridos.' });
   const apiToken = `edge_${crypto.randomBytes(16).toString('hex')}`;
   const numPort = Number(port) || 8096;
   const info = db
     .prepare(
-      `INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, api_token, region_countries, isp_match)
-       VALUES (?, ?, ?, 0, 'standby', ?, ?, ?, ?, ?)`
+      `INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, api_token, region_countries, isp_match, max_bandwidth_mbps)
+       VALUES (?, ?, ?, 0, 'standby', ?, ?, ?, ?, ?, ?)`
     )
     .run(
       String(name),
@@ -4269,9 +4313,127 @@ app.post('/api/servers', requireAuth, requireAdmin, (req, res) => {
       Number(max_clients) || 2500,
       apiToken,
       String(region_countries || '').trim(),
-      String(isp_match || '').trim()
+      String(isp_match || '').trim(),
+      Number(max_bandwidth_mbps) || 800
     );
   res.json({ id: Number(info.lastInsertRowid), api_token: apiToken, ok: true });
+});
+
+// ==================== INSTALADOR DE BALANCERS DESDE EL PANEL ====================
+// El operador escribe IP + clave del VPS y el panel entra por SSH, instala el
+// nodo (Node aislado + agente con caché + systemd) y lo deja conectado. La
+// instalación corre en segundo plano; la pantalla sigue el log por jobId.
+function normalizeMasterUrl(raw, req) {
+  const value = String(raw || '').trim() || `${req.protocol}://${req.get('host')}`;
+  if (!/^https?:\/\//i.test(value)) return '';
+  try {
+    const u = new URL(value);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return '';
+  }
+}
+
+app.post('/api/servers/install', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const host = String(b.host || '').trim();
+  if (!host) return res.status(400).json({ error: 'Falta la IP o el dominio del VPS.' });
+
+  const edgePort = Number(b.port) || 8096;
+  const maxBw = Math.max(10, Number(b.max_bandwidth_mbps) || 800);
+  const sshPort = Number(b.ssh_port) || 22;
+  const sshUser = String(b.ssh_user || 'root').trim() || 'root';
+  const sshPassword = String(b.ssh_password || '');
+  const sshKey = String(b.ssh_key || '');
+  const cacheMb = Math.max(0, Number(b.cache_mb ?? 256) || 0);
+  const masterUrl = normalizeMasterUrl(b.master_url, req);
+  if (!masterUrl) return res.status(400).json({ error: 'La URL del panel no es válida (ej: http://1.2.3.4:8095).' });
+  if (!sshPassword && !sshKey) {
+    return res.status(400).json({ error: 'Indica la contraseña del VPS o pega una clave privada SSH.' });
+  }
+
+  let srv = null;
+  if (b.id) {
+    srv = db.prepare('SELECT * FROM servers WHERE id = ? AND is_main = 0').get(Number(b.id));
+    if (!srv) return res.status(404).json({ error: 'Nodo no encontrado.' });
+    db.prepare('UPDATE servers SET host = ?, port = ?, max_bandwidth_mbps = ? WHERE id = ?').run(
+      host,
+      edgePort,
+      maxBw,
+      srv.id
+    );
+    srv = db.prepare('SELECT * FROM servers WHERE id = ?').get(srv.id);
+  } else {
+    const name = String(b.name || '').trim() || `Balancer ${host}`;
+    const apiToken = `edge_${crypto.randomBytes(16).toString('hex')}`;
+    const info = db
+      .prepare(
+        `INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, api_token, region_countries, isp_match, max_bandwidth_mbps)
+         VALUES (?, ?, ?, 0, 'standby', 'load', ?, ?, ?, ?, ?)`
+      )
+      .run(
+        name,
+        host,
+        edgePort,
+        Number(b.max_clients) || 2500,
+        apiToken,
+        String(b.region_countries || '').trim(),
+        String(b.isp_match || '').trim(),
+        maxBw
+      );
+    srv = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(info.lastInsertRowid));
+  }
+
+  const jobId = createInstallJob(srv.id);
+  db.prepare("UPDATE servers SET install_status = 'running', install_log = '' WHERE id = ?").run(srv.id);
+
+  const jobLog = [];
+  runRemoteInstall({
+    host,
+    sshPort,
+    username: sshUser,
+    password: sshPassword,
+    privateKey: sshKey,
+    masterUrl,
+    token: srv.api_token,
+    edgePort,
+    cacheMb,
+    onLog: (text) => {
+      jobLog.push(text);
+      appendInstallLog(jobId, text);
+    }
+  })
+    .then((result) => {
+      const tail = String(result.log || jobLog.join('')).slice(-4000);
+      db.prepare(
+        "UPDATE servers SET install_status = 'ok', install_log = ?, installed_at = datetime('now') WHERE id = ?"
+      ).run(tail, srv.id);
+      finishInstallJob(jobId, 'ok');
+    })
+    .catch((err) => {
+      const tail = String(err?.log || jobLog.join('')).slice(-4000);
+      db.prepare("UPDATE servers SET install_status = 'error', install_log = ? WHERE id = ?").run(tail, srv.id);
+      finishInstallJob(jobId, 'error', `\n[error] ${err.message}\n`);
+    });
+
+  res.json({
+    ok: true,
+    id: srv.id,
+    jobId,
+    host,
+    port: edgePort,
+    ssh_port: sshPort,
+    max_bandwidth_mbps: maxBw,
+    // Se devuelve el comando por si el operador prefiere pegarlo a mano.
+    manual_command: buildInstallCommand({ masterUrl, token: srv.api_token, port: edgePort, cacheMb })
+  });
+});
+
+app.get('/api/servers/install/:jobId', requireAuth, requireAdmin, (req, res) => {
+  const job = getInstallJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Trabajo de instalación no encontrado (el panel se reinició).' });
+  const srv = db.prepare('SELECT id, name, host, install_status FROM servers WHERE id = ?').get(job.serverId);
+  res.json({ ...job, server: srv || null });
 });
 
 app.delete('/api/servers/:id', requireAuth, requireAdmin, (req, res) => {

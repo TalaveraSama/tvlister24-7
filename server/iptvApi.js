@@ -6,6 +6,8 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { db } from './db.js';
 import { getStreamBaseUrl } from './publicBase.js';
+import { getEgressMbps } from './bandwidthMeter.js';
+import { pickTarget } from './lbSelector.js';
 import { resolveDeviceForLine } from './deviceRegistry.js';
 import { signToken } from './auth.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit, checkCredentialGate, noteCredentialFailure, clearCredentialFailures } from './auth.js';
@@ -343,8 +345,32 @@ function rewriteHlsManifestForProxy(manifestText, manifestFinalUrl, proxyPrefix,
     .join('\n');
 }
 
+/**
+ * Elige quién atiende esta petición: el maestro o uno de los balancers.
+ *
+ * - Se mira el **ancho de banda** de cada nodo (lo que dice su latido), no sólo
+ *   CPU/conexiones: así un VPS con 1 Gbps entra en el reparto y deja de recibir
+ *   clientes cuando se llena.
+ * - El maestro participa con su capacidad (`master_max_bandwidth_mbps`, 800 por
+ *   defecto) y su salida **medida** en este proceso; si es el más libre, se
+ *   sirve en local (devolver null).
+ * - `lb_master_offload_pct` (0 = repartir siempre; 70 = el maestro sólo suelta
+ *   clientes al pasar del 70 %).
+ */
 function selectEdgeRedirect(req) {
   if (String(req.query.edge_origin || '') === '1') return null;
+
+  const settings = Object.fromEntries(
+    db
+      .prepare(
+        "SELECT key, value FROM settings WHERE key IN ('lb_routing_mode','master_max_bandwidth_mbps','lb_master_offload_pct')"
+      )
+      .all()
+      .map((r) => [r.key, r.value])
+  );
+
+  const masterCap = Number(settings.master_max_bandwidth_mbps) || 800;
+  const masterRatio = masterCap > 0 ? getEgressMbps() / masterCap : 0;
 
   const healthyEdges = db
     .prepare(
@@ -354,39 +380,18 @@ function selectEdgeRedirect(req) {
          AND last_heartbeat_at IS NOT NULL
          AND datetime(last_heartbeat_at) >= datetime('now', '-90 seconds')`
     )
-    .all()
-    .filter((srv) => (srv.active_conns || 0) < (srv.max_clients || 1000) && (srv.cpu_usage || 0) < 95);
+    .all();
 
-  if (healthyEdges.length === 0) return null;
-
-  const mode = db.prepare("SELECT value FROM settings WHERE key = 'lb_routing_mode'").get()?.value || 'load';
-  const reqCountry = (req.headers['cf-ipcountry'] || req.headers['x-country-code'] || '').toUpperCase().trim();
-  const reqIsp = (req.headers['x-isp'] || req.headers['user-agent'] || '').toLowerCase();
-
-  let candidates = healthyEdges;
-  if (mode === 'geoip' && reqCountry) {
-    const geoMatched = healthyEdges.filter((srv) =>
-      String(srv.region_countries || '')
-        .toUpperCase()
-        .split(',')
-        .map((c) => c.trim())
-        .includes(reqCountry)
-    );
-    if (geoMatched.length > 0) candidates = geoMatched;
-  } else if (mode === 'isp' && reqIsp) {
-    const ispMatched = healthyEdges.filter(
-      (srv) => srv.isp_match && reqIsp.includes(String(srv.isp_match).toLowerCase().trim())
-    );
-    if (ispMatched.length > 0) candidates = ispMatched;
-  }
-
-  candidates.sort((a, b) => {
-    const scoreA = (a.active_conns || 0) / Math.max(1, a.max_clients || 1000) + (a.cpu_usage || 0) / 100;
-    const scoreB = (b.active_conns || 0) / Math.max(1, b.max_clients || 1000) + (b.cpu_usage || 0) / 100;
-    return scoreA - scoreB;
+  const best = pickTarget({
+    nodes: healthyEdges,
+    masterRatio,
+    mode: String(settings.lb_routing_mode || 'load'),
+    country: (req.headers['cf-ipcountry'] || req.headers['x-country-code'] || '').toUpperCase().trim(),
+    isp: (req.headers['x-isp'] || req.headers['user-agent'] || '').toLowerCase(),
+    offloadPct: Number(settings.lb_master_offload_pct) || 0
   });
+  if (!best) return null;
 
-  const best = candidates[0];
   const proto = best.https_port && req.protocol === 'https' ? 'https' : 'http';
   const port = proto === 'https' ? best.https_port : best.port || 8096;
   return {

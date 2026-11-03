@@ -544,6 +544,16 @@ function runInitDbBody() {
   ensureColumn('servers', 'region_countries', "TEXT DEFAULT ''");
   ensureColumn('servers', 'isp_match', "TEXT DEFAULT ''");
   ensureColumn('servers', 'https_port', 'INTEGER');
+  // --- Balanceo por ancho de banda (v2.6.29) --------------------------------
+  // `bandwidth_mbps` (ya existía) es lo que el nodo dice que está sirviendo;
+  // `max_bandwidth_mbps` es su techo (NIC) y sirve para no mandarle más gente
+  // cuando está lleno. `install_*` guarda el resultado del instalador remoto.
+  ensureColumn('servers', 'max_bandwidth_mbps', 'REAL NOT NULL DEFAULT 800');
+  ensureColumn('servers', 'cache_hit_pct', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('servers', 'edge_version', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('servers', 'install_status', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('servers', 'install_log', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('servers', 'installed_at', 'TEXT');
   ensureColumn('streams', 'archive_enabled', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'xui_id', 'INTEGER');
   // --- VOD desde Jellyfin (enlaces simbólicos, como el «Create Symlink» de XUI) --

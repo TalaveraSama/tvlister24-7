@@ -9,6 +9,7 @@ set -euo pipefail
 MASTER_URL=""
 EDGE_TOKEN=""
 EDGE_PORT="8096"
+EDGE_CACHE_MB="256"
 EDGE_DIR="/opt/tvlister-edge"
 NODE_VERSION="v22.23.4"
 
@@ -17,12 +18,13 @@ while [[ $# -gt 0 ]]; do
     --master) MASTER_URL="$2"; shift 2 ;;
     --token)  EDGE_TOKEN="$2"; shift 2 ;;
     --port)   EDGE_PORT="$2"; shift 2 ;;
+    --cache-mb) EDGE_CACHE_MB="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 
 if [[ -z "$MASTER_URL" || -z "$EDGE_TOKEN" ]]; then
-  echo "Uso: bash install_edge_lb.sh --master <URL_MASTER> --token <API_TOKEN> [--port 8096]"
+  echo "Uso: bash install_edge_lb.sh --master <URL_MASTER> --token <API_TOKEN> [--port 8096] [--cache-mb 256]"
   exit 1
 fi
 
@@ -53,7 +55,7 @@ chmod +x "$EDGE_DIR/edge-agent.js"
 echo "[3/3] Configurando servicio systemd tvlister-edge..."
 cat > /etc/systemd/system/tvlister-edge.service <<EOF
 [Unit]
-Description=TVLister 24/7 Edge Load Balancer Relay Agent
+Description=TVLister 24/7 Balancer Node (segment cache + heartbeat)
 After=network.target
 
 [Service]
@@ -62,6 +64,7 @@ WorkingDirectory=${EDGE_DIR}
 Environment=MASTER_URL=${MASTER_URL}
 Environment=EDGE_API_TOKEN=${EDGE_TOKEN}
 Environment=EDGE_PORT=${EDGE_PORT}
+Environment=EDGE_CACHE_MB=${EDGE_CACHE_MB}
 ExecStart=${NODE_BIN} ${EDGE_DIR}/edge-agent.js
 Restart=always
 RestartSec=3
@@ -80,7 +83,8 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
 fi
 
 echo "================================================================="
-echo "✅ Nodo Edge Load Balancer activo en puerto ${EDGE_PORT}"
+echo "✅ Nodo Balancer (caché de segmentos) activo en puerto ${EDGE_PORT}"
+echo "🧠 Caché de segmentos: ${EDGE_CACHE_MB} MB"
 echo "🔗 Master vinculado: ${MASTER_URL}"
 echo "📊 Estado: systemctl status tvlister-edge --no-pager"
 echo "================================================================="

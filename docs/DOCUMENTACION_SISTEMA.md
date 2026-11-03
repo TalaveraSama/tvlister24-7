@@ -1143,8 +1143,8 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.28/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.28
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.29/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.29
 ```
 
 La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
@@ -3022,6 +3022,25 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
 - El 80 y el 443 se registran solos como puertos estándar del gestor multi-puerto (una sola vez: si
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
+
+### v2.6.29: balancers que suman ancho de banda e instalador desde el panel
+
+| Pieza | Qué hace |
+| --- | --- |
+| `scripts/edge-agent.js` (2.1.0) | Caché de segmentos en memoria (LRU + TTL), **single-flight** (N clientes = 1 descarga), reescritura de manifiestos a rutas relativas, medición de Mbps/caché en el latido. Los flujos continuos y el VOD con `Range` siguen en streaming |
+| `server/bandwidthMeter.js` | Mide la salida del maestro en el socket de cada respuesta (ventana de 20 s) |
+| `server/lbSelector.js` | `pickTarget()`: elige por carga real (Mbps del nodo, conexiones, CPU), descarta nodos al 95 % de su NIC y decide cuándo atiende el maestro |
+| `server/balancerInstall.js` | Instalación remota por SSH (`ssh2`): comando con *shell-quoting*, trabajos con log en vivo, credenciales no persistentes |
+| `POST /api/servers/install` | Crea (o reaprovecha) el nodo, lanza la instalación y devuelve `jobId` + comando manual |
+| `GET /api/servers/install/:jobId` | Estado y log del trabajo |
+| `POST /api/lb/heartbeat` | Acepta `bandwidth_mbps`, `cache_hit_pct`, `edge_version`; responde con los dominios a reescribir |
+| `POST /api/servers` | Acepta `max_bandwidth_mbps` |
+
+Ajustes nuevos (`/api/settings`): `master_max_bandwidth_mbps` (800 por defecto) y `lb_master_offload_pct`
+(0 = reparto libre entre maestro y nodos; 70 = el maestro suelta clientes al pasar del 70 %).
+
+Columnas nuevas en `servers` (migración automática): `max_bandwidth_mbps`, `cache_hit_pct`,
+`edge_version`, `install_status`, `install_log`, `installed_at`.
 
 ### v2.6.28: el aviso «Falta la API Key de TMDB» con la clave puesta
 

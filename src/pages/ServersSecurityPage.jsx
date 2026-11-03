@@ -48,8 +48,29 @@ export default function ServersSecurityPage() {
     anti_restreaming: 'true',
     proxy_direct_ts: 'false',
     flood_limit_per_min: '240',
-    lb_routing_mode: 'load'
+    lb_routing_mode: 'load',
+    master_max_bandwidth_mbps: '800',
+    lb_master_offload_pct: '0'
   });
+
+  // Instalador de balancers: se piden los datos del VPS y el panel entra por SSH.
+  const [balForm, setBalForm] = useState({
+    name: '',
+    host: '',
+    port: 8096,
+    max_bandwidth_mbps: 800,
+    max_clients: 2500,
+    ssh_port: 22,
+    ssh_user: 'root',
+    ssh_password: '',
+    ssh_key: '',
+    cache_mb: 256,
+    master_url: ''
+  });
+  const [balBusy, setBalBusy] = useState(false);
+  const [balJob, setBalJob] = useState(null); // { jobId, host, status, log }
+  const [balManual, setBalManual] = useState('');
+  const [balError, setBalError] = useState('');
 
   const [newAdmin, setNewAdmin] = useState({ username: '', password: '', email: '', notes: '' });
   const [pwdTargetId, setPwdTargetId] = useState(1);
@@ -107,6 +128,8 @@ export default function ServersSecurityPage() {
       proxy_direct_ts: data.settings?.proxy_direct_ts || 'false',
       flood_limit_per_min: data.settings?.flood_limit_per_min || '240',
       lb_routing_mode: data.settings?.lb_routing_mode || 'load',
+      master_max_bandwidth_mbps: String(data.settings?.master_max_bandwidth_mbps || 800),
+      lb_master_offload_pct: String(data.settings?.lb_master_offload_pct || 0),
       public_stream_base: data.settings?.public_stream_base || ''
     });
     if (data.admins?.length > 0 && !pwdTargetId) {
@@ -207,6 +230,57 @@ export default function ServersSecurityPage() {
     const res = await apiFetch(`/api/system/ssl-config?domain=${encodeURIComponent(sslDomain)}`);
     setSslData(res);
   };
+
+  // Instala el nodo por SSH desde el propio panel (no hay que copiar comandos).
+  const installBalancer = async (e) => {
+    e.preventDefault();
+    if (!balForm.host.trim()) return;
+    setBalBusy(true);
+    setBalError('');
+    setBalManual('');
+    try {
+      const res = await apiFetch('/api/servers/install', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...balForm,
+          master_url: balForm.master_url.trim() || window.location.origin
+        })
+      });
+      setBalManual(res.manual_command || '');
+      setBalJob({ jobId: res.jobId, host: balForm.host, status: 'running', log: '' });
+      flash(`Instalando balancer en ${balForm.host}… el progreso sale abajo.`);
+      loadAll();
+    } catch (err) {
+      setBalError(err.message || 'No se pudo iniciar la instalación.');
+    } finally {
+      setBalBusy(false);
+    }
+  };
+
+  // Sigue el log de la instalación hasta que termina.
+  useEffect(() => {
+    if (!balJob?.jobId || balJob.status !== 'running') return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const job = await apiFetch(`/api/servers/install/${balJob.jobId}`);
+        if (cancelled) return;
+        setBalJob((prev) => (prev ? { ...prev, status: job.status, log: job.log || '' } : prev));
+        if (job.status !== 'running') {
+          loadAll();
+          if (job.status === 'ok') flash(`Balancer ${balJob.host} instalado. Esperando su primer latido…`);
+        }
+      } catch {
+        /* el panel se reinició: se corta el seguimiento */
+      }
+    };
+    const timer = setInterval(tick, 1500);
+    tick();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [balJob?.jobId, balJob?.status]);
 
   const addServer = async (e) => {
     e.preventDefault();
@@ -543,6 +617,39 @@ export default function ServersSecurityPage() {
                       <option value="geoip">GeoIP por País</option>
                       <option value="isp">Afinidad por ISP</option>
                     </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Capacidad del maestro (Mbps)</label>
+                    <input
+                      type="number"
+                      value={settingsForm.master_max_bandwidth_mbps}
+                      onChange={(e) =>
+                        setSettingsForm({ ...settingsForm, master_max_bandwidth_mbps: e.target.value })
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Tope de salida de este panel para el reparto (800 = 1 Gbps con margen).
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Repartir a los balancers desde</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="0"
+                        max="95"
+                        value={settingsForm.lb_master_offload_pct}
+                        onChange={(e) =>
+                          setSettingsForm({ ...settingsForm, lb_master_offload_pct: e.target.value })
+                        }
+                        className="w-24 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
+                      />
+                      <span className="text-[11px] text-slate-400">% del maestro</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      0 = repartir siempre entre maestro y nodos; 70 = el maestro sólo suelta clientes al pasar del 70 %.
+                    </p>
                   </div>
                 </div>
 
@@ -952,55 +1059,158 @@ export default function ServersSecurityPage() {
             <div>
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
                 <Server className="w-4 h-4 text-indigo-400" />
-                Nodos Edge Load Balancer Reales (Relay + Heartbeat cada 10s)
+                Balancers con ancho de banda propio (caché de segmentos)
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Registra un VPS secundario y ejecuta su comando de 1 línea para activar balanceo automático con failover al Master.
+                Escribe la IP y la clave del VPS y el panel lo instala solo. Cada nodo cachea los segmentos y sirve a sus
+                clientes: su 1 Gbps <b className="text-slate-300">se suma</b> al del maestro. Cuando un nodo se llena, el panel
+                reparte al que esté más libre (maestro incluido).
               </p>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                <span className="px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-800 font-mono text-slate-300">
+                  Maestro: {Number(sys.egressMbps || 0).toFixed(1)} / {sys.masterMaxBandwidthMbps || 800} Mbps
+                </span>
+                <span className="text-slate-500">
+                  {(sys.servers || []).filter((x) => !x.is_main).length} balancer(es) registrados
+                </span>
+              </div>
             </div>
 
-            <form onSubmit={addServer} className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-xs">
-              <input
-                type="text"
-                placeholder="Nombre Nodo"
-                value={srvForm.name}
-                onChange={(e) => setSrvForm({ ...srvForm, name: e.target.value })}
-                className="sm:col-span-2 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
-              />
-              <input
-                type="text"
-                placeholder="IP Pública Edge"
-                value={srvForm.host}
-                onChange={(e) => setSrvForm({ ...srvForm, host: e.target.value })}
-                className="sm:col-span-2 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-              />
-              <input
-                type="number"
-                placeholder="Puerto"
-                value={srvForm.port}
-                onChange={(e) => setSrvForm({ ...srvForm, port: Number(e.target.value) })}
-                className="px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-              />
-              <button
-                type="submit"
-                className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold inline-flex items-center justify-center gap-1"
-              >
-                <Plus className="w-3.5 h-3.5" /> Crear Edge
-              </button>
-              <input
-                type="text"
-                placeholder="Países GeoIP (ej. MX,CO,AR)"
-                value={srvForm.region_countries}
-                onChange={(e) => setSrvForm({ ...srvForm, region_countries: e.target.value })}
-                className="sm:col-span-3 px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"
-              />
-              <input
-                type="text"
-                placeholder="Filtro ISP opcional (ej. claro, telmex)"
-                value={srvForm.isp_match}
-                onChange={(e) => setSrvForm({ ...srvForm, isp_match: e.target.value })}
-                className="sm:col-span-3 px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white"
-              />
+            <form onSubmit={installBalancer} className="rounded-xl bg-[#090e1a] border border-slate-800 p-3 space-y-2 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <input
+                  type="text"
+                  placeholder="Nombre (ej. Balancer MX-2)"
+                  value={balForm.name}
+                  onChange={(e) => setBalForm({ ...balForm, name: e.target.value })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white"
+                />
+                <input
+                  type="text"
+                  placeholder="IP o dominio del VPS"
+                  value={balForm.host}
+                  onChange={(e) => setBalForm({ ...balForm, host: e.target.value })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white font-mono"
+                />
+                <input
+                  type="number"
+                  placeholder="Puerto del nodo"
+                  value={balForm.port}
+                  onChange={(e) => setBalForm({ ...balForm, port: Number(e.target.value) })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white font-mono"
+                />
+                <input
+                  type="number"
+                  title="Capacidad de subida del VPS en Mbps (800 = 1 Gbps con margen)"
+                  placeholder="Mbps del VPS"
+                  value={balForm.max_bandwidth_mbps}
+                  onChange={(e) => setBalForm({ ...balForm, max_bandwidth_mbps: Number(e.target.value) })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white font-mono"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <input
+                  type="number"
+                  placeholder="Puerto SSH"
+                  value={balForm.ssh_port}
+                  onChange={(e) => setBalForm({ ...balForm, ssh_port: Number(e.target.value) })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white font-mono"
+                />
+                <input
+                  type="text"
+                  placeholder="Usuario SSH (root)"
+                  value={balForm.ssh_user}
+                  onChange={(e) => setBalForm({ ...balForm, ssh_user: e.target.value })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white font-mono"
+                />
+                <input
+                  type="password"
+                  placeholder="Contraseña SSH"
+                  autoComplete="new-password"
+                  value={balForm.ssh_password}
+                  onChange={(e) => setBalForm({ ...balForm, ssh_password: e.target.value })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white font-mono"
+                />
+                <input
+                  type="number"
+                  title="RAM para la caché de segmentos del nodo"
+                  placeholder="Caché MB"
+                  value={balForm.cache_mb}
+                  onChange={(e) => setBalForm({ ...balForm, cache_mb: Number(e.target.value) })}
+                  className="px-3 py-2 rounded-xl bg-[#070b13] border border-slate-700 text-white font-mono"
+                />
+              </div>
+
+              <details className="rounded-lg border border-slate-800 bg-[#070b13] px-3 py-2">
+                <summary className="cursor-pointer text-[11px] text-slate-400">
+                  Usar clave privada SSH en vez de contraseña (opcional)
+                </summary>
+                <textarea
+                  rows={3}
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                  value={balForm.ssh_key}
+                  onChange={(e) => setBalForm({ ...balForm, ssh_key: e.target.value })}
+                  className="mt-2 w-full px-3 py-2 rounded-lg bg-[#05080f] border border-slate-700 text-cyan-200 font-mono text-[10px]"
+                />
+              </details>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={balBusy || !balForm.host.trim()}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-semibold inline-flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  {balBusy ? 'Conectando…' : 'Instalar y conectar el balancer'}
+                </button>
+                <span className="text-[11px] text-slate-400">
+                  El panel entra por SSH y deja el nodo listo (Node aislado + caché + servicio). Puedes añadir los VPS que quieras.
+                </span>
+              </div>
+
+              {balError && (
+                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-200 text-[11px]">
+                  {balError}
+                </div>
+              )}
+
+              {balJob && (
+                <div className="rounded-lg border border-slate-800 bg-[#05080f] p-2.5 space-y-1">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-slate-200">
+                      Instalación en {balJob.host}
+                    </span>
+                    <span
+                      className={
+                        balJob.status === 'ok'
+                          ? 'text-emerald-300'
+                          : balJob.status === 'error'
+                            ? 'text-rose-300'
+                            : 'text-amber-300'
+                      }
+                    >
+                      {balJob.status === 'ok' ? 'Terminada' : balJob.status === 'error' ? 'Con errores' : 'Instalando…'}
+                    </span>
+                  </div>
+                  <pre className="max-h-44 overflow-auto text-[10px] leading-relaxed text-slate-400 font-mono whitespace-pre-wrap">
+                    {balJob.log || 'Conectando por SSH…'}
+                  </pre>
+                </div>
+              )}
+
+              {balManual && (
+                <div className="rounded-lg border border-slate-800 bg-[#070b13] p-2 flex items-center justify-between gap-2">
+                  <code className="text-[10px] text-cyan-300 font-mono truncate">{balManual}</code>
+                  <button
+                    type="button"
+                    onClick={() => copyText(`bal-manual-${balJob?.jobId || 'x'}`, balManual)}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-indigo-600 text-slate-200 hover:text-white shrink-0 font-semibold text-[10px]"
+                  >
+                    <Copy className="w-3 h-3" /> Copiar comando
+                  </button>
+                </div>
+              )}
             </form>
 
             <div className="space-y-3 text-xs">
@@ -1020,9 +1230,16 @@ export default function ServersSecurityPage() {
                           </span>
                         </div>
                         <div className="text-[11px] font-mono text-slate-400 mt-0.5">
-                          {s.host}:{s.http_port || s.port} • CPU {s.cpu_usage || 0}% • RAM {s.ram_usage || 0}% • Conns:{' '}
-                          {s.active_conns || 0}/{s.max_clients}
-                          {s.last_heartbeat_at ? ` • Heartbeat: ${s.last_heartbeat_at}` : ''}
+                          {s.host}:{s.http_port || s.port} •{' '}
+                          <b className="text-slate-200">
+                            {Number(s.bandwidth_mbps || 0).toFixed(1)}/{s.max_bandwidth_mbps || 800} Mbps
+                          </b>{' '}
+                          • CPU {s.cpu_usage || 0}% • RAM {s.ram_usage || 0}% • Conns {s.active_conns || 0}/{s.max_clients}
+                          {s.cache_hit_pct ? ` • Caché ${s.cache_hit_pct}%` : ''}
+                          {s.edge_version ? ` • v${s.edge_version}` : ''}
+                          {s.install_status === 'running' ? ' • Instalando…' : ''}
+                          {s.install_status === 'error' ? ' • Falló la instalación' : ''}
+                          {s.last_heartbeat_at ? ` • Latido: ${s.last_heartbeat_at}` : ''}
                         </div>
                       </div>
                       {!s.is_main && (
