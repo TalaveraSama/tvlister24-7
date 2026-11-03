@@ -71,7 +71,8 @@ const usageA = {
   ],
   total: 4,
   empty: 2,
-  withContent: 2
+  withContent: 2,
+  subfolderFolders: [{ id: 9, path: '/srv/pelis/Ciencia Ficcion', category_mode: 'subfolders' }]
 };
 const usageB = {
   categories: [{ id: 3, name: 'Acción', type: 'vod', sort_order: 3, movies: 5, series: 0, total: 5, empty: false }],
@@ -156,6 +157,7 @@ ok(!!review, 'existe «Revisar categorías»');
 if (review) await click(review);
 ok(calls.some((c) => c.key === 'GET /api/vod/categories/usage'), 'pide el uso por categoría');
 ok(text().includes('4 categoría(s)') && text().includes('2 vacía(s)'), 'resume cuántas hay y cuántas están vacías');
+ok(text().includes('volverá a crear sus categorías'), 'avisa de las carpetas que recrearán las categorías');
 
 const boxes = [...document.querySelectorAll('input[type="checkbox"]')].filter((b) =>
   b.closest('label')?.textContent?.match(/película\(s\)/)

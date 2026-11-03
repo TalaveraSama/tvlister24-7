@@ -3087,6 +3087,12 @@ cmd_vod_cats() {
       console.log("");
       console.log("  Borrar las vacías : tvlister-admin vod-cats clean");
       console.log("  Mover y borrar    : tvlister-admin vod-cats clean --all --move-to \"Acción\"");
+      if (u.subfolderFolders.length) {
+        console.log("");
+        console.log("  ⚠️  Carpetas en modo «por carpeta del disco» (recrearán sus categorías al escanear):");
+        for (const f of u.subfolderFolders.slice(0, 5)) console.log("     · " + f.path);
+        console.log("     Cámbialas a «Por género de TMDB» o «Una sola categoría» si no las quieres de vuelta.");
+      }
     '
     return $?
   fi
@@ -3170,6 +3176,11 @@ cmd_vod_cats() {
         console.log(`   Movidas ${res.moved.movies} película(s) y ${res.moved.series} serie(s)${destino ? " a «" + destino + "»" : ""}.`);
       }
       console.log("   El panel ya muestra el catálogo sin esas categorías.");
+      if (u.subfolderFolders.length) {
+        console.log("");
+        console.log("   ⚠️  Ojo: estas carpetas siguen en modo «por carpeta» y volverán a crear categorías:");
+        for (const f of u.subfolderFolders.slice(0, 5)) console.log("      · " + f.path);
+      }
     } catch (e) {
       console.error("❌ " + e.message);
       process.exit(1);

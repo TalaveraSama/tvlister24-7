@@ -61,6 +61,10 @@ const seriesId = Number(
 db.prepare(
   "INSERT INTO vod_watch_folders (folder_path, content_mode, default_category_id, category_mode) VALUES ('/tmp/pelis', 'movies', ?, 'tmdb_genres')"
 ).run(cCiencia);
+// Otra que sigue en «cada subcarpeta es una categoría»: hay que avisar de ella.
+db.prepare(
+  "INSERT INTO vod_watch_folders (folder_path, content_mode, default_category_id, category_mode) VALUES ('/tmp/series', 'series', ?, 'subfolders')"
+).run(sSuspenso);
 
 // ==================== 2. Uso por categoría ====================
 const usage = vodCategoryUsage();
@@ -74,11 +78,15 @@ eq('Ciencia Ficcion quedó con 1 película', byName['Ciencia Ficcion'].total, 1)
 ok('triller está vacía', byName.triller.empty);
 eq('cuenta de vacías', usage.empty, 2);
 eq('cuenta con contenido', usage.withContent, 4);
+eq('avisa de las carpetas que recrearán categorías', usage.subfolderFolders.map((f) => f.path), ['/tmp/series']);
 
 // ==================== 3. Borrar sólo vacías ====================
 let res = purgeVodCategories({ ids: [cTriller, sSuspenso] });
 ok('borra las vacías', res.ok && res.deleted === 2, JSON.stringify(res));
 ok('triller ya no existe', !db.prepare('SELECT id FROM categories WHERE id = ?').get(cTriller));
+const fSeries = db.prepare("SELECT default_category_id FROM vod_watch_folders WHERE folder_path = '/tmp/series'").get();
+ok('la carpeta que apuntaba a la borrada se queda sin categoría', fSeries.default_category_id === null,
+  String(fSeries.default_category_id));
 ok('las películas de Acción siguen intactas', db.prepare('SELECT COUNT(*) n FROM vod_items WHERE category_id = ?').get(cAccion).n === 2);
 
 // ==================== 4. Con contenido y sin destino: no borra nada ====================

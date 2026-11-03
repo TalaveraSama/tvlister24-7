@@ -2665,6 +2665,21 @@ export default function VodPage({ onPreview }) {
 
                 {catUsage && (
                   <div className="space-y-2">
+                    {catUsage.subfolderFolders?.length > 0 && (
+                      <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+                        <b>Atención:</b> {catUsage.subfolderFolders.length === 1 ? 'esta carpeta sigue' : 'estas carpetas siguen'} en
+                        modo «por carpeta del disco» y volverá a crear sus categorías en el próximo escaneo:{' '}
+                        <span className="font-mono">
+                          {catUsage.subfolderFolders
+                            .slice(0, 3)
+                            .map((f) => f.path)
+                            .join(' · ')}
+                          {catUsage.subfolderFolders.length > 3 ? ' …' : ''}
+                        </span>
+                        . Cámbialas a «Por género de TMDB» o «Una sola categoría» en Ajustes de la carpeta si no las
+                        quieres de vuelta.
+                      </div>
+                    )}
                     <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-800 bg-[#0e1526] divide-y divide-slate-800">
                       {catUsage.categories.length === 0 && (
                         <div className="p-3 text-center text-[11px] text-slate-500">

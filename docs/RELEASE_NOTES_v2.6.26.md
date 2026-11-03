@@ -72,8 +72,8 @@ Los puertos siguen siendo 443 y 80 (v2.6.25); `tvlister-admin vod-cats` es lo ú
 ## Comprobación
 
 ```
-node scripts/test_vod_category_cleanup.mjs   # 28 comprobaciones sobre una base temporal
-node scripts/test_vod_category_ui.mjs        # la tarjeta real renderizada con jsdom (npm i -D jsdom)
+node scripts/test_vod_category_cleanup.mjs   # 30 comprobaciones sobre una base temporal
+node scripts/test_vod_category_ui.mjs        # la tarjeta real renderizada con jsdom, 18 comprobaciones (npm i -D jsdom)
 node scripts/test_vod_genres.mjs             # el reparto por género de TMDB sigue igual
 node scripts/test_vod_paging.mjs             # la paginación del catálogo sigue igual
 ```

@@ -162,11 +162,26 @@ export function vodCategoryUsage() {
     };
   });
 
+  // Carpetas que siguen en «cada subcarpeta es una categoría»: si se borran sus
+  // categorías, el próximo escaneo las vuelve a crear. Se avisa en el panel.
+  let subfolderFolders = [];
+  try {
+    subfolderFolders = db
+      .prepare(
+        "SELECT id, folder_path, category_mode FROM vod_watch_folders WHERE LOWER(COALESCE(category_mode,'')) = 'subfolders' ORDER BY folder_path"
+      )
+      .all()
+      .map((f) => ({ id: Number(f.id), path: f.folder_path, category_mode: f.category_mode }));
+  } catch {
+    subfolderFolders = [];
+  }
+
   return {
     categories,
     total: categories.length,
     empty: categories.filter((c) => c.empty).length,
-    withContent: categories.filter((c) => !c.empty).length
+    withContent: categories.filter((c) => !c.empty).length,
+    subfolderFolders
   };
 }
 
