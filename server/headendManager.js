@@ -211,7 +211,7 @@ headendRouter.get('/api/headend/install.sh', (req, res) => {
   const token = String(req.query.token || '').trim();
   const port = Number(req.query.port || 8097);
   const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.headers['x-forwarded-host'] || req.headers.host || '127.0.0.1:8095';
+  const host = req.headers['x-forwarded-host'] || req.headers.host || '127.0.0.1';
   const masterUrl = String(req.query.master || `${proto}://${host}`).replace(/\/+$/, '');
 
   const rawScript = fs.readFileSync(INSTALL_SCRIPT_PATH, 'utf8');

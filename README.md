@@ -6,6 +6,12 @@ Plataforma auto-hospedada para la gestión profesional de **Canales en Vivo**, *
 
 🎬 **Jellyfin → VOD con «Create Symlink»**: el panel importa tu catálogo de Jellyfin (películas, otros VOD y series con episodios) y, como XUI.one, **crea enlaces simbólicos** a los archivos que ya tienes en el disco: no copia, no mueve y no recodifica nada. Botón *Jellyfin* en **VOD y Series**; en terminal: `tvlister-admin jellyfin`. Guía: **[`docs/JELLYFIN_VOD.md`](docs/JELLYFIN_VOD.md)**.
 
+🔌 **El panel usa los puertos estándar: `80` y `443` (v2.6.25)**: se entra por `http://TU_IP` y por
+`https://TU_IP`, sin escribir puerto; el 443 se abre solo en cuanto hay certificado (Let's Encrypt,
+acme.sh o `tvlister-admin tls <cert> <clave>`) y el 80 sigue sirviendo el panel mientras se emite.
+Una instalación anterior conserva su puerto y, en un servidor con XUI.one, el panel se queda en el
+interno (`8095`) para no pisar su nginx.
+
 🎭 **El sincronizador separa las películas por género de TMDB (v2.6.24)**: al escanear una carpeta,
 cada título entra en su categoría —**Acción, Comedia, Terror, Thriller, Románticas, Ciencia ficción…**—
 según la ficha de TMDB, con prioridad y renombrado configurables (una comedia romántica puede ir a
@@ -41,7 +47,14 @@ en terminal: `tvlister-admin devices`. Guía: **[`docs/REGISTRO_APARATOS_MAC.md`
 
 ## Instalación Rápida en VPS Ubuntu / Debian (Coexistencia Segura con XUI.one)
 
-El instalador opera en **modo aislado** (`/opt/tvlister24-7/.runtime`): no ejecuta `apt-get` sobre librerías fijadas por XUI.one, no toca MariaDB ni Nginx, y elige automáticamente un puerto libre (`8095`).
+El instalador opera en **modo aislado** (`/opt/tvlister24-7/.runtime`): no ejecuta `apt-get` sobre librerías fijadas por XUI.one, no toca MariaDB ni Nginx. El panel usa los **puertos estándar: `80` (HTTP) y `443` (HTTPS)**, así que se abre como `http://TU_IP` y `https://TU_IP`, sin escribir puerto. En un servidor **con XUI.one** se queda en el puerto interno de siempre (`8095`) para no pisar su nginx, y si el `80` está ocupado por otro proceso también baja al siguiente libre.
+
+El `443` necesita un certificado real (nunca se genera uno autofirmado). Con Let's Encrypt ya instalado se abre solo; si lo tienes en archivos:
+
+```bash
+sudo tvlister-admin tls /ruta/fullchain.pem /ruta/privkey.pem   # instala el par y abre el 443
+sudo tvlister-admin tls                                        # estado del certificado y del 443
+```
 
 ### Opción recomendada: instalador de release (versión fija y verificada)
 
@@ -51,18 +64,20 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 ```
 
-Para fijar una versión concreta (recomendado en producción) y el puerto:
+Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.24/install.sh \
-  | sudo bash -s -- --tag v2.6.24 --port 8095
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.25/install.sh \
+  | sudo bash -s -- --tag v2.6.25
 ```
+
+El puerto por defecto es el `80`; `--port <n>` sólo hace falta si quieres forzar otro.
 
 Si un release no tiene el paquete adjunto (o su descarga falla), el instalador usa el árbol del tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.24/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.24
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.25/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.25
 ```
 
 También puedes instalarlo desde la consola del propio servidor:

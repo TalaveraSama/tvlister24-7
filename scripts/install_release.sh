@@ -12,11 +12,13 @@
 # Fijando una versión concreta:
 #
 #   curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.3.0/install.sh \
-#     | bash -s -- --tag v2.3.0 --port 8095
+#     | bash -s -- --tag v2.6.25
 #
 # Opciones:
 #   --tag <vX.Y.Z>   Instala una versión exacta (por defecto: la última publicada)
-#   --port <n>       Puerto del panel (por defecto: 8095 si está libre, si no automático)
+#   --port <n>       Puerto del panel (por defecto: 80 si está libre; si está ocupado,
+#                    automático y, si hay 8095 libre, ese). El 443 lo abre el panel
+#                    con el certificado: tvlister-admin tls <cert> <clave>
 #   --dir <ruta>     Carpeta de instalación (por defecto /opt/tvlister24-7)
 #   --no-verify      No verificar el SHA256 del paquete (no recomendado)
 #   --help           Esta ayuda
@@ -54,11 +56,11 @@ while [ $# -gt 0 ]; do
 TVLister 24/7 — instalador desde release
 
   curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
-  curl -fsSL .../releases/download/v2.3.0/install.sh | sudo bash -s -- --tag v2.3.0 --port 8095
+  curl -fsSL .../releases/download/v2.6.25/install.sh | sudo bash -s -- --tag v2.6.25
 
 Opciones:
   --tag <vX.Y.Z>   Instala una versión exacta (por defecto: la última publicada)
-  --port <n>       Puerto del panel (por defecto: 8095 si está libre; si no, automático)
+  --port <n>       Puerto del panel (por defecto: 80 si está libre; si no, automático)
   --dir <ruta>     Carpeta de instalación (por defecto /opt/tvlister24-7)
   --no-verify      No verificar el SHA256 del paquete (no recomendado)
   --help           Esta ayuda

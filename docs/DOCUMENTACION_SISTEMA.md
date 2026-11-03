@@ -81,7 +81,7 @@ El sistema está construido con tecnologías modernas, ligeras y sin dependencia
                │ /live • /movie • /c/   │ /panel_api.php         │ /xmltv.xml.gz
                ▼                        ▼                        ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│            TVLister 24/7 — Motor Central Node.js 22 (Puerto 8095)          │
+│       TVLister 24/7 — Motor Central Node.js 22 (Puertos 80 y 443)          │
 │  • Firewall IP/User-Agent en Caché + Rate-Limit compatible con CGNAT       │
 │  • Control Estricto de Expiración, Conexiones Simultáneas y Bouquets       │
 │  • Stream Shield Proxy: Reescribe HLS (.m3u8) con HMAC y enruta MPEG-TS    │
@@ -99,14 +99,14 @@ El sistema está construido con tecnologías modernas, ligeras y sin dependencia
 ### ¿Cómo convive con XUI.one en el mismo VPS sin romper nada?
 1. **Cero uso de `apt-get`:** No actualiza ni toca paquetes del sistema Ubuntu, respetando los repositorios de MariaDB 10.6, PHP compilado y librerías fijadas por XUI.one.
 2. **Directorio 100% aislado:** Todo vive en `/opt/tvlister24-7` con su propio Node.js aislado.
-3. **Puertos separados:** Mientras XUI.one usa los puertos `80`/`8080`, TVLister corre en el puerto `8095` (o el que elijas con `tvlister-admin set-port`).
+3. **Puertos estándar:** TVLister escucha en el **`80`** (HTTP) y en el **`443`** (HTTPS, con el certificado del dominio), así que entra como `http://TU_IP` o `https://TU_IP` sin escribir puerto. En un servidor con XUI.one el panel se queda en el puerto interno (`8095`) porque el 80/443 son de su nginx; ahí los clientes entran por el dominio, que nginx reenvía al panel. Si el 80 está ocupado por otro proceso, el instalador toma el siguiente libre (o el que fijes con `tvlister-admin set-port`). Los puertos conviven: no hay que apagar uno para usar el otro.
 4. **Lectura limpia:** Tanto el binario `ffmpeg` como la base de datos `xui` se consultan únicamente en **modo solo-lectura**.
 
 ---
 
 ## 4. Qué Hace Cada Función del Panel y Cómo Utilizarla
 
-Al iniciar sesión en `http://TU_IP:8095` con tu usuario `admin`, encontrarás en la barra lateral izquierda todos los módulos operativos:
+Al iniciar sesión en `http://TU_IP` (o `https://TU_IP` si ya hay certificado) con tu usuario `admin`, encontrarás en la barra lateral izquierda todos los módulos operativos:
 
 ---
 
@@ -181,7 +181,7 @@ Administra las cuentas de acceso de tus suscriptores finales.
 * Controla fecha de vencimiento (o sin vencimiento / *Ilimitado*), estado (`Activa` / `Suspendida`), límite estricto de **conexiones simultáneas** (`max_connections`), **Bouquets permitidos** y filtro opcional de **IPs autorizadas**.
 * Soporta 3 tipos de cliente:
   1. **M3U / Xtream Codes:** Usuario y contraseña para TiviMate, IPTV Smarters, XCIPTV, VLC, WebTV.
-  2. **Dispositivo MAG (Stalker Portal):** Vincula la dirección MAC (`00:1A:79:XX:XX:XX`) para cajas MAG/STB conectadas a `http://TU_IP:8095/c/`.
+  2. **Dispositivo MAG (Stalker Portal):** Vincula la dirección MAC (`00:1A:79:XX:XX:XX`) para cajas MAG/STB conectadas a `http://TU_IP/c/`.
   3. **Receptor Enigma2:** Compatible con listas M3U y el endpoint dedicado `/enigma2.php`.
 
 **¿Cómo utilizarlo?**
@@ -270,16 +270,16 @@ Es una aplicación de televisión web lista para tus clientes finales (accesible
 
 ## 5. Cómo Conectan tus Clientes Finales (Apps, Smart TV, MAG, Web)
 
-Suponiendo que tu servidor responde en `http://TU_IP:8095` (o `https://tv.tudominio.com`):
+Suponiendo que tu servidor responde en `http://TU_IP` (o `https://tv.tudominio.com`):
 
 | Aplicación / Dispositivo | Cómo configurarlo en el dispositivo del cliente |
 | :--- | :--- |
-| **TiviMate / IPTV Smarters / XCIPTV / Televizo** | Elegir **Xtream Codes Login**:<br>• **URL del Servidor:** `http://TU_IP:8095`<br>• **Usuario:** *(usuario de la línea)*<br>• **Contraseña:** *(clave de la línea)* |
-| **VLC / Kodi / Smart IPTV / OttPlayer (Lista M3U)** | Usar URL M3U Plus:<br>`http://TU_IP:8095/get.php?username=USUARIO&password=CLAVE&type=m3u_plus&output=hls`<br>*(Cambia `output=ts` si prefieres flujo MPEG-TS).* |
-| **Guía de Programación EPG (XMLTV)** | Normal: `http://TU_IP:8095/xmltv.php?username=USUARIO&password=CLAVE`<br>Comprimida GZIP: `http://TU_IP:8095/xmltv.xml.gz` |
-| **Cajas MAG (250 / 254 / 322 / 420 / Formuler Stalker)** | 1. Registra la MAC `00:1A:79:...` en **Líneas → Agregar MAG**.<br>2. En la caja MAG configura Portal URL:<br>`http://TU_IP:8095/c/` *(o `http://TU_IP:8095/stalker_portal/c/`)*. |
-| **Decodificadores Enigma2** | Endpoint XML Bouquet:<br>`http://TU_IP:8095/enigma2.php?username=USUARIO&password=CLAVE` |
-| **Navegador Web (PC / Móvil / Smart TV)** | Abrir `http://TU_IP:8095` → pulsar **«Abrir Portal Reproductor WebTV para Clientes»** e ingresar usuario y clave de la línea. |
+| **TiviMate / IPTV Smarters / XCIPTV / Televizo** | Elegir **Xtream Codes Login**:<br>• **URL del Servidor:** `http://TU_IP`<br>• **Usuario:** *(usuario de la línea)*<br>• **Contraseña:** *(clave de la línea)* |
+| **VLC / Kodi / Smart IPTV / OttPlayer (Lista M3U)** | Usar URL M3U Plus:<br>`http://TU_IP/get.php?username=USUARIO&password=CLAVE&type=m3u_plus&output=hls`<br>*(Cambia `output=ts` si prefieres flujo MPEG-TS).* |
+| **Guía de Programación EPG (XMLTV)** | Normal: `http://TU_IP/xmltv.php?username=USUARIO&password=CLAVE`<br>Comprimida GZIP: `http://TU_IP/xmltv.xml.gz` |
+| **Cajas MAG (250 / 254 / 322 / 420 / Formuler Stalker)** | 1. Registra la MAC `00:1A:79:...` en **Líneas → Agregar MAG**.<br>2. En la caja MAG configura Portal URL:<br>`http://TU_IP/c/` *(o `http://TU_IP/stalker_portal/c/`)*. |
+| **Decodificadores Enigma2** | Endpoint XML Bouquet:<br>`http://TU_IP/enigma2.php?username=USUARIO&password=CLAVE` |
+| **Navegador Web (PC / Móvil / Smart TV)** | Abrir `http://TU_IP` → pulsar **«Abrir Portal Reproductor WebTV para Clientes»** e ingresar usuario y clave de la línea. |
 
 ---
 
@@ -398,7 +398,7 @@ Desde el menú lateral **Ingesta, Flussonic & MNF**, el **Panel TVLister 24/7** 
      `mnf://IP_SERVIDOR_A:8095/mnf/trunk01/clave01/ID_CANAL.mnf`
    * Entre ambos VPS viajará en binario ultraligero **MNF v1**, y cuando un cliente Smart TV o TiviMate pida `.ts` o `.m3u8` al Servidor B, TVLister lo convierte al vuelo sin gastar CPU en recodificación.
 2. **Para exportar una lista M3U completa en protocolo MNF**:
-   * Usa `http://TU_IP:8095/get.php?username=USUARIO&password=CLAVE&type=m3u_plus&output=mnf`.
+   * Usa `http://TU_IP/get.php?username=USUARIO&password=CLAVE&type=m3u_plus&output=mnf`.
 3. **Para medir el ahorro real**:
    * Entra a **Laboratorio de Benchmark en Vivo**, pega opcionalmente cualquier URL `.ts` y pulsa **«Ejecutar Benchmark Ahora»**.
 
@@ -440,13 +440,13 @@ Convierte tu VPS en un servidor receptor de transmisiones en vivo desde **OBS St
 ---
 
 ### 8.4. Pestaña 4 — Multi-Puertos HTTP / Streaming Dinámicos
-**¿Cómo abrir más puertos simultáneos sin apagar el principal (`8095`)?**
+**¿Cómo abrir más puertos simultáneos sin apagar los estándar (`80` y `443`)?**
 * **Desde el Panel Web**: Entra a **Ingesta, Flussonic & MNF → Multi-Puertos HTTP**, escribe el puerto deseado (ej. `8880` o `25461`, o pulsa uno de los botones rápidos ISP) y haz clic en **«Abrir Puerto Ahora»**.
 * **Desde SSH (abre además UFW + `iptables` automáticamente)**:
   ```bash
   tvlister-admin add-port 8880
   ```
-Tus clientes podrán conectarse indistintamente por `http://TU_IP:8095` o `http://TU_IP:8880` con las mismas credenciales.
+Tus clientes podrán conectarse indistintamente por `http://TU_IP` o `http://TU_IP:8880` con las mismas credenciales.
 
 ---
 
@@ -499,12 +499,12 @@ en **RAMDisk (`/dev/shm`)** o en disco.
 **API para scripts / automatización:**
 ```bash
 # Consultar métricas reales del motor (procesos, hilos, RAM por canal, prefijo HLS)
-curl -s -H "Authorization: Bearer $TOKEN" http://TU_IP:8095/api/system/ffmpeg-efficiency
+curl -s -H "Authorization: Bearer $TOKEN" http://TU_IP/api/system/ffmpeg-efficiency
 
 # Cambiar política (ej. máximo ahorro: sin pipe TS y 1 hilo H.264)
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"tsPipeMode":"never","h264Threads":1}' \
-  http://TU_IP:8095/api/system/ffmpeg-efficiency
+  http://TU_IP/api/system/ffmpeg-efficiency
 ```
 ---
 
@@ -1136,13 +1136,16 @@ un paquete verificado:
 # última versión
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
-# versión exacta y puerto fijo
-curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.3.0/install.sh \
-  | sudo bash -s -- --tag v2.3.0 --port 8095
+# versión exacta (el puerto por defecto ya es el 80)
+curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/download/v2.6.25/install.sh \
+  | sudo bash -s -- --tag v2.6.25
 ```
 
-Opciones del bootstrap: `--tag vX.Y.Z`, `--port N`, `--dir RUTA` (por defecto `/opt/tvlister24-7`),
-`--no-verify` y `--help`. El instalador recibe el paquete vía `TVLISTER_SOURCE_DIR` y **no clona git**:
+El panel escucha de fábrica en el **80** (HTTP) y, con certificado, en el **443** (HTTPS).
+Para cargar el certificado y abrir el 443: `tvlister-admin tls <fullchain.pem> <privkey.pem>`.
+
+Opciones del bootstrap: `--tag vX.Y.Z`, `--port N` (por defecto el `80`; sólo hace falta para forzar
+otro), `--dir RUTA` (por defecto `/opt/tvlister24-7`), `--no-verify` y `--help`. El instalador recibe el paquete vía `TVLISTER_SOURCE_DIR` y **no clona git**:
 si el release dejara de estar accesible, cae al clon de GitHub y, en último caso, reutiliza el código ya
 instalado (nunca borra `data/` ni `.runtime/`).
 
@@ -2988,6 +2991,28 @@ Detalles que cambian el comportamiento en producción:
 Compatibilidad: el modo por defecto del registro sigue siendo `monitor` (sólo registra), la lista
 M3U, `/live/:usuario/:clave/…`, `/player_api.php`, MAG/Stalker y Enigma2 no cambian, y el tope de
 conexiones simultáneas se sigue aplicando en `recordConnection` como siempre.
+
+### v2.6.25: el panel vuelve a los puertos estándar (80 y 443)
+
+El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a mano. Ahora:
+
+| Antes | Ahora |
+| --- | --- |
+| `8095` | **`80`** como puerto principal |
+| `http://TU_IP:8095` | **`http://TU_IP`** |
+| El 443 se abría desde *Multi-Puertos* | El **443** se abre solo con el certificado |
+| Sin certificado no se sabía qué faltaba | El log dice qué falta y cómo cargarlo |
+
+- **`PORT` manda**: una instalación existente conserva su puerto; si el 80 está ocupado (nginx de
+  XUI.one), el instalador elige otro y lo avisa.
+- El **443** busca el certificado ya presente en el servidor (rutas guardadas,
+  `TVLISTER_TLS_CERT/KEY`, `/etc/letsencrypt/live/*/`, `~/.acme.sh/*/`, `/etc/tvlister/tls/`), y
+  `tvlister-admin tls <cert> <clave>` lo valida, lo guarda, abre 80/443 en el firewall, reinicia y
+  **comprueba** que `https://127.0.0.1/api/health` responde.
+- **Sin certificado el 80 sigue sirviendo el panel** en claro; nunca se genera un autofirmado.
+- El 80 y el 443 se registran solos como puertos estándar del gestor multi-puerto (una sola vez: si
+  los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
+- `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
 ### v2.6.24: el sincronizador separa el catálogo por género de TMDB
 

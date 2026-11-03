@@ -1702,7 +1702,7 @@ flussonic2312Router.post('/api/flussonic-2312/prepare-local-push-script', requir
   });
 
   const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
-  const host = String(req.headers['x-forwarded-host'] || req.get('host') || '127.0.0.1:8095').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.get('host') || '127.0.0.1').split(',')[0].trim();
   const scriptUrl = `${proto}://${host}/api/flussonic-2312/local-push/${token}.sh`;
   const sshCommand = `curl -fsSL "${scriptUrl}" | sudo bash`;
 
@@ -2167,7 +2167,7 @@ function detectLocalServerLanOrigin(req) {
 
   const hostHdr = String(req?.headers?.host || '');
   const portMatch = hostHdr.match(/:(\d+)$/);
-  const port = portMatch ? portMatch[1] : process.env.PORT || '8095';
+  const port = portMatch ? portMatch[1] : process.env.PORT || '80';
   return `http://${preferred}:${port}`;
 }
 

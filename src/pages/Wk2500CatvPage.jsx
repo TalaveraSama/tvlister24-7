@@ -1550,7 +1550,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             <input
               type="text"
               required
-              placeholder="http://IP_PANEL_ORIGEN:8095"
+              placeholder="http://IP_PANEL_ORIGEN"
               value={trunkForm.origin_url}
               onChange={(e) => setTrunkForm({ ...trunkForm, origin_url: e.target.value })}
               className="sm:col-span-3 px-3 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono"

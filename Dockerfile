@@ -14,7 +14,10 @@ COPY . .
 RUN npm run build
 
 ENV NODE_ENV=production
-ENV PORT=8080
-EXPOSE 8080
+# Puertos estándar del panel: 80 (HTTP) y 443 (HTTPS con el certificado montado
+# en /app/certs). PORT se puede forzar con `-e PORT=...` si el 80 está ocupado.
+ENV PORT=80
+ENV TVLISTER_TLS_DIR=/app/certs
+EXPOSE 80 443
 
 CMD ["node", "--no-warnings", "server/index.js"]

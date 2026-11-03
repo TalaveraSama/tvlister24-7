@@ -108,6 +108,39 @@ function candidatePairs() {
     out.push({ certPath: `${base}/fullchain.pem`, keyPath: `${base}/privkey.pem`, source: `${DEFAULT_PATHS} (${domain})` });
   }
 
+  // Barrido de los directorios habituales: en un servidor que ya tenía
+  // Let's Encrypt (por ejemplo el de XUI.one) el certificado existe pero aún no
+  // hay dominio configurado en el panel, así que sin esto el 443 se quedaba
+  // cerrado hasta que alguien escribiera la ruta a mano. Se ordena por fecha de
+  // emisión: el más reciente primero.
+  const seen = new Set(out.map((c) => c.certPath));
+  const scanned = [];
+  for (const root of ['/etc/letsencrypt/live', path.join(os.homedir(), '.acme.sh'), DEFAULT_PATHS]) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const base = path.join(root, entry.name);
+      const certPath = path.join(base, 'fullchain.pem');
+      const keyPath = path.join(base, 'privkey.pem');
+      if (seen.has(certPath)) continue;
+      seen.add(certPath);
+      let at = 0;
+      try {
+        at = fs.statSync(certPath).mtimeMs;
+      } catch {
+        continue;
+      }
+      scanned.push({ certPath, keyPath, source: `detectado en ${root}`, at });
+    }
+  }
+  scanned.sort((a, b) => b.at - a.at);
+  for (const item of scanned) out.push({ certPath: item.certPath, keyPath: item.keyPath, source: item.source });
+
   out.push({
     certPath: path.join(DEFAULT_PATHS, 'fullchain.pem'),
     keyPath: path.join(DEFAULT_PATHS, 'privkey.pem'),

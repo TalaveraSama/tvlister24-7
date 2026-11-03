@@ -100,7 +100,7 @@ export default function IngestProtocolsPage() {
   const [m4fResolved, setM4fResolved] = useState([]);
 
   // 4. Multi-Port State
-  const [portsData, setPortsData] = useState({ primaryPort: 8080, extraPorts: [], allListeningPorts: [] });
+  const [portsData, setPortsData] = useState({ primaryPort: 80, extraPorts: [], allListeningPorts: [] });
   const [newPortInput, setNewPortInput] = useState('');
   const [newPortScheme, setNewPortScheme] = useState('https');
   const [portBusy, setPortBusy] = useState(false);
@@ -438,7 +438,7 @@ export default function IngestProtocolsPage() {
     }
   };
 
-  const baseHost = typeof window !== 'undefined' ? window.location.host : 'tu-servidor:8095';
+  const baseHost = typeof window !== 'undefined' ? window.location.host : 'tu-servidor';
   const wsProto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
   const httpProto = typeof window !== 'undefined' ? window.location.protocol.replace(':', '') : 'http';
 
@@ -546,7 +546,7 @@ export default function IngestProtocolsPage() {
               </div>
               <div className="text-lg font-bold text-white mb-2">Ida y Vuelta TS ↔ MNF ↔ CMAF</div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Conecta dos paneles TVLister usando <code className="text-violet-300">mnf://origen:8095/u/p/1.mnf</code> para ahorrar hasta 18% de tráfico entre servidores VPS, y TVLister lo remuxea en tiempo real a <code className="text-slate-200">.ts</code> o HLS para Smart TVs antiguas sin recodificar CPU.
+                Conecta dos paneles TVLister usando <code className="text-violet-300">mnf://origen/u/p/1.mnf</code> para ahorrar hasta 18% de tráfico entre servidores VPS, y TVLister lo remuxea en tiempo real a <code className="text-slate-200">.ts</code> o HLS para Smart TVs antiguas sin recodificar CPU.
               </p>
             </div>
           </div>
@@ -1143,10 +1143,13 @@ export default function IngestProtocolsPage() {
                 Gestor Dinámico Multi-Puerto (HTTPS / HTTP / Xtream / HLS / TS / MNF)
               </h2>
               <p className="text-xs text-slate-400 mt-1">
-                Abre puertos TCP simultáneos en caliente sin reiniciar el puerto principal, con TLS
-                propio en el panel. Así los reproductores que exigen el <strong>443</strong> (o que
-                rechazan HTTP) funcionan igual que los que usan 8080/8880, compartiendo las mismas
-                líneas y conexiones.
+                El panel usa de fábrica los puertos estándar: <strong>80</strong> (HTTP) y{' '}
+                <strong>443</strong> (HTTPS con el certificado del dominio), así que se abre como{' '}
+                <code className="text-cyan-300">http://TU_IP</code> o{' '}
+                <code className="text-cyan-300">https://TU_IP</code> sin escribir puerto. Aquí puedes
+                abrir más puertos TCP en caliente (8080, 8880, 25461…) sin reiniciar el principal:
+                todos comparten las mismas líneas y conexiones. El 443 no se abre si no hay
+                certificado; cárgalo con <code className="text-cyan-300">tvlister-admin tls</code>.
               </p>
             </div>
 

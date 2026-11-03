@@ -308,14 +308,24 @@ systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
 pkill -f "/opt/tvlister24-7.*server/index.js" >/dev/null 2>&1 || true
 sleep 1
 
+# Los puertos estándar del panel son el 80 (HTTP) y el 443 (HTTPS, lo abre el
+# gestor multi-puerto con el certificado): en un servidor limpio se entra como
+# http://IP y https://IP, sin escribir puerto.
+#
+# Excepciones, en este orden:
+#   · Una instalación existente conserva SIEMPRE su puerto (Environment=PORT=).
+#   · Si hay XUI.one instalado, el 80 y el 443 son de su nginx: se prefiere el
+#     puerto interno de siempre (8095) para no pisarlo. Aunque su nginx esté
+#     parado en ese momento, arrancarlo después le impediría escuchar.
+#   · Si el 80 está ocupado por cualquier otro proceso, se busca el siguiente.
 if [ -n "${PORT:-}" ]; then
-  CANDIDATE_PORTS="$PORT 8095 8895 9080 9095"
+  CANDIDATE_PORTS="$PORT 80 8095 8895 9080 9095"
 elif [ -n "$EXISTING_PORT" ]; then
-  CANDIDATE_PORTS="$EXISTING_PORT 8095 8895 9080 9095"
+  CANDIDATE_PORTS="$EXISTING_PORT 80 8095 8895 9080 9095"
 elif [ "$XUI_DETECTED" -eq 1 ]; then
-  CANDIDATE_PORTS="8095 8895 9080 9095 8080"
+  CANDIDATE_PORTS="8095 8895 9080 9095 80 8080"
 else
-  CANDIDATE_PORTS="8080 8095 8895 9080 9095"
+  CANDIDATE_PORTS="80 8095 8895 9080 9095 8080"
 fi
 
 FINAL_PORT=$("${NODE_DIR}/bin/node" -e '
@@ -379,7 +389,9 @@ systemctl restart "${SERVICE_NAME}"
 
 # Si UFW está activo, abrir el puerto del panel y los puertos de ingesta RTMP/SRT/RTSP
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow "${FINAL_PORT}/tcp" >/dev/null 2>&1 || true
+  for WEB_P in "$FINAL_PORT" 80 443; do
+    ufw allow "${WEB_P}/tcp" >/dev/null 2>&1 || true
+  done
   ufw allow 1935/tcp >/dev/null 2>&1 || true
   ufw allow 19350/tcp >/dev/null 2>&1 || true
   ufw allow 8554/tcp >/dev/null 2>&1 || true
@@ -388,7 +400,7 @@ fi
 
 # Asegurar que iptables permita tráfico entrante al puerto del panel e ingesta en vivo
 if command -v iptables >/dev/null 2>&1; then
-  for TCP_P in "${FINAL_PORT}" 1935 19350 8554; do
+  for TCP_P in "${FINAL_PORT}" 80 443 1935 19350 8554; do
     iptables -C INPUT -p tcp --dport "${TCP_P}" -j ACCEPT 2>/dev/null || \
       iptables -I INPUT 1 -p tcp --dport "${TCP_P}" -j ACCEPT 2>/dev/null || true
   done
@@ -415,7 +427,13 @@ echo ""
 echo "============================================================"
 echo "  ${STATUS_MSG}"
 echo "============================================================"
-echo "  🌐 Panel Admin & WebTV : http://${SERVER_IP}:${FINAL_PORT}"
+if [ "$FINAL_PORT" = "80" ]; then
+  PANEL_WEB_URL="http://${SERVER_IP}"
+else
+  PANEL_WEB_URL="http://${SERVER_IP}:${FINAL_PORT}"
+fi
+echo "  🌐 Panel Admin & WebTV : ${PANEL_WEB_URL}"
+echo "  🔒 HTTPS (puerto 443)  : https://${SERVER_IP}  (se abre con el certificado: tvlister-admin tls <cert> <clave>)"
 echo "  👤 Usuario Admin       : admin"
 echo "  🛠️  Consola SysAdmin    : tvlister-admin"
 echo "  🔑 Cambiar clave Admin : tvlister-admin reset-admin TU_NUEVA_CLAVE"

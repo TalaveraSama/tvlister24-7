@@ -16,10 +16,22 @@ if [ ! -x "$NODE_BIN" ]; then
 fi
 
 get_current_port() {
+  # Puerto principal (HTTP). El estándar es el 80; el 443 lo abre el propio
+  # panel con TLS. Una instalación antigua conserva el suyo (p. ej. 8095).
+  local p=""
   if [ -f "$SERVICE_FILE" ]; then
-    grep -E '^Environment=PORT=' "$SERVICE_FILE" | head -n1 | cut -d= -f3 || echo "8095"
+    p=$(grep -E '^Environment=PORT=' "$SERVICE_FILE" 2>/dev/null | head -n1 | cut -d= -f3 || true)
+  fi
+  echo "${p:-80}"
+}
+
+# URL del panel sin el :80 (que nadie escribe) y tal cual para el resto.
+panel_url_for_port() {
+  local port="${1:-$(get_current_port)}" ip="${2:-$(get_server_ip)}"
+  if [ "$port" = "80" ]; then
+    echo "http://${ip}"
   else
-    echo "8095"
+    echo "http://${ip}:${port}"
   fi
 }
 
@@ -39,7 +51,8 @@ cmd_status() {
   echo "============================================================"
   echo "  TVLister 24/7 — Estado del Sistema"
   echo "============================================================"
-  echo "  URL Panel Admin : http://${ip}:${port}"
+  echo "  URL Panel Admin : $(panel_url_for_port "$port" "$ip")"
+  echo "  HTTPS estándar  : https://${ip}  (puerto 443; se abre con el certificado: tvlister-admin tls <cert> <clave>)"
   echo "  Directorio      : ${APP_DIR}"
   echo "  Base de Datos   : ${APP_DIR}/data/tvlister.db"
   if [ -d "/home/xui" ]; then
@@ -77,20 +90,31 @@ cmd_reset_admin() {
 
 cmd_open_firewall() {
   local port="${1:-$(get_current_port)}"
+  # El panel usa el 80 (HTTP) y el 443 (HTTPS) de fábrica: se abren siempre,
+  # además del puerto principal de esta instalación.
+  local ports=("$port")
+  local p
+  for p in 80 443; do
+    [[ " ${ports[*]} " == *" ${p} "* ]] || ports+=("$p")
+  done
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow "${port}/tcp" >/dev/null 2>&1 || true
-    echo "✅ Puerto ${port}/tcp permitido en UFW."
+    for p in "${ports[@]}"; do
+      ufw allow "${p}/tcp" >/dev/null 2>&1 || true
+    done
+    echo "✅ Puertos ${ports[*]}/tcp permitidos en UFW."
   fi
   if command -v iptables >/dev/null 2>&1; then
-    iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT
-    echo "✅ Regla ACCEPT para puerto TCP ${port} verificada en iptables."
+    for p in "${ports[@]}"; do
+      iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport "$p" -j ACCEPT
+    done
+    echo "✅ Reglas ACCEPT para TCP ${ports[*]} verificadas en iptables."
   fi
 }
 
 cmd_set_port() {
   local new_port="${1:-}"
   if [ -z "$new_port" ]; then
-    read -r -p "Ingresa el nuevo puerto TCP (ej. 8095, 8895, 9080): " new_port
+    read -r -p "Ingresa el nuevo puerto TCP (80 = estándar, 8095, 8895, 9080): " new_port
   fi
   if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 80 ] || [ "$new_port" -gt 65535 ]; then
     echo "[ERROR] Puerto inválido: $new_port"
@@ -104,7 +128,7 @@ cmd_set_port() {
   systemctl daemon-reload
   systemctl restart "$SERVICE_NAME"
   cmd_open_firewall "$new_port"
-  echo "✅ Panel movido y reiniciado en: http://$(get_server_ip):${new_port}"
+  echo "✅ Panel movido y reiniciado en: $(panel_url_for_port "$new_port")"
 }
 
 cmd_backup() {
@@ -322,7 +346,7 @@ cmd_streams_port() {
 
     const want = String(process.env.SP_WANT || "status").trim().toLowerCase();
     const givenDomain = String(process.env.SP_DOMAIN || "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
-    const mainPort = Number(process.env.SP_MAINPORT) || 8095;
+    const mainPort = Number(process.env.SP_MAINPORT) || 80;
 
     const get = (k) => String(db.prepare("SELECT value FROM settings WHERE key = ?").get(k)?.value || "").trim();
     const set = (k, v) => db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(k, v);
@@ -358,7 +382,7 @@ cmd_streams_port() {
         console.log("   ------------------------------------  --------------------------------");
         console.log("   http://DOMINIO/            (80)       http://DOMINIO/...            (80)");
         console.log("   https://DOMINIO/           (443)      https://DOMINIO/...           (443)");
-        console.log("   http://IP:" + mainPort + "/            (8095)     http://IP:" + mainPort + "/...         (8095)");
+        console.log("   http://IP:" + mainPort + "/            (" + mainPort + ")     http://IP:" + mainPort + "/...         (" + mainPort + ")");
         console.log("");
         console.log("  O sea: si entra por el dominio sin puerto, ya sale por el 80.");
       }
@@ -874,7 +898,7 @@ cmd_access_code() {
       fi
       local ip port
       ip=$(get_server_ip); port=$(get_current_port)
-      echo "  http://${ip}:${port}/?access=$arg1"
+      echo "  $(panel_url_for_port "$port" "$ip")/?access=$arg1"
       echo "  (con dominio y HTTPS, cambia el host por el del panel)"
       ;;
 
@@ -1246,7 +1270,7 @@ cmd_doctor() {
     console.log(fs.existsSync("./dist/index.html") ? "  [OK]   6. Build de producción compilado (dist/)" : "  [FALTA] 6. Ejecuta npm run build");
   '
   if curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then
-    echo "  [OK]   7. Endpoint /api/health respondiendo en http://${ip}:${port}"
+    echo "  [OK]   7. Endpoint /api/health respondiendo en $(panel_url_for_port "$port" "$ip")"
   else
     echo "  [FALTA] 7. Servicio no responde en 127.0.0.1:${port} -> Ejecuta: tvlister-admin restart"
   fi
@@ -3472,9 +3496,46 @@ case "$ACTION" in
     cd "$APP_DIR"
     TLS_SUB="${2:-}"
 
+    # El 80 y el 443 son los puertos estándar del panel: se registran una vez
+    # instalado el certificado para que el 443 (HTTPS) y el 80 (redirección)
+    # queden abiertos sin pasos extra, y se abren en el firewall.
+    ensure_standard_ports() {
+      "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb, db } from "./server/db.js";
+        initDb();
+        const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
+        const entries = new Map();
+        for (const tok of String(row?.value || "").split(/[,\s;]+/)) {
+          const [p, s] = tok.split(":");
+          const n = Number(p);
+          if (Number.isInteger(n) && n) entries.set(n, s || "");
+        }
+        entries.set(443, "https");
+        entries.set(80, "both");
+        const val = Array.from(entries.entries()).sort((a, b) => a[0] - b[0]).map(([p, s]) => `${p}:${s}`).join(",");
+        db.prepare("INSERT INTO settings (key, value) VALUES (\x27extra_http_ports\x27, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(val);
+        console.log("✅ Puertos estándar del panel: " + val);
+      ' >/dev/null 2>&1 || true
+      cmd_open_firewall 443 >/dev/null 2>&1 || true
+    }
+
     restart_panel() {
+      ensure_standard_ports
       systemctl restart "${SERVICE_NAME:-tvlister24-7}" >/dev/null 2>&1 \
         && echo "✅ Panel reiniciado (los puertos TLS se abren con el certificado nuevo)."
+      # Comprobación real del 443: sin esto, un certificado mal montado se
+      # descubriría cuando un cliente no pudiera entrar.
+      local i code443
+      for i in $(seq 1 15); do
+        sleep 1
+        code443=$(curl -fsSk --max-time 3 -o /dev/null -w "%{http_code}" "https://127.0.0.1/api/health" 2>/dev/null || true)
+        if [ "$code443" = "200" ]; then
+          echo "✅ HTTPS activo en https://$(get_server_ip)  (puerto 443)"
+          return 0
+        fi
+      done
+      echo "⚠️  El 443 no respondió todavía. Revisa el arranque:"
+      echo "     journalctl -u ${SERVICE_NAME:-tvlister24-7} -n 40 --no-pager | grep -i multi-port"
     }
 
     case "$TLS_SUB" in
@@ -3644,17 +3705,24 @@ case "$ACTION" in
       const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
       console.log("");
       console.log("🌐 Puertos :", row?.value || "(ninguno)");
-      console.log("   HTTPS 80/443 : tvlister-admin add-port 443 https  ·  tvlister-admin add-port 80 both");
+      console.log("   El panel usa de fábrica el 80 (HTTP) y el 443 (HTTPS).");
       console.log("   Añadir cert  : tvlister-admin tls origin | tls add <dominio> | tls list");
     '
     ;;
   list-ports)
-    echo "Puerto Principal : $(get_current_port)"
+    MAIN_P="$(get_current_port)"
+    echo "Puerto Principal : ${MAIN_P} (HTTP)"
+    echo "Puerto HTTPS     : 443 (se abre con el certificado: tvlister-admin tls <cert> <clave>)"
     cd "$APP_DIR"
-    "$NODE_BIN" --no-warnings --input-type=module -e '
+    MAIN_PORT_ENV="$MAIN_P" "$NODE_BIN" --no-warnings --input-type=module -e '
       import { db } from "./server/db.js";
+      const main = Number(process.env.MAIN_PORT_ENV);
       const row = db.prepare("SELECT value FROM settings WHERE key = \x27extra_http_ports\x27").get();
-      console.log("Puertos Extra    :", row?.value || "(ninguno)");
+      const extra = String(row?.value || "")
+        .split(/[,\s;]+/)
+        .filter(Boolean)
+        .filter((tok) => Number(tok.split(":")[0]) !== main);
+      console.log("Puertos Extra    :", extra.length ? extra.join(",") : "(ninguno)");
     '
     ;;
   install-ingest)

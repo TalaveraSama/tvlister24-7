@@ -218,7 +218,13 @@ import {
 } from './backupScheduler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT) || 8080;
+// Puerto principal del panel: **el estándar**. Como root (el servicio systemd)
+// escucha en el 80, y el 443 con TLS lo abre el gestor multi-puerto; sin
+// privilegios (desarrollo, pruebas) se queda en 8095 para no pedir root.
+// `PORT` manda siempre que esté puesto, y una instalación existente conserva
+// el suyo (está en Environment=PORT= del servicio).
+const DEFAULT_PORT = typeof process.getuid === 'function' && process.getuid() === 0 ? 80 : 8095;
+const PORT = Number(process.env.PORT) || DEFAULT_PORT;
 const HOST = '0.0.0.0';
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -5157,7 +5163,8 @@ async function startServer() {
   process.on('SIGINT', gracefulShutdown);
 
   httpServer.listen(PORT, HOST, async () => {
-    console.log(`TVLister 24/7 Panel listening on http://${HOST}:${PORT}`);
+    const portSuffix = PORT === 80 ? '' : `:${PORT}`;
+    console.log(`TVLister 24/7 Panel listening on http://${HOST}:${PORT} (http://<tu-ip>${portSuffix})`);
     await initMultiPortManager({
       app,
       primaryServer: httpServer,
