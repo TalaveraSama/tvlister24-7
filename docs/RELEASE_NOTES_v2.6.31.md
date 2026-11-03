@@ -49,7 +49,8 @@ de la pantalla (ya lo tienes así).
 | --- | --- | --- |
 | `node scripts/test_vod_genre_reclassify.mjs` | Escenario exacto: todo en `Movies` con el género guardado. La vista previa ve 7 títulos, no crea nada; Aplicar crea Acción, Comedia, Ciencia ficción, Crimen, Animación y Thriller y vacía `Movies`; el segundo clic no hace nada; **un «reseteo» simulado se reconstruye sin gastar consultas de TMDB**; prioridad «Románticas» aplicada | **30 OK** |
 | `node scripts/test_vod_genre_apply_api.mjs` | Lo mismo por HTTP contra el panel real (el botón que pulsas), incluyendo un título sin género guardado que se resuelve en TMDB | **21 OK** |
-| `test_vod_genres` / `test_vod_genre_tmdb_state` / `test_vod_genre_tmdb_ui` / VOD / balanceadores | Sin regresiones | todo OK |
+| `test_vod_genre_tmdb_ui.mjs` | Pantalla real: al pulsar **Aplicar** se ve «Separadas por género de TMDB: 7 películas», las categorías creadas y «5 ya tenían el género guardado» | **24 OK** |
+| `test_vod_genres` / `test_vod_genre_tmdb_state` / VOD / balanceadores | Sin regresiones | todo OK |
 
 Con el código de la v2.6.30 la primera prueba falla (sólo creaba «Thriller» y `Movies` se quedaba con todo):
 es una regresión real, no una prueba acomodada.

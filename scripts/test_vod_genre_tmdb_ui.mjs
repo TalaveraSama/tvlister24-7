@@ -111,6 +111,31 @@ globalThis.fetch = async (url, options = {}) => {
       priority: ['Románticas', 'Terror', 'Acción'],
       ...(postGenreDropsTmdb ? {} : { tmdb: { configured: true, language: 'es-MX' } })
     };
+  } else if (key === 'POST /api/vod/genres/classify') {
+    data = {
+      ok: true,
+      dryRun: Boolean(options.body && JSON.parse(options.body).dryRun),
+      limit: 120,
+      media: 'both',
+      movies: {
+        table: 'movies',
+        checked: 7,
+        classified: 7,
+        moved: 5,
+        notFound: 0,
+        failed: 0,
+        remaining: 0,
+        pendingBefore: 7,
+        pendingMoves: 5,
+        items: [],
+        categories: [
+          { name: 'Acción', count: 2 },
+          { name: 'Comedia', count: 3 },
+          { name: 'Ciencia ficción', count: 2 }
+        ]
+      },
+      series: { table: 'series', checked: 0, classified: 0, moved: 0, notFound: 0, failed: 0, remaining: 0, items: [], categories: [] }
+    };
   } else {
     data = base[key] ?? {};
   }
@@ -225,6 +250,30 @@ ok(
 const cerrar = [...document.querySelectorAll('button')].find((b) => b.querySelector('svg') && b.closest('.fixed'));
 if (cerrar) await click(cerrar);
 ok(!text().includes('Falta la API Key de TMDB'), 'tras guardar la clave ya no avisa (sin recargar)');
+
+// ==================== 7. Aplicar: se ven las categorías y las mudanzas ====================
+// Se vuelve a abrir el modal de sincronizar carpeta (la tarjeta vive ahí).
+await abrirCarpetas();
+const aplicarBtn = byText('button', 'Aplicar a Películas y Series');
+ok(!!aplicarBtn && aplicarBtn.disabled === false, '«Aplicar» está disponible con la clave puesta');
+if (aplicarBtn) await click(aplicarBtn);
+await act(async () => {
+  await new Promise((r) => setTimeout(r, 400));
+});
+
+const classifyCalls = calls.filter((c) => c.key === 'POST /api/vod/genres/classify');
+ok(classifyCalls.length >= 1, 'llamó al clasificador', `${classifyCalls.length} lote(s)`);
+ok(classifyCalls.every((c) => c.body?.dryRun === false), 'aplicando de verdad (dryRun: false)');
+ok(
+  classifyCalls.every((c) => !('refresh' in (c.body || {}))),
+  'no fuerza refresh (usa el género ya guardado)',
+  JSON.stringify(classifyCalls[0]?.body)
+);
+ok(text().includes('Separadas por género de TMDB: 7 películas'), 'informa cuántas separó', text().match(/Separadas por género[^.]*/)?.[0]);
+ok(text().includes('Acción'), 'se ven las categorías creadas (Acción)');
+ok(text().includes('Comedia'), 'se ven las categorías creadas (Comedia)');
+ok(text().includes('ya tenían el género guardado'), 'explica que 5 ya tenían el género guardado');
+ok(text().includes('en su categoría de género'), 'el resumen habla de «su categoría de género»');
 
 console.log(fails.length === 0 ? '\nTODO OK' : `\n${fails.length} fallo(s)`);
 process.exit(fails.length === 0 ? 0 : 1);
