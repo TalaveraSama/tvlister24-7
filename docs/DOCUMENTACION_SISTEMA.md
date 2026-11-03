@@ -1143,8 +1143,8 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.30/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.30
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.31/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.31
 ```
 
 La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
@@ -3022,6 +3022,23 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
 - El 80 y el 443 se registran solos como puertos estándar del gestor multi-puerto (una sola vez: si
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
+
+### v2.6.31: la separación por género reconstruye las categorías tras el reseteo
+
+Síntoma: después de juntar todo en `Movies`, «Aplicar a Películas y Series» no creaba Acción, Comedia…
+Causa: la clasificación sólo elegía filas con `tmdb_genres` vacío; los géneros ya estaban guardados.
+
+| Antes | Ahora |
+| --- | --- |
+| `WHERE tmdb_genres IS NULL OR tmdb_genres = ''` | También las filas con género guardado que están en **otra** categoría (se mueven sin consultar TMDB) |
+| El resultado no distinguía esos casos | `moved` = «ya tenían el género guardado»; `pendingMoves` en la vista previa |
+| `tmdb_genres = '[]'` se reintentaba | Se respeta (salvo `refresh`, que reencola todo y recalcula) |
+
+Respuesta de `POST /api/vod/genres/classify`: `checked`, `classified`, `moved`, `notFound`, `failed`,
+`remaining`, `pendingBefore`, `pendingMoves`.
+
+Pruebas: `scripts/test_vod_genre_reclassify.mjs` (30 OK) y `scripts/test_vod_genre_apply_api.mjs` (21 OK, por
+HTTP contra el panel real).
 
 ### v2.6.30: reparto de canales entre nodos (afinidad)
 

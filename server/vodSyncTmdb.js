@@ -282,7 +282,12 @@ async function genresForHit(hit, mediaType = 'movie') {
 function parseStoredGenres(raw) {
   try {
     const arr = JSON.parse(raw || '[]');
-    return Array.isArray(arr) ? arr.map((g) => String(g ?? '').trim()).filter(Boolean) : [];
+    if (!Array.isArray(arr)) return [];
+    return arr
+      // Se guardan como texto, pero una importación antigua puede traer
+      // `{id, name}`: se aceptan las dos formas.
+      .map((g) => String(typeof g === 'object' && g ? g.name ?? '' : g ?? '').trim())
+      .filter(Boolean);
   } catch {
     return [];
   }
@@ -342,21 +347,57 @@ export async function classifyVodGenresByTmdb({
 
 async function classifyTable({ table, categoryType, mediaType, cap, dryRun, refresh, genreConfig }) {
   // `table`/`categoryType` son constantes internas, nunca datos del cliente.
-  // `tmdb_genres = '[]'` significa «ya se preguntó a TMDB y no tiene género»:
-  // no se vuelve a preguntar (si se corrige el título, se usa `refresh`).
-  const pendingWhere = refresh ? '1 = 1' : "(tmdb_genres IS NULL OR tmdb_genres = '')";
-  const rows = db
-    .prepare(
-      `SELECT id, title, release_year, tmdb_id, tmdb_genres FROM ${table}
-        WHERE ${pendingWhere} ORDER BY id ASC LIMIT ?`
-    )
-    .all(cap);
-  const pendingBefore = db
-    .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${pendingWhere}`)
-    .get().c;
+  //
+  // Qué se procesa en cada lote:
+  //   a) Filas sin géneros guardados (nunca se preguntó a TMDB).
+  //   b) Filas **cuyos géneros ya se conocen pero están en otra categoría**:
+  //      esto es lo que fallaba después de la limpieza de categorías. Al mover
+  //      todo a la categoría maestra (`Movies`) los géneros seguían guardados,
+  //      así que la condición anterior (`tmdb_genres IS NULL`) las saltaba y la
+  //      separación no hacía nada: no se creaba Acción, Comedia, Terror… y todo
+  //      se quedaba dentro de `Movies`.
+  const catRows = db.prepare('SELECT id, name FROM categories WHERE type = ?').all(categoryType);
+  const catNameById = new Map(catRows.map((r) => [Number(r.id), r.name]));
+  const norm = (v) => String(v || '').trim().toLowerCase();
+
+  const allRows = db
+    .prepare(`SELECT id, title, release_year, tmdb_id, tmdb_genres, category_id FROM ${table} ORDER BY id ASC`)
+    .all();
+
+  // Lo que hay que hacer, decidido sin red: mudanzas con el género ya guardado.
+  const toMove = [];
+  const needsLookup = [];
+  for (const row of allRows) {
+    const rawGenres = String(row.tmdb_genres ?? '').trim();
+    const cached = parseStoredGenres(rawGenres);
+    if (cached.length > 0) {
+      // `refresh` = «vuelve a preguntar a TMDB por todo»: se reencolan todas las
+      // filas con género guardado y el destino se recalcula con la respuesta
+      // nueva. Sin `refresh` se aprovecha el género guardado y sólo se mueve lo
+      // que esté en otra categoría (esto es lo que faltaba para reconstruir
+      // Acción, Comedia… después de juntar todo en `Movies`).
+      if (refresh) {
+        needsLookup.push(row);
+        continue;
+      }
+      const target = resolveGenreCategoryName(cached, genreConfig);
+      const current = norm(catNameById.get(Number(row.category_id)) || '');
+      if (target && current !== norm(target)) toMove.push({ row, genres: cached, target });
+      continue;
+    }
+    // `tmdb_genres = '[]'` significa «ya se preguntó y no tiene género»: no se
+    // repite la consulta en cada lote (con `refresh` sí).
+    if (rawGenres === '[]' && !refresh) continue;
+    needsLookup.push(row);
+  }
+
+  const pendingBefore = needsLookup.length;
+  const pendingMovesBefore = toMove.length;
 
   const plan = [];
-  let classified = 0;
+  let classified = 0; // total de títulos que quedan en su categoría de género
+  let moved = 0; // los que sólo cambian de categoría (sin volver a preguntar a TMDB)
+  let lookups = 0; // consultas a TMDB de este lote
   let notFound = 0;
   let failed = 0;
 
@@ -369,24 +410,42 @@ async function classifyTable({ table, categoryType, mediaType, cap, dryRun, refr
   // lote (el título se queda en la categoría que ya tenía).
   const markChecked = db.prepare(`UPDATE ${table} SET tmdb_genres = '[]' WHERE id = ?`);
 
-  for (const row of rows) {
-    let genres = refresh ? [] : parseStoredGenres(row.tmdb_genres);
+  // ---- a) Mudanzas con el género ya guardado (baratas, sin red) -----------
+  for (const item of toMove.slice(0, Math.max(cap, 1) * 5)) {
+    const { row, genres, target } = item;
+    classified += 1;
+    moved += 1;
+    plan.push({ id: row.id, title: row.title, genres, category: target });
+    if (!dryRun) {
+      const categoryId = ensureVodCategory(target, categoryType);
+      updRow.run(
+        JSON.stringify(genres),
+        String(row.tmdb_id ?? ''),
+        genres.slice(0, 3).join(', '),
+        categoryId,
+        row.id
+      );
+    }
+  }
+
+  // ---- b) Consultas a TMDB (las que nunca tuvieron género) ----------------
+  for (const row of needsLookup.slice(0, cap)) {
+    let genres = [];
     let tmdbId = String(row.tmdb_id ?? '').trim();
     let hit = null;
+    lookups += 1;
     try {
-      if (genres.length === 0) {
-        if (!tmdbId) {
-          const cleaned = cleanTitleString(row.title);
-          const hits = await searchTmdb({
-            query: cleaned.title,
-            type: mediaType === 'series' ? 'series' : 'movie',
-            year: cleaned.year || row.release_year
-          });
-          hit = hits[0] || null;
-          tmdbId = String(hit?.tmdb_id ?? '').trim();
-        }
-        genres = hit ? await genresForHit(hit, mediaType) : await getTmdbGenres(tmdbId, mediaType);
+      if (!tmdbId) {
+        const cleaned = cleanTitleString(row.title);
+        const hits = await searchTmdb({
+          query: cleaned.title,
+          type: mediaType === 'series' ? 'series' : 'movie',
+          year: cleaned.year || row.release_year
+        });
+        hit = hits[0] || null;
+        tmdbId = String(hit?.tmdb_id ?? '').trim();
       }
+      genres = hit ? await genresForHit(hit, mediaType) : await getTmdbGenres(tmdbId, mediaType);
     } catch {
       failed += 1;
       continue;
@@ -408,16 +467,22 @@ async function classifyTable({ table, categoryType, mediaType, cap, dryRun, refr
     }
   }
 
+  // `refresh` no cambia qué filas se miran (si no, el mismo lote se repetiría
+  // para siempre), sólo obliga a volver a preguntar a TMDB las que se procesan.
+  const remainingTmdb = Math.max(0, pendingBefore - lookups);
+  const remainingMoves = dryRun ? pendingMovesBefore : 0;
+
   return {
     table: table === 'series' ? 'series' : 'movies',
-    checked: rows.length,
+    checked: toMove.length + needsLookup.length,
     classified,
+    moved,
     notFound,
     failed,
-    // Cuántas quedan por revisar después de este lote. En la vista previa no se
-    // marca nada, así que sólo descuentan las que sí tienen género.
-    remaining: Math.max(0, pendingBefore - (dryRun ? classified : rows.length)),
-    pendingBefore,
+    // Cuántas quedan por revisar después de este lote.
+    remaining: remainingTmdb + remainingMoves,
+    pendingBefore: pendingBefore + pendingMovesBefore,
+    pendingMoves: pendingMovesBefore,
     items: plan,
     categories: summarizeGenrePlan(plan)
   };

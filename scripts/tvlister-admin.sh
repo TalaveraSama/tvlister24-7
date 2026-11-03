@@ -3213,6 +3213,14 @@ cmd_vod_cats() {
         console.log(`   Movidas ${res.moved.movies} película(s) y ${res.moved.series} serie(s)${destino ? " a «" + destino + "»" : ""}.`);
       }
       console.log("   El panel ya muestra el catálogo sin esas categorías.");
+      // Al mover todo a la maestra, las categorías por género desaparecen: el
+      // panel las reconstruye pulsando «Aplicar a Películas y Series» (o por la
+      // API /api/vod/genres/classify). Los géneros ya están guardados, así que
+      // no hay que volver a preguntar a TMDB.
+      console.log("");
+      console.log("   Si separas el catálogo por género de TMDB, las categorías (Acción, Comedia…) se reconstruyen");
+      console.log("   en Películas → Sincronizar Carpeta → «Aplicar a Películas y Series». No hace falta volver a TMDB:");
+      console.log("   el género de cada título ya está guardado en la base.");
       if (u.subfolderFolders.length) {
         console.log("");
         console.log("   ⚠️  Ojo: estas carpetas siguen en modo «por carpeta» y volverán a crear categorías:");

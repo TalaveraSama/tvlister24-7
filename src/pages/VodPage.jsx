@@ -182,14 +182,15 @@ function GenrePlanBlock({ title, plan }) {
       <div className="flex items-center gap-2 text-[11px] text-slate-400">
         <span className="font-semibold text-slate-200">{title}</span>
         <span>
-          {plan.checked} revisadas • {plan.classified} con género
+          {plan.checked} revisadas • {plan.classified} en su categoría de género
+          {plan.moved > 0 ? ` • ${plan.moved} ya tenían el género guardado` : ''}
           {plan.notFound > 0 ? ` • ${plan.notFound} sin resultado en TMDB` : ''}
           {plan.remaining > 0 ? ` • ${plan.remaining} pendientes` : ''}
         </span>
       </div>
       {plan.categories.length === 0 ? (
         <div className="text-[11px] text-slate-500">
-          Ningún título de este lote tiene género en TMDB todavía.
+          Este lote no tiene títulos que mover: o ya están en su categoría de género, o TMDB no les conoce género.
         </div>
       ) : (
         <div className="flex flex-wrap gap-1.5">
@@ -890,6 +891,9 @@ export default function VodPage({ onPreview }) {
           `Borradas ${res.deleted} categoría(s).` +
           (movidos > 0
             ? ` Se movieron ${res.moved.movies} películas y ${res.moved.series} series a «${destino?.name || 'la categoría elegida'}».`
+            : '') +
+          (movidos > 0
+            ? ' Si separas el catálogo por género de TMDB, pulsa «Aplicar a Películas y Series» para reconstruir Acción, Comedia, Terror…'
             : '')
       });
       setCatSelected([]);
