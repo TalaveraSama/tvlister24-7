@@ -3029,6 +3029,24 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.38: la tabla del push, sólo lo que importa
+
+La tarjeta de salidas UDP abría con los 124 canales del rango; con la lista real (32/64/125 canales) se
+convertía en una lista larga donde lo útil es lo que ya está emparejado. Ahora la tabla abre en **«Canales con
+stream asignado»** y el selector de al lado cambia la vista:
+
+| Vista | Para qué |
+| --- | --- |
+| Canales con stream asignado (por defecto) | lo que ya emite Flussonic |
+| Todos los canales del rango | ver el mapa completo |
+| Canales sin stream | emparejarlos con su stream |
+| Canales con salida UDP puesta | repasar las salidas |
+
+- Al elegir el stream de un canal, la tabla vuelve sola a «con stream asignado» para enseñar la fila recién
+  emparejada (antes el canal desaparecía de la vista y parecía que no se había guardado).
+- La API añade `has_output` en cada canal; `channels_con_salida` ya usaba ese dato.
+- Si el filtro deja la tabla vacía, se explica cómo cambiarlo en vez de dejar una tabla en blanco.
+
 ### v2.6.37: el panel guarda la salida en Flussonic y no emite UDP
 
 **Lo pedido:** «el panel tiene que guardar en Flussonic el UDP; el panel no emite UDP cuando el control lo tiene

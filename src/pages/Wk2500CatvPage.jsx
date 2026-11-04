@@ -135,7 +135,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     dirty: {},
     range: { from: 2, to: 125 },
     iface: '',
-    filter: 'canales',
+    filter: 'con_stream',
     titles: null,
     query: ''
   });
@@ -354,6 +354,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         ...prev,
         busy: '',
         snapshot: r.snapshot || prev.snapshot,
+        // Al asignar un stream el canal pasa a «con stream»: se vuelve a esa
+        // vista para que el operador vea la fila recién emparejada.
+        filter: stream ? 'con_stream' : prev.filter,
         draft: { ...prev.draft, [stream]: prev.draft[stream] || '' },
         message: stream
           ? `✅ CH${catvCh} queda con el stream «${stream}»${freed}.`
@@ -1082,6 +1085,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
 
   const pushChannels = (fsPush.snapshot?.channels || []).filter((c) => {
     if (c.catv_ch < fsPush.range.from || c.catv_ch > fsPush.range.to) return false;
+    if (fsPush.filter === 'con_stream' && !c.stream) return false;
+    if (fsPush.filter === 'sin_stream' && c.stream) return false;
+    if (fsPush.filter === 'con_salida' && !c.has_output) return false;
     const q = String(fsPush.query || '').trim().toLowerCase();
     if (!q) return true;
     return (
@@ -1961,6 +1967,16 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             <RefreshCw className={`w-3.5 h-3.5 ${fsPush.loading ? 'animate-spin' : ''}`} /> Actualizar
           </button>
           <div className="flex items-center gap-1.5 ml-auto">
+            <select
+              value={fsPush.filter}
+              onChange={(e) => setFsPush((prev) => ({ ...prev, filter: e.target.value }))}
+              className="px-2 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-slate-200"
+            >
+              <option value="con_stream">Canales con stream asignado</option>
+              <option value="todos">Todos los canales del rango</option>
+              <option value="sin_stream">Canales sin stream</option>
+              <option value="con_salida">Canales con salida UDP puesta</option>
+            </select>
             <input
               type="text"
               placeholder="Buscar canal, IP o stream…"
@@ -2103,6 +2119,20 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             </table>
           </div>
         ) : null}
+
+        {fsPush.snapshot?.flussonic_reachable && pushChannelRows.length === 0 && (
+          <div className="rounded-xl border border-slate-700 bg-[#090e1a] px-3 py-2 text-[11px] text-slate-400">
+            No hay canales en este rango con el filtro «
+            {fsPush.filter === 'con_stream'
+              ? 'Canales con stream asignado'
+              : fsPush.filter === 'sin_stream'
+                ? 'Canales sin stream'
+                : fsPush.filter === 'con_salida'
+                  ? 'Canales con salida UDP puesta'
+                  : 'Todos los canales del rango'}
+            ». Cambia el filtro o el rango para ver otros.
+          </div>
+        )}
 
         {fsPush.snapshot?.flussonic_reachable && pushChannels.length > pushChannelRows.length && (
           <div className="text-[10px] text-slate-500">

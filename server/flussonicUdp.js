@@ -956,6 +956,7 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
       stream_exists: Boolean(st),
       stream_alive: st ? st.alive : null,
       push: st ? st.push : null,
+      has_output: Boolean(st && st.push),
       has_output: Boolean(st && st.push && dest && outputTargetKey(st.push.url) === outputTargetKey(dest)),
       in_sync: Boolean(st && st.in_sync),
       other_udp: st ? st.udp_outputs.filter((u) => outputTargetKey(u) !== outputTargetKey(dest)) : [],

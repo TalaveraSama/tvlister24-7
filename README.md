@@ -24,6 +24,11 @@ interfaz dedicada, nombres de las portadoras, grilla de canales) · **2 · Fluss
 verificar y volver sin dos emisores) · **3 · Flussonic UDP · push** (la salida UDP de cada canal). Ya no se mezcla
 lo nativo con lo de Flussonic.
 
+🔎 **La tabla del push abre en «canales con stream asignado» (v2.6.38)**: antes salían los 124 canales del
+rango y había que buscar a mano; ahora se ve de entrada lo que ya tiene stream, con un selector para ver
+*todos*, los *sin stream* (para emparejarlos) o los que tienen *salida UDP puesta*. Al emparejar un canal, la
+tabla vuelve sola a «con stream» para ver la fila recién asignada.
+
 ⚡ **El panel no emite cuando manda Flussonic (v2.6.37)**: al guardar la salida UDP de un canal en Flussonic, el
 canal pasa a Flussonic y **TVLister cierra su emisor** en ese mismo momento (cero datagramas, comprobado
 midiendo). El panel sólo **escribe el texto de la salida** en Flussonic y vigila que siga puesta. Vale también

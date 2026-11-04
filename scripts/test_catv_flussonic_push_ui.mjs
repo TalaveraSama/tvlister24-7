@@ -316,15 +316,29 @@ ok(
 ok(text().includes('134.2 MB'), 'muestra lo enviado (como el «running · 134.2 MB» de Flussonic)');
 ok(text().includes('Emitiendo'), 'marca el canal que está emitiendo');
 ok(text().includes('Otra IP/puerto'), 'marca el que apunta a otra IP/puerto');
-ok(text().includes('Sin stream'), 'marca el canal sin stream');
+ok(
+  text().includes('canal(es) de la lista sin stream de Flussonic'),
+  'dice cuántos canales de la lista están sin stream'
+);
 ok(text().includes('TVLister apagado'), 'marca los canales que ya controla Flussonic (TVLister apagado)');
 ok(text().includes('emitiendo desde TVLister') || text().includes('TVLister no emite'), 'dice si el panel emite ese canal');
 ok(text().includes('El panel no emite este UDP'), 'explica que el panel sólo escribe el texto de la salida');
 ok(text().includes('nombre se repite en varios canales'), 'avisa del nombre repetido (NACIONAL)');
 
 // --- 3. Elegir el stream a mano (a0cq → CH4) ---------------------------
-const ch4Row = [...document.querySelectorAll('tr')].find((tr) => tr.querySelector('select') && tr.textContent.includes('CH') === false && tr.textContent.includes('NACIONAL') && tr.querySelector('select')?.value === '');
-const selCh4 = ch4Row?.querySelector('select') || [...document.querySelectorAll('tr')].find((tr) => !tr.querySelector('select')?.value)?.querySelector('select');
+// Por defecto sólo se ven los canales con stream; para asignar uno nuevo se
+// cambia el filtro a «Canales sin stream».
+const filterSel = [...document.querySelectorAll('select')].find((el) =>
+  [...el.options].some((o) => o.value === 'sin_stream')
+);
+ok(Boolean(filterSel), 'hay filtro de canales (con stream / sin stream)');
+await act(async () => {
+  filterSel.value = 'sin_stream';
+  filterSel.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+});
+const ch4Row = [...document.querySelectorAll('tr')].find((tr) => tr.querySelector('select') && !tr.querySelector('select').value);
+const selCh4 = ch4Row?.querySelector('select');
 ok(Boolean(selCh4), 'cada canal sin stream tiene su lista para elegir el stream');
 if (selCh4) {
   await act(async () => {
