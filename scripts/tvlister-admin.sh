@@ -2923,6 +2923,7 @@ cmd_catv() {
             else if (a === "--stream") opt.stream = argv[++i] || "";
             else if (a === "--map") opt.mapCh = Number(argv[++i] || 0);
             else if (a === "--titles") opt.titles = true;
+            else if (a === "--keep-local") opt.keepLocal = true;
             else if (a === "--url") opt.url = argv[++i] || "";
             else if (/^\d+(-\d+)?$/.test(a)) { opt.range = a; opt.rangeGiven = true; }
           }
@@ -2938,6 +2939,7 @@ cmd_catv() {
             const r = await pushMod.applyStreamPushItems({
               items: [{ stream: opt.stream, url: opt.url, remove: opt.remove }],
               dryRun: !opt.apply,
+              takeOver: !opt.remove && !opt.keepLocal,
               iface: ""
             });
             const d = r.detail?.[0] || {};
@@ -2994,7 +2996,7 @@ cmd_catv() {
               iface,
               remove: opt.remove,
               dryRun: !opt.apply,
-              takeOver: !opt.remove
+              takeOver: !opt.remove && !opt.keepLocal
             });
             if (!r.ok) { console.error("  " + (r.error || "No se pudo leer Flussonic.")); process.exit(1); }
             console.log("============================================================");
@@ -3008,6 +3010,7 @@ cmd_catv() {
             console.log("------------------------------------------------------------");
             console.log("  " + (opt.apply ? (r.message || r.applied + " aplicados") : "Vista previa: " + r.changed + " cambiarian (nada escrito)"));
             if (r.sin_stream?.length) console.log("  " + r.sin_stream.length + " canal(es) sin stream de Flussonic reconocido");
+            if (opt.apply && !opt.remove) console.log("  TVLister deja de emitir esos canales: el UDP lo pone Flussonic.");
             if (!opt.apply) console.log("  Escribe con: tvlister-admin catv flussonic push --range " + rng.from + "-" + rng.to + " --apply");
             console.log("============================================================");
             process.exit(r.failed ? 1 : 0);
@@ -3142,6 +3145,7 @@ cmd_catv() {
         console.log("       tvlister-admin catv flussonic push --stream NOMBRE --url udp://IP:PUERTO [--apply]");
         console.log("       tvlister-admin catv flussonic push --map 4 --stream a0ek     (canal -> stream a mano)");
         console.log("       tvlister-admin catv flussonic push --titles [--apply]        (nombre del canal en el TS)");
+        console.log("       (--keep-local: NO apagar el emisor de TVLister; por defecto SI se apaga)");
       '
       ;;
 

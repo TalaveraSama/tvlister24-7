@@ -66,6 +66,7 @@ const streamsState = new Map([
   ['CANAL 6', { name: 'CANAL 6', title: 'Canal 6', alive: true, bitrate: 2000000, outputs: [], push: [] }],
   ['a0ek', { name: 'a0ek', title: 'A&E', alive: true, bitrate: 1900000, outputs: [], push: [], mpegts: {} }],
   ['a0cq', { name: 'a0cq', title: 'A3 Cine', alive: true, bitrate: 1800000, outputs: [], push: [], mpegts: {} }],
+  ['a0zz', { name: 'a0zz', title: 'Canal 12', alive: true, bitrate: 1500000, outputs: [], push: [], mpegts: {} }],
   ['SIN CANAL', { name: 'SIN CANAL', title: 'sin relacion', alive: true, bitrate: 1000000, outputs: [], push: [] }]
 ]);
 const patchCalls = [];
@@ -256,6 +257,15 @@ try {
     { ch: 9, name: 'NACIONAL', dest: 4779 },
     { ch: 10, name: 'A3 CINE', dest: 4780 }
   ];
+  // CH12: la fuente está SÓLO en Flussonic (sin stream_id ni custom_source_url).
+  raw
+    .prepare(
+      `UPDATE wk2500_channels SET custom_name = 'CANAL 12', udp_host = '127.0.0.1', udp_port = 4777,
+              custom_source_url = '', stream_id = NULL, output_mode = 'direct_spts', enabled = 1,
+              flussonic_stream = '', udp_engine = 'local'
+        WHERE catv_ch = 12`
+    )
+    .run();
   for (const c of [...CHANNELS, ...EXTRA, { ch: 6, name: 'CANAL 6', dest: 4776, host: '127.0.0.1' }]) {
     raw
       .prepare(
@@ -359,6 +369,11 @@ try {
     action: 'remove'
   })).data;
   ok('quitar responde ok', removed?.ok === true, JSON.stringify(removed?.detail?.filter((d) => !d.ok)));
+  ok(
+    'avisa de los canales que se quedan sin emisor',
+    (removed?.sin_emisor || []).includes(2) || (removed?.sin_emisor || []).includes(3),
+    JSON.stringify(removed?.sin_emisor) + ' · ' + (removed?.panel_note || '')
+  );
   ok('el CH2 y CH3 se quedan sin UDP', udpOf('NACIONAL 2').length === 0 && udpOf('TELEMUNDO').length === 0, JSON.stringify([udpOf('NACIONAL 2'), udpOf('TELEMUNDO')]));
   ok('el CH4 no se toca', udpOf('CANAL 5').length === 1, JSON.stringify(udpOf('CANAL 5')));
   ok('el rtmp sigue ahí', (streamsState.get('NACIONAL 2').outputs || []).some((o) => String(o.url).startsWith('rtmp://')));
@@ -421,6 +436,49 @@ try {
   );
   const ch8b = ((await api('GET', '/api/wk2500/flussonic-push')).data?.channels || []).find((c) => c.catv_ch === 8);
   ok('el canal ya sale identificado al escanear', ch8b?.push === null || ch8b?.service_name === 'NACIONAL');
+
+  // --- 5e. La regla: si el control lo tiene Flussonic, el panel NO emite ---
+  // CH3 con destino unicast local para poder contar sus datagramas de verdad.
+  raw.prepare("UPDATE wk2500_channels SET udp_host = '127.0.0.1' WHERE catv_ch = 3").run();
+
+  // Vuelta a TVLister: el panel retira la salida de Flussonic y vuelve a emitir.
+  const backCh3 = (await api('POST', '/api/wk2500/flussonic-control/switch', { engine: 'local', catv_ch: 3 })).data;
+  ok('«volver a TVLister» deja el canal en local', backCh3?.ok === true, JSON.stringify(backCh3?.detail));
+  await api('POST', '/api/wk2500/control', { action: 'start_one', catv_ch: 3 });
+  await sleep(2500);
+  const beforeCh3 = await countDatagrams(4772, 2500);
+  ok('el CH3 vuelve a emitir desde TVLister', beforeCh3 > 0, `${beforeCh3} datagramas`);
+
+  const rowApply = (await api('POST', '/api/wk2500/flussonic-push', {
+    items: [{ stream: 'TELEMUNDO', url: 'udp://239.1.1.2:4772' }]
+  })).data;
+  ok('guardar una fila responde ok', rowApply?.ok === true, JSON.stringify(rowApply?.detail));
+  ok('el panel dice que TVLister NO emite', rowApply?.panel_emitting === 0, rowApply?.panel_note);
+  ok('el aviso lo explica', /TVLister no emite/i.test(rowApply?.panel_note || ''), rowApply?.panel_note);
+  const afterCh3 = await countDatagrams(4772, 3000);
+  ok('deja de salir un solo datagrama de TVLister a ese destino', afterCh3 === 0, `${afterCh3} datagramas`);
+  const planCh3 = (await api('GET', '/api/wk2500/plan')).data;
+  const ch3slot = (planCh3?.slots || planCh3?.channels || []).find((c) => c.catv_ch === 3);
+  ok('el canal queda con motor Flussonic en el plan', ch3slot?.live_engine === 'flussonic_api', `engine=${ch3slot?.live_engine}`);
+  const snapCh3 = ((await api('GET', '/api/wk2500/flussonic-push')).data?.channels || []).find((c) => c.catv_ch === 3);
+  ok('la tabla por canal lo marca apagado en TVLister', snapCh3?.panel_emitting === false, JSON.stringify(snapCh3?.panel_emitting));
+
+  // --- 5f. Un canal cuya fuente está sólo en Flussonic también recibe push --
+  const mapNoSource = (await api('POST', '/api/wk2500/flussonic-push/map', { catv_ch: 12, stream: 'a0zz' })).data;
+  ok('se puede mapear un canal sin origen local', mapNoSource?.ok === true, JSON.stringify(mapNoSource?.stream));
+  const pushNoSource = (await api('POST', '/api/wk2500/flussonic-push', {
+    from_channels: true,
+    ch_start: 12,
+    ch_end: 12,
+    action: 'apply'
+  })).data;
+  ok('y se le escribe la salida UDP en Flussonic', pushNoSource?.ok === true, JSON.stringify(pushNoSource?.detail));
+  ok(
+    'la salida queda con el host:puerto del canal',
+    udpOf('a0zz').some((u) => u.includes('127.0.0.1:4777')),
+    JSON.stringify(udpOf('a0zz'))
+  );
+  ok('sin origen local, el panel tampoco emite', pushNoSource?.panel_emitting === 0, pushNoSource?.panel_note);
 
   // --- 6. take_over: el canal pasa a Flussonic -------------------------
   const before = await countDatagrams(4776, 3500);

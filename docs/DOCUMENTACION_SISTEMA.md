@@ -3029,6 +3029,46 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.37: el panel guarda la salida en Flussonic y no emite UDP
+
+**Lo pedido:** «el panel tiene que guardar en Flussonic el UDP; el panel no emite UDP cuando el control lo tiene
+Flussonic, el panel sólo lo que hace es enviarle el texto de salida UDP».
+
+#### 1. La regla
+
+`udp_engine = flussonic` ⇒ **TVLister no abre ningún socket ni lanza FFmpeg** para ese canal: sólo escribe la
+salida (`outputs`) en Flussonic por su API y vigila que siga puesta (`delegated`). Al guardar una salida desde
+la tarjeta de push, el canal **pasa a Flussonic y se apaga el emisor local en el mismo paso**:
+
+- `POST /api/wk2500/flussonic-push` aplica `take_over` **por defecto** (antes había que marcarlo). Sólo se
+  desactiva explícitamente con `take_over:false` (API) o `--keep-local` (CLI), y entonces se avisa de que
+  habrá dos emisores.
+- Red de seguridad en cada petición: se recorren los canales en modo Flussonic y se cierra cualquier worker
+  local que siguiera abierto (`localEmitterState()`), aunque el cambio se haya hecho por SQL.
+- La respuesta incluye `panel_emitting` (número de canales que aún emiten desde TVLister), `emitters` por canal
+  y `panel_note` con el resumen.
+
+#### 2. Canales sin fuente local
+
+`channelSlotsForPush()` incluye ahora **todo canal con destino UDP**, aunque su fuente viva sólo en Flussonic
+(antes exigía `stream_id` o `custom_source_url`). El worker delegado también se crea sin fuente local:
+`startWk2500ChannelWorker()` comprueba el motor **antes** de exigir origen, y `reconcileCatvEngines()` incluye
+`udp_engine='flussonic'` en su consulta, así que sobrevive a un reinicio del panel.
+
+#### 3. En el panel
+
+- Fila: `TVLister apagado` (delegado) o `emitiendo desde TVLister` + enlace `volver a TVLister`.
+- Aviso tras aplicar: «TVLister no emite: el UDP lo pone Flussonic».
+- Al quitar una salida de un canal delegado: «CH… quedan SIN emisor…».
+- Se eliminó la casilla de apagar TVLister (era una forma de dejar dos emisores).
+
+#### 4. Pruebas
+
+`test_catv_flussonic_push.mjs` **65 OK**: 400 datagramas del CH3 desde TVLister antes de guardar, **0** después,
+plan con `flussonic_api`, `panel_emitting:false`, canal sin fuente local con salida escrita, y la vuelta a
+TVLister emitiendo otra vez. `test_catv_flussonic_push_ui.mjs` **51 OK**, control **25 OK**, control UI **28 OK**,
+pacer **20 OK**; sin regresiones (VOD, balanceo, afinidad, paginación).
+
 ### v2.6.36: la página CATV ordenada en tres mundos (nativo · Flussonic · push)
 
 **Lo pedido:** «no entiendo, eso es un solo revoltijo… ordena bien lo que es nativo, lo que es Flussonic,

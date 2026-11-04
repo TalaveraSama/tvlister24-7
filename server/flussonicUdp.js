@@ -638,7 +638,9 @@ export async function autoMapFlussonicChannels({ serverId = null, dryRun = true,
               s.name AS stream_name, s.flussonic_stream_name AS mapped_flussonic_name
          FROM wk2500_channels w
          LEFT JOIN streams s ON s.id = w.stream_id
-        WHERE w.stream_id IS NOT NULL OR w.custom_source_url <> ''
+        WHERE w.stream_id IS NOT NULL
+           OR w.custom_source_url <> ''
+           OR (w.udp_host <> '' AND w.udp_port > 0)
         ORDER BY w.catv_ch ASC`
     )
     .all();
@@ -847,7 +849,9 @@ function channelSlotsForPush() {
               s.name AS stream_name, s.flussonic_stream_name AS mapped_flussonic_name
          FROM wk2500_channels w
          LEFT JOIN streams s ON s.id = w.stream_id
-        WHERE w.stream_id IS NOT NULL OR w.custom_source_url <> ''
+        WHERE w.stream_id IS NOT NULL
+           OR w.custom_source_url <> ''
+           OR (w.udp_host <> '' AND w.udp_port > 0)
         ORDER BY w.catv_ch ASC`
     )
     .all();

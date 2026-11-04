@@ -24,6 +24,12 @@ interfaz dedicada, nombres de las portadoras, grilla de canales) · **2 · Fluss
 verificar y volver sin dos emisores) · **3 · Flussonic UDP · push** (la salida UDP de cada canal). Ya no se mezcla
 lo nativo con lo de Flussonic.
 
+⚡ **El panel no emite cuando manda Flussonic (v2.6.37)**: al guardar la salida UDP de un canal en Flussonic, el
+canal pasa a Flussonic y **TVLister cierra su emisor** en ese mismo momento (cero datagramas, comprobado
+midiendo). El panel sólo **escribe el texto de la salida** en Flussonic y vigila que siga puesta. Vale también
+para canales cuya fuente vive sólo en Flussonic (sin stream local). `--keep-local` queda como excepción a
+propósito, con aviso de dos emisores.
+
 🔌 **Las salidas UDP de Flussonic, por canal (v2.6.36)**: la tabla del push es la lista de canales: eliges con un
 desplegable **qué stream de Flussonic** emite cada uno (con su título, `A3 Cine · a0cq`), pones su
 `udp://[interfaz@]IP:PUERTO` y ves el estado (`running · 134.2 MB`) sin tocar las salidas que no son UDP. El
@@ -118,15 +124,15 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 
 ```bash
 # última versión publicada
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.36/scripts/install_release.sh \
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.37/scripts/install_release.sh \
   | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.36/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.36
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.37/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.37
 ```
 
 Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el

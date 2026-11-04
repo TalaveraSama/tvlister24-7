@@ -82,6 +82,7 @@ const mkChannel = (ch, name, stream, title, extra = {}) => ({
   other_udp: [],
   other_outputs: [],
   engine: extra.engine || 'local',
+  panel_emitting: extra.panel_emitting ?? (extra.engine ? extra.engine !== 'flussonic' : true),
   enabled: true,
   ok: Boolean(stream)
 });
@@ -225,6 +226,8 @@ globalThis.fetch = async (url, options = {}) => {
       data = {
         ok: true,
         dryRun: dry,
+        panel_emitting: dry ? null : 0,
+        panel_note: dry ? '' : 'TVLister no emite: el UDP lo pone Flussonic.',
         message: dry ? '' : '3 de 3 stream(s) con la salida UDP del canal.',
         detail: [
           { catv_ch: 2, stream: 'NACIONAL 2', url: 'udp://ens37@239.25.0.2:5002', ok: true },
@@ -238,6 +241,8 @@ globalThis.fetch = async (url, options = {}) => {
     } else {
       data = {
         ok: true,
+        panel_emitting: 0,
+        panel_note: 'TVLister no emite: el UDP lo pone Flussonic.',
         detail: [
           {
             stream: body?.items?.[0]?.stream,
@@ -312,7 +317,9 @@ ok(text().includes('134.2 MB'), 'muestra lo enviado (como el «running · 134.2 
 ok(text().includes('Emitiendo'), 'marca el canal que está emitiendo');
 ok(text().includes('Otra IP/puerto'), 'marca el que apunta a otra IP/puerto');
 ok(text().includes('Sin stream'), 'marca el canal sin stream');
-ok(text().includes('por Flussonic') && text().includes('por TVLister'), 'dice quién emite cada canal');
+ok(text().includes('TVLister apagado'), 'marca los canales que ya controla Flussonic (TVLister apagado)');
+ok(text().includes('emitiendo desde TVLister') || text().includes('TVLister no emite'), 'dice si el panel emite ese canal');
+ok(text().includes('El panel no emite este UDP'), 'explica que el panel sólo escribe el texto de la salida');
 ok(text().includes('nombre se repite en varios canales'), 'avisa del nombre repetido (NACIONAL)');
 
 // --- 3. Elegir el stream a mano (a0cq → CH4) ---------------------------
@@ -347,7 +354,8 @@ ok(Boolean(applyBtn), 'existe «Poner salida UDP del rango»');
 if (applyBtn) await click(applyBtn);
 const applyCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push' && c.body?.from_channels).pop();
 ok(applyCall?.body?.dry_run !== true, 'aplicar escribe de verdad');
-ok(applyCall?.body?.take_over === true, 'pide apagar TVLister para no duplicar emisor');
+ok(applyCall?.body?.take_over !== false, 'no se puede dejar TVLister emitiendo (take_over por defecto)', JSON.stringify(applyCall?.body?.take_over));
+ok(text().includes('TVLister no emite'), 'el panel confirma que no emite ese UDP');
 ok(text().includes('con la salida UDP del canal'), 'confirma cuántos streams quedaron con salida');
 
 // --- 6. Quitar el rango -------------------------------------------------

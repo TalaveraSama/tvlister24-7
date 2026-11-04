@@ -919,15 +919,33 @@ export function stopAllWk2500Workers() {
   }
 }
 
+/**
+ * ¿TVLister tiene un emisor abierto (socket/ffmpeg) para este canal?
+ * Es la comprobación que se enseña en el panel: cuando el control lo tiene
+ * Flussonic, esto tiene que ser SIEMPRE false (el panel sólo escribe el texto
+ * de la salida UDP en Flussonic, no emite).
+ */
+export function localEmitterState(catvCh) {
+  const ch = Number(catvCh);
+  const w = udpWorkers.get(ch);
+  if (!w) return { emitting: false, kind: 'none', status: 'parado', engine: '' };
+  const kind = w.engineKind || 'local';
+  const emitting = kind !== 'flussonic' && Boolean(w.child || w.socket);
+  return {
+    emitting,
+    kind,
+    status: w.status || '',
+    engine: w.engine || '',
+    packets: Number(w.packetsSent) || 0
+  };
+}
+
 export function startWk2500ChannelWorker(catvCh) {
   const ch = Number(catvCh);
   stopWk2500ChannelWorker(ch);
 
   const slotRow = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(ch);
   if (!slotRow || !slotRow.udp_host || !slotRow.udp_port) return false;
-
-  const up = resolveSlotUpstream(slotRow);
-  if (!up.rawPrimary && !up.localHls) return false;
 
   // ── Motor UDP delegado a Flussonic ───────────────────────────────────────
   // El canal está marcado para que sea Flussonic quien empuje el UDP a esta
@@ -992,6 +1010,10 @@ export function startWk2500ChannelWorker(catvCh) {
     state.rateTimer.unref?.();
     return true;
   }
+
+  // A partir de aquí el canal lo emite TVLister: hace falta un origen.
+  const up = resolveSlotUpstream(slotRow);
+  if (!up.rawPrimary && !up.localHls) return false;
 
   const state = {
     catv_ch: ch,
@@ -1544,7 +1566,7 @@ export function reconcileCatvEngines() {
   try {
     rows = db
       .prepare(
-        "SELECT catv_ch, udp_engine, enabled FROM wk2500_channels WHERE enabled = 1 AND (stream_id IS NOT NULL OR custom_source_url <> '')"
+        "SELECT catv_ch, udp_engine, enabled FROM wk2500_channels WHERE enabled = 1 AND (stream_id IS NOT NULL OR custom_source_url <> '' OR udp_engine = 'flussonic')"
       )
       .all();
   } catch {
@@ -3712,7 +3734,13 @@ wk2500Router.get('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async 
     const m = await import('./flussonicUdp.js');
     const serverId = req.query.server_id ? Number(req.query.server_id) : null;
     const snap = await m.flussonicPushSnapshot({ serverId, refresh: req.query.refresh !== '0' });
-    res.json(snap);
+    res.json({
+      ...snap,
+      channels: (snap.channels || []).map((c) => ({
+        ...c,
+        panel_emitting: localEmitterState(c.catv_ch).emitting
+      }))
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -3781,7 +3809,9 @@ wk2500Router.post('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async
     const serverId = b.flussonic_server_id ? Number(b.flussonic_server_id) : null;
     const remove = b.action === 'remove' || b.remove === true;
     const dryRun = b.dry_run === true || b.dryRun === true;
-    const takeOver = b.take_over === true || b.takeOver === true;
+    // Por defecto SÍ se apaga el emisor local: en cuanto el canal queda en
+    // Flussonic, TVLister no emite. Sólo se puede desactivar a propósito.
+    const takeOver = remove ? false : b.take_over !== false;
     if (b.iface !== undefined) m.setPushInterface(String(b.iface || ''));
     const iface = m.getPushInterface();
 
@@ -3809,7 +3839,8 @@ wk2500Router.post('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async
       result.action = remove ? 'remove' : 'apply';
     }
 
-    // Cambio de motor en caliente para los canales tomados por Flussonic.
+    // Cambio de motor en caliente: TVLister cierra su socket y el canal pasa a
+    // un worker «delegado» que sólo vigila que Flussonic mantenga la salida.
     if (!dryRun && Array.isArray(result.taken_over)) {
       for (const ch of result.taken_over) {
         stopWk2500ChannelWorker(ch);
@@ -3818,8 +3849,56 @@ wk2500Router.post('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async
       }
     }
 
+    // Red de seguridad: si el canal quedó en Flussonic pero seguía con el
+    // emisor local abierto (p. ej. se cambió el motor por SQL o desde el CLI),
+    // se cierra aquí mismo. El panel NUNCA emite un canal que controla Flussonic.
+    if (!dryRun) {
+      const rows = db
+        .prepare("SELECT catv_ch, enabled FROM wk2500_channels WHERE udp_engine = 'flussonic'")
+        .all();
+      for (const row of rows) {
+        const w = udpWorkers.get(Number(row.catv_ch));
+        if (w && w.engineKind !== 'flussonic') {
+          stopWk2500ChannelWorker(Number(row.catv_ch));
+          if (row.enabled) startWk2500ChannelWorker(Number(row.catv_ch));
+        }
+      }
+    }
+
+    // ¿Quién emite de verdad ahora mismo? Se informa canal por canal.
+    const touched = (result.detail || []).map((d) => Number(d.catv_ch)).filter((n) => Number.isFinite(n));
+    const emitters = {};
+    for (const ch of touched) emitters[ch] = localEmitterState(ch);
+    const panelEmitting = Object.values(emitters).filter((e) => e.emitting).length;
+
     const snapshot = await m.flussonicPushSnapshot({ serverId, refresh: true });
-    res.json({ ...result, snapshot });
+    const sinEmisor = (snapshot.channels || [])
+      .filter((c) => c.engine === 'flussonic' && !c.push)
+      .map((c) => Number(c.catv_ch));
+
+    res.json({
+      ...result,
+      emitters,
+      sin_emisor: sinEmisor,
+      panel_emitting: panelEmitting,
+      panel_note: [
+        panelEmitting === 0
+          ? 'TVLister no emite: el UDP lo pone Flussonic.'
+          : `${panelEmitting} canal(es) siguen emitiendo desde TVLister.`,
+        sinEmisor.length
+          ? `CH${sinEmisor.slice(0, 8).join(', CH')}${sinEmisor.length > 8 ? '…' : ''} quedan SIN emisor (su salida en Flussonic está vacía): devuélvelos a TVLister cuando quieras.`
+          : ''
+      ]
+        .filter(Boolean)
+        .join(' '),
+      snapshot: {
+        ...snapshot,
+        channels: (snapshot.channels || []).map((c) => ({
+          ...c,
+          panel_emitting: localEmitterState(c.catv_ch).emitting
+        }))
+      }
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }

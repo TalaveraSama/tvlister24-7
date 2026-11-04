@@ -135,7 +135,6 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     dirty: {},
     range: { from: 2, to: 125 },
     iface: '',
-    takeOver: true,
     filter: 'canales',
     titles: null,
     query: ''
@@ -204,6 +203,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       }));
       await loadPlan(true);
       await loadUdpEngine();
+      await loadFlussonicPush(true);
     } catch (err) {
       setFsControl((prev) => ({ ...prev, busy: '', message: err.message }));
     }
@@ -239,9 +239,10 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       dirty: { ...prev.dirty, [stream]: true }
     }));
 
+  // Sin take_over explícito: el panel apaga su emisor siempre que el canal
+  // queda en Flussonic (el servidor lo aplica por defecto).
   const pushBody = (extra) => ({
     iface: fsPush.iface,
-    take_over: fsPush.takeOver,
     ...extra
   });
 
@@ -285,7 +286,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         dirty: {},
         message:
           (r.message || 'Hecho.') +
-          (fallos.length ? ' · ' + fallos.slice(0, 3).map((f) => `${f.stream}: ${f.error}`).join(' | ') : '')
+          (fallos.length ? ' · ' + fallos.slice(0, 3).map((f) => `${f.stream}: ${f.error}`).join(' | ') : '') +
+          (r.panel_note ? ` · ${r.panel_note}` : '')
       }));
       await loadFlussonicPush(true);
       await loadPlan(true);
@@ -313,7 +315,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         message: d.ok
           ? `✅ ${stream}: ${remove ? 'salida UDP quitada' : `salida UDP ${d.already ? 'ya estaba puesta' : 'puesta'}`}${
               d.url ? ` (${d.url})` : ''
-            }`
+            }` + (r.panel_note ? ` · ${r.panel_note}` : '')
           : `⚠️ ${stream}: ${d.error || 'no se pudo aplicar'}`
       }));
       if (d.ok) {
@@ -1913,15 +1915,13 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           >
             Guardar interfaz
           </button>
-          <label className="flex items-center gap-2 px-2 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[10px] text-slate-300 col-span-2">
-            <input
-              type="checkbox"
-              checked={fsPush.takeOver}
-              onChange={(e) => setFsPush((prev) => ({ ...prev, takeOver: e.target.checked }))}
-              className="w-3.5 h-3.5 accent-violet-500"
-            />
-            Al pulsar «Guardar» en un canal, apagar TVLister en ese canal (nunca dos emisores al mismo destino)
-          </label>
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[10px] text-emerald-200 col-span-2">
+            <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              <strong>El panel no emite este UDP:</strong> sólo escribe la salida en Flussonic. Al guardar, TVLister
+              apaga su emisor de ese canal para que no haya dos.
+            </span>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -2061,7 +2061,21 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                           {bueno ? <CheckCircle2 className="w-3 h-3" /> : null}
                           {estado}
                         </span>
-                        <div className="text-[10px] text-slate-500 mt-0.5">{c.engine === 'flussonic' ? 'por Flussonic' : 'por TVLister'}</div>
+                        {c.engine === 'flussonic' ? (
+                          <div className="text-[10px] text-emerald-400/90 mt-0.5">TVLister apagado</div>
+                        ) : (
+                          <div className="text-[10px] text-amber-300/90 mt-0.5">
+                            {c.panel_emitting ? 'emitiendo desde TVLister' : 'TVLister no emite'}
+                            <button
+                              type="button"
+                              onClick={() => handleFlussonicSwitch('local', { catv_ch: c.catv_ch })}
+                              disabled={Boolean(fsPush.busy)}
+                              className="ml-1 underline text-slate-400 hover:text-white disabled:opacity-40"
+                            >
+                              volver a TVLister
+                            </button>
+                          </div>
+                        )}
                       </td>
                       <td className="px-2 py-1.5 text-right text-slate-300 align-top">{c.push?.mb ? `${c.push.mb} MB` : '—'}</td>
                       <td className="px-2 py-1.5 text-right whitespace-nowrap align-top">
