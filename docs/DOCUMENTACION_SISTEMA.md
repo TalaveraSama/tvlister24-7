@@ -3029,6 +3029,48 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.36: la página CATV ordenada en tres mundos (nativo · Flussonic · push)
+
+**Lo pedido:** «no entiendo, eso es un solo revoltijo… ordena bien lo que es nativo, lo que es Flussonic,
+Flussonic UDP… también Flussonic debe poner los nombres de servicio de cada canal para identificarlos en el IP
+analógico al escanearlo».
+
+#### 1. Tres pestañas
+
+| Pestaña | Contenido |
+| --- | --- |
+| **1 · Nativo TVLister (UDP 2–125)** | Moduladores y armado rápido, Interfaz de Red Dedicada, Nombres de las portadoras (CH 1 al 125), plantilla IP/puerto, troncal MNF y la grilla de canales |
+| **2 · Flussonic · quién emite** | Enviar los canales a Flussonic, verificar por canal y volver a TVLister; cambio manual por rango |
+| **3 · Flussonic UDP · push** | Salida UDP de cada canal y nombre de servicio para el escaneo |
+
+El nombre del menú pasa a **CATV WK2500 · Flussonic (UDP 2–125)**.
+
+#### 2. Mapeo: nombres repetidos nunca se adivinan
+
+La lista del operador repite `NACIONAL` en varios canales y los streams de Flussonic suelen llamarse
+`a0ek`/`a0cq`. `computeChannelStreamMap()` cuenta cuántas portadoras comparten cada nombre
+(`channelNameCounts()`): si el nombre es compartido, el canal **no se empareja solo** y se devuelve el motivo
+(«El nombre “NACIONAL” lo comparten N canales: asígnalo a mano»). El emparejamiento por nombre sólo se aplica a
+nombres propios del canal.
+
+La asignación se hace a mano y queda guardada: `POST /api/wk2500/flussonic-push/map {catv_ch, stream}`,
+columna desplegable en la tabla del push o `tvlister-admin catv flussonic push --map 4 --stream a0ek`. Un stream
+nunca queda en dos canales: al asignarlo se libera del anterior (`freed`).
+
+#### 3. Nombre de servicio en el TS (SDT)
+
+`POST /api/wk2500/flussonic-push/titles {dry_run, ch_start, ch_end}` escribe el nombre de la portadora como
+`mpegts.service_name` del stream (lo que leen los equipos al escanear). Se **verifica leyéndolo otra vez**; si la
+versión de Flussonic no guarda ese campo, se escribe en `title` (que Flussonic usa como nombre del servicio por
+defecto) y el resultado indica qué campo quedó. El snapshot devuelve `service_name` y `service_source` por stream.
+
+#### 4. Pruebas
+
+`test_catv_flussonic_push.mjs` **52 OK** (52 incluye: nombre repetido no emparejado, mapeo a mano, un stream en
+un solo canal, servicio escrito en `mpegts.service_name`, y todo el push anterior), `test_catv_flussonic_push_ui.mjs`
+**48 OK** (tres pestañas, tabla por canal, desplegable de streams, nombres de servicio), `test_catv_flussonic_ui.mjs`
+**28 OK**, control 25 OK, pacer 20 OK. Sin regresiones (VOD, balanceo, afinidad, paginación).
+
 ### v2.6.35: las salidas UDP de Flussonic se ponen desde el panel (push)
 
 **Corrección (v2.6.35):** con `take_over`, el reconciliador de 4 s reescribía la salida recién puesta

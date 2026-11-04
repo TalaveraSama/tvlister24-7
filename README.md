@@ -19,11 +19,17 @@ según la ficha de TMDB, con prioridad y renombrado configurables (una comedia r
 botón **Aplicar** que lo recoloca por lotes, creando las categorías que falten. Si TMDB no encuentra
 un título, se queda en la categoría que tenía y no se repite la consulta.
 
-🔌 **Las salidas UDP de Flussonic, desde el panel (v2.6.35)**: en *UDP / CATV*, la tarjeta **«Salidas UDP de
-Flussonic (push)»** lista los streams que ya existen y les pone o quita el push `udp://[interfaz@]IP:PUERTO` de
-cada canal de la lista — lo mismo que se hacía a mano en *Push live video to certain URLs*, pero de una vez por
-rango, con el estado (`running · 134.2 MB`), y sin tocar las salidas que no son UDP. Por terminal:
-`tvlister-admin catv flussonic push --range 2-125 [--iface ens37] [--apply|--remove]`.
+🧭 **La página CATV, ordenada en tres pestañas (v2.6.36)**: **1 · Nativo TVLister** (moduladores y armado rápido,
+interfaz dedicada, nombres de las portadoras, grilla de canales) · **2 · Flussonic · quién emite** (enviar,
+verificar y volver sin dos emisores) · **3 · Flussonic UDP · push** (la salida UDP de cada canal). Ya no se mezcla
+lo nativo con lo de Flussonic.
+
+🔌 **Las salidas UDP de Flussonic, por canal (v2.6.36)**: la tabla del push es la lista de canales: eliges con un
+desplegable **qué stream de Flussonic** emite cada uno (con su título, `A3 Cine · a0cq`), pones su
+`udp://[interfaz@]IP:PUERTO` y ves el estado (`running · 134.2 MB`) sin tocar las salidas que no son UDP. El
+emparejamiento automático **nunca** usa un nombre repetido como `NACIONAL`: esos se eligen a mano, una vez. Y con
+**«Nombre del canal en el TS»** Flussonic lleva el nombre de la portadora en la SDT, para que el canal salga
+identificado al escanear. Terminal: `tvlister-admin catv flussonic push [--map 4 --stream a0ek] [--titles --apply]`.
 
 🔀 **Control de quién emite (v2.6.33)**: la tarjeta de control **detecta** qué stream de Flussonic corresponde a
 cada canal, los **pasa a Flussonic** con un clic y muestra por canal si está **emitiendo**, si el stream está
@@ -112,15 +118,15 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 
 ```bash
 # última versión publicada
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.35/scripts/install_release.sh \
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.36/scripts/install_release.sh \
   | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.35/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.35
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.36/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.36
 ```
 
 Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el

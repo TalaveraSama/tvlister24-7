@@ -66,6 +66,39 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const calls = [];
 let withPush = 2;
 
+const mkChannel = (ch, name, stream, title, extra = {}) => ({
+  catv_ch: ch,
+  name,
+  service_name: name,
+  dest: `udp://ens37@239.25.0.${ch}:500${ch}`,
+  shared_name: name === 'NACIONAL',
+  stream,
+  stream_title: title,
+  stream_exists: Boolean(stream),
+  stream_alive: Boolean(stream),
+  push: extra.push || null,
+  has_output: Boolean(extra.push),
+  in_sync: Boolean(extra.in_sync),
+  other_udp: [],
+  other_outputs: [],
+  engine: extra.engine || 'local',
+  enabled: true,
+  ok: Boolean(stream)
+});
+
+let channels = [
+  mkChannel(2, 'NACIONAL', 'a0ek', 'A&E', {
+    push: { url: 'udp://ens37@239.25.0.2:5002', state: 'running', running: true, mb: 134.2 },
+    in_sync: true,
+    engine: 'flussonic'
+  }),
+  mkChannel(3, 'TELEMUNDO', 'a0cq', 'A3 Cine', {
+    push: { url: 'udp://ens37@239.9.9.9:9999', state: 'running', running: true, mb: 3 }
+  }),
+  mkChannel(4, 'NACIONAL', '', '', {}),
+  mkChannel(5, 'UNIMAS', 'a0di', 'AMC', {})
+];
+
 const pushSnapshot = () => ({
   ok: true,
   server: { id: 1, name: 'Astra', base_url: 'http://127.0.0.1:8080' },
@@ -73,50 +106,54 @@ const pushSnapshot = () => ({
   flussonic_error: '',
   iface: 'ens37',
   total: 4,
-  with_push: withPush,
+  with_push: 2,
   in_sync: 1,
+  channels,
+  channels_total: channels.length,
+  channels_mapped: channels.filter((c) => c.stream).length,
+  channels_con_salida: channels.filter((c) => c.has_output).length,
   streams: [
     {
-      name: 'NACIONAL 2',
-      title: 'Nacional 2',
+      name: 'a0ek',
+      title: 'A&E',
       alive: true,
-      bitrate_kbps: 2410,
+      bitrate_kbps: 1900000,
       clients: 0,
       udp_outputs: ['udp://ens37@239.25.0.2:5002'],
-      other_outputs: ['rtmp://10.0.0.9/live/n2'],
+      other_outputs: [],
       push: { url: 'udp://ens37@239.25.0.2:5002', state: 'running', running: true, bytes: 140718898, mb: 134.2 },
-      channel: { catv_ch: 2, name: 'NACIONAL 2', dest: 'udp://ens37@239.25.0.2:5002', engine: 'flussonic', method: 'nombre exacto' },
+      channel: { catv_ch: 2, name: 'NACIONAL', service_name: 'NACIONAL', dest: 'udp://ens37@239.25.0.2:5002', method: 'a mano' },
       suggested_url: 'udp://ens37@239.25.0.2:5002',
       in_sync: true
     },
     {
-      name: 'TELEMUNDO',
-      title: 'Telemundo',
+      name: 'a0cq',
+      title: 'A3 Cine',
       alive: true,
-      bitrate_kbps: 2600,
+      bitrate_kbps: 1800000,
       clients: 0,
       udp_outputs: ['udp://ens37@239.9.9.9:9999'],
       other_outputs: [],
       push: { url: 'udp://ens37@239.9.9.9:9999', state: 'running', running: true, bytes: 3145728, mb: 3 },
-      channel: { catv_ch: 3, name: 'Telemundo', dest: 'udp://ens37@239.25.0.3:5003', engine: 'local', method: 'nombre exacto' },
+      channel: { catv_ch: 3, name: 'TELEMUNDO', service_name: 'TELEMUNDO', dest: 'udp://ens37@239.25.0.3:5003', method: 'a mano' },
       suggested_url: 'udp://ens37@239.25.0.3:5003',
       in_sync: false
     },
     {
-      name: 'CANAL 7',
-      title: 'Canal 7',
+      name: 'a0di',
+      title: 'AMC',
       alive: true,
-      bitrate_kbps: 2100,
+      bitrate_kbps: 1700000,
       clients: 0,
       udp_outputs: [],
-      other_outputs: [],
+      other_outputs: ['rtmp://10.0.0.9/live/amc'],
       push: null,
-      channel: { catv_ch: 7, name: 'CANAL 7', dest: 'udp://ens37@239.25.0.7:5007', engine: 'local', method: 'nombre exacto' },
-      suggested_url: 'udp://ens37@239.25.0.7:5007',
+      channel: { catv_ch: 5, name: 'UNIMAS', service_name: 'UNIMAS', dest: 'udp://ens37@239.25.0.5:5005', method: 'a mano' },
+      suggested_url: 'udp://ens37@239.25.0.5:5005',
       in_sync: false
     },
     {
-      name: 'STREAM SUELTO',
+      name: 'SUELTO1',
       title: 'sin canal en la lista',
       alive: true,
       bitrate_kbps: 1000,
@@ -129,7 +166,7 @@ const pushSnapshot = () => ({
       in_sync: false
     }
   ],
-  channels_sin_stream: [{ catv_ch: 9, name: 'CANAL 9', dest: 'udp://ens37@239.25.0.9:5009' }]
+  channels_sin_stream: [{ catv_ch: 4, name: 'NACIONAL', dest: 'udp://ens37@239.25.0.4:5004', shared_name: true }]
 });
 
 globalThis.fetch = async (url, options = {}) => {
@@ -154,6 +191,34 @@ globalThis.fetch = async (url, options = {}) => {
     data = { slots: [], units: [], streams: [], models: [], brands: [], tv_standards: [], coverage: {}, summary: {}, dedicated_nic: null };
   else if (key === 'GET /api/wk2500/udp-engine') data = { servers: [], channels: [] };
   else if (key === 'POST /api/wk2500/flussonic-push/interface') data = { ok: true, iface: body?.iface || '' };
+  else if (key === 'POST /api/wk2500/flussonic-push/map') {
+    const ch = channels.find((c) => c.catv_ch === body.catv_ch);
+    if (ch) {
+      ch.stream = body.stream || '';
+      ch.stream_title = body.stream === 'a0cq' ? 'A3 Cine' : body.stream === 'a0ek' ? 'A&E' : '';
+      ch.stream_exists = Boolean(ch.stream);
+    }
+    data = { ok: true, catv_ch: body.catv_ch, stream: body.stream, freed: body.stream === 'a0cq' ? [3] : [], snapshot: pushSnapshot() };
+  } else if (key === 'POST /api/wk2500/flussonic-push/titles') {
+    const rows = [
+      { catv_ch: 2, service_name: 'NACIONAL', stream: 'a0ek', stream_title: 'A&E', current_service_name: 'A&E', ok: true },
+      { catv_ch: 5, service_name: 'UNIMAS', stream: 'a0di', stream_title: 'AMC', current_service_name: 'AMC', ok: true }
+    ];
+    data = body.dry_run
+      ? { ok: true, rows, total: rows.length, pendientes: rows.length, dryRun: true, detail: [] }
+      : {
+          ok: true,
+          rows,
+          total: rows.length,
+          pendientes: rows.length,
+          dryRun: false,
+          detail: rows.map((r) => ({ ...r, field: 'mpegts.service_name' })),
+          applied: rows.length,
+          failed: 0,
+          message: `${rows.length} de ${rows.length} stream(s) con el nombre del canal para el escaneo.`,
+          snapshot: pushSnapshot()
+        };
+  }
   else if (key === 'POST /api/wk2500/flussonic-push') {
     if (body?.from_channels) {
       const dry = body.dry_run === true;
@@ -222,35 +287,49 @@ const type = (el, value) =>
     await new Promise((r) => setTimeout(r, 80));
   });
 
-// --- 1. La tarjeta está y resume el estado -------------------------------
-ok(text().includes('Salidas UDP de Flussonic (push)'), 'la tarjeta de push está a la vista');
-ok(text().includes('Flussonic responde · 4 streams'), 'dice si Flussonic responde y cuántos streams tiene');
-ok(text().includes('Con salida UDP: 2'), 'cuenta los streams con salida UDP', text().match(/Con salida UDP: \d+/)?.[0]);
-ok(text().includes('1 con otra IP/puerto'), 'avisa de los que tienen otra IP/puerto');
+// --- 0. Tres pestañas y sólo se ve la elegida ---------------------------
+ok(text().includes('1 · Nativo TVLister'), 'la pestaña de lo nativo está a la vista');
+ok(text().includes('3 · Flussonic UDP · push'), 'la pestaña de la salida UDP está a la vista');
+ok(!text().includes('la salida de cada canal (push)'), 'al abrir no se mezcla con lo nativo');
+const tabPush = byText('button', '3 · Flussonic UDP · push');
+ok(Boolean(tabPush), 'existe la pestaña de la salida UDP');
+if (tabPush) await click(tabPush);
 
-// --- 2. Tabla: stream, canal, URL, estado y MB --------------------------
-ok(text().includes('NACIONAL 2') && text().includes('CH2'), 'muestra el stream y su canal de la lista');
+// --- 1. La tarjeta está y resume el estado -------------------------------
+ok(text().includes('Flussonic UDP · la salida de cada canal (push)'), 'la tarjeta de push está a la vista');
+ok(text().includes('Flussonic responde · 4 streams'), 'dice si Flussonic responde y cuántos streams tiene');
+ok(text().includes('Canales con stream: 3/4'), 'cuenta los canales con stream', text().match(/Canales con stream: \d+\/\d+/)?.[0]);
+ok(text().includes('Con salida UDP puesta: 2'), 'cuenta los canales con salida puesta', text().match(/Con salida UDP puesta: \d+/)?.[0]);
+
+// --- 2. Tabla por canal: CH, portadora, stream y estado ------------------
+ok(text().includes('NACIONAL') && text().includes('TELEMUNDO'), 'lista las portadoras de la lista');
+ok(text().includes('A&E') || text().includes('A3 Cine'), 'muestra el título real del stream (no sólo a0ek)');
 ok(
-  text().includes('239.25.0.2:5002') || [...document.querySelectorAll('input')].some((i) => String(i.value).includes('239.25.0.2:5002')),
-  'muestra la salida UDP actual'
+  [...document.querySelectorAll('input[type="text"]')].some((i) => String(i.value).includes('239.25.0.2:5002')),
+  'la salida UDP del canal es editable'
 );
 ok(text().includes('134.2 MB'), 'muestra lo enviado (como el «running · 134.2 MB» de Flussonic)');
-ok(text().includes('Emitiendo'), 'marca el push que está emitiendo');
+ok(text().includes('Emitiendo'), 'marca el canal que está emitiendo');
 ok(text().includes('Otra IP/puerto'), 'marca el que apunta a otra IP/puerto');
-ok(text().includes('rtmp://10.0.0.9/live/n2'), 'muestra también las salidas que no son UDP (sin tocarlas)');
-ok(text().includes('CANAL 9') && text().includes('sin stream reconocido'), 'avisa de los canales sin stream en Flussonic');
+ok(text().includes('Sin stream'), 'marca el canal sin stream');
+ok(text().includes('por Flussonic') && text().includes('por TVLister'), 'dice quién emite cada canal');
+ok(text().includes('nombre se repite en varios canales'), 'avisa del nombre repetido (NACIONAL)');
 
-// --- 3. Filtro: streams sin canal --------------------------------------
-const select = [...document.querySelectorAll('select')].find((el) =>
-  [...el.options].some((o) => o.value === 'todos')
-);
-ok(Boolean(select), 'hay selector de vista');
-await act(async () => {
-  select.value = 'todos';
-  select.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 120));
-});
-ok(text().includes('STREAM SUELTO'), 'con «Todos los streams» aparece el que no está en la lista');
+// --- 3. Elegir el stream a mano (a0cq → CH4) ---------------------------
+const ch4Row = [...document.querySelectorAll('tr')].find((tr) => tr.querySelector('select') && tr.textContent.includes('CH') === false && tr.textContent.includes('NACIONAL') && tr.querySelector('select')?.value === '');
+const selCh4 = ch4Row?.querySelector('select') || [...document.querySelectorAll('tr')].find((tr) => !tr.querySelector('select')?.value)?.querySelector('select');
+ok(Boolean(selCh4), 'cada canal sin stream tiene su lista para elegir el stream');
+if (selCh4) {
+  await act(async () => {
+    selCh4.value = 'a0cq';
+    selCh4.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+  });
+  const mapCall = calls.find((c) => c.key === 'POST /api/wk2500/flussonic-push/map');
+  ok(Boolean(mapCall), 'elegir el stream lo guarda en el panel');
+  ok(mapCall?.body?.stream === 'a0cq', 'manda el stream elegido', JSON.stringify(mapCall?.body));
+  ok(text().includes('se liberó de CH3') || text().includes('queda con el stream'), 'confirma el cambio y avisa si estaba en otro canal');
+}
 
 // --- 4. Vista previa del rango -----------------------------------------
 const previewBtn = byText('button', 'Ver plan del rango');
@@ -278,27 +357,44 @@ if (removeBtn) await click(removeBtn);
 const removeCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push' && c.body?.from_channels).pop();
 ok(removeCall?.body?.action === 'remove', 'quitar manda action=remove', JSON.stringify(removeCall?.body));
 
-// --- 7. Editar una fila -------------------------------------------------
-const rowOf = (streamName) =>
-  [...document.querySelectorAll('tr')].find((tr) => tr.textContent.includes(streamName) && tr.querySelector('input[type="text"]'));
-const pushRow = rowOf('TELEMUNDO');
-const pushInput = pushRow?.querySelector('input[type="text"]');
-ok(Boolean(pushInput), 'la fila del stream tiene su URL editable', pushInput?.value);
-if (pushInput) await type(pushInput, 'udp://ens37@239.25.0.3:5003');
-const saveRow = [...(rowOf('TELEMUNDO')?.querySelectorAll('button') || [])].find((b) => b.textContent.trim() === 'Guardar');
+// --- 7. Editar la URL de un canal y guardar ----------------------------
+const rowOf = (needle) =>
+  [...document.querySelectorAll('tr')].find((tr) => tr.textContent.includes(needle) && tr.querySelector('input[type="text"]'));
+const ch3Row = [...document.querySelectorAll('tr')].find(
+  (tr) => tr.querySelector('select')?.value === 'a0cq' && tr.querySelector('input[type="text"]')
+);
+const ch3Input = ch3Row?.querySelector('input[type="text"]');
+ok(Boolean(ch3Input), 'la fila del canal tiene su URL editable', ch3Input?.value);
+if (ch3Input) await type(ch3Input, 'udp://ens37@239.25.0.3:5003');
+const saveRow = [...(ch3Row?.querySelectorAll('button') || [])].find((b) => b.textContent.trim() === 'Guardar');
 ok(Boolean(saveRow), 'cada fila tiene su botón Guardar');
 if (saveRow) await click(saveRow);
 const rowCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push' && c.body?.items).pop();
-ok(rowCall?.body?.items?.[0]?.stream === 'TELEMUNDO', 'guarda la fila del stream correcto', JSON.stringify(rowCall?.body?.items));
+ok(rowCall?.body?.items?.[0]?.stream === 'a0cq', 'guarda la salida del stream correcto', JSON.stringify(rowCall?.body?.items));
 ok(rowCall?.body?.items?.[0]?.url === 'udp://ens37@239.25.0.3:5003', 'guarda la URL que se escribió', rowCall?.body?.items?.[0]?.url);
 ok(text().includes('salida UDP puesta'), 'el panel confirma la fila guardada');
 
-// --- 8. Quitar una fila -------------------------------------------------
-const quitRow = [...(rowOf('TELEMUNDO')?.querySelectorAll('button') || [])].find((b) => b.textContent.trim() === 'Quitar');
+// --- 8. Quitar la salida de un canal ----------------------------------
+const quitRow = [...(ch3Row?.querySelectorAll('button') || [])].find((b) => b.textContent.trim() === 'Quitar');
 ok(Boolean(quitRow), 'cada fila tiene su botón Quitar');
 if (quitRow) await click(quitRow);
 const quitCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push' && c.body?.items).pop();
 ok(quitCall?.body?.items?.[0]?.remove === true, 'quitar la fila pide remove=true', JSON.stringify(quitCall?.body?.items));
+
+// --- 8b. Nombre de servicio para el escaneo ---------------------------
+const titlesPreview = byText('button', 'Ver qué nombres se escribirían');
+ok(Boolean(titlesPreview), 'existe la vista previa de los nombres de servicio');
+if (titlesPreview) await click(titlesPreview);
+const titlesCall = calls.find((c) => c.key === 'POST /api/wk2500/flussonic-push/titles');
+ok(titlesCall?.body?.dry_run === true, 'la vista previa de nombres no escribe', JSON.stringify(titlesCall?.body));
+ok(text().includes('nombre(s) por escribir en Flussonic'), 'dice cuántos nombres faltan');
+ok(text().includes('CH2') && text().includes('A&E'), 'enseña qué nombre y cuál tiene ahora');
+const titlesApply = byText('button', 'Aplicar nombres');
+ok(Boolean(titlesApply), 'ofrece aplicar los nombres');
+if (titlesApply) await click(titlesApply);
+const titlesApplyCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push/titles').pop();
+ok(titlesApplyCall?.body?.dry_run === false, 'aplicar los nombres escribe de verdad');
+ok(text().includes('con el nombre del canal para el escaneo'), 'confirma cuántos se escribieron');
 
 // --- 9. Guardar la interfaz --------------------------------------------
 const ifaceInput = [...document.querySelectorAll('input[type="text"]')].find((i) => i.value === 'ens37');

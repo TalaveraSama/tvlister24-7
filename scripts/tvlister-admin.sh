@@ -2913,7 +2913,7 @@ cmd_catv() {
           // Los argumentos llegan separados por 0x1f para no romper los nombres
           // de stream con espacios ("NACIONAL 2").
           const argv = String(process.env.FS_PUSH_ARGS || "").split("\x1f").filter(Boolean);
-          const opt = { apply: false, remove: false, iface: "", range: "2-125", rangeGiven: false, stream: "", url: "" };
+          const opt = { apply: false, remove: false, iface: "", range: "2-125", rangeGiven: false, stream: "", url: "", mapCh: 0, titles: false };
           for (let i = 0; i < argv.length; i += 1) {
             const a = argv[i];
             if (a === "--apply") opt.apply = true;
@@ -2921,6 +2921,8 @@ cmd_catv() {
             else if (a === "--iface") opt.iface = argv[++i] || "";
             else if (a === "--range" || a === "-r") { opt.range = argv[++i] || "2-125"; opt.rangeGiven = true; }
             else if (a === "--stream") opt.stream = argv[++i] || "";
+            else if (a === "--map") opt.mapCh = Number(argv[++i] || 0);
+            else if (a === "--titles") opt.titles = true;
             else if (a === "--url") opt.url = argv[++i] || "";
             else if (/^\d+(-\d+)?$/.test(a)) { opt.range = a; opt.rangeGiven = true; }
           }
@@ -2928,7 +2930,7 @@ cmd_catv() {
           const iface = pushMod.getPushInterface();
           const rng = parseRange(opt.range);
 
-          if (opt.stream) {
+          if (opt.stream && !opt.mapCh) {
             if (!opt.url && !opt.remove) {
               console.error("  Falta --url udp://IP:PUERTO (o --remove para quitarla).");
               process.exit(1);
@@ -2948,6 +2950,41 @@ cmd_catv() {
             if (!opt.apply) console.log("  Vista previa: escribe con --apply");
             console.log("============================================================");
             process.exit(d.ok ? 0 : 1);
+          }
+
+          if (opt.mapCh) {
+            const r = pushMod.setChannelStream({ catvCh: opt.mapCh, stream: opt.stream });
+            if (!r.ok) { console.error("  " + r.error); process.exit(1); }
+            console.log("============================================================");
+            console.log("  CH" + opt.mapCh + " -> " + (r.stream || "(sin stream)"));
+            console.log("------------------------------------------------------------");
+            console.log(r.stream
+              ? "  [OK] guardado. Si estaba en otro canal, se libera de: " + ((r.freed || []).map((c) => "CH" + c).join(", ") || "ninguno")
+              : "  [OK] el canal se queda sin stream de Flussonic.");
+            console.log("============================================================");
+            process.exit(0);
+          }
+
+          if (opt.titles) {
+            const r = await pushMod.applyServiceNames({
+              chStart: rng.from,
+              chEnd: rng.to,
+              dryRun: !opt.apply
+            });
+            if (!r.ok && r.error) { console.error("  " + r.error); process.exit(1); }
+            console.log("============================================================");
+            console.log("  Nombre del canal dentro del TS (para el escaneo)");
+            console.log("============================================================");
+            const rows = opt.apply ? r.detail : (r.rows || []).filter((x) => x.ok);
+            for (const x of rows.slice(0, 40)) {
+              console.log("  " + (x.ok === false ? "[!!]" : "[OK]") + " CH" + pad(x.catv_ch, 5) + pad(x.service_name, 22) + pad(x.stream, 22) +
+                (x.current_service_name === x.service_name ? "ya estaba" : "ahora: " + (x.current_service_name || "-")));
+            }
+            console.log("------------------------------------------------------------");
+            console.log(opt.apply ? "  " + (r.message || "") : "  Vista previa: " + (r.pendientes || 0) + " por escribir (nada escrito)");
+            if (!opt.apply) console.log("  Escribe con: tvlister-admin catv flussonic push --titles --apply");
+            console.log("============================================================");
+            process.exit(r.ok === false ? 1 : 0);
           }
 
           if (opt.remove || opt.apply || opt.rangeGiven) {
@@ -2985,10 +3022,11 @@ cmd_catv() {
           const filas = snap.streams.filter((x) => x.channel || x.push).slice(0, 60);
           if (filas.length) {
             console.log("");
-            console.log("  " + pad("CH", 6) + pad("STREAM", 26) + pad("SALIDA UDP", 40) + pad("ESTADO", 12) + "MB");
+            console.log("  " + pad("CH", 6) + pad("CANAL (portadora)", 22) + pad("STREAM DE FLUSSONIC", 30) + pad("SALIDA UDP", 38) + pad("ESTADO", 16) + "ENVIADO");
             for (const x of filas) {
               const estado = !x.push ? "sin salida" : x.in_sync ? (x.push.running ? "emitindo" : "puesta") : "otra IP/puerto";
-              console.log("  " + pad(x.channel ? "CH" + x.channel.catv_ch : "-", 6) + pad(x.name, 26) + pad(x.push?.url || x.suggested_url || "-", 40) + pad(estado, 12) + (x.push?.mb ? x.push.mb : "-"));
+              const etiquetaStream = x.title && x.title !== x.name ? x.name + " (" + x.title + ")" : x.name;
+              console.log("  " + pad(x.channel ? "CH" + x.channel.catv_ch : "-", 6) + pad(x.channel?.name || "-", 22) + pad(etiquetaStream, 30) + pad(x.push?.url || x.suggested_url || "-", 38) + pad(estado, 16) + (x.push?.mb ? x.push.mb + " MB" : "-"));
             }
             if (snap.streams.filter((x) => x.channel || x.push).length > 60) console.log("  ... y mas streams (usa --range)");
           }
@@ -2998,6 +3036,8 @@ cmd_catv() {
           console.log("  Aplicarlo:             tvlister-admin catv flussonic push --range 2-125 --apply");
           console.log("  Quitarlo:              tvlister-admin catv flussonic push --range 2-125 --remove --apply");
           console.log("  Un stream suelto:      tvlister-admin catv flussonic push --stream NOMBRE --url udp://IP:PUERTO --apply");
+          console.log("  Canal -> stream:       tvlister-admin catv flussonic push --map 4 --stream a0ek");
+          console.log("  Nombre en el TS:      tvlister-admin catv flussonic push --titles --apply");
           console.log("============================================================");
           process.exit(0);
         }
@@ -3100,6 +3140,8 @@ cmd_catv() {
         console.log("  Uso: tvlister-admin catv flussonic [status|map [--apply]|apply [rango]|verify|local [rango]]");
         console.log("       tvlister-admin catv flussonic push [--range 2-125] [--iface ens37] [--apply|--remove]");
         console.log("       tvlister-admin catv flussonic push --stream NOMBRE --url udp://IP:PUERTO [--apply]");
+        console.log("       tvlister-admin catv flussonic push --map 4 --stream a0ek     (canal -> stream a mano)");
+        console.log("       tvlister-admin catv flussonic push --titles [--apply]        (nombre del canal en el TS)");
       '
       ;;
 

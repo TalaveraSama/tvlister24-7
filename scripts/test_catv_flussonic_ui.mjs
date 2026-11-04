@@ -187,8 +187,17 @@ const click = (el) =>
     await new Promise((r) => setTimeout(r, 250));
   });
 
+// --- 0. La página está separada en tres mundos --------------------------
+ok(text().includes('1 · Nativo TVLister'), 'la pestaña de lo nativo está a la vista');
+ok(text().includes('2 · Flussonic · quién emite'), 'la pestaña de Flussonic está a la vista');
+ok(text().includes('3 · Flussonic UDP · push'), 'la pestaña de la salida UDP está a la vista');
+ok(!text().includes('Flussonic · quién emite cada canal'), 'al abrir, sólo se ve lo nativo (sin revoltijo)');
+
 // --- 1. La tarjeta está y cuenta quién emite -----------------------------
-ok(text().includes('Flussonic: enviar los canales desde ahí'), 'la tarjeta de control de Flussonic está a la vista');
+const tabControl = byText('button', '2 · Flussonic · quién emite');
+ok(Boolean(tabControl), 'existe la pestaña de quién emite');
+if (tabControl) await click(tabControl);
+ok(text().includes('Flussonic · quién emite cada canal'), 'la tarjeta de control de Flussonic está a la vista');
 ok(text().includes('Flussonic responde · 4 streams'), 'dice si Flussonic responde y cuántos streams tiene');
 ok(text().includes('Flussonic: 2') && text().includes('TVLister: 3'), 'cuenta canales por Flussonic y por TVLister');
 

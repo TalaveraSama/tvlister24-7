@@ -24,6 +24,7 @@ import {
   ShieldCheck,
   Copy,
   RefreshCw,
+  Radio,
   X
 } from 'lucide-react';
 import { apiFetch, getToken } from '../lib/api.js';
@@ -135,8 +136,13 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     range: { from: 2, to: 125 },
     iface: '',
     takeOver: true,
-    filter: 'canales'
+    filter: 'canales',
+    titles: null,
+    query: ''
   });
+
+  // La página tiene tres mundos separados: lo nativo, quién emite y el push.
+  const [section, setSection] = useState('nativo');
 
   const showToast = (msg) => {
     setErrorNotice('');
@@ -330,6 +336,71 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       await loadFlussonicPush(true);
     } catch (err) {
       setFsPush((prev) => ({ ...prev, message: err.message }));
+    }
+  };
+
+  // Elegir a mano el stream de Flussonic de un canal (a0ek → CH4).
+  const handlePushMapChannel = async (catvCh, stream) => {
+    setFsPush((prev) => ({ ...prev, busy: `map:${catvCh}` }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-push/map', {
+        method: 'POST',
+        body: JSON.stringify({ catv_ch: catvCh, stream })
+      });
+      const freed = r.freed?.length ? ` · se liberó de CH${r.freed.join(', CH')}` : '';
+      setFsPush((prev) => ({
+        ...prev,
+        busy: '',
+        snapshot: r.snapshot || prev.snapshot,
+        draft: { ...prev.draft, [stream]: prev.draft[stream] || '' },
+        message: stream
+          ? `✅ CH${catvCh} queda con el stream «${stream}»${freed}.`
+          : `CH${catvCh} se queda sin stream de Flussonic.`
+      }));
+      await loadFlussonicPush(true);
+      await loadFlussonicControl(true);
+    } catch (err) {
+      setFsPush((prev) => ({ ...prev, busy: '', message: err.message }));
+    }
+  };
+
+  // Nombre de servicio del canal dentro del TS (para reconocerlo al escanear).
+  const handlePushTitles = async (apply = false) => {
+    setFsPush((prev) => ({ ...prev, busy: apply ? 'titles-apply' : 'titles' }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-push/titles', {
+        method: 'POST',
+        body: JSON.stringify({
+          dry_run: !apply,
+          ch_start: fsPush.range.from,
+          ch_end: fsPush.range.to
+        })
+      });
+      if (!apply) {
+        const rows = (r.rows || []).filter((x) => x.ok);
+        setFsPush((prev) => ({
+          ...prev,
+          busy: '',
+          titles: r,
+          message:
+            `Vista previa: ${rows.length} canal(es) con stream · ${r.pendientes} nombre(s) por escribir en Flussonic.` +
+            (rows.length ? ` Ej.: CH${rows[0].catv_ch} → «${rows[0].service_name}».` : '')
+        }));
+        return;
+      }
+      const fallos = (r.detail || []).filter((d) => !d.ok);
+      setFsPush((prev) => ({
+        ...prev,
+        busy: '',
+        titles: r,
+        snapshot: r.snapshot || prev.snapshot,
+        message:
+          (r.message || 'Hecho.') +
+          (fallos.length ? ' · ' + fallos.slice(0, 3).map((f) => `${f.stream}: ${f.error}`).join(' | ') : '')
+      }));
+      await loadFlussonicPush(true);
+    } catch (err) {
+      setFsPush((prev) => ({ ...prev, busy: '', message: err.message }));
     }
   };
 
@@ -996,7 +1067,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   const modalCap = Number(modalUnit?.form.model_channels || 32);
   const modalSpanError = Boolean(modalUnit) && (modalSpan > modalCap || (modalExplicit && modalChannels.length === 0));
 
-  // Filas de la tarjeta de push: se filtra por canal asignado o por estado.
+  // ── Flussonic UDP (push): la lista de canales manda ──────────────────
   const pushAll = fsPush.snapshot?.streams || [];
   const pushStreams = pushAll.filter((st) => {
     if (fsPush.filter === 'con_salida') return Boolean(st.push);
@@ -1006,6 +1077,22 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   });
   const pushPendientes = pushAll.filter((st) => st.push && st.suggested_url && !st.in_sync).length;
   const pushVisibles = pushStreams.slice(0, 200);
+
+  const pushChannels = (fsPush.snapshot?.channels || []).filter((c) => {
+    if (c.catv_ch < fsPush.range.from || c.catv_ch > fsPush.range.to) return false;
+    const q = String(fsPush.query || '').trim().toLowerCase();
+    if (!q) return true;
+    return (
+      String(c.catv_ch) === q ||
+      String(c.name || '').toLowerCase().includes(q) ||
+      String(c.stream || '').toLowerCase().includes(q) ||
+      String(c.stream_title || '').toLowerCase().includes(q)
+    );
+  });
+  const pushChannelRows = pushChannels.slice(0, 200);
+  const pushStreamOptions = [...pushAll]
+    .filter((st) => st.name)
+    .sort((a, b) => String(a.title || a.name).localeCompare(String(b.title || b.name)));
 
   return (
     <div className="space-y-5">
@@ -1071,6 +1158,84 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           </button>
         </div>
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════
+          Tres mundos separados: NATIVO (TVLister), FLUSSONIC (quién emite)
+          y FLUSSONIC UDP (la salida/push de cada canal). Sólo se abre uno.
+         ══════════════════════════════════════════════════════════════════ */}
+      <div className="rounded-2xl bg-[#0b1120] border border-slate-800 p-2">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <button
+            type="button"
+            onClick={() => setSection('nativo')}
+            className={`text-left rounded-xl px-3 py-2.5 border transition ${
+              section === 'nativo'
+                ? 'bg-cyan-500/15 border-cyan-400/60'
+                : 'bg-[#0e1526] border-slate-800 hover:border-cyan-500/40'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Radio className={`w-4 h-4 ${section === 'nativo' ? 'text-cyan-300' : 'text-slate-500'}`} />
+              <span className={`text-xs font-bold ${section === 'nativo' ? 'text-white' : 'text-slate-300'}`}>
+                1 · Nativo TVLister
+              </span>
+              <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 font-bold">
+                UDP 2–125
+              </span>
+            </div>
+            <div className="text-[10.5px] text-slate-400 mt-1">
+              Moduladores, IP analógicos, NIC dedicada, nombres de portadoras y el plan de canales.
+              TVLister emite: {fsControl.snapshot?.local_channels ?? udpEngine.channels.filter((c) => (c.engine || 'local') === 'local').length} canales.
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSection('flussonic')}
+            className={`text-left rounded-xl px-3 py-2.5 border transition ${
+              section === 'flussonic'
+                ? 'bg-indigo-500/15 border-indigo-400/60'
+                : 'bg-[#0e1526] border-slate-800 hover:border-indigo-500/40'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Cpu className={`w-4 h-4 ${section === 'flussonic' ? 'text-indigo-300' : 'text-slate-500'}`} />
+              <span className={`text-xs font-bold ${section === 'flussonic' ? 'text-white' : 'text-slate-300'}`}>
+                2 · Flussonic · quién emite
+              </span>
+              <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 font-bold">
+                {fsControl.snapshot?.flussonic_channels ?? 0} canales
+              </span>
+            </div>
+            <div className="text-[10.5px] text-slate-400 mt-1">
+              Qué canal lo empuja Flussonic y cuál TVLister: enviar, verificar y volver, sin dos emisores.
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSection('push')}
+            className={`text-left rounded-xl px-3 py-2.5 border transition ${
+              section === 'push'
+                ? 'bg-violet-500/15 border-violet-400/60'
+                : 'bg-[#0e1526] border-slate-800 hover:border-violet-500/40'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Network className={`w-4 h-4 ${section === 'push' ? 'text-violet-300' : 'text-slate-500'}`} />
+              <span className={`text-xs font-bold ${section === 'push' ? 'text-white' : 'text-slate-300'}`}>
+                3 · Flussonic UDP · push
+              </span>
+              <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 font-bold">
+                {fsPush.snapshot?.channels_con_salida ?? 0} con salida
+              </span>
+            </div>
+            <div className="text-[10.5px] text-slate-400 mt-1">
+              La salida UDP de cada canal y el nombre con el que se identifica al escanear (lo de «Push live»).
+            </div>
+          </button>
+        </div>
+      </div>
+
+      {section === 'nativo' && (<>
 
       {/* ==================== EQUIPOS WK2500: MODELOS 32 / 64 / 125 ==================== */}
       <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/35 p-4 space-y-3.5">
@@ -1631,7 +1796,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         <p className="text-[11px] text-slate-400 leading-relaxed">
           Lista ordenada del operador para los canales analógicos. Se aplica al rótulo de cada
           portadora y sale en el CSV de la página <strong className="text-slate-200">CANALES</strong> del
-          modulador. No cambia frecuencias, ni UDP, ni el stream asignado.
+          modulador. No cambia frecuencias, ni UDP, ni el stream asignado. Para que esos mismos nombres
+          viajen en el TS de Flussonic (y el canal salga identificado al escanear), usa{' '}
+          <button type="button" onClick={() => setSection('push')} className="text-violet-300 underline font-bold">
+            Flussonic UDP · push → Nombre del canal en el TS
+          </button>.
         </p>
         {names.summary && (
           <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">
@@ -1653,12 +1822,18 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         )}
       </div>
 
-      {/* ── Salidas UDP en Flussonic (lo mismo que «Push live» de su panel) ── */}
-      <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/35 p-4 space-y-3">
+      </>)}
+
+      {section === 'push' && (<>
+      {/* ══════════════════════════════════════════════════════════════════
+          FLUSSONIC UDP · la salida de cada canal (lo que antes se hacía a
+          mano en «Push live video to certain URLs» de Flussonic)
+         ══════════════════════════════════════════════════════════════════ */}
+      <div className="rounded-2xl bg-[#0e1526] border border-violet-500/40 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
-            <Network className="w-4 h-4 text-emerald-400" />
-            Salidas UDP de Flussonic (push)
+            <Network className="w-4 h-4 text-violet-400" />
+            Flussonic UDP · la salida de cada canal (push)
           </h2>
           <div className="flex flex-wrap items-center gap-2 text-[10px]">
             {fsPush.snapshot ? (
@@ -1675,21 +1850,20 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                 </span>
               )
             ) : null}
-            <span className="px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 font-bold">
-              Con salida UDP: {fsPush.snapshot?.with_push ?? 0}
+            <span className="px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 font-bold">
+              Canales con stream: {fsPush.snapshot?.channels_mapped ?? 0}/{fsPush.snapshot?.channels_total ?? 0}
             </span>
-            {pushPendientes > 0 && (
-              <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-bold">
-                {pushPendientes} con otra IP/puerto
-              </span>
-            )}
+            <span className="px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 font-bold">
+              Con salida UDP puesta: {fsPush.snapshot?.channels_con_salida ?? 0}
+            </span>
           </div>
         </div>
 
         <p className="text-[11px] text-slate-400 leading-relaxed">
-          Los canales ya están en Flussonic: aquí se les pone la <strong className="text-slate-200">salida UDP</strong> que
-          antes se añadía a mano en <em>Push live video to certain URLs</em>. La URL sale del destino del canal en la lista
-          (CH → IP:puerto) y se escribe con la API de Flussonic. Las salidas que no son UDP (rtmp, srt…) nunca se tocan.
+          Aquí sólo se escribe la <strong className="text-slate-200">salida UDP de cada canal en Flussonic</strong>: la
+          fila es el canal de tu lista (CH → IP:puerto) y a la derecha eliges qué stream de Flussonic la emite. No
+          cambia quién emite —eso está en <em>Flussonic · quién emite</em>— ni toca las salidas que no son UDP
+          (rtmp, srt…).
         </p>
 
         {fsPush.snapshot && !fsPush.snapshot.server && (
@@ -1744,9 +1918,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
               type="checkbox"
               checked={fsPush.takeOver}
               onChange={(e) => setFsPush((prev) => ({ ...prev, takeOver: e.target.checked }))}
-              className="w-3.5 h-3.5 accent-emerald-500"
+              className="w-3.5 h-3.5 accent-violet-500"
             />
-            Apagar TVLister en esos canales (evita dos emisores al mismo destino)
+            Al pulsar «Guardar» en un canal, apagar TVLister en ese canal (nunca dos emisores al mismo destino)
           </label>
         </div>
 
@@ -1764,7 +1938,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             type="button"
             onClick={() => handlePushRange('apply')}
             disabled={Boolean(fsPush.busy) || !fsPush.snapshot?.flussonic_reachable}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold disabled:opacity-40"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold disabled:opacity-40"
           >
             <Save className="w-3.5 h-3.5" />
             {fsPush.busy === 'apply' ? 'Aplicando…' : 'Poner salida UDP del rango'}
@@ -1787,33 +1961,30 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             <RefreshCw className={`w-3.5 h-3.5 ${fsPush.loading ? 'animate-spin' : ''}`} /> Actualizar
           </button>
           <div className="flex items-center gap-1.5 ml-auto">
-            <span className="text-[10px] uppercase tracking-wide text-slate-500">Ver</span>
-            <select
-              value={fsPush.filter}
-              onChange={(e) => setFsPush((prev) => ({ ...prev, filter: e.target.value }))}
-              className="px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-[11px] text-slate-200"
-            >
-              <option value="canales">Sólo canales de la lista</option>
-              <option value="todos">Todos los streams</option>
-              <option value="con_salida">Con salida UDP</option>
-              <option value="sin_salida">Sin salida UDP</option>
-            </select>
+            <input
+              type="text"
+              placeholder="Buscar canal, IP o stream…"
+              value={fsPush.query}
+              onChange={(e) => setFsPush((prev) => ({ ...prev, query: e.target.value }))}
+              className="w-52 px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[11px] text-slate-200"
+            />
           </div>
         </div>
 
         {fsPush.message && (
-          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">
+          <div className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-[11px] text-violet-200">
             {fsPush.message}
           </div>
         )}
 
-        {fsPush.snapshot?.flussonic_reachable && pushVisibles.length > 0 ? (
+        {fsPush.snapshot?.flussonic_reachable && pushChannelRows.length > 0 ? (
           <div className="overflow-x-auto rounded-xl border border-slate-800">
             <table className="w-full text-[11px]">
               <thead className="bg-[#0a1120] text-slate-400 uppercase tracking-wide text-[10px]">
                 <tr>
-                  <th className="px-2 py-1.5 text-left">Stream en Flussonic</th>
-                  <th className="px-2 py-1.5 text-left">Canal</th>
+                  <th className="px-2 py-1.5 text-left">CH</th>
+                  <th className="px-2 py-1.5 text-left">Portadora</th>
+                  <th className="px-2 py-1.5 text-left">Stream que la emite en Flussonic</th>
                   <th className="px-2 py-1.5 text-left">Salida UDP (push)</th>
                   <th className="px-2 py-1.5 text-center">Estado</th>
                   <th className="px-2 py-1.5 text-right">Enviado</th>
@@ -1821,92 +1992,91 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/70">
-                {pushVisibles.map((st) => {
-                  const draft = fsPush.draft[st.name] ?? '';
-                  const enSincronia = st.in_sync;
-                  const otra = Boolean(st.push) && !enSincronia;
-                  const etiqueta = !st.push
-                    ? 'Sin salida'
-                    : enSincronia
-                      ? st.push.running
-                        ? 'Emitiendo'
-                        : 'Puesta'
-                      : 'Otra IP/puerto';
+                {pushChannelRows.map((c) => {
+                  const url = c.stream ? fsPush.draft[c.stream] ?? c.dest : '';
+                  const estado = !c.stream
+                    ? 'Sin stream'
+                    : !c.stream_exists
+                      ? 'Stream no existe'
+                      : !c.has_output
+                        ? 'Sin salida'
+                        : c.in_sync
+                          ? c.push?.running
+                            ? 'Emitiendo'
+                            : 'Puesta'
+                          : 'Otra IP/puerto';
+                  const bueno = estado === 'Emitiendo' || estado === 'Puesta';
                   return (
-                    <tr key={st.name} className="hover:bg-white/[0.02]">
-                      <td className="px-2 py-1.5">
-                        <div className="font-mono text-indigo-300">{st.name}</div>
-                        {st.title && st.title !== st.name && (
-                          <div className="text-[10px] text-slate-500 truncate max-w-[180px]">{st.title}</div>
+                    <tr key={c.catv_ch} className="hover:bg-white/[0.02]">
+                      <td className="px-2 py-1.5 font-mono text-cyan-300 font-bold align-top">{c.catv_ch}</td>
+                      <td className="px-2 py-1.5 align-top">
+                        <div className="text-slate-200">{c.name}</div>
+                        {c.stream_title && c.stream_title !== c.name && (
+                          <div className="text-[10px] text-slate-500 truncate max-w-[150px]">{c.stream_title}</div>
                         )}
+                        <div className="text-[10px] text-slate-600 font-mono">{c.dest?.replace(/^udp:\/\//, '')}</div>
                       </td>
-                      <td className="px-2 py-1.5">
-                        {st.channel ? (
-                          <span className="text-slate-200">
-                            <span className="font-mono text-cyan-300 font-bold">CH{st.channel.catv_ch}</span> ·{' '}
-                            {st.channel.name}
-                            <span className="ml-1 text-[10px] text-slate-500">{st.channel.method}</span>
-                          </span>
-                        ) : (
-                          <span className="text-slate-500">—</span>
-                        )}
+                      <td className="px-2 py-1.5 align-top">
+                        <select
+                          value={c.stream || ''}
+                          onChange={(e) => handlePushMapChannel(c.catv_ch, e.target.value)}
+                          disabled={Boolean(fsPush.busy)}
+                          className="w-full min-w-[210px] px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-slate-200 text-[11px] disabled:opacity-50"
+                        >
+                          <option value="">— sin stream —</option>
+                          {pushStreamOptions.map((st) => (
+                            <option key={st.name} value={st.name}>
+                              {st.title && st.title !== st.name ? `${st.title}  ·  ${st.name}` : st.name}
+                            </option>
+                          ))}
+                        </select>
+                        {fsPush.busy === `map:${c.catv_ch}` && <div className="text-[10px] text-violet-300">guardando…</div>}
                       </td>
-                      <td className="px-2 py-1.5">
+                      <td className="px-2 py-1.5 align-top">
                         <input
                           type="text"
-                          value={draft}
-                          placeholder={st.channel?.dest || 'udp://IP:PUERTO'}
-                          onChange={(e) => setPushDraft(st.name, e.target.value)}
-                          className="w-full min-w-[230px] px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-emerald-300 font-mono text-[11px]"
+                          value={url}
+                          disabled={!c.stream}
+                          placeholder={c.dest || 'udp://IP:PUERTO'}
+                          onChange={(e) => setPushDraft(c.stream, e.target.value)}
+                          className="w-full min-w-[210px] px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-emerald-300 font-mono text-[11px] disabled:opacity-40"
                         />
-                        {st.push && !enSincronia && (
-                          <div className="text-[10px] text-amber-300/80 mt-0.5 font-mono truncate max-w-[260px]" title={st.push.url}>
-                            ahora en Flussonic: {st.push.url}
-                          </div>
-                        )}
-                        {st.udp_outputs?.length > 1 && (
+                        {c.other_udp?.length ? (
                           <div className="text-[10px] text-amber-300/80 mt-0.5">
-                            {st.udp_outputs.length} salidas UDP guardadas
-                          </div>
-                        )}
-                        {st.other_outputs?.length ? (
-                          <div className="text-[10px] text-slate-500 mt-0.5 truncate max-w-[260px]" title={st.other_outputs.join(' · ')}>
-                            también: {st.other_outputs.join(' · ')}
+                            {c.other_udp.length} salida(s) UDP más en ese stream
                           </div>
                         ) : null}
                       </td>
-                      <td className="px-2 py-1.5 text-center">
+                      <td className="px-2 py-1.5 text-center align-top">
                         <span
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                            enSincronia
+                            bueno
                               ? 'bg-emerald-500/15 text-emerald-300'
-                              : otra
+                              : estado === 'Otra IP/puerto'
                                 ? 'bg-amber-500/15 text-amber-300'
                                 : 'bg-slate-500/15 text-slate-300'
                           }`}
-                          title={st.push?.url || 'Sin salidas UDP'}
+                          title={c.push?.url || 'Sin salida UDP'}
                         >
-                          {enSincronia ? <CheckCircle2 className="w-3 h-3" /> : otra ? <AlertTriangle className="w-3 h-3" /> : null}
-                          {etiqueta}
+                          {bueno ? <CheckCircle2 className="w-3 h-3" /> : null}
+                          {estado}
                         </span>
-                        {!st.alive && <div className="text-[10px] text-rose-300 mt-0.5">stream caído</div>}
+                        <div className="text-[10px] text-slate-500 mt-0.5">{c.engine === 'flussonic' ? 'por Flussonic' : 'por TVLister'}</div>
                       </td>
-                      <td className="px-2 py-1.5 text-right text-slate-300">
-                        {st.push?.mb ? `${st.push.mb} MB` : '—'}
-                      </td>
-                      <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                      <td className="px-2 py-1.5 text-right text-slate-300 align-top">{c.push?.mb ? `${c.push.mb} MB` : '—'}</td>
+                      <td className="px-2 py-1.5 text-right whitespace-nowrap align-top">
                         <button
                           type="button"
-                          onClick={() => handlePushSaveRow(st.name)}
-                          disabled={Boolean(fsPush.busy)}
-                          className="px-2 py-0.5 rounded-lg bg-emerald-600/80 hover:bg-emerald-500 text-white text-[10px] font-bold disabled:opacity-40"
+                          onClick={() => handlePushSaveRow(c.stream)}
+                          disabled={Boolean(fsPush.busy) || !c.stream}
+                          className="px-2 py-0.5 rounded-lg bg-violet-600/80 hover:bg-violet-500 text-white text-[10px] font-bold disabled:opacity-40"
                         >
-                          {fsPush.busy === `row:${st.name}` ? '…' : 'Guardar'}
+                          {fsPush.busy === `row:${c.stream}` ? '…' : 'Guardar'}
                         </button>
                         <button
                           type="button"
-                          onClick={() => handlePushSaveRow(st.name, true)}
-                          disabled={Boolean(fsPush.busy) || !st.push}
+                          onClick={() => handlePushSaveRow(c.stream, true)}
+                          disabled={Boolean(fsPush.busy) || !c.stream || !c.push}
                           className="ml-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 text-[10px] font-bold disabled:opacity-40"
                         >
                           Quitar
@@ -1920,36 +2090,84 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           </div>
         ) : null}
 
-        {fsPush.snapshot?.flussonic_reachable && pushStreams.length > pushVisibles.length && (
+        {fsPush.snapshot?.flussonic_reachable && pushChannels.length > pushChannelRows.length && (
           <div className="text-[10px] text-slate-500">
-            Mostrando {pushVisibles.length} de {pushStreams.length}. Usa el rango para trabajar por tandas.
+            Mostrando {pushChannelRows.length} de {pushChannels.length} canales del rango. Usa Desde/Hasta CH para ver otros.
           </div>
         )}
 
         {fsPush.snapshot?.channels_sin_stream?.length ? (
           <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200 space-y-1">
             <div className="font-bold">
-              {fsPush.snapshot.channels_sin_stream.length} canal(es) de la lista sin stream reconocido en Flussonic
+              {fsPush.snapshot.channels_sin_stream.length} canal(es) de la lista sin stream de Flussonic
             </div>
             {fsPush.snapshot.channels_sin_stream.slice(0, 6).map((c) => (
               <div key={`ps${c.catv_ch}`} className="text-amber-200/80">
                 CH{c.catv_ch} · {c.name}
-                {c.dest ? ` · destino ${c.dest}` : ''}
+                {c.shared_name ? ' · el nombre se repite en varios canales' : ''}
               </div>
             ))}
-            <div className="text-[10px] text-amber-200/60">
-              Al pulsar «Ver plan del rango» se listan con las sugerencias de nombre más parecido.
-            </div>
           </div>
         ) : null}
+
+        {/* Nombres de servicio: lo que se ve al escanear */}
+        <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-3 space-y-2">
+          <h3 className="text-[11px] font-bold text-violet-200 uppercase tracking-wide flex items-center gap-1.5">
+            <Tv className="w-3.5 h-3.5" /> Nombre del canal en el TS (para identificarlo al escanear)
+          </h3>
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            Escribe en cada stream de Flussonic el <strong className="text-slate-200">nombre de su portadora</strong> (el
+            de «Nombres de las portadoras») como nombre de servicio del TS. Así, al escanear la salida del modulador, el
+            canal sale identificado y no como <span className="font-mono">a0ek</span>.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handlePushTitles(false)}
+              disabled={Boolean(fsPush.busy) || !fsPush.snapshot?.flussonic_reachable}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[11px] font-bold disabled:opacity-40"
+            >
+              <Wand2 className="w-3.5 h-3.5" />
+              {fsPush.busy === 'titles' ? 'Mirando…' : 'Ver qué nombres se escribirían'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handlePushTitles(true)}
+              disabled={Boolean(fsPush.busy) || !fsPush.titles?.pendientes}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold disabled:opacity-40"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              {fsPush.busy === 'titles-apply'
+                ? 'Escribiendo…'
+                : `Aplicar nombres${fsPush.titles?.pendientes ? ` (${fsPush.titles.pendientes})` : ''}`}
+            </button>
+          </div>
+          {fsPush.titles?.rows?.length ? (
+            <div className="max-h-40 overflow-y-auto rounded-lg bg-[#090e1a] border border-slate-800 p-2 text-[11px] font-mono">
+              {fsPush.titles.rows.slice(0, 40).map((r) => (
+                <div key={`tt${r.catv_ch}`} className="flex gap-2 py-0.5">
+                  <span className="w-12 shrink-0 text-cyan-300">CH{r.catv_ch}</span>
+                  <span className="w-28 shrink-0 truncate text-violet-300">{r.service_name}</span>
+                  <span className="flex-1 truncate text-slate-400">{r.stream}</span>
+                  <span className={`shrink-0 ${r.current_service_name === r.service_name ? 'text-emerald-400' : 'text-amber-300'}`}>
+                    {r.current_service_name === r.service_name ? 'ya está' : `ahora: ${r.current_service_name || '—'}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
 
+      </>)}
+
+      {section === 'flussonic' && (<>
       {/* ── Control de Flussonic: quién empuja el UDP a los moduladores ── */}
       <div className="rounded-2xl bg-[#0e1526] border border-indigo-500/35 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
             <Cpu className="w-4 h-4 text-indigo-400" />
-            Flussonic: enviar los canales desde ahí
+            Flussonic · quién emite cada canal
           </h2>
           <div className="flex flex-wrap items-center gap-2 text-[10px]">
             {fsControl.snapshot ? (
@@ -1973,10 +2191,13 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         </div>
 
         <p className="text-[11px] text-slate-400 leading-relaxed">
-          Flussonic ya recibe los canales: aquí se le pide que sea <strong className="text-slate-200">él</strong> quien
-          empuje el MPEG-TS a la IP/puerto de cada modulador. TVLister deja de abrir sockets para esos canales, pone la
-          salida por la API y comprueba que quedó puesta. Al volver a TVLister se quita primero la salida de Flussonic,
-          para que nunca haya dos emisores al mismo destino.
+          Aquí se decide <strong className="text-slate-200">quién empuja el MPEG-TS</strong> a la IP/puerto de cada
+          modulador. Flussonic ya recibe los canales: al enviarlos, TVLister deja de abrir sockets para esos canales.
+          Al volver a TVLister se quita primero la salida de Flussonic, para que nunca haya dos emisores al mismo
+          destino. ¿Falta decir qué stream es cada canal? Se elige a mano en{' '}
+          <button type="button" onClick={() => setSection('push')} className="text-violet-300 underline font-bold">
+            Flussonic UDP · push
+          </button>.
         </p>
 
         {fsControl.snapshot && !fsControl.snapshot.server && (
@@ -2118,8 +2339,18 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                   return (
                     <tr key={c.catv_ch} className="hover:bg-white/[0.02]">
                       <td className="px-2 py-1.5 font-mono text-cyan-300 font-bold">{c.catv_ch}</td>
-                      <td className="px-2 py-1.5 text-slate-200">{c.name}</td>
-                      <td className="px-2 py-1.5 text-indigo-300 font-mono">{c.stream || '—'}</td>
+                      <td className="px-2 py-1.5 text-slate-200">
+                        {c.channel_name || c.name}
+                        {c.channel_name && c.name !== c.channel_name && (
+                          <span className="block text-[10px] text-slate-500">{c.name}</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <span className="text-indigo-300 font-mono">{c.stream || '—'}</span>
+                        {c.stream_title && c.stream_title !== c.stream && (
+                          <span className="block text-[10px] text-slate-500">{c.stream_title}</span>
+                        )}
+                      </td>
                       <td className="px-2 py-1.5 text-slate-400 font-mono">{c.dest}</td>
                       <td className="px-2 py-1.5 text-center">
                         <span
@@ -2173,8 +2404,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       <div className="rounded-2xl bg-[#0e1526] border border-cyan-500/35 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
-            <Network className="w-4 h-4 text-cyan-400" />
-            Motor UDP: ajuste manual por rango
+            <Sliders className="w-4 h-4 text-indigo-400" />
+            Cambio manual de motor por rango (avanzado)
           </h2>
           <div className="flex items-center gap-2 text-[10px]">
             <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-bold">
@@ -2288,6 +2519,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         )}
       </div>
 
+      </>)}
+
+      {section === 'nativo' && (<>
       {/* Collapsible / Compact MNF Trunk & Bulk UDP Addressing Cards */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <form
@@ -2835,6 +3069,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           </div>
         )}
       </div>
+
+      </>)}
 
       {/* ==================== MODAL: COMPROBAR SALIDA UDP / CATV ==================== */}
       {verifyModal ? (

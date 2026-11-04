@@ -3718,6 +3718,42 @@ wk2500Router.get('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async 
   }
 });
 
+/** Asignar a mano el stream de Flussonic de un canal (a0ek → CH4, etc.). */
+wk2500Router.post('/api/wk2500/flussonic-push/map', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    ensureCatvSlotsInitialized();
+    const m = await import('./flussonicUdp.js');
+    const b = req.body || {};
+    const r = m.setChannelStream({ catvCh: b.catv_ch, stream: b.stream || '' });
+    if (!r.ok) return res.status(400).json(r);
+    const snapshot = await m.flussonicPushSnapshot({ serverId: b.flussonic_server_id ? Number(b.flussonic_server_id) : null, refresh: true });
+    res.json({ ...r, snapshot });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * Nombre de servicio del canal dentro del TS (SDT) para que el modulador y el
+ * televisor lo identifiquen al escanear. dry_run=true sólo lo enseña.
+ */
+wk2500Router.post('/api/wk2500/flussonic-push/titles', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    ensureCatvSlotsInitialized();
+    const m = await import('./flussonicUdp.js');
+    const b = req.body || {};
+    const serverId = b.flussonic_server_id ? Number(b.flussonic_server_id) : null;
+    const dryRun = b.dry_run !== false;
+    const r = await m.applyServiceNames({ serverId, chStart: b.ch_start, chEnd: b.ch_end, dryRun });
+    if (!r.ok && r.error) return res.status(400).json({ ok: false, error: r.error });
+    let snapshot = null;
+    if (!dryRun) snapshot = await m.flussonicPushSnapshot({ serverId, refresh: true });
+    res.json({ ...r, snapshot });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 wk2500Router.post('/api/wk2500/flussonic-push/interface', requireAuth, requireAdmin, async (req, res) => {
   try {
     const m = await import('./flussonicUdp.js');

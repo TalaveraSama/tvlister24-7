@@ -120,6 +120,58 @@ async function getStreamConfig(srv, streamName) {
   return { config: r.json || {} };
 }
 
+/**
+ * PATCH parcial de un stream (sólo los campos que se mandan). Se usa para el
+ * nombre de servicio del TS y para el título, sin tocar entradas ni salidas.
+ */
+async function patchStream(srv, streamName, patch) {
+  const enc = String(streamName).split('/').map(encodeURIComponent).join('/');
+  const headers = headersFor(srv);
+  const r = await fetchJsonWithTimeout(
+    `${apiBase(srv)}/streams/${enc}`,
+    { method: 'PATCH', headers, body: JSON.stringify(patch) },
+    8000
+  );
+  if (r.ok) return { ok: true, method: 'PATCH' };
+  const unsupported = [400, 404, 405, 422, 500, 501].includes(Number(r.status));
+  if (!unsupported) return { ok: false, error: apiError(r, 'Flussonic no aceptó el cambio') };
+  // Algunos 23.12 no admiten PATCH parcial: PUT con el stream tal cual + el campo.
+  const got = await getStreamConfig(srv, streamName);
+  if (got.error) return { ok: false, error: got.error };
+  const payload = {};
+  for (const key of WRITABLE_STREAM_FIELDS) {
+    if (got.config && got.config[key] !== undefined) payload[key] = got.config[key];
+  }
+  payload.name = got.config?.name || streamName;
+  Object.assign(payload, patch);
+  const put = await fetchJsonWithTimeout(
+    `${apiBase(srv)}/streams/${enc}`,
+    { method: 'PUT', headers, body: JSON.stringify(payload) },
+    8000
+  );
+  if (put.ok) return { ok: true, method: 'PUT' };
+  return { ok: false, error: apiError(put, 'Flussonic no aceptó el cambio') };
+}
+
+/**
+ * Nombre de servicio del canal dentro del MPEG-TS (el que ven los equipos al
+ * escanear). Se intenta `mpegts.service_name` (SDT exacto) y, si esa versión no
+ * lo guarda, se escribe en `title` (Flussonic lo usa como nombre del servicio).
+ */
+async function writeServiceName(srv, streamName, serviceName, config) {
+  const patch = { mpegts: { ...(config?.mpegts || {}), service_name: serviceName } };
+  const first = await patchStream(srv, streamName, patch);
+  if (first.ok) {
+    const check = await getStreamConfig(srv, streamName);
+    if (!check.error && String(check.config?.mpegts?.service_name || '') === serviceName) {
+      return { ok: true, method: 'mpegts.service_name', field: 'mpegts.service_name' };
+    }
+  }
+  const second = await patchStream(srv, streamName, { title: serviceName });
+  if (!second.ok) return { ok: false, error: second.error || first.error || 'Flussonic no aceptó el nombre' };
+  return { ok: true, method: 'title', field: 'title' };
+}
+
 function normalizeOutputs(raw) {
   if (!raw) return [];
   const list = Array.isArray(raw) ? raw : [raw];
@@ -420,6 +472,8 @@ export async function listFlussonicStreams({ serverId = null } = {}) {
       alive: stats.alive !== false && stats.status !== 'error',
       bitrate_kbps: Math.round(Number(stats.bitrate || 0)),
       clients: Number(stats.client_count || 0),
+      service_name: String(item.mpegts?.service_name || item.title || item.name || '').trim(),
+      service_source: item.mpegts?.service_name ? 'mpegts' : 'titulo',
       outputs: normalizeOutputs(item.outputs).map((o) => o.url),
       output_details: normalizeOutputs(item.outputs).map((o) => ({
         url: o.url,
@@ -451,8 +505,23 @@ function slotFlussonicCandidates(slot = {}) {
  * un nombre contiene al otro → parecido por palabras (sólo si ≥ 0,6). Nunca
  * repite un stream: el primero que lo toma se lo queda.
  */
+/**
+ * Cuántas portadoras comparten cada nombre (la lista del operador repite
+ * «NACIONAL» en 9 canales). Un nombre compartido no sirve para emparejar solo.
+ */
+export function channelNameCounts() {
+  const rows = db.prepare('SELECT custom_name FROM wk2500_channels WHERE custom_name <> \'\'').all();
+  const counts = new Map();
+  for (const r of rows) {
+    const k = normalizeChannelKey(r.custom_name);
+    if (k) counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  return counts;
+}
+
 export function computeChannelStreamMap(pool = [], slots = [], { overwrite = false, minScore = 0.6 } = {}) {
   const taken = new Map(); // stream -> catv_ch (el primero que lo toma se lo queda)
+  const nameCounts = channelNameCounts();
   for (const row of db.prepare("SELECT catv_ch, flussonic_stream FROM wk2500_channels WHERE udp_engine = 'flussonic'").all()) {
     const nm = String(row.flussonic_stream || '').trim();
     if (nm && pool.some((s) => s.name === nm)) taken.set(nm, Number(row.catv_ch));
@@ -470,7 +539,16 @@ export function computeChannelStreamMap(pool = [], slots = [], { overwrite = fal
       continue;
     }
 
-    const candidates = slotFlussonicCandidates(slot);
+    // El nombre del canal sólo empareja si es suyo y de nadie más: con
+    // «NACIONAL» repetido, emparejar por nombre sería un revoltijo.
+    const ownName = normalizeChannelKey(slot.custom_name || slot.stream_name || '');
+    const sharedName = ownName && (nameCounts.get(ownName) || 0) > 1;
+    const candidates = slotFlussonicCandidates(slot).filter((c) => {
+      if (!sharedName) return true;
+      // Se deja pasar sólo si coincide exacto con un stream (raro) para no
+      // perder un mapeo ya escrito a mano.
+      return pool.some((s) => normalizeChannelKey(s.name) === normalizeChannelKey(c));
+    });
     let best = null;
     for (const cand of candidates) {
       const key = normalizeChannelKey(cand);
@@ -514,6 +592,10 @@ export function computeChannelStreamMap(pool = [], slots = [], { overwrite = fal
       unmatched.push({
         catv_ch: slot.catv_ch,
         name: slot.custom_name || slot.stream_name || `CH ${slot.catv_ch}`,
+        reason: sharedName
+          ? `El nombre «${slot.custom_name}» lo comparten ${nameCounts.get(ownName)} canales: asígnalo a mano`
+          : '',
+        shared_name: Boolean(sharedName),
         suggestions
       });
       continue;
@@ -590,7 +672,7 @@ export async function flussonicControlSnapshot({ serverId = null, refresh = true
     .prepare(
       `SELECT w.catv_ch, w.udp_host, w.udp_port, w.ttl, w.pkt_size, w.rtp, w.local_interface_ip,
               w.flussonic_stream, w.flussonic_server_id, w.flussonic_output_url, w.enabled, w.udp_engine,
-              w.custom_source_url,
+              w.custom_source_url, w.custom_name,
               s.name AS stream_name, s.flussonic_stream_name AS mapped_flussonic_name
          FROM wk2500_channels w
          LEFT JOIN streams s ON s.id = w.stream_id
@@ -623,6 +705,8 @@ export async function flussonicControlSnapshot({ serverId = null, refresh = true
     return {
       catv_ch: Number(row.catv_ch),
       name: row.stream_name || `CH ${row.catv_ch}`,
+      channel_name: String(row.custom_name || row.stream_name || `CH ${row.catv_ch}`).trim(),
+      stream_title: info ? String(info.title || '') : '',
       enabled: Boolean(row.enabled),
       stream,
       dest: expected,
@@ -796,6 +880,7 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
   const slots = channelSlotsForPush();
   const { mapped } = computeChannelStreamMap(pool, slots, {});
   const byCh = new Map(mapped.map((m) => [Number(m.catv_ch), m]));
+  const nameCountsForPush = channelNameCounts();
   const channelByStream = new Map();
   const channelsSinStream = [];
   for (const slot of slots) {
@@ -804,25 +889,29 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
       channelsSinStream.push({
         catv_ch: Number(slot.catv_ch),
         name: slot.custom_name || slot.stream_name || `CH ${slot.catv_ch}`,
-        dest: buildPushUrlFromChannel(slot, iface)
+        dest: buildPushUrlFromChannel(slot, iface),
+        shared_name: (nameCountsForPush.get(normalizeChannelKey(slot.custom_name || '')) || 0) > 1
       });
       continue;
     }
     channelByStream.set(m.stream, {
       catv_ch: Number(slot.catv_ch),
       name: slot.custom_name || slot.stream_name || `CH ${slot.catv_ch}`,
+      service_name: String(slot.custom_name || '').trim(),
       dest: buildPushUrlFromChannel(slot, iface),
       host: slot.udp_host,
       port: Number(slot.udp_port) || 0,
       engine: slot.udp_engine || 'local',
       enabled: Boolean(slot.enabled),
       method: m.method,
-      flussonic_output_url: slot.flussonic_output_url || ''
+      flussonic_output_url: slot.flussonic_output_url || '',
+      stream_title: ''
     });
   }
 
   const streams = pool.map((s) => {
     const channel = channelByStream.get(s.name) || null;
+    if (channel) channel.stream_title = s.title;
     const udpUrls = (s.outputs || []).filter(isUdpPush);
     const suggested = channel?.dest || '';
     const primary =
@@ -843,6 +932,36 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
     };
   });
 
+  // Vista por canal (la que usa el operador: «CH4 → este stream»).
+  const byStreamName = new Map(streams.map((st) => [st.name, st]));
+  const channels = slots.map((slot) => {
+    const ch = Number(slot.catv_ch);
+    const name = String(slot.custom_name || slot.stream_name || `CH ${ch}`).trim();
+    const mapped = byCh.get(ch) || null;
+    const stream = mapped ? mapped.stream : '';
+    const st = stream ? byStreamName.get(stream) : null;
+    const dest = buildPushUrlFromChannel(slot, iface);
+    return {
+      catv_ch: ch,
+      name,
+      service_name: name,
+      dest,
+      shared_name: (nameCountsForPush.get(normalizeChannelKey(slot.custom_name || '')) || 0) > 1,
+      stream,
+      stream_title: st ? st.title : '',
+      stream_exists: Boolean(st),
+      stream_alive: st ? st.alive : null,
+      push: st ? st.push : null,
+      has_output: Boolean(st && st.push && dest && outputTargetKey(st.push.url) === outputTargetKey(dest)),
+      in_sync: Boolean(st && st.in_sync),
+      other_udp: st ? st.udp_outputs.filter((u) => outputTargetKey(u) !== outputTargetKey(dest)) : [],
+      other_outputs: st ? st.other_outputs : [],
+      engine: slot.udp_engine || 'local',
+      enabled: Boolean(slot.enabled),
+      ok: Boolean(stream) && Boolean(dest)
+    };
+  });
+
   return {
     ok: true,
     server: listed.server || { id: srv.id, name: srv.name, base_url: srv.base_url },
@@ -850,9 +969,13 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
     flussonic_error: listed.ok ? '' : listed.error || '',
     iface,
     streams,
+    channels,
     total: streams.length,
     with_push: streams.filter((s) => s.push).length,
     in_sync: streams.filter((s) => s.in_sync).length,
+    channels_total: channels.length,
+    channels_mapped: channels.filter((c) => c.stream).length,
+    channels_con_salida: channels.filter((c) => c.has_output).length,
     channels_sin_stream: channelsSinStream
   };
 }
@@ -1150,5 +1273,120 @@ export async function applyStreamPushItems({ serverId = null, items = [], dryRun
     failed: detail.length - applied,
     taken_over: takenOver,
     message: `${applied} de ${detail.length} stream(s) actualizados${takenOver.length ? ` · ${takenOver.length} canal(es) pasados a Flussonic` : ''}.`
+  };
+}
+
+// ============ MAPEO A MANO Y NOMBRES DE SERVICIO (v2.6.36) =================
+// Los streams de Flussonic suelen llamarse a0ek/a0cq (su título es «A&E»,
+// «A3 Cine»…) y la lista del operador repite «NACIONAL» en varios canales. Aquí
+// el operador elige el stream de cada canal en una lista, y el panel escribe el
+// nombre del canal como nombre de servicio del TS para reconocerlo al escanear.
+
+/** Asigna (o quita) el stream de Flussonic de un canal. Un stream, un canal. */
+export function setChannelStream({ catvCh, stream = '' } = {}) {
+  const ch = Number(catvCh);
+  if (!Number.isFinite(ch)) return { ok: false, error: 'Canal inválido.' };
+  const slot = db.prepare('SELECT catv_ch, custom_name, flussonic_stream FROM wk2500_channels WHERE catv_ch = ?').get(ch);
+  if (!slot) return { ok: false, error: `El canal CH${ch} no existe en el plan.` };
+  const name = String(stream || '').trim();
+
+  if (!name) {
+    db.prepare("UPDATE wk2500_channels SET flussonic_stream = '', updated_at = datetime('now') WHERE catv_ch = ?").run(ch);
+    return { ok: true, catv_ch: ch, stream: '', cleared: true };
+  }
+
+  const freed = db
+    .prepare('SELECT catv_ch FROM wk2500_channels WHERE flussonic_stream = ? AND catv_ch <> ?')
+    .all(name, ch)
+    .map((r) => Number(r.catv_ch));
+  withTry(() =>
+    db
+      .prepare("UPDATE wk2500_channels SET flussonic_stream = '', updated_at = datetime('now') WHERE flussonic_stream = ? AND catv_ch <> ?")
+      .run(name, ch)
+  );
+  db.prepare("UPDATE wk2500_channels SET flussonic_stream = ?, updated_at = datetime('now') WHERE catv_ch = ?").run(name, ch);
+  return { ok: true, catv_ch: ch, stream: name, freed };
+}
+
+function withTry(fn) {
+  try {
+    fn();
+  } catch {
+    /* el índice único no es crítico: el aviso va en freed */
+  }
+}
+
+/**
+ * Plan de nombres de servicio: qué se escribiría en Flussonic para que cada
+ * canal se identifique al escanear (SDT). Usa el nombre de la portadora.
+ */
+export async function planServiceNames({ serverId = null, chStart = 2, chEnd = 125 } = {}) {
+  const listed = await listFlussonicStreams({ serverId });
+  if (!listed.ok) return { ok: false, error: listed.error, rows: [] };
+  const byName = new Map((listed.streams || []).map((s) => [s.name, s]));
+  const from = Math.max(2, Number(chStart) || 2);
+  const to = Math.min(125, Number(chEnd) || 125);
+  const slots = db
+    .prepare(
+      `SELECT catv_ch, custom_name, flussonic_stream, stream_id FROM wk2500_channels
+        WHERE catv_ch BETWEEN ? AND ? AND flussonic_stream <> '' ORDER BY catv_ch`
+    )
+    .all(from, to);
+
+  const rows = slots.map((slot) => {
+    const stream = String(slot.flussonic_stream || '').trim();
+    const info = byName.get(stream);
+    const service = String(slot.custom_name || '').trim() || `CH ${slot.catv_ch}`;
+    const current = String(info?.service_name || info?.title || '').trim();
+    return {
+      catv_ch: Number(slot.catv_ch),
+      service_name: service,
+      stream,
+      stream_title: String(info?.title || ''),
+      current_service_name: current,
+      exists: Boolean(info),
+      ok: Boolean(info),
+      error: info ? '' : 'ese stream no existe en Flussonic'
+    };
+  });
+  return {
+    ok: true,
+    server: listed.server,
+    rows,
+    total: rows.length,
+    pendientes: rows.filter((r) => r.ok && r.current_service_name !== r.service_name).length
+  };
+}
+
+/** Escribe el nombre de servicio de cada canal en su stream (SDT / título). */
+export async function applyServiceNames({ serverId = null, chStart = 2, chEnd = 125, dryRun = true } = {}) {
+  const planned = await planServiceNames({ serverId, chStart, chEnd });
+  if (!planned.ok) return planned;
+  const srv = getFlussonicServer(serverId);
+  if (!srv) return { ok: false, error: 'No hay ningún servidor Flussonic dado de alta.', rows: [] };
+  const targets = planned.rows.filter((r) => r.ok && r.current_service_name !== r.service_name);
+  if (dryRun) {
+    return { ...planned, dryRun: true, detail: targets.map((r) => ({ ...r, action: 'pendiente' })), applied: 0, failed: 0 };
+  }
+  const detail = [];
+  for (const row of targets) {
+    const got = await getStreamConfig(srv, row.stream);
+    if (got.error) {
+      detail.push({ ...row, ok: false, error: got.error });
+      continue;
+    }
+    const wrote = await writeServiceName(srv, row.stream, row.service_name, got.config);
+    detail.push({ ...row, ok: wrote.ok, field: wrote.field || '', error: wrote.error || '' });
+  }
+  const applied = detail.filter((d) => d.ok).length;
+  return {
+    ok: detail.every((d) => d.ok),
+    dryRun: false,
+    server: planned.server,
+    rows: planned.rows,
+    detail,
+    applied,
+    failed: detail.length - applied,
+    message: `${applied} de ${targets.length} stream(s) con el nombre del canal para el escaneo.`
   };
 }

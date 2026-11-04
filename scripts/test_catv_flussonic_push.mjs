@@ -64,6 +64,8 @@ const streamsState = new Map([
     }
   ],
   ['CANAL 6', { name: 'CANAL 6', title: 'Canal 6', alive: true, bitrate: 2000000, outputs: [], push: [] }],
+  ['a0ek', { name: 'a0ek', title: 'A&E', alive: true, bitrate: 1900000, outputs: [], push: [], mpegts: {} }],
+  ['a0cq', { name: 'a0cq', title: 'A3 Cine', alive: true, bitrate: 1800000, outputs: [], push: [], mpegts: {} }],
   ['SIN CANAL', { name: 'SIN CANAL', title: 'sin relacion', alive: true, bitrate: 1000000, outputs: [], push: [] }]
 ]);
 const patchCalls = [];
@@ -79,6 +81,7 @@ const fake = http.createServer((req, res) => {
         name: s.name,
         title: s.title,
         static: true,
+        mpegts: s.mpegts || {},
         outputs: s.outputs,
         stats: { alive: s.alive, bitrate: s.bitrate, client_count: 0, push: s.push }
       }))
@@ -94,6 +97,7 @@ const fake = http.createServer((req, res) => {
         name: st.name,
         title: st.title,
         static: true,
+        mpegts: st.mpegts || {},
         outputs: st.outputs,
         inputs: [{ url: `tshttp://10.0.0.1:8080/${name}` }],
         stats: { alive: st.alive, bitrate: st.bitrate, push: st.push }
@@ -109,7 +113,9 @@ const fake = http.createServer((req, res) => {
         } catch {
           parsed = {};
         }
-        patchCalls.push({ name, method: req.method, outputs: parsed.outputs });
+        patchCalls.push({ name, method: req.method, outputs: parsed.outputs, body: parsed });
+        if (parsed.mpegts) st.mpegts = { ...(st.mpegts || {}), ...parsed.mpegts };
+        if (parsed.title) st.title = parsed.title;
         if (Array.isArray(parsed.outputs)) {
           st.outputs = parsed.outputs.map((o) => (typeof o === 'string' ? { url: o } : o));
           // El push nuevo arranca «running» con unos MB, como en Flussonic.
@@ -245,7 +251,12 @@ try {
     { ch: 3, name: 'Telemundo', dest: 4772 },
     { ch: 4, name: 'CANAL 5', dest: 4773 }
   ];
-  for (const c of [...CHANNELS, { ch: 6, name: 'CANAL 6', dest: 4776, host: '127.0.0.1' }]) {
+  const EXTRA = [
+    { ch: 8, name: 'NACIONAL', dest: 4778 },
+    { ch: 9, name: 'NACIONAL', dest: 4779 },
+    { ch: 10, name: 'A3 CINE', dest: 4780 }
+  ];
+  for (const c of [...CHANNELS, ...EXTRA, { ch: 6, name: 'CANAL 6', dest: 4776, host: '127.0.0.1' }]) {
     raw
       .prepare(
         `UPDATE wk2500_channels SET custom_name = ?, udp_host = ?, udp_port = ?,
@@ -280,7 +291,11 @@ try {
   ok('y su estado running + MB', row2?.push?.running === true && row2?.push?.mb === 134.2, JSON.stringify(row2?.push));
   ok('avisa de que no coincide con el destino del canal', row2?.in_sync === false);
   ok('el rtmp no se confunde con el push', row2?.other_outputs?.length === 1 && row2.other_outputs[0].startsWith('rtmp://'));
-  ok('los canales sin stream se listan aparte', (snap?.channels_sin_stream || []).length === 0, `${snap?.channels_sin_stream?.length}`);
+  ok(
+    'los canales sin stream (nombre repetido) se listan aparte y marcados',
+    (snap?.channels_sin_stream || []).some((c) => c.catv_ch === 8 && c.shared_name === true),
+    JSON.stringify(snap?.channels_sin_stream)
+  );
 
   // --- 2. Vista previa desde la lista de canales -----------------------
   const preview = (await api('POST', '/api/wk2500/flussonic-push', {
@@ -364,6 +379,48 @@ try {
     items: [{ stream: 'NO EXISTE', url: 'udp://239.5.5.5:5556' }]
   })).data;
   ok('un stream que no existe no rompe nada', missing?.ok === false && /404|no se pudo|No se pudo/i.test(missing?.detail?.[0]?.error || ''), missing?.detail?.[0]?.error);
+
+  // --- 5b. Un nombre repetido NO se empareja solo (el «revoltijo») ------
+  const amb = (await api('POST', '/api/wk2500/flussonic-control/auto-map', { dryRun: true })).data;
+  const ambCh8 = (amb?.unmatched || []).find((u) => u.catv_ch === 8) || (amb?.mapped || []).find((m) => m.catv_ch === 8);
+  ok(
+    'el CH8 (nombre «NACIONAL» repetido) no se empareja por nombre',
+    (amb?.unmatched || []).some((u) => u.catv_ch === 8 && /comparten|asígnalo a mano/.test(u.reason || '')),
+    JSON.stringify(ambCh8)
+  );
+  ok(
+    'el CH10 sí se empareja por su nombre propio (A3 CINE ↔ A3 Cine)',
+    (amb?.mapped || []).find((m) => m.catv_ch === 10)?.stream === 'a0cq',
+    JSON.stringify((amb?.mapped || []).find((m) => m.catv_ch === 10))
+  );
+
+  // --- 5c. Mapeo a mano: a0ek → CH8 ------------------------------------
+  const mapped = (await api('POST', '/api/wk2500/flussonic-push/map', { catv_ch: 8, stream: 'a0ek' })).data;
+  ok('se puede asignar el stream a mano', mapped?.ok === true, JSON.stringify(mapped?.stream));
+  const ch8 = (mapped?.snapshot?.channels || []).find((c) => c.catv_ch === 8);
+  ok('el snapshot por canal muestra el stream elegido', ch8?.stream === 'a0ek', JSON.stringify({ s: ch8?.stream, t: ch8?.stream_title }));
+  ok('y su título real (A&E) para identificarlo', ch8?.stream_title === 'A&E', ch8?.stream_title);
+  ok(
+    'el mismo stream no queda en dos canales',
+    (mapped?.snapshot?.channels || []).filter((c) => c.stream === 'a0ek').length === 1
+  );
+
+  // --- 5d. Nombre de servicio para el escaneo --------------------------
+  const titlePreview = (await api('POST', '/api/wk2500/flussonic-push/titles', { dry_run: true, ch_start: 2, ch_end: 125 })).data;
+  const row8 = (titlePreview?.rows || []).find((r) => r.catv_ch === 8);
+  ok('el plan de nombres usa el nombre de la portadora', row8?.service_name === 'NACIONAL', JSON.stringify(row8));
+  ok('y enseña el que tiene ahora Flussonic', row8?.current_service_name === 'A&E', row8?.current_service_name);
+  ok('no escribe nada en la vista previa', !patchCalls.some((c) => c.body?.mpegts || c.body?.title), `${patchCalls.length} PATCH`);
+
+  const titlesApplied = (await api('POST', '/api/wk2500/flussonic-push/titles', { dry_run: false, ch_start: 2, ch_end: 125 })).data;
+  ok('aplicar los nombres responde ok', titlesApplied?.ok === true, JSON.stringify(titlesApplied?.detail?.filter((d) => !d.ok)));
+  ok(
+    'Flussonic guarda el nombre del canal en el TS (service_name)',
+    streamsState.get('a0ek')?.mpegts?.service_name === 'NACIONAL',
+    JSON.stringify(streamsState.get('a0ek')?.mpegts)
+  );
+  const ch8b = ((await api('GET', '/api/wk2500/flussonic-push')).data?.channels || []).find((c) => c.catv_ch === 8);
+  ok('el canal ya sale identificado al escanear', ch8b?.push === null || ch8b?.service_name === 'NACIONAL');
 
   // --- 6. take_over: el canal pasa a Flussonic -------------------------
   const before = await countDatagrams(4776, 3500);
