@@ -12,6 +12,7 @@ import { getStreamHomeNodeId, isHomeNodeUsable } from './nodeAffinity.js';
 import { resolveDeviceForLine } from './deviceRegistry.js';
 import { signToken } from './auth.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit, checkCredentialGate, noteCredentialFailure, clearCredentialFailures } from './auth.js';
+import { isLiveChannel, ensureLiveState, liveUrlForPlayback } from './youtubeLive.js';
 import {
   registerDevice,
   verifyDeviceToken,
@@ -1622,6 +1623,36 @@ async function serveLiveForLine(req, res, { line, username, password, streamSpec
     const localManifest = getLocalHlsManifestPath(workerKey);
     if (localManifest) {
       return serveLocalHlsManifest(req, res, localManifest, { username, password, workerKey });
+    }
+
+    // ── Canal con señal en vivo (YouTube / HLS) ───────────────────────────
+    if (isLiveChannel(ch)) {
+      // Con motor FFmpeg el cliente debe consumir la copia del panel (HLS
+      // servido arriba). Aquí sólo llega si el motor aún no tiene segmentos.
+      if (String(ch.engine_mode || 'virtual') !== 'virtual') {
+        return res
+          .status(503)
+          .send('El canal en vivo está arrancando: el motor todavía no tiene segmentos. Reintenta en unos segundos.');
+      }
+      let liveUrl = liveUrlForPlayback(ch);
+      if (!liveUrl) {
+        try {
+          const st = await ensureLiveState(ch);
+          liveUrl = st?.ok && st?.url ? st.url : '';
+          if (!liveUrl) {
+            return res.status(503).send(`Señal en vivo no disponible: ${st?.error || 'sin directo ahora'}`);
+          }
+        } catch {
+          liveUrl = '';
+        }
+      }
+      if (!liveUrl) return res.status(503).send('Señal en vivo no disponible');
+      if (protocol === 'MPEG-TS') {
+        return res
+          .status(503)
+          .send('Canal de señal en vivo: usa la entrega HLS (.m3u8) o activa el motor FFmpeg del canal.');
+      }
+      return res.redirect(302, liveUrl);
     }
 
     const state = computeChannel247LiveState(ch);

@@ -603,6 +603,12 @@ function runInitDbBody() {
   ensureColumn('servers', 'origin_only', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('streams', 'flussonic_stream_name', "TEXT DEFAULT ''");
   ensureColumn('channels_247', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+  // --- Señal en vivo (YouTube / HLS) como canal 24/7 ----------------------
+  // source_kind: 'playlist' (parrilla de siempre) | 'youtube' (señal en vivo)
+  ensureColumn('channels_247', 'source_kind', "TEXT NOT NULL DEFAULT 'playlist'");
+  ensureColumn('channels_247', 'live_source_url', "TEXT DEFAULT ''");
+  // JSON: {url, title, live, expires_at_ms, resolved_at_ms, error…}
+  ensureColumn('channels_247', 'live_source_state', "TEXT DEFAULT ''");
 
   // Interruptor de failover global retirado: ahora el segundo origen es automático y dormido.
   db.prepare("DELETE FROM settings WHERE key = 'failover_enabled'").run();

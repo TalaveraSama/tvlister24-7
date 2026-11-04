@@ -12,7 +12,14 @@ import {
   Terminal,
   Calendar,
   X,
-  Film
+  Film,
+  Youtube,
+  Radio,
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -33,8 +40,16 @@ export default function Channels247Page({ onPreview }) {
     engine_mode: 'virtual',
     transcode_profile_id: 2,
     watermark_text: 'TVLISTER 24/7',
+    source_kind: 'playlist',
+    live_source_url: '',
     playlist: []
   });
+
+  // Señal en vivo (YouTube): estado de yt-dlp y resultado de «Comprobar».
+  const [ytStatus, setYtStatus] = useState(null);
+  const [probe, setProbe] = useState(null);
+  const [liveBusy, setLiveBusy] = useState('');
+  const [cookiesPath, setCookiesPath] = useState('');
 
   const [customTitle, setCustomTitle] = useState('');
   const [customUrl, setCustomUrl] = useState('');
@@ -73,6 +88,8 @@ export default function Channels247Page({ onPreview }) {
       engine_mode: 'virtual',
       transcode_profile_id: 2,
       watermark_text: 'TVLISTER 24/7',
+      source_kind: 'playlist',
+      live_source_url: '',
       playlist: vodList.slice(0, 2).map((v, idx) => ({
         id: `clip-${Date.now()}-${idx}`,
         vod_id: v.id,
@@ -81,6 +98,8 @@ export default function Channels247Page({ onPreview }) {
         duration_sec: v.duration_sec
       }))
     });
+    setProbe(null);
+    loadYtStatus();
     setModalOpen(true);
   };
 
@@ -95,9 +114,88 @@ export default function Channels247Page({ onPreview }) {
       engine_mode: ch.engine_mode || 'virtual',
       transcode_profile_id: ch.transcode_profile_id || 2,
       watermark_text: ch.watermark_text || '',
+      source_kind: ch.source_kind || 'playlist',
+      live_source_url: ch.live_source_url || '',
       playlist: Array.isArray(ch.playlist) ? ch.playlist : []
     });
+    setProbe(null);
+    if ((ch.source_kind || 'playlist') === 'youtube') loadYtStatus();
     setModalOpen(true);
+  };
+
+  // ── Señal en vivo de YouTube ──────────────────────────────────────────
+  const loadYtStatus = async () => {
+    try {
+      const st = await apiFetch('/api/youtube/status');
+      setYtStatus(st);
+      if (st?.cookies) setCookiesPath((prev) => prev || st.cookies.path || '');
+    } catch {
+      setYtStatus({ installed: false, hint: 'No se pudo consultar el estado de yt-dlp.' });
+    }
+  };
+
+  const handleProbe = async () => {
+    const url = String(form.live_source_url || '').trim();
+    if (!url) {
+      setProbe({ ok: false, live: false, error: 'Pega primero el enlace del directo de YouTube.' });
+      return;
+    }
+    setProbe({ busy: true });
+    try {
+      const r = await apiFetch('/api/youtube/probe', { method: 'POST', body: JSON.stringify({ url }) });
+      setProbe({ ...r, busy: false });
+      if (r.yt_dlp) setYtStatus(r.yt_dlp);
+      if (r.live && r.title && !String(form.name || '').trim()) {
+        setForm((prev) => ({ ...prev, name: r.title }));
+      }
+    } catch (err) {
+      setProbe({ busy: false, ok: false, live: false, error: err.message });
+    }
+  };
+
+  const handleInstallYtdlp = async () => {
+    setProbe({ busy: true, installing: true });
+    try {
+      const r = await apiFetch('/api/youtube/install', { method: 'POST', body: JSON.stringify({}) });
+      setYtStatus(await apiFetch('/api/youtube/status'));
+      setProbe(
+        r.ok
+          ? { busy: false, ok: true, live: false, error: '', installed: `yt-dlp ${r.version || ''} instalado en ${r.path}` }
+          : { busy: false, ok: false, live: false, error: r.error || 'No se pudo instalar yt-dlp' }
+      );
+    } catch (err) {
+      setProbe({ busy: false, ok: false, live: false, error: err.message });
+    }
+  };
+
+  const handleSaveCookies = async () => {
+    try {
+      await apiFetch('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ youtube_cookies_file: String(cookiesPath || '').trim() })
+      });
+      await loadYtStatus();
+      window.alert(
+        String(cookiesPath || '').trim()
+          ? 'Ruta de cookies guardada. Se usará la próxima vez que el panel lea un directo.'
+          : 'Cookies borradas: el panel leerá YouTube sin sesión.'
+      );
+    } catch (err) {
+      window.alert(err.message || 'No se pudo guardar la ruta de cookies.');
+    }
+  };
+
+  const handleRefreshLive = async (id) => {
+    setLiveBusy(`refresh:${id}`);
+    try {
+      const r = await apiFetch(`/api/channels247/${id}/live-source/refresh`, { method: 'POST', body: JSON.stringify({}) });
+      if (!r.ok) window.alert(r.state?.error || 'La señal no está disponible ahora mismo.');
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      setLiveBusy('');
+      loadAll();
+    }
   };
 
   const addVodToPlaylist = (vodId) => {
@@ -155,19 +253,27 @@ export default function Channels247Page({ onPreview }) {
 
   const handleSave = async (e) => {
     e.preventDefault();
-    if (editingId) {
-      await apiFetch(`/api/channels247/${editingId}`, {
-        method: 'PUT',
-        body: JSON.stringify(form)
-      });
-    } else {
-      await apiFetch('/api/channels247', {
-        method: 'POST',
-        body: JSON.stringify(form)
-      });
+    if (form.source_kind === 'youtube' && !String(form.live_source_url || '').trim()) {
+      setProbe({ ok: false, live: false, error: 'Pega el enlace del directo de YouTube antes de guardar.' });
+      return;
     }
-    setModalOpen(false);
-    loadAll();
+    try {
+      if (editingId) {
+        await apiFetch(`/api/channels247/${editingId}`, {
+          method: 'PUT',
+          body: JSON.stringify(form)
+        });
+      } else {
+        await apiFetch('/api/channels247', {
+          method: 'POST',
+          body: JSON.stringify(form)
+        });
+      }
+      setModalOpen(false);
+      loadAll();
+    } catch (err) {
+      setProbe({ ok: false, live: false, error: err.message || 'No se pudo guardar el canal.' });
+    }
   };
 
   const handleAction = async (id, action) => {
@@ -245,41 +351,101 @@ export default function Channels247Page({ onPreview }) {
                               : 'bg-slate-800 text-slate-300 border-slate-700'
                           }`}
                         >
-                          {ch.engine_mode === 'ffmpeg'
-                            ? `FFMPEG AUTO${ch.workerPid ? ` (PID ${ch.workerPid})` : ''}`
-                            : 'RELOJ VIRTUAL'}
+                          {ch.source_kind === 'youtube'
+                            ? ch.engine_mode === 'ffmpeg'
+                              ? `MOTOR 24/7${ch.workerPid ? ` (PID ${ch.workerPid})` : ''}`
+                              : 'SIN MOTOR'
+                            : ch.engine_mode === 'ffmpeg'
+                              ? `FFMPEG AUTO${ch.workerPid ? ` (PID ${ch.workerPid})` : ''}`
+                              : 'RELOJ VIRTUAL'}
                         </span>
+                        {ch.source_kind === 'youtube' && (
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              ch.liveSource?.live
+                                ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                                : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                            }`}
+                          >
+                            {ch.liveSource?.live ? '● YOUTUBE EN VIVO' : 'SIN SEÑAL'}
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-slate-400 mt-0.5">
-                        {ch.category_name || '24/7'} • {ch.playlist?.length || 0} programas • EPG:{' '}
-                        <span className="font-mono text-slate-300">{ch.epg_channel_id}</span>
+                        {ch.category_name || '24/7'} •{' '}
+                        {ch.source_kind === 'youtube'
+                          ? ch.liveSource?.title || 'Señal en vivo de YouTube'
+                          : `${ch.playlist?.length || 0} programas`}{' '}
+                        • EPG: <span className="font-mono text-slate-300">{ch.epg_channel_id}</span>
                       </div>
                     </div>
                   </div>
                 </div>
 
                 {/* Live Now Playing Box */}
-                <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800/90 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400 font-medium">Emitiendo ahora mismo:</span>
-                    <span className="font-mono text-indigo-300 text-[11px]">{st.progressPct || 0}%</span>
-                  </div>
-                  <div className="text-xs font-semibold text-white truncate">
-                    {st.currentItem ? `▶ ${st.currentItem.title}` : 'Parrilla vacía'}
-                  </div>
-                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400"
-                      style={{ width: `${st.progressPct || 0}%` }}
-                    />
-                  </div>
-                  {st.nextItem && (
-                    <div className="text-[11px] text-slate-400 flex items-center justify-between">
-                      <span>Posición: {Math.floor((st.seekOffsetSec || 0) / 60)}m {(st.seekOffsetSec || 0) % 60}s</span>
-                      <span className="truncate max-w-[240px]">A continuación: {st.nextItem.title}</span>
+                {ch.source_kind === 'youtube' ? (
+                  <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800/90 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400 font-medium flex items-center gap-1.5">
+                        <Youtube className="w-3.5 h-3.5 text-red-400" /> Señal tomada de YouTube:
+                      </span>
+                      <span
+                        className={`font-mono text-[11px] ${
+                          ch.liveSource?.live ? 'text-emerald-300' : 'text-amber-300'
+                        }`}
+                      >
+                        {ch.liveSource?.live ? 'EN VIVO' : 'SIN SEÑAL'}
+                      </span>
                     </div>
-                  )}
-                </div>
+                    <div className="text-xs font-semibold text-white truncate">
+                      {ch.liveSource?.title || 'Sin título'}
+                      {ch.liveSource?.uploader ? (
+                        <span className="text-slate-400 font-normal"> · {ch.liveSource.uploader}</span>
+                      ) : null}
+                    </div>
+                    <div className="text-[11px] text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className="truncate max-w-[55%]">{ch.liveSource?.live_source_url}</span>
+                      {ch.liveSource?.expires_in_min !== null && ch.liveSource?.expires_in_min !== undefined && (
+                        <span className={ch.liveSource.expires_in_min < 15 ? 'text-amber-300' : ''}>
+                          URL renovable · {ch.liveSource.expires_in_min} min
+                        </span>
+                      )}
+                      {ch.liveSource?.resolved_at && (
+                        <span>Actualizada {String(ch.liveSource.resolved_at).slice(11, 19)}</span>
+                      )}
+                    </div>
+                    {ch.liveSource?.error && (
+                      <div className="text-[11px] text-amber-300 flex items-start gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                        <span>{ch.liveSource.error}</span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800/90 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400 font-medium">Emitiendo ahora mismo:</span>
+                      <span className="font-mono text-indigo-300 text-[11px]">{st.progressPct || 0}%</span>
+                    </div>
+                    <div className="text-xs font-semibold text-white truncate">
+                      {st.currentItem ? `▶ ${st.currentItem.title}` : 'Parrilla vacía'}
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400"
+                        style={{ width: `${st.progressPct || 0}%` }}
+                      />
+                    </div>
+                    {st.nextItem && (
+                      <div className="text-[11px] text-slate-400 flex items-center justify-between">
+                        <span>
+                          Posición: {Math.floor((st.seekOffsetSec || 0) / 60)}m {(st.seekOffsetSec || 0) % 60}s
+                        </span>
+                        <span className="truncate max-w-[240px]">A continuación: {st.nextItem.title}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
@@ -308,6 +474,18 @@ export default function Channels247Page({ onPreview }) {
                     <Calendar className="w-3.5 h-3.5 text-cyan-400" />
                     Parrilla EPG
                   </button>
+
+                  {ch.source_kind === 'youtube' && (
+                    <button
+                      onClick={() => handleRefreshLive(ch.id)}
+                      disabled={liveBusy === `refresh:${ch.id}`}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs transition disabled:opacity-50"
+                      title="Volver a resolver el directo de YouTube ahora"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${liveBusy === `refresh:${ch.id}` ? 'animate-spin' : ''}`} />
+                      Renovar señal
+                    </button>
+                  )}
 
                   <button
                     onClick={() => setFfmpegModal(ch)}
@@ -458,8 +636,184 @@ export default function Channels247Page({ onPreview }) {
                 </div>
               </div>
 
-              {/* Add from VOD Library */}
+              {/* Tipo de fuente del canal */}
               <div className="p-4 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3">
+                <div className="font-semibold text-white flex items-center gap-2">
+                  <Radio className="w-4 h-4 text-cyan-400" />
+                  ¿De dónde sale la señal de este canal?
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, source_kind: 'playlist' })}
+                    className={`text-left px-3 py-2.5 rounded-xl border transition ${
+                      form.source_kind !== 'youtube'
+                        ? 'bg-indigo-600/20 border-indigo-500/60 text-white'
+                        : 'bg-[#0e1526] border-slate-700 text-slate-300 hover:border-slate-500'
+                    }`}
+                  >
+                    <div className="font-semibold flex items-center gap-1.5">
+                      <Film className="w-3.5 h-3.5" /> Parrilla 24/7
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Películas del catálogo o enlaces MP4/HLS en bucle continuo.
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setForm({ ...form, source_kind: 'youtube', engine_mode: 'ffmpeg' });
+                      if (!ytStatus) loadYtStatus();
+                    }}
+                    className={`text-left px-3 py-2.5 rounded-xl border transition ${
+                      form.source_kind === 'youtube'
+                        ? 'bg-red-600/20 border-red-500/60 text-white'
+                        : 'bg-[#0e1526] border-slate-700 text-slate-300 hover:border-slate-500'
+                    }`}
+                  >
+                    <div className="font-semibold flex items-center gap-1.5">
+                      <Youtube className="w-3.5 h-3.5 text-red-400" /> Señal en vivo de YouTube
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Toma el directo (YouTube Live) y lo emite como canal 24/7 en HLS.
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Señal en vivo de YouTube */}
+              {form.source_kind === 'youtube' && (
+                <div className="p-4 rounded-xl bg-[#090e1a] border border-red-500/30 space-y-3">
+                  <div className="font-semibold text-red-300 flex items-center gap-2">
+                    <Youtube className="w-4 h-4" />
+                    Enlace del directo
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={form.live_source_url}
+                      onChange={(e) => setForm({ ...form, live_source_url: e.target.value })}
+                      placeholder="https://www.youtube.com/watch?v=… o https://www.youtube.com/@canal/live"
+                      className="flex-1 px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleProbe}
+                      disabled={probe?.busy}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold disabled:opacity-50"
+                    >
+                      {probe?.busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                      Comprobar señal
+                    </button>
+                  </div>
+
+                  {probe && !probe.busy && (
+                    <div
+                      className={`rounded-xl px-3 py-2 text-[11px] border ${
+                        probe.live
+                          ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200'
+                          : 'bg-amber-500/10 border-amber-500/40 text-amber-200'
+                      }`}
+                    >
+                      {probe.live ? (
+                        <div className="space-y-0.5">
+                          <div className="font-bold flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5" /> EN VIVO
+                            {probe.title ? ` — ${probe.title}` : ''}
+                          </div>
+                          <div>
+                            {probe.uploader ? `${probe.uploader} · ` : ''}
+                            HLS listo para copiar
+                            {probe.expires_in_min !== null && probe.expires_in_min !== undefined
+                              ? ` · la URL se renovará en ${probe.expires_in_min} min`
+                              : ''}
+                          </div>
+                        </div>
+                      ) : probe.installed ? (
+                        <div className="font-bold flex items-center gap-1.5 text-emerald-200">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> {probe.installed}
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          <div className="flex items-start gap-1.5">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span>{probe.error || 'No hay directo disponible en ese enlace.'}</span>
+                          </div>
+                          {probe.needs_ytdlp && (
+                            <button
+                              type="button"
+                              onClick={handleInstallYtdlp}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-600/80 hover:bg-amber-500 text-white font-bold"
+                            >
+                              <Download className="w-3.5 h-3.5" /> Instalar yt-dlp
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="text-[11px] text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+                    {ytStatus?.installed ? (
+                      <span className="text-emerald-300">
+                        yt-dlp {ytStatus.version || ''} listo ({ytStatus.bin})
+                      </span>
+                    ) : (
+                      <>
+                        <span className="text-amber-300">yt-dlp no está instalado.</span>
+                        <button
+                          type="button"
+                          onClick={handleInstallYtdlp}
+                          disabled={probe?.busy}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold disabled:opacity-50"
+                        >
+                          <Download className="w-3 h-3" /> Instalar yt-dlp
+                        </button>
+                      </>
+                    )}
+                    <span className="text-slate-500">
+                      El panel renueva el enlace antes de que caduque: el canal no se corta.
+                    </span>
+                  </div>
+
+                  {/* Cookies (opcional): YouTube a veces pide iniciar sesión */}
+                  <details className="rounded-xl bg-[#0e1526] border border-slate-800 px-3 py-2">
+                    <summary className="cursor-pointer text-[11px] text-slate-400">
+                      ¿YouTube dice «confirma que no eres un robot»? Usa cookies (opcional)
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={cookiesPath}
+                          onChange={(e) => setCookiesPath(e.target.value)}
+                          placeholder="/opt/tvlister24-7/.runtime/youtube-cookies.txt"
+                          className="flex-1 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono text-[11px]"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveCookies}
+                          className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-semibold"
+                        >
+                          Guardar ruta
+                        </button>
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Exporta las cookies de youtube.com en formato Netscape (extensión «Get cookies.txt») y copia el
+                        archivo al servidor. Sin cookies el panel también funciona, salvo que YouTube bloquee la IP.
+                        {ytStatus?.cookies?.exists ? ' — Archivo encontrado.' : ''}
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              )}
+
+              {/* Add from VOD Library */}
+              <div
+                className={`p-4 rounded-xl bg-[#090e1a] border border-slate-800 space-y-3 ${
+                  form.source_kind === 'youtube' ? 'hidden' : ''
+                }`}
+              >
                 <div className="font-semibold text-indigo-300 flex items-center gap-2">
                   <Film className="w-4 h-4" />
                   1. Agregar Película desde Biblioteca VOD
@@ -513,7 +867,7 @@ export default function Channels247Page({ onPreview }) {
               </div>
 
               {/* Playlist Sequence */}
-              <div>
+              <div className={form.source_kind === 'youtube' ? 'hidden' : ''}>
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-semibold text-white">
                     Secuencia de Emisión Continua ({form.playlist.length} bloques)
@@ -575,7 +929,7 @@ export default function Channels247Page({ onPreview }) {
                   type="submit"
                   className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
                 >
-                  Guardar Parrilla 24/7
+                  {form.source_kind === 'youtube' ? 'Guardar Canal en Vivo 24/7' : 'Guardar Parrilla 24/7'}
                 </button>
               </div>
             </form>

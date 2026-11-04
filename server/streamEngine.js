@@ -491,7 +491,63 @@ export function parsePlaylist(playlistJson) {
   }
 }
 
+function parseLiveStateJson(channel) {
+  try {
+    const raw = channel?.live_source_state;
+    if (!raw) return null;
+    const st = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return st && typeof st === 'object' ? st : null;
+  } catch {
+    return null;
+  }
+}
+
 export function computeChannel247LiveState(channel, nowMs = Date.now()) {
+  // Canal alimentado por una señal en vivo (YouTube / HLS): no hay reloj de
+  // parrilla. Se informa la señal, su título y cuándo hay que renovar la URL.
+  if (String(channel?.source_kind || 'playlist') === 'youtube') {
+    const st = parseLiveStateJson(channel);
+    const live = Boolean(st?.url && st?.live);
+    const nowSec = Math.floor(nowMs / 1000);
+    const title = st?.title || channel?.name || 'Señal en vivo';
+    const slotSec = 2 * 3600;
+    const schedule = Array.from({ length: 6 }, (_, i) => ({
+      slot: i,
+      title,
+      url: st?.url || '',
+      duration_sec: slotSec,
+      start_epoch: nowSec + i * slotSec,
+      end_epoch: nowSec + (i + 1) * slotSec,
+      start_iso: new Date((nowSec + i * slotSec) * 1000).toISOString(),
+      end_iso: new Date((nowSec + (i + 1) * slotSec) * 1000).toISOString(),
+      is_current: i === 0
+    }));
+    return {
+      isPlaying: channel?.status === 'running' && live,
+      isLiveSource: true,
+      totalDurationSec: 0,
+      playlistCount: 0,
+      currentIndex: 0,
+      currentItem: live
+        ? { id: 'live', title, url: st.url, duration_sec: 0 }
+        : null,
+      nextItem: null,
+      seekOffsetSec: 0,
+      remainingSec: 0,
+      progressPct: 0,
+      live: {
+        live,
+        title: st?.title || '',
+        uploader: st?.uploader || '',
+        status: st?.live_status || '',
+        error: st?.error || '',
+        resolved_at: st?.checked_at || '',
+        expires_at_ms: Number(st?.expires_at_ms) || 0
+      },
+      schedule
+    };
+  }
+
   const playlist = parsePlaylist(channel.playlist_json);
   if (playlist.length === 0) {
     return {
@@ -1246,6 +1302,96 @@ export function buildFfmpegArgsForChannel247(channel, profile) {
     path.join(outDir, 'index.m3u8')
   );
   return args;
+}
+
+/**
+ * Motor de un canal 24/7 alimentado por una señal en vivo (YouTube / HLS).
+ *
+ * Diferencias con la parrilla (`buildFfmpegArgsForChannel247`):
+ *  · no hay concat ni `-stream_loop`: la fuente ya es continua;
+ *  · **no se transcodifica**: vídeo y audio se copian (0 % de CPU en el VPS),
+ *    salvo que el nivelador de audio global esté activo (ahí sólo el audio);
+ *  · se pasan las cabeceras que exige la URL firmada de YouTube.
+ *
+ * La URL caduca: `argsBuilder` del supervisor vuelve a llamar a esta función en
+ * cada intento, y `index.js` renueva el manifiesto antes de que expire.
+ */
+export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
+  const url = String(inputUrl || '').trim();
+  if (!url) return null;
+
+  const outDir = resolveHlsDirForKey(`ch247_${channel.id}`);
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const globalAudio = getGlobalAudioLevelingConfig();
+  const aBitrate =
+    globalAudio.enabled && globalAudio.bitrate
+      ? globalAudio.bitrate
+      : profile?.audio_bitrate && profile.audio_bitrate !== 'source'
+        ? profile.audio_bitrate
+        : '128k';
+
+  let headers = {};
+  try {
+    const st = typeof channel?.live_source_state === 'string' ? JSON.parse(channel.live_source_state || '{}') : null;
+    headers = st?.headers && typeof st.headers === 'object' ? st.headers : {};
+  } catch {
+    headers = {};
+  }
+
+  const args = [
+    '-nostdin',
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-threads',
+    '2',
+    // Red inestable: no cerrar el canal por un segmento perdido.
+    '-reconnect',
+    '1',
+    '-reconnect_streamed',
+    '1',
+    '-reconnect_on_network_error',
+    '1',
+    '-reconnect_delay_max',
+    '6',
+    '-rw_timeout',
+    '20000000'
+  ];
+  if (headers['User-Agent']) args.push('-user_agent', String(headers['User-Agent']));
+  const extraHeaders = [];
+  if (headers.Referer) extraHeaders.push(`Referer: ${headers.Referer}`);
+  if (headers.Origin) extraHeaders.push(`Origin: ${headers.Origin}`);
+  if (extraHeaders.length) args.push('-headers', `${extraHeaders.join('\r\n')}\r\n`);
+
+  args.push('-i', url, '-dn', '-sn', '-c:v', 'copy');
+
+  if (globalAudio.enabled) {
+    args.push('-af', buildAudioLevelingFilter(globalAudio.preset), '-ac', '2', '-ar', '48000', '-c:a', 'aac', '-b:a', aBitrate);
+  } else {
+    args.push('-c:a', 'copy');
+  }
+
+  args.push(
+    '-f',
+    'hls',
+    '-hls_time',
+    '4',
+    '-hls_list_size',
+    '6',
+    '-hls_flags',
+    'delete_segments+program_date_time+temp_file+independent_segments',
+    path.join(outDir, 'index.m3u8')
+  );
+  return args;
+}
+
+export function buildFfmpegCommandForChannel247Live(channel, profile, inputUrl) {
+  const bin = isFfmpegAvailable() ? getFfmpegBin() : 'ffmpeg';
+  const args = buildFfmpegArgsForChannel247Live(channel, profile, inputUrl);
+  if (!args) return `${bin} # (La señal en vivo no está resuelta todavía)`;
+  return [bin, ...args.map((a) => (a.includes(' ') ? `"${a}"` : a))].join(' ');
 }
 
 export function buildFfmpegCommandForChannel247(channel, profile) {

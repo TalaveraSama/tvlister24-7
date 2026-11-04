@@ -3029,6 +3029,29 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.48: un canal 24/7 puede salir de un directo de YouTube
+
+El formulario de **Canales 24/7** pregunta de dónde sale la señal: **Parrilla 24/7** (lo de siempre) o
+**Señal en vivo de YouTube**. Con la segunda, se pega el enlace del directo, **Comprobar señal** confirma que
+está en vivo (título, canal y minutos hasta la renovación) y el panel:
+
+- guarda `source_kind='youtube'`, `live_source_url` y el estado de la señal en `live_source_state`;
+- lee el directo con **yt-dlp** (binario en `.runtime/bin/yt-dlp`, instalable desde la pantalla con
+  **Instalar yt-dlp**, sin `apt`) y se queda con el manifiesto **HLS** que ya trae audio y vídeo juntos;
+- lo emite con **FFmpeg `-c copy`** (sin recodificar, 0 % de CPU de vídeo) como HLS de 4 s / 6 segmentos en el
+  RAMDisk, así que las líneas lo ven en `/live/<usuario>/<clave>/<10000+id>.m3u8` como cualquier otro 24/7;
+- **renueva la URL firmada 10 minutos antes de que caduque** (guardia cada 60 s) y reinicia el motor con la
+  URL nueva; si el directo termina, apaga el motor y deja el canal como **SIN SEÑAL** sin borrar nada; cuando
+  vuelve, lo reengancha solo (reintento cada 5 min).
+
+En modo **virtual** (sin motor) el panel responde 302 al manifiesto del directo; en MPEG-TS avisa que ese canal
+se entrega por HLS. Si YouTube responde «confirma que no eres un robot», el apartado plegable de la pantalla
+permita indicar un **archivo de cookies** en formato Netscape (`settings.youtube_cookies_file`).
+
+Endpoints nuevos: `GET /api/youtube/status`, `POST /api/youtube/install`, `POST /api/youtube/probe` y
+`POST /api/channels247/:id/live-source/refresh`. Pruebas: `scripts/test_youtube_live.mjs` (39 OK) y
+`scripts/test_youtube_live_ui.mjs` (35 OK). Los canales de parrilla y la salida UDP/CATV no cambian.
+
 ### v2.6.47: el número del botón del rango es el que se escribe
 
 El contador del botón del rango se calculaba con las filas visibles (filtro/búsqueda incluidos) mientras la
