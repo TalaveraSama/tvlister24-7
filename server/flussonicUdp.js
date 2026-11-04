@@ -231,6 +231,20 @@ function rememberWriteShape(shape) {
   }
 }
 
+/**
+ * Configuración global del servidor. Sirve para explicar el 400 típico de los
+ * Flussonic con `config_external`: con eso activo, la API rechaza CUALQUIER
+ * cambio en un stream (los define el backend externo).
+ */
+async function readServerConfig(srv) {
+  try {
+    const r = await fetchJsonWithTimeout(`${apiBase(srv)}/config`, { headers: headersFor(srv) }, 8000);
+    return r.ok ? r.json || {} : null;
+  } catch {
+    return null;
+  }
+}
+
 function rawDetail(resp, max = 160) {
   const raw = String(resp?.text || resp?.json?.error || '').replace(/\s+/g, ' ').trim();
   return raw.length > max ? raw.slice(0, max) + '…' : raw;
@@ -294,6 +308,16 @@ async function putOutputs(srv, streamName, outputs, config) {
     }
   }
 
+  // Si todo falló, una causa muy habitual: el servidor usa config_external y
+  // la API rechaza cualquier cambio de stream, sea cual sea el cuerpo.
+  let external = '';
+  try {
+    const global = await readServerConfig(srv);
+    external = String(global?.config_external || '').trim();
+  } catch {
+    /* sin dato */
+  }
+
   const last = attempts[attempts.length - 1] || {};
   const shown = attempts
     .slice(0, 3)
@@ -309,6 +333,10 @@ async function putOutputs(srv, streamName, outputs, config) {
     ok: false,
     attempts,
     error:
+      (external
+        ? `Este Flussonic tiene config_external (${external}): los streams los define un backend externo y la ` +
+          'API rechaza los cambios. Edita la salida UDP allí, o quita config_external para que el panel pueda escribir. '
+        : '') +
       `${head}${hint ? `: ${hint}` : ''}. Probado: ${tried}` +
       ' — ejecuta `tvlister-admin catv flussonic probe <stream>` para ver la respuesta exacta.'
   };
@@ -352,8 +380,15 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
       .filter(Boolean),
     outputs_before: before,
     test_url: testUrl,
+    config_external: '',
     attempts: []
   };
+  try {
+    const global = await readServerConfig(srv);
+    report.config_external = String(global?.config_external || '').trim();
+  } catch {
+    /* sin dato */
+  }
 
   for (const shape of WRITE_SHAPES) {
     const body = JSON.stringify(shapeBody(shape, [testUrl], cfg, name));

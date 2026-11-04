@@ -2926,6 +2926,7 @@ cmd_catv() {
           }
           console.log("Servidor: " + r.server + "  ·  API: " + r.api);
           console.log("Stream:   " + r.stream + "  (static=" + r.static + ", named_by=" + (r.named_by || "-") + ")");
+          if (r.config_external) console.log("⚠️  config_external: " + r.config_external + "  → la API rechaza cualquier cambio de stream (los define ese backend)");
           console.log("Entradas: " + (r.inputs.join(", ") || "(ninguna)"));
           console.log("Salidas : " + (r.outputs_before.join(", ") || "(ninguna)"));
           console.log("Prueba  : " + r.test_url);

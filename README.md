@@ -27,7 +27,9 @@ lo nativo con lo de Flussonic.
 🧪 **Si Flussonic sigue rechazando el cuerpo (v2.6.41)**: el panel prueba las formas conocidas de escritura
 (`outputs`, `push`, stream completo; con objetos y con texto) y se queda con la que el servidor **acepta y
 guarda** (lo comprueba releyendo). Si ninguna funciona, el aviso trae la respuesta exacta de cada intento y
-el comando `tvlister-admin catv flussonic probe <stream>` para verlo todo y dejarlo como estaba.
+el comando `tvlister-admin catv flussonic probe <stream>` para verlo todo y dejarlo como estaba. Si el
+servidor tiene `config_external` (los streams los define un backend externo) el panel lo detecta y lo dice:
+en ese modo Flussonic rechaza cualquier cambio por API.
 
 🛠️ **El push vuelve a escribir en Flussonic 23.12 (v2.6.39 + v2.6.40)**: Flussonic actualiza con **PUT** y JSON merge
 patch, y rechaza el cuerpo entero si le llegan `inputs` con sus campos de estado (`stats`, `id`). El panel

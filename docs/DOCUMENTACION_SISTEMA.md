@@ -3029,6 +3029,17 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.42: detectar `config_external` cuando Flussonic rechaza todo
+
+Si **todas** las formas de escritura fallan con 400, hay una causa que explica el patrón entero: el servidor
+tiene `config_external` (los streams los define un backend externo) y, en ese modo, Flussonic **rechaza
+cualquier cambio de stream por API**. Ahora:
+
+- Al fallar todas las formas, el panel lee `GET /streamer/api/v3/config` y, si hay `config_external`, lo dice
+  en el error: *«Este Flussonic tiene config_external (…): los streams los define un backend externo y la API
+  rechaza los cambios. Edita la salida UDP allí, o quita config_external para que el panel pueda escribir.»*
+- `tvlister-admin catv flussonic probe <stream>` imprime también `config_external` cuando existe.
+
 ### v2.6.41: el panel se adapta al Flussonic que haya y, si no puede, lo enseña
 
 Algunos Flussonic 23.12 siguen contestando `HTTP 400` al `PUT` de la salida UDP aunque el cuerpo sea mínimo.
