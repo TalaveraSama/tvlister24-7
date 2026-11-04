@@ -544,6 +544,7 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
       .filter(Boolean),
     outputs_before: before,
     test_url: testUrl,
+    test_url_already: before.some((u) => outputTargetKey(u) === outputTargetKey(testUrl)),
     config_external: '',
     attempts: []
   };
@@ -583,15 +584,18 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
     }
     const put = await fetchJsonWithTimeout(apiUrl, { method: 'PUT', headers, body }, 8000);
     const after = await readOutputs(srv, name);
+    // Ojo: si el stream YA tenía esa salida, «sigue estando» no prueba nada.
+    // La forma sólo vale si el servidor la aceptó (2xx) y además quedó puesta.
     const saved = Array.isArray(after) && after.some((u) => outputTargetKey(u) === outputTargetKey(testUrl));
     report.attempts.push({
       shape,
       status: Number(put.status) || 0,
+      accepted: Boolean(put.ok),
       raw: rawDetail(put, 220),
       body: body.slice(0, 260),
       saved
     });
-    if (saved) {
+    if (put.ok && saved) {
       report.winner = shape;
       break;
     }
@@ -609,12 +613,13 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
       report.attempts.push({
         shape: 'outputs_sin_iface',
         status: Number(put.status) || 0,
+        accepted: Boolean(put.ok),
         raw: rawDetail(put, 220),
         body: body.slice(0, 260),
         saved,
         diagnostic: true
       });
-      if (saved) report.winner = 'outputs_sin_iface';
+      if (put.ok && saved) report.winner = 'outputs_sin_iface';
     }
   }
 

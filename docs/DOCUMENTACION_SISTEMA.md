@@ -3029,6 +3029,13 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.44: el probe exige que el servidor acepte el cuerpo
+
+Un `PUT` rechazado con `400` no borra la salida que el stream ya tenía, así que comprobar sólo «la salida sigue
+estando» daba falsos positivos en `catv flussonic probe`. Ahora una forma cuenta como ganadora únicamente si el
+servidor respondió `2xx` **y** la salida quedó puesta al releer el stream; cada intento lleva su `accepted`, y
+si la URL probada ya estaba entre las salidas se avisa de que «siga estando» no prueba nada.
+
 ### v2.6.43: la forma de escribir la salida la dicta el esquema del servidor
 
 Cuando el `PUT` de la salida UDP devuelve `400` con cualquier cuerpo, el panel deja de adivinar y le pregunta

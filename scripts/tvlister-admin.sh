@@ -2936,10 +2936,10 @@ cmd_catv() {
           }
           console.log("Entradas: " + (r.inputs.join(", ") || "(ninguna)"));
           console.log("Salidas : " + (r.outputs_before.join(", ") || "(ninguna)"));
-          console.log("Prueba  : " + r.test_url);
+          console.log("Prueba  : " + r.test_url + (r.test_url_already ? "  ⚠️ (el stream ya tenía esa salida: que «siga» no prueba que el PUT se acepte)" : ""));
           console.log("");
           for (const a of r.attempts) {
-            console.log(`  ${a.saved ? "✅" : "  "} ${pad(a.shape, 13)} HTTP ${String(a.status).padEnd(4)} ${a.raw}`);
+            console.log(`  ${a.accepted && a.saved ? "✅" : "  "} ${pad(a.shape, 13)} HTTP ${String(a.status).padEnd(4)} ${a.raw}`);
           }
           console.log("");
           console.log(r.winner ? "✅ Forma que funciona: " + r.winner : "❌ Ninguna forma funcionó");

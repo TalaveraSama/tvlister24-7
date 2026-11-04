@@ -78,7 +78,9 @@ const streamsState = new Map([
   // ESQUEMA: sólo acepta lo que anuncia su propio /schema (`push` de texto).
   ['ESQUEMA', { name: 'ESQUEMA', title: 'sólo acepta push de texto', alive: true, bitrate: 1000000, outputs: [], push: [] }],
   // ESQUEMAFULL: exige el objeto completo y sólo las propiedades del esquema.
-  ['ESQUEMAFULL', { name: 'ESQUEMAFULL', title: 'exige el objeto entero', alive: true, bitrate: 900000, outputs: [], push: [], mpegts: { service_name: 'X' } }]
+  ['ESQUEMAFULL', { name: 'ESQUEMAFULL', title: 'exige el objeto entero', alive: true, bitrate: 900000, outputs: [], push: [], mpegts: { service_name: 'X' } }],
+  // YATIENE: ya tiene la salida pedida y rechaza cualquier PUT (400).
+  ['YATIENE', { name: 'YATIENE', title: 'ya tiene la salida', alive: true, bitrate: 800000, outputs: [{ url: 'udp://127.0.0.1:4801' }], push: [] }]
 ]);
 // Qué dice el /schema del fake: 'outputs' (lista de objetos) o 'push_text'.
 let schemaProfile = 'outputs';
@@ -209,6 +211,10 @@ const fake = http.createServer((req, res) => {
         }
         if (name === 'NOGUARDA') {
           send({ ok: true });
+          return;
+        }
+        if (name === 'YATIENE') {
+          send({ name: 'request_body', while: 'parsing_parameters', input1: { disabled: false } }, 400);
           return;
         }
         if (name === 'ESQUEMAFULL') {
@@ -443,7 +449,7 @@ const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
   // --- 1. Foto: streams, push actual y canal ---------------------------
   let snap = (await api('GET', '/api/wk2500/flussonic-push')).data;
   ok('Flussonic responde', snap?.flussonic_reachable === true, `${snap?.total} streams`);
-  ok('cuenta los streams con salida UDP', snap?.with_push === 1, `${snap?.with_push}`);
+  ok('cuenta los streams con salida UDP', snap?.with_push === 2, `${snap?.with_push}`);
   const row2 = (snap?.streams || []).find((s) => s.name === 'NACIONAL 2');
   ok('empareja el stream con su canal de la lista', row2?.channel?.catv_ch === 2, JSON.stringify(row2?.channel));
   ok('muestra la salida UDP que ya tenía', row2?.push?.url === 'udp://ens37@239.9.9.9:9999', row2?.push?.url);
@@ -741,6 +747,19 @@ const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
     (udpOf('ESQUEMA') || []).some((u) => u.endsWith('127.0.0.1:4796')),
     JSON.stringify(udpOf('ESQUEMA'))
   );
+  // --- 5j-bis. La salida «sigue estando» no prueba que el PUT se acepte ---
+  const probeYa = await mod.probeStreamWrite({ streamName: 'YATIENE', url: 'udp://127.0.0.1:4801' });
+  ok(
+    'un PUT rechazado no se da por bueno aunque la salida siguiera puesta',
+    !probeYa?.winner && probeYa?.test_url_already === true,
+    JSON.stringify({ winner: probeYa?.winner, already: probeYa?.test_url_already })
+  );
+  ok(
+    'y el probe marca cada intento como no aceptado',
+    (probeYa?.attempts || []).length > 0 && probeYa.attempts.every((a) => a.accepted === false),
+    JSON.stringify((probeYa?.attempts || []).map((a) => [a.shape, a.status, a.accepted]))
+  );
+
   // --- 5l. Un servidor que exige el objeto completo (y sólo SUS campos) --
   await fetch(`http://127.0.0.1:${flussonicPort}/__schema?p=strict`);
   mod.forgetWriteShape();
