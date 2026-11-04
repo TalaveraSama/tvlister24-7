@@ -28,6 +28,7 @@ import {
   getFreshLocalHlsManifestPath
 } from './streamEngine.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
+import { createCatvPacer } from './catvUdpPacer.js';
 
 export const wk2500Router = express.Router();
 
@@ -639,8 +640,24 @@ function catvPacingEnabled() {
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
+/**
+ * Estabilizador de salida (pacer). Es lo que convierte la entrega del origen en
+ * una línea plana en la entrada del modulador: se emite al ritmo del canal y se
+ * rellena con nulos, como Astra. Sin él, un segmento de 2 s entra en 30 ms y el
+ * modulador lo lee como una ráfaga de decenas de Mbps.
+ * Se puede apagar con TVLISTER_CATV_PACER=off (vuelve al comportamiento anterior).
+ */
+export function catvPacerEnabled() {
+  const v = String(process.env.TVLISTER_CATV_PACER ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
 export function buildFfmpegUdpOutputArgs(slotRow, inputSpec, opts = {}) {
   const mode = slotRow.output_mode || 'direct_spts';
+  // Con el estabilizador, FFmpeg escribe el SPTS en stdout y el socket lo
+  // controla el pacer (ritmo constante + relleno de nulos). Sin él, escribe
+  // directo al destino UDP como antes.
+  const deliverToPacer = opts.deliver ? String(opts.deliver) === 'pacer' : catvPacerEnabled();
   const serviceId = Math.max(1, Number(slotRow.service_id) || Number(slotRow.catv_ch) || 1);
   const muxrate = Number(slotRow.muxrate_kbps) > 0 ? Number(slotRow.muxrate_kbps) * 1000 : 0;
   const transport = resolveEffectiveTransport(slotRow, unitForSlot(slotRow));
@@ -665,8 +682,17 @@ export function buildFfmpegUdpOutputArgs(slotRow, inputSpec, opts = {}) {
   const isVideoCopy = mode !== 'ntsc_sd_wk2500';
   const args = [];
   if (inputSpec !== 'pipe:0') args.push('-nostdin');
-  // -progress pipe:1 permite medir los bytes realmente entregados al socket UDP (telemetría por canal)
-  args.push('-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1', '-y');
+  // -progress permite ver cuánto entregó FFmpeg. Con el pacer, stdout lleva el
+  // MPEG-TS, así que el progreso va por stderr (pipe:2).
+  args.push(
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-nostats',
+    '-progress',
+    deliverToPacer ? 'pipe:2' : 'pipe:1',
+    '-y'
+  );
 
   if (isPureCopy) {
     args.push('-threads', '1');
@@ -812,11 +838,16 @@ export function buildFfmpegUdpOutputArgs(slotRow, inputSpec, opts = {}) {
     '-max_muxing_queue_size',
     '1024',
     '-flush_packets',
-    '1',
-    '-f',
-    transport.rtp ? 'rtp_mpegts' : 'mpegts',
-    udpUrl
+    '1'
   );
+
+  if (deliverToPacer) {
+    // MPEG-TS crudo por stdout: el pacer lo trocea en datagramas del tamaño
+    // que espera el modulador (188 o 1316) y le añade RTP si el equipo lo pide.
+    args.push('-f', 'mpegts', 'pipe:1');
+  } else {
+    args.push('-f', transport.rtp ? 'rtp_mpegts' : 'mpegts', udpUrl);
+  }
 
   return args;
 }
@@ -839,6 +870,14 @@ export function stopWk2500ChannelWorker(catvCh) {
     }
   }
   w.stopped = true;
+  if (w.pacer) {
+    try {
+      w.pacer.close();
+    } catch {
+      // ya cerrado
+    }
+    w.pacer = null;
+  }
   if (w.reconnectTimer) clearTimeout(w.reconnectTimer);
   if (w.rateTimer) clearInterval(w.rateTimer);
   if (w.abortController) {
@@ -968,10 +1007,57 @@ export function startWk2500ChannelWorker(catvCh) {
     reconnectTimer: null,
     rateTimer: null,
     attempt: 0,
-    streamingSinceMs: 0
+    streamingSinceMs: 0,
+    // Estabilizador de salida (ritmo constante + relleno de nulos)
+    pacer: null,
+    peakKbps: 0,
+    pacerTargetKbps: 0,
+    pacerNullPct: 0,
+    pacerQueueMs: 0,
+    pacerIdleMs: 0,
+    stallKilled: false,
+    steady: false
   };
 
   state.rateTimer = setInterval(() => {
+    // Con estabilizador, la telemetría es la del propio socket (bytes que
+    // salieron de verdad), no una estimación: incluye el pico de 250 ms, que
+    // es lo que mide el modulador cuando "ve ráfagas".
+    if (state.pacer) {
+      const st = state.pacer.stats();
+      state.bitrateKbps = st.sent_kbps;
+      state.peakKbps = st.peak_kbps;
+      state.pacerTargetKbps = st.target_kbps;
+      state.pacerNullPct = st.null_pct;
+      state.pacerQueueMs = st.queue_ms;
+      state.steady = st.steady;
+      state.packetsSent = st.datagrams;
+      state.bytesWindow = 0;
+      state.pacerIdleMs = st.idle_payload_ms;
+      // El relleno CBR mantiene la portadora con nulos aunque el origen se
+      // caiga: eso NO es "en vivo". Sólo se marca streaming si siguen llegando
+      // datos reales del canal.
+      if (st.idle_payload_ms < 2000) {
+        markStreaming();
+      } else if (state.status === 'streaming' && st.idle_payload_ms > 10000) {
+        state.status = 'connecting';
+        state.lastError = 'Sin datos del origen: sólo sale relleno CBR';
+      }
+      // Vigilante de origen colgado: un canal 24/7 no pasa 45 s sin un solo
+      // paquete. Se reinicia el motor para que vuelva a conectar (el pacer
+      // sigue manteniendo la portadora mientras tanto).
+      if (st.idle_payload_ms > 45000 && !state.stopped && !state.stallKilled) {
+        state.stallKilled = true;
+        state.lastError = 'Origen sin datos 45 s: reiniciando el motor del canal';
+        try {
+          if (state.child) state.child.kill('SIGTERM');
+          else if (state.abortController) state.abortController.abort();
+        } catch {
+          // ya cerrado
+        }
+      }
+      return;
+    }
     state.bitrateKbps = Math.round((state.bytesWindow * 8) / 2000);
     state.bytesWindow = 0;
   }, 2000);
@@ -997,49 +1083,86 @@ export function startWk2500ChannelWorker(catvCh) {
     state.reconnectTimer = setTimeout(runCycle, 3000);
   };
 
+  /**
+   * Reutiliza el estabilizador entre reconexiones: si el origen se cae 3 s, el
+   * socket sigue emitiendo al ritmo del canal (con relleno) y el modulador no
+   * ve un hueco. Sólo se recrea si cambió el destino o el formato de salida.
+   */
+  const ensurePacer = (freshSlot, transport, bindIp) => {
+    const key = `${freshSlot.udp_host}:${freshSlot.udp_port}:${transport.pktSize}:${transport.rtp ? 1 : 0}:${
+      Number(freshSlot.muxrate_kbps) || 0
+    }`;
+    if (state.pacer && !state.pacer.stopped && state.pacer.key === key) return state.pacer;
+    if (state.pacer) {
+      try {
+        state.pacer.close();
+      } catch {
+        // ya cerrado
+      }
+      state.pacer = null;
+    }
+    const pacer = createCatvPacer({ slotRow: freshSlot, transport, bindIp });
+    if (pacer) {
+      pacer.key = key;
+      pacer.start();
+      state.pacer = pacer;
+    }
+    return pacer;
+  };
+
   const runDirectNodeUdpCycle = async (freshSlot, candidateUrl) => {
-    state.engine = 'direct_dgram_1316';
     const isMnf = /^mnfs?:\/\//i.test(candidateUrl) || /\.mnf(\?|$)/i.test(candidateUrl);
     const httpUrl = candidateUrl
       .replace(/^mnf(s?):\/\//i, 'http$1://')
       .replace(/^ts(https?:\/\/)/i, '$1');
 
-    const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-    state.socket = socket;
-
-    await new Promise((resolve, reject) => {
-      socket.once('error', reject);
-      const effectiveIp = resolveEffectiveBindIp(freshSlot);
-      const bindIp = effectiveIp || '0.0.0.0';
-      socket.bind(0, bindIp, () => {
-        socket.removeListener('error', reject);
-        try {
-          socket.setSendBufferSize(1024 * 1024);
-          if (isMulticastIp(freshSlot.udp_host)) {
-            socket.setMulticastTTL(Math.max(1, Number(freshSlot.ttl) || 16));
-            if (bindIp !== '0.0.0.0') {
-              socket.setMulticastInterface(bindIp);
-            }
-          }
-        } catch {
-          // non-fatal socket option
-        }
-        resolve();
-      });
-    });
-
     const transport = resolveEffectiveTransport(freshSlot, unitForSlot(freshSlot));
-    state.engine = `direct_dgram_${transport.pktSize}`;
-    const packetizer = new TsUdpPacketizer((pkt) => {
-      if (state.stopped) return;
-      socket.send(pkt, Number(freshSlot.udp_port), freshSlot.udp_host, (err) => {
-        if (!err) {
-          state.packetsSent += 1;
-          state.bytesWindow += pkt.length;
-          markStreaming();
-        }
+    const bindIp = resolveEffectiveBindIp(freshSlot);
+
+    // Con estabilizador: el pacer es dueño del socket y entrega al ritmo del
+    // canal. Sin él (TVLISTER_CATV_PACER=off) se mantiene el envío directo.
+    const pacer = ensurePacer(freshSlot, transport, bindIp);
+    let socket = null;
+    if (pacer) {
+      state.engine = `direct_dgram_paced_${transport.pktSize}`;
+    } else {
+      state.engine = 'direct_dgram_1316';
+      socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      state.socket = socket;
+      await new Promise((resolve, reject) => {
+        socket.once('error', reject);
+        const bindTo = bindIp || '0.0.0.0';
+        socket.bind(0, bindTo, () => {
+          socket.removeListener('error', reject);
+          try {
+            socket.setSendBufferSize(1024 * 1024);
+            if (isMulticastIp(freshSlot.udp_host)) {
+              socket.setMulticastTTL(Math.max(1, Number(freshSlot.ttl) || 16));
+              if (bindTo !== '0.0.0.0') socket.setMulticastInterface(bindTo);
+            }
+          } catch {
+            // non-fatal socket option
+          }
+          resolve();
+        });
       });
-    }, transport.pktSize);
+      state.engine = `direct_dgram_${transport.pktSize}`;
+    }
+
+    // El pacer ya alinea a 188 y trocea al tamaño del datagrama: se le pasa el
+    // TS crudo. Sin pacer se mantiene el empaquetador clásico.
+    const packetizer = pacer
+      ? null
+      : new TsUdpPacketizer((pkt) => {
+          if (state.stopped) return;
+          socket.send(pkt, Number(freshSlot.udp_port), freshSlot.udp_host, (err) => {
+            if (!err) {
+              state.packetsSent += 1;
+              state.bytesWindow += pkt.length;
+              markStreaming();
+            }
+          });
+        }, transport.pktSize);
 
     const ac = new AbortController();
     state.abortController = ac;
@@ -1064,8 +1187,22 @@ export function startWk2500ChannelWorker(catvCh) {
     let mnfRemux = null;
     if (treatAsMnf) {
       mnfRemux = new MnfToTsRemuxer();
-      mnfRemux.on('ts', (tsChunk) => packetizer.push(tsChunk));
+      mnfRemux.on('ts', (tsChunk) => {
+        if (pacer) pacer.push(tsChunk);
+        else packetizer.push(tsChunk);
+      });
     }
+
+    const feed = (buf) => {
+      if (pacer) {
+        pacer.push(buf);
+        if (state.status !== 'streaming') markStreaming();
+        return pacer.needsDrain() ? pacer.drain() : null;
+      }
+      packetizer.push(buf);
+      markStreaming();
+      return null;
+    };
 
     const reader = resp.body.getReader();
     while (!state.stopped) {
@@ -1074,9 +1211,11 @@ export function startWk2500ChannelWorker(catvCh) {
       if (value && value.byteLength > 0) {
         const buf = Buffer.from(value);
         if (mnfRemux) {
-          mnfRemux.push(buf);
+          mnfRemux.push(buf); // el TS reconstruido sale por el evento 'ts'
+          if (pacer && pacer.needsDrain()) await pacer.drain();
         } else {
-          packetizer.push(buf);
+          const waiting = feed(buf);
+          if (waiting) await waiting;
         }
       }
     }
@@ -1086,7 +1225,19 @@ export function startWk2500ChannelWorker(catvCh) {
     if (!isFfmpegAvailable()) {
       throw new Error('FFmpeg no instalado para este perfil de salida UDP');
     }
-    state.engine = 'ffmpeg_spts_1316';
+    const transport = resolveEffectiveTransport(freshSlot, unitForSlot(freshSlot));
+    const bindIp = resolveEffectiveBindIp(freshSlot);
+
+    // Estabilizador: FFmpeg produce el SPTS y el pacer lo entrega al ritmo del
+    // canal (con relleno de nulos). Es lo que evita que un segmento de 2 s
+    // salga de golpe y el modulador lea 33 Mbps en un canal de 2 Mbps.
+    const pacer = ensurePacer(freshSlot, transport, bindIp);
+    if (pacer) {
+      state.engine = `ffmpeg_paced_${transport.pktSize}`;
+    } else {
+      state.engine = 'ffmpeg_spts_1316';
+    }
+
     const isMnf = !localHlsPath && (/^mnfs?:\/\//i.test(candidateUrl) || /\.mnf(\?|$)/i.test(candidateUrl));
 
     const bin = getFfmpegBin();
@@ -1095,8 +1246,13 @@ export function startWk2500ChannelWorker(catvCh) {
       : process.env;
 
     const inputForFfmpeg = localHlsPath || (isMnf ? 'pipe:0' : candidateUrl);
-    const args = buildFfmpegUdpOutputArgs(freshSlot, inputForFfmpeg, { channelTitle, pacing: freshSlot.pacing });
+    const args = buildFfmpegUdpOutputArgs(freshSlot, inputForFfmpeg, {
+      channelTitle,
+      pacing: freshSlot.pacing,
+      deliver: pacer ? 'pacer' : 'udp'
+    });
 
+    state.lastArgs = args; // diagnóstico (tvlister-admin catv steady / soporte)
     const child = spawn(bin, args, {
       stdio: [isMnf ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       detached: false,
@@ -1110,35 +1266,73 @@ export function startWk2500ChannelWorker(catvCh) {
 
     let stderrTail = '';
     child.stderr?.on('data', (chunk) => {
-      stderrTail = (stderrTail + chunk.toString('utf8')).slice(-220);
+      // Con el pacer, -progress también va por stderr: se descartan esas líneas
+      // para que el mensaje de error sea el de FFmpeg y no un contador.
+      const text = String(chunk);
+      const meaningful = text
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(
+          (l) =>
+            l &&
+            !/^(frame|fps|stream_\d+_\d+|bitrate|total_size|out_time|out_time_ms|out_time_us|dup_frames|drop_frames|speed|progress)=/.test(
+              l
+            )
+        )
+        .join(' ');
+      if (meaningful) {
+        stderrTail = `${stderrTail} ${meaningful}`.slice(-220);
+        state.stderrTail = stderrTail;
+      }
     });
 
-    // Telemetría real del motor FFmpeg: leemos `total_size` de -progress pipe:1.
-    // Así el panel muestra los Mbps/packet realmente enviados al WK2500 en vez de un valor fijo.
-    let progressBuf = '';
-    let lastProgressTotal = 0;
-    child.stdout?.on('error', () => {});
-    child.stdout?.on('data', (chunk) => {
-      progressBuf += chunk.toString('utf8');
-      let nl = progressBuf.indexOf('\n');
-      while (nl !== -1) {
-        const line = progressBuf.slice(0, nl).trim();
-        progressBuf = progressBuf.slice(nl + 1);
-        const m = /^total_size=(\d+)$/.exec(line);
-        if (m) {
-          const total = Number(m[1]);
-          if (Number.isFinite(total) && total > lastProgressTotal) {
-            const delta = total - lastProgressTotal;
-            lastProgressTotal = total;
-            state.bytesWindow += delta;
-            state.packetsSent += Math.ceil(delta / 1316);
-            markStreaming();
-          }
+    if (pacer) {
+      // TS de FFmpeg -> pacer. Si la cola crece, se pausa el pipe: FFmpeg se
+      // frena solo (contrapresión) y no se pierde ni un paquete.
+      child.stdout.on('error', () => {});
+      child.stdout.on('data', (chunk) => {
+        pacer.push(chunk);
+        if (state.status !== 'streaming') markStreaming();
+        if (pacer.needsDrain() && !state.stopped) {
+          child.stdout.pause();
+          pacer.drain().then(() => {
+            if (!state.stopped && !child.killed) {
+              try {
+                child.stdout.resume();
+              } catch {
+                // pipe cerrado
+              }
+            }
+          });
         }
-        nl = progressBuf.indexOf('\n');
-      }
-      if (progressBuf.length > 8192) progressBuf = progressBuf.slice(-2048);
-    });
+      });
+    } else {
+      // Telemetría clásica: `total_size` de -progress pipe:1.
+      let progressBuf = '';
+      let lastProgressTotal = 0;
+      child.stdout?.on('error', () => {});
+      child.stdout?.on('data', (chunk) => {
+        progressBuf += chunk.toString('utf8');
+        let nl = progressBuf.indexOf('\n');
+        while (nl !== -1) {
+          const line = progressBuf.slice(0, nl).trim();
+          progressBuf = progressBuf.slice(nl + 1);
+          const m = /^total_size=(\d+)$/.exec(line);
+          if (m) {
+            const total = Number(m[1]);
+            if (Number.isFinite(total) && total > lastProgressTotal) {
+              const delta = total - lastProgressTotal;
+              lastProgressTotal = total;
+              state.bytesWindow += delta;
+              state.packetsSent += Math.ceil(delta / 1316);
+              markStreaming();
+            }
+          }
+          nl = progressBuf.indexOf('\n');
+        }
+        if (progressBuf.length > 8192) progressBuf = progressBuf.slice(-2048);
+      });
+    }
 
     if (isMnf && child.stdin) {
       state.upstream_proto = 'MNF v1 -> FFmpeg SPTS';
@@ -1192,6 +1386,7 @@ export function startWk2500ChannelWorker(catvCh) {
 
   const runCycle = async () => {
     if (state.stopped || udpWorkers.get(ch) !== state) return;
+    state.stallKilled = false;
     const freshSlot = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(ch);
     if (!freshSlot) {
       stopWk2500ChannelWorker(ch);
@@ -1323,7 +1518,10 @@ export function catvOutputPlan({ unitId = null, onlyEnabled = true } = {}) {
       declared_kbps: declared,
       engine,
       pacing,
-      constant: engine === 'direct_dgram' ? false : pacing,
+      pacer: catvPacerEnabled(),
+      target_kbps: Number(row.muxrate_kbps) || 0,
+      // Con pacer la salida es constante siempre (reloj propio + nulos).
+      constant: catvPacerEnabled() ? true : engine === 'direct_dgram' ? false : pacing,
       dest: `${row.udp_host}:${row.udp_port}`
     });
   }
@@ -1823,6 +2021,9 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
         enabled: Boolean(row.enabled),
         live_status: liveStatus,
         bitrate_kbps: bitrateKbps,
+        peak_kbps: w?.peakKbps || 0,
+        pacer_kbps: w?.pacerTargetKbps || 0,
+        steady: Boolean(w?.steady),
         unit_id: unitRow ? Number(unitRow.id) : null,
         unit_name: unitRow ? unitRow.name : ''
       });
@@ -1842,6 +2043,14 @@ wk2500Router.get('/api/wk2500/plan', requireAuth, requireAdmin, (req, res) => {
       live_status: liveStatus,
       live_engine: w?.engine || '',
       bitrate_kbps: bitrateKbps,
+      // Estabilizador de salida: ritmo objetivo, pico real de 250 ms y cola.
+      // `steady` es lo que mira el operador: pico ≤ 1,25 × la media.
+      pacer_kbps: w?.pacerTargetKbps || 0,
+      peak_kbps: w?.peakKbps || 0,
+      queue_ms: w?.pacerQueueMs || 0,
+      null_pct: w?.pacerNullPct || 0,
+      idle_ms: w?.pacerIdleMs || 0,
+      steady: Boolean(w?.steady),
       packets_sent: w?.packetsSent || 0,
       uptime_sec: w ? Math.floor((Date.now() - w.startedAtMs) / 1000) : 0,
       last_error: w?.lastError || '',

@@ -1807,7 +1807,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                               type="button"
                               title={
                                 isLive
-                                  ? `Enviando ${(assigned.bitrate_kbps / 1000).toFixed(1)} Mbps por UDP al WK2500 (CH ${assigned.catv_ch})`
+                                  ? `Enviando ${(assigned.bitrate_kbps / 1000).toFixed(1)} Mbps por UDP al WK2500 (CH ${assigned.catv_ch})` +
+                                    (assigned.peak_kbps
+                                      ? ` · pico ${(assigned.peak_kbps / 1000).toFixed(1)} Mbps` +
+                                        (assigned.steady ? ' · salida estabilizada' : ' · a ráfagas')
+                                      : '')
                                   : assigned.last_error || 'Canal activado, esperando flujo del origen'
                               }
                               onClick={() => handleSlotChange(assigned.catv_ch, { enabled: !isEnabled })}
@@ -2029,7 +2033,12 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                             disabled={!hasAssigned && !slot.enabled}
                             title={
                               isLive
-                                ? `Enviando ${(slot.bitrate_kbps / 1000).toFixed(1)} Mbps a udp://${slot.udp_host}:${slot.udp_port}`
+                                ? `Enviando ${(slot.bitrate_kbps / 1000).toFixed(1)} Mbps a udp://${slot.udp_host}:${slot.udp_port}` +
+                                  (slot.peak_kbps
+                                    ? ` · pico de 250 ms: ${(slot.peak_kbps / 1000).toFixed(1)} Mbps` +
+                                      ` · objetivo del estabilizador: ${(slot.pacer_kbps / 1000).toFixed(1)} Mbps` +
+                                      ` · ${slot.steady ? 'sin ráfagas (plano)' : 'todavía con ráfagas'}`
+                                    : '')
                                 : slot.last_error || (slot.enabled ? 'Canal activado, esperando flujo del origen' : 'Canal apagado')
                             }
                             onClick={() => handleSlotChange(slot.catv_ch, { enabled: !slot.enabled })}
@@ -2050,6 +2059,15 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                                   ? 'RECONECTANDO'
                                   : 'CONECTANDO'}
                           </button>
+                          {isLive && slot.peak_kbps > 0 ? (
+                            <div
+                              className={`mt-1 text-[10px] font-semibold ${
+                                slot.steady ? 'text-emerald-400/90' : 'text-amber-400/90'
+                              }`}
+                            >
+                              pico {(slot.peak_kbps / 1000).toFixed(1)}M · {slot.steady ? 'estable' : 'a ráfagas'}
+                            </div>
+                          ) : null}
                         </td>
                       </tr>
                     );

@@ -19,6 +19,13 @@ según la ficha de TMDB, con prioridad y renombrado configurables (una comedia r
 botón **Aplicar** que lo recoloca por lotes, creando las categorías que falten. Si TMDB no encuentra
 un título, se queda en la categoría que tenía y no se repite la consulta.
 
+📡 **El UDP sale estabilizado, como Astra (v2.6.32)**: el motor ya no reenvía el flujo al socket tal como
+llega. Un estabilizador propio emite al **ritmo exacto del canal** y rellena con paquetes nulos MPEG-TS hasta
+ese ritmo (CBR), así el modulador lee **una línea plana** y no ráfagas de 33 Mbps en un canal de 2 Mbps.
+En *UDP / CATV* cada portadora muestra su **pico** y si está **estable**; el objetivo se calcula solo desde el
+bitrate real (o se fija con `tvlister-admin catv steady --apply --cbr`). Se puede desactivar con
+`TVLISTER_CATV_PACER=off`.
+
 🎭 **«Sólo sale Movies» al separar por género (v2.6.31)**: si juntaste todo en la categoría maestra, la
 separación por género de TMDB no reconstruía Acción, Comedia, Terror… porque sólo miraba los títulos **sin**
 género guardado. Ya no: mueve también los que **ya tienen el género** y sólo estaban en otra categoría, sin
@@ -96,15 +103,15 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 
 ```bash
 # última versión publicada
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.31/scripts/install_release.sh \
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.32/scripts/install_release.sh \
   | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.31/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.31
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.32/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.32
 ```
 
 Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el

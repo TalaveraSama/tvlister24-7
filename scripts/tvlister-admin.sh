@@ -2950,8 +2950,9 @@ cmd_catv() {
           return { ...r, new_muxrate: muxrate, action };
         });
 
-        const broken = plan.filter((r) => r.engine === "ffmpeg" && !r.pacing);
-        const direct = plan.filter((r) => r.engine === "direct_dgram");
+        const broken = plan.filter((r) => !r.pacer && r.engine === "ffmpeg" && !r.pacing);
+        const direct = plan.filter((r) => !r.pacer && r.engine === "direct_dgram");
+        const paced = plan.filter((r) => r.pacer);
 
         console.log("");
         console.log("============================================================");
@@ -2959,20 +2960,22 @@ cmd_catv() {
         console.log("  " + plan.length + " canal(es) habilitados con origen");
         console.log("============================================================");
         console.log("");
-        console.log("  " + pad("CANAL", 7) + pad("MOTOR", 14) + pad("DOSIFICADO", 12) +
+        console.log("  " + pad("CANAL", 7) + pad("MOTOR", 20) + pad("DOSIFICADO", 14) +
           padl("DECLARADO", 11) + padl("MUXRATE", 11) + "  NOMBRE");
         for (const r of plan) {
           console.log(
             "  CH" + pad(r.catv_ch, 5) +
-            pad(r.engine, 14) +
-            pad(r.constant ? "si (-re)" : "NO", 12) +
+            pad(r.engine, 20) +
+            pad(r.pacer ? "si (pacer)" : r.constant ? "si (-re)" : "NO", 14) +
             padl(mbps(r.declared_kbps) + " Mbps", 11) +
             padl(r.new_muxrate ? mbps(r.new_muxrate) + " Mbps" : "-", 11) +
             "  " + String(r.name).slice(0, 30) +
             (r.action ? "  [" + r.action + "]" : "")
           );
           // La cadena completa: de dónde entra y por dónde sale.
-          const flags = r.engine === "ffmpeg"
+          const flags = r.pacer
+            ? "ts -> pacer " + (r.new_muxrate ? "CBR " + mbps(r.new_muxrate) + " Mbps fijo" : "objetivo automático")
+            : r.engine === "ffmpeg"
             ? "-c copy" + (r.constant ? ", -re" : "") + (r.new_muxrate ? ", CBR" : "")
             : "sin dosificar";
           console.log("        " + r.source_kind + "  ->  " + r.engine + " (" + flags + ")  ->  udp " + r.dest);
@@ -2996,16 +2999,21 @@ cmd_catv() {
 
         console.log("");
         console.log("------------------------------------------------------------");
+        if (paced.length) {
+          console.log("  [OK] " + paced.length + " canal(es) con ESTABILIZADOR (pacer): el socket emite a ritmo");
+          console.log("       constante y rellena con paquetes nulos hasta el objetivo, igual que Astra.");
+          console.log("       Pico de 250 ms esperado: <= 1,25 x la media. Ya no hay rafagas de 33 Mbps.");
+        }
         if (broken.length) {
           console.log("  [!!] " + broken.length + " canal(es) por FFmpeg SIN dosificar: " +
             broken.slice(0, 8).map((r) => "CH" + r.catv_ch).join(" "));
-        } else {
+        } else if (!paced.length) {
           console.log("  [OK] Todos los canales con FFmpeg salen dosificados (-re).");
         }
         if (direct.length) {
-          console.log("  [!!] " + direct.length + " canal(es) por el motor directo (sin dosificar): " +
+          console.log("  [!!] " + direct.length + " canal(es) por el motor directo (sin estabilizador): " +
             direct.slice(0, 8).map((r) => "CH" + r.catv_ch).join(" "));
-          console.log("       Es MNF o TVLISTER_CATV_DIRECT=1. Con MNF el flujo ya llega dosificado.");
+          console.log("       Es MNF o TVLISTER_CATV_DIRECT=1, o TVLISTER_CATV_PACER=off.");
         }
         if (wantCbr || wantClear) {
           if (apply) {
@@ -3017,9 +3025,10 @@ cmd_catv() {
           }
         } else {
           console.log("");
-          console.log("  Para forzar además un flujo plano (CBR, rellena con paquetes nulos):");
+          console.log("  El estabilizador ya mantiene un flujo plano. Si quieres FIJAR el ritmo");
+          console.log("  (CBR exacto, útil si el origen cambia mucho de bitrate):");
           console.log("     tvlister-admin catv steady --apply --cbr [--headroom 15]");
-          console.log("  Para volver a VBR dosificado:");
+          console.log("  Para volver al objetivo automático (recomendado):");
           console.log("     tvlister-admin catv steady --apply --clear");
         }
         console.log("");

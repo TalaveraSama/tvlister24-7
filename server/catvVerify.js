@@ -125,6 +125,10 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
           status: w?.status || 'stopped',
           engine: w?.engine || '',
           bitrate_kbps: Number(w?.bitrateKbps || 0),
+          peak_kbps: Number(w?.peakKbps || 0),
+          pacer_kbps: Number(w?.pacerTargetKbps || 0),
+          steady: Boolean(w?.steady),
+          idle_ms: Number(w?.pacerIdleMs || 0),
           packets_total: packets,
           packets_per_sec: w ? Math.max(0, packets - before) : 0,
           last_error: w?.lastError || ''
@@ -276,7 +280,9 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
     // ---- 3. Emisión real --------------------------------------------------
     // Se cuenta como entrega real si salieron paquetes en la muestra (aunque el
     // worker esté reconectando en ese instante).
-    const running = carriers.filter((c) => c.worker.packets_per_sec > 0);
+    // Con relleno CBR salen paquetes aunque el origen esté caído: para contar
+    // como emisión real tienen que llegar datos del canal, no sólo nulos.
+    const running = carriers.filter((c) => c.worker.packets_per_sec > 0 && (c.worker.idle_ms || 0) < 5000);
     const withSource = carriers.filter((c) => c.has_source);
     if (workerSource === 'external') {
       add(
@@ -297,6 +303,32 @@ export async function verifyCatv({ unitId = null, ping = true, workerSource = 'i
           : running.length === 0
           ? `Hay ${withSource.length} con canal asignado pero ninguna sale al aire. Pulsa «Iniciar» en el plan o revisa el origen.`
           : ''
+      );
+    }
+
+    // ---- 3b. Forma de la salida: ¿línea plana o ráfagas? ------------------
+    // Es la comprobación que responde a "veo 33 Mbps en un canal de 2 Mbps".
+    const emitting = carriers.filter((c) => c.worker.bitrate_kbps > 0);
+    const bursty = emitting.filter(
+      (c) => c.worker.peak_kbps > 0 && c.worker.peak_kbps > c.worker.bitrate_kbps * 1.3
+    );
+    if (emitting.length) {
+      const worst = emitting.reduce((a, b) =>
+        b.worker.peak_kbps / Math.max(1, b.worker.bitrate_kbps) > a.worker.peak_kbps / Math.max(1, a.worker.bitrate_kbps) ? b : a
+      );
+      add(
+        'pacing',
+        bursty.length ? 'warn' : 'ok',
+        bursty.length === 0,
+        bursty.length
+          ? `${bursty.length} portadora(s) salen a ráfagas (pico > 1,3 × la media)`
+          : 'Salida estabilizada: el pico de 250 ms no supera 1,3 × la media',
+        bursty.length
+          ? `La peor es CH${worst.catv_ch}: media ${(worst.worker.bitrate_kbps / 1000).toFixed(2)} Mbps, ` +
+            `pico ${(worst.worker.peak_kbps / 1000).toFixed(2)} Mbps. Comprueba que el estabilizador esté activo ` +
+            '(TVLISTER_CATV_PACER no debe estar en off) y que el canal no lleve output_mode distinto de «Directo».'
+          : `${emitting.length} portadora(s) midiendo · objetivo ${(worst.worker.pacer_kbps / 1000).toFixed(2)} Mbps · ` +
+            `peor pico ${(worst.worker.peak_kbps / 1000).toFixed(2)} Mbps (media ${(worst.worker.bitrate_kbps / 1000).toFixed(2)} Mbps).`
       );
     }
 

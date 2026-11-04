@@ -1143,8 +1143,8 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.31/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.31
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.32/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.32
 ```
 
 La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
@@ -1923,6 +1923,10 @@ Medido con `catv watch` (5 s, mismo TS de 2,9 Mbps, fuente a trozos de 2 s):
 
 La corrección es `-re` (leer la entrada a ritmo nativo) delante de `-i`, sólo en la salida hacia el modulador:
 
+> **Desde la v2.6.32 esto queda como respaldo histórico:** el `-re` sigue puesto, pero la constancia real la
+> da el **estabilizador de salida** (`server/catvUdpPacer.js`), que emite al ritmo del canal y rellena con
+> nulos. Con él, el pico de 250 ms no pasa de ~1,05 × la media en los dos motores (FFmpeg y directo).
+
 - No se aplica a `pipe:0` (MNF) ni cuando la portadora ya tiene `muxrate` (un CBR ya marca el ritmo).
 - Se puede desactivar por si un origen concreto se atasca:
   `TVLISTER_CATV_PACING=0` en el servicio (`systemctl edit tvlister24-7`) y `tvlister-admin restart`.
@@ -2081,8 +2085,10 @@ Las dos acaban en el mismo sitio: **FFmpeg con `-c copy` y `-re`**, que es lo qu
         HLS local (RAMDisk del panel)  ->  ffmpeg (-c copy, -re)  ->  udp 239.9.9.2:1003
 ```
 
-Si aparece `sin dosificar`, ese canal va por el motor directo (MNF, o `TVLISTER_CATV_DIRECT=1`) y **no** habrá
-constancia: es la causa del 6/10/2/0.
+Con la v2.6.32 la columna **DOSIFICADO** dice `si (pacer)` en todos los canales: la constancia ya no depende
+del motor de entrada sino del socket de salida. `sin dosificar` sólo aparece si se apaga el estabilizador
+(`TVLISTER_CATV_PACER=off`); en ese caso el motor directo (MNF o `TVLISTER_CATV_DIRECT=1`) vuelve a entregar
+a trozos: es la causa del 6/10/2/0 y de las ráfagas de 33 Mbps.
 
 #### Medición de la cadena completa (worker real del panel)
 
@@ -3022,6 +3028,48 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
 - El 80 y el 443 se registran solos como puertos estándar del gestor multi-puerto (una sola vez: si
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
+
+### v2.6.32: estabilizador de salida UDP (pacer) — el canal sale plano, como Astra
+
+**Síntoma:** en *UDP / CATV*, hacia los moduladores analógicos, se ven **ráfagas de 33 Mbps** en un canal de
+2 Mbps. La media es correcta, pero el modulador mide la entrada por ventanas y ve el pico.
+
+**Causa:** el motor reenviaba el MPEG-TS al socket **tal como llegaba**. Un segmento HLS de 2 s entra en
+~30 ms; una ráfaga MNF de 1 MB también entra de golpe. Se enviaban 500 KB en un suspiro ⇒ el modulador lee
+16–33 Mbps. `-re` dosifica la *lectura* del origen, no la escritura al socket, y la salida de FFmpeg llevaba
+`buffer_size=1048576` (4 s de un canal de 2 Mbps) que se vaciaba a la velocidad del enlace.
+
+**Solución (`server/catvUdpPacer.js`):** un reloj propio en el socket.
+
+| Pieza | Qué hace |
+| --- | --- |
+| Cubo de fichas | Emite como máximo el ritmo objetivo; nunca "ráfagas de recuperación" |
+| Relleno CBR | Si el origen va por debajo, añade paquetes nulos (PID 0x1FFF) ⇒ línea plana |
+| Objetivo automático | Media del bitrate real del canal en una ventana de 20 s (+10 %), con histéresis |
+| Objetivo fijo | `muxrate_kbps` del canal manda (`catv steady --cbr`) |
+| Contrapresión | Si la cola crece, se frena FFmpeg/HTTP (`drain()`) en vez de tirar paquetes |
+| RTP | Cabecera RTP/MPEG-TS propia (PT 33, reloj 90 kHz, contador de secuencia) |
+| Origen cortado | La portadora sigue con relleno (el modulador no ve un hueco) y el panel marca «sin datos» |
+| Vigilante | 45 s sin un solo paquete real ⇒ se reinicia el motor del canal |
+
+FFmpeg ahora escribe el SPTS en `stdout` (`-f mpegts pipe:1`, progreso por `pipe:2`) y el pacer es el único
+dueño del socket; el motor directo (MNF / HTTP TS) alimenta el mismo pacer. Todo el envío pasa por él.
+
+**En el panel:** cada portadora activa muestra `ACTIVO 2.0M` con `pico 2.1M · estable`; la API expone
+`pacer_kbps`, `peak_kbps`, `queue_ms`, `null_pct`, `idle_ms` y `steady`. «Comprobar» añade la verificación
+*Salida estabilizada* (pico de 250 ms ≤ 1,3 × la media). En terminal:
+
+```bash
+tvlister-admin catv steady          # motor y objetivo de cada canal (columna DOSIFICADO: si (pacer))
+tvlister-admin catv watch --secs 10 # mide el grupo de verdad: forma «constante»
+```
+
+`TVLISTER_CATV_PACER=off` vuelve al comportamiento anterior (envío directo), y
+`TVLISTER_CATV_PACER_QUEUE_MS` ajusta la cola máxima (4000 ms por defecto, suficiente para segmentos de 4 s).
+
+**Pruebas:** `node scripts/test_catv_udp_pacer.mjs` — **17 OK**, con FFmpeg simulado y receptor UDP real.
+Sin pacer el mismo canal sale a **16 Mbps de pico en una media de 2 Mbps** (la regresión); con pacer,
+**2,45 Mbps planos (**pico/media 1,03**)**.
 
 ### v2.6.31: la separación por género reconstruye las categorías tras el reseteo
 
