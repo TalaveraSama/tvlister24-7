@@ -3703,6 +3703,92 @@ wk2500Router.post('/api/wk2500/flussonic-control/switch', requireAuth, requireAd
   }
 });
 
+// ============ PUSH UDP EN FLUSSONIC (v2.6.34) ==============================
+// La pantalla «Push live video to certain URLs» de Flussonic, desde el panel:
+// los streams ya existen; aquí sólo se les pone o quita la salida UDP del canal.
+
+wk2500Router.get('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const m = await import('./flussonicUdp.js');
+    const serverId = req.query.server_id ? Number(req.query.server_id) : null;
+    const snap = await m.flussonicPushSnapshot({ serverId, refresh: req.query.refresh !== '0' });
+    res.json(snap);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+wk2500Router.post('/api/wk2500/flussonic-push/interface', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const m = await import('./flussonicUdp.js');
+    const iface = m.setPushInterface(String(req.body?.iface || ''));
+    res.json({ ok: true, iface });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * Dos modos en la misma ruta:
+ *   { from_channels: true, ch_start, ch_end, iface, action:'apply'|'remove', dry_run }
+ *       → usa la lista de canales y el mapeo por nombre.
+ *   { items: [{ stream, url, remove }] }
+ *       → edición fila a fila (lo que se escribe en la tabla).
+ * take_over (por defecto en 'apply' desde canales) deja el canal en modo
+ * Flussonic para que no haya dos emisores al mismo destino.
+ */
+wk2500Router.post('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    ensureCatvSlotsInitialized();
+    const m = await import('./flussonicUdp.js');
+    const b = req.body || {};
+    const serverId = b.flussonic_server_id ? Number(b.flussonic_server_id) : null;
+    const remove = b.action === 'remove' || b.remove === true;
+    const dryRun = b.dry_run === true || b.dryRun === true;
+    const takeOver = b.take_over === true || b.takeOver === true;
+    if (b.iface !== undefined) m.setPushInterface(String(b.iface || ''));
+    const iface = m.getPushInterface();
+
+    let result;
+    if (b.from_channels === true) {
+      result = await m.applyChannelPushes({
+        serverId,
+        chStart: b.ch_start,
+        chEnd: b.ch_end,
+        iface,
+        remove,
+        dryRun,
+        takeOver
+      });
+    } else {
+      result = await m.applyStreamPushItems({
+        serverId,
+        items: Array.isArray(b.items) ? b.items : [],
+        dryRun,
+        takeOver,
+        // En la edición fila a fila se escribe lo que se ve: la interfaz sólo
+        // se añade si se pide expresamente en esa fila.
+        iface: b.iface !== undefined ? String(b.iface || '') : ''
+      });
+      result.action = remove ? 'remove' : 'apply';
+    }
+
+    // Cambio de motor en caliente para los canales tomados por Flussonic.
+    if (!dryRun && Array.isArray(result.taken_over)) {
+      for (const ch of result.taken_over) {
+        stopWk2500ChannelWorker(ch);
+        const slot = db.prepare('SELECT enabled FROM wk2500_channels WHERE catv_ch = ?').get(ch);
+        if (slot?.enabled) startWk2500ChannelWorker(ch);
+      }
+    }
+
+    const snapshot = await m.flussonicPushSnapshot({ serverId, refresh: true });
+    res.json({ ...result, snapshot });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 // Reconciliar: reaplica en Flussonic las salidas UDP de los canales en ese modo.
 wk2500Router.post('/api/wk2500/flussonic-udp/sync', requireAuth, requireAdmin, async (req, res) => {
   try {

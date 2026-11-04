@@ -123,6 +123,21 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     range: { from: 2, to: 125 }
   });
 
+  // Salidas UDP en Flussonic («Push live video to certain URLs»): los streams ya
+  // existen; aquí se les pone o quita el UDP del canal, uno a uno o por rango.
+  const [fsPush, setFsPush] = useState({
+    loading: false,
+    busy: '',
+    snapshot: null,
+    message: '',
+    draft: {},
+    dirty: {},
+    range: { from: 2, to: 125 },
+    iface: '',
+    takeOver: true,
+    filter: 'canales'
+  });
+
   const showToast = (msg) => {
     setErrorNotice('');
     setNotice(msg);
@@ -185,6 +200,136 @@ export default function Wk2500CatvPage({ setActiveTab }) {
       await loadUdpEngine();
     } catch (err) {
       setFsControl((prev) => ({ ...prev, busy: '', message: err.message }));
+    }
+  };
+
+  const loadFlussonicPush = async (silent = false) => {
+    if (!silent) setFsPush((prev) => ({ ...prev, loading: true }));
+    try {
+      const snap = await apiFetch('/api/wk2500/flussonic-push');
+      setFsPush((prev) => {
+        const draft = { ...prev.draft };
+        for (const st of snap.streams || []) {
+          if (prev.dirty[st.name]) continue;
+          draft[st.name] = st.suggested_url || st.push?.url || '';
+        }
+        return {
+          ...prev,
+          loading: false,
+          snapshot: snap,
+          draft,
+          iface: prev.iface || snap.iface || ''
+        };
+      });
+    } catch (err) {
+      setFsPush((prev) => ({ ...prev, loading: false, message: err.message }));
+    }
+  };
+
+  const setPushDraft = (stream, value) =>
+    setFsPush((prev) => ({
+      ...prev,
+      draft: { ...prev.draft, [stream]: value },
+      dirty: { ...prev.dirty, [stream]: true }
+    }));
+
+  const pushBody = (extra) => ({
+    iface: fsPush.iface,
+    take_over: fsPush.takeOver,
+    ...extra
+  });
+
+  const handlePushRange = async (action) => {
+    const dry = action === 'preview';
+    setFsPush((prev) => ({ ...prev, busy: action }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-push', {
+        method: 'POST',
+        body: JSON.stringify(
+          pushBody({
+            from_channels: true,
+            ch_start: fsPush.range.from,
+            ch_end: fsPush.range.to,
+            action: dry ? 'apply' : action,
+            dry_run: dry
+          })
+        )
+      });
+      if (dry) {
+        const draft = { ...fsPush.draft };
+        for (const d of r.detail || []) draft[d.stream] = d.url;
+        setFsPush((prev) => ({
+          ...prev,
+          busy: '',
+          snapshot: r.snapshot || prev.snapshot,
+          draft,
+          dirty: {},
+          message:
+            `Vista previa: ${r.detail?.length || 0} canal(es) con destino UDP` +
+            (r.sin_stream?.length ? ` · ${r.sin_stream.length} sin stream reconocido` : '') +
+            '. Revisa las URLs y pulsa «Aplicar».'
+        }));
+        return;
+      }
+      const fallos = (r.detail || []).filter((d) => !d.ok);
+      setFsPush((prev) => ({
+        ...prev,
+        busy: '',
+        snapshot: r.snapshot || prev.snapshot,
+        dirty: {},
+        message:
+          (r.message || 'Hecho.') +
+          (fallos.length ? ' · ' + fallos.slice(0, 3).map((f) => `${f.stream}: ${f.error}`).join(' | ') : '')
+      }));
+      await loadFlussonicPush(true);
+      await loadPlan(true);
+      await loadFlussonicControl(true);
+    } catch (err) {
+      setFsPush((prev) => ({ ...prev, busy: '', message: err.message }));
+    }
+  };
+
+  const handlePushSaveRow = async (stream, remove = false) => {
+    const url = String(fsPush.draft[stream] || '').trim();
+    if (!remove && !url) return handlePushSaveRow(stream, true);
+    setFsPush((prev) => ({ ...prev, busy: `row:${stream}` }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-push', {
+        method: 'POST',
+        body: JSON.stringify(pushBody({ items: [{ stream, url, remove }] }))
+      });
+      const d = r.detail?.[0] || {};
+      setFsPush((prev) => ({
+        ...prev,
+        busy: '',
+        snapshot: r.snapshot || prev.snapshot,
+        dirty: { ...prev.dirty, [stream]: false },
+        message: d.ok
+          ? `✅ ${stream}: ${remove ? 'salida UDP quitada' : `salida UDP ${d.already ? 'ya estaba puesta' : 'puesta'}`}${
+              d.url ? ` (${d.url})` : ''
+            }`
+          : `⚠️ ${stream}: ${d.error || 'no se pudo aplicar'}`
+      }));
+      if (d.ok) {
+        await loadFlussonicPush(true);
+        await loadPlan(true);
+        await loadFlussonicControl(true);
+      }
+    } catch (err) {
+      setFsPush((prev) => ({ ...prev, busy: '', message: err.message }));
+    }
+  };
+
+  const handlePushSaveIface = async () => {
+    try {
+      await apiFetch('/api/wk2500/flussonic-push/interface', {
+        method: 'POST',
+        body: JSON.stringify({ iface: fsPush.iface })
+      });
+      setFsPush((prev) => ({ ...prev, message: `Interfaz de salida guardada: ${prev.iface || 'ninguna (ruta automática)'}.` }));
+      await loadFlussonicPush(true);
+    } catch (err) {
+      setFsPush((prev) => ({ ...prev, message: err.message }));
     }
   };
 
@@ -323,6 +468,14 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   useEffect(() => {
     loadFlussonicControl(true);
     const t = setInterval(() => loadFlussonicControl(true), 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Los pushes (URL + estado + MB) también cada 15 s; nunca pisa lo que el
+  // operador esté escribiendo en una fila.
+  useEffect(() => {
+    loadFlussonicPush(true);
+    const t = setInterval(() => loadFlussonicPush(true), 15000);
     return () => clearInterval(t);
   }, []);
 
@@ -842,6 +995,17 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     : 0;
   const modalCap = Number(modalUnit?.form.model_channels || 32);
   const modalSpanError = Boolean(modalUnit) && (modalSpan > modalCap || (modalExplicit && modalChannels.length === 0));
+
+  // Filas de la tarjeta de push: se filtra por canal asignado o por estado.
+  const pushAll = fsPush.snapshot?.streams || [];
+  const pushStreams = pushAll.filter((st) => {
+    if (fsPush.filter === 'con_salida') return Boolean(st.push);
+    if (fsPush.filter === 'sin_salida') return !st.push;
+    if (fsPush.filter === 'canales') return Boolean(st.channel);
+    return true;
+  });
+  const pushPendientes = pushAll.filter((st) => st.push && st.suggested_url && !st.in_sync).length;
+  const pushVisibles = pushStreams.slice(0, 200);
 
   return (
     <div className="space-y-5">
@@ -1487,6 +1651,297 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             ))}
           </div>
         )}
+      </div>
+
+      {/* ── Salidas UDP en Flussonic (lo mismo que «Push live» de su panel) ── */}
+      <div className="rounded-2xl bg-[#0e1526] border border-emerald-500/35 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
+            <Network className="w-4 h-4 text-emerald-400" />
+            Salidas UDP de Flussonic (push)
+          </h2>
+          <div className="flex flex-wrap items-center gap-2 text-[10px]">
+            {fsPush.snapshot ? (
+              fsPush.snapshot.flussonic_reachable ? (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-bold">
+                  Flussonic responde · {fsPush.snapshot.total} streams
+                </span>
+              ) : (
+                <span
+                  className="px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 font-bold"
+                  title={fsPush.snapshot.flussonic_error}
+                >
+                  Flussonic no responde
+                </span>
+              )
+            ) : null}
+            <span className="px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 font-bold">
+              Con salida UDP: {fsPush.snapshot?.with_push ?? 0}
+            </span>
+            {pushPendientes > 0 && (
+              <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-bold">
+                {pushPendientes} con otra IP/puerto
+              </span>
+            )}
+          </div>
+        </div>
+
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Los canales ya están en Flussonic: aquí se les pone la <strong className="text-slate-200">salida UDP</strong> que
+          antes se añadía a mano en <em>Push live video to certain URLs</em>. La URL sale del destino del canal en la lista
+          (CH → IP:puerto) y se escribe con la API de Flussonic. Las salidas que no son UDP (rtmp, srt…) nunca se tocan.
+        </p>
+
+        {fsPush.snapshot && !fsPush.snapshot.server && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+            No hay ningún servidor Flussonic dado de alta. Añádelo en «Flussonic 23.12» para poder configurar sus salidas.
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 items-end text-xs">
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Desde CH</label>
+            <input
+              type="number"
+              min={1}
+              max={125}
+              value={fsPush.range.from}
+              onChange={(e) => setFsPush((prev) => ({ ...prev, range: { ...prev.range, from: Number(e.target.value) } }))}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-cyan-300 font-bold"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Hasta CH</label>
+            <input
+              type="number"
+              min={1}
+              max={125}
+              value={fsPush.range.to}
+              onChange={(e) => setFsPush((prev) => ({ ...prev, range: { ...prev.range, to: Number(e.target.value) } }))}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-cyan-300 font-bold"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Interfaz (opcional)</label>
+            <input
+              type="text"
+              placeholder="ens37"
+              value={fsPush.iface}
+              onChange={(e) => setFsPush((prev) => ({ ...prev, iface: e.target.value }))}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-emerald-300 font-mono"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handlePushSaveIface}
+            disabled={Boolean(fsPush.busy)}
+            className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold disabled:opacity-40"
+          >
+            Guardar interfaz
+          </button>
+          <label className="flex items-center gap-2 px-2 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-[10px] text-slate-300 col-span-2">
+            <input
+              type="checkbox"
+              checked={fsPush.takeOver}
+              onChange={(e) => setFsPush((prev) => ({ ...prev, takeOver: e.target.checked }))}
+              className="w-3.5 h-3.5 accent-emerald-500"
+            />
+            Apagar TVLister en esos canales (evita dos emisores al mismo destino)
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => handlePushRange('preview')}
+            disabled={Boolean(fsPush.busy) || !fsPush.snapshot?.flussonic_reachable}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[11px] font-bold disabled:opacity-40"
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            {fsPush.busy === 'preview' ? 'Calculando…' : 'Ver plan del rango'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handlePushRange('apply')}
+            disabled={Boolean(fsPush.busy) || !fsPush.snapshot?.flussonic_reachable}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold disabled:opacity-40"
+          >
+            <Save className="w-3.5 h-3.5" />
+            {fsPush.busy === 'apply' ? 'Aplicando…' : 'Poner salida UDP del rango'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handlePushRange('remove')}
+            disabled={Boolean(fsPush.busy) || !fsPush.snapshot?.flussonic_reachable}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-700/70 hover:bg-rose-600 border border-rose-500/40 text-white text-[11px] font-bold disabled:opacity-40"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            {fsPush.busy === 'remove' ? 'Quitando…' : 'Quitar salidas del rango'}
+          </button>
+          <button
+            type="button"
+            onClick={() => loadFlussonicPush(false)}
+            disabled={Boolean(fsPush.busy || fsPush.loading)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[11px] font-bold disabled:opacity-40"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${fsPush.loading ? 'animate-spin' : ''}`} /> Actualizar
+          </button>
+          <div className="flex items-center gap-1.5 ml-auto">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">Ver</span>
+            <select
+              value={fsPush.filter}
+              onChange={(e) => setFsPush((prev) => ({ ...prev, filter: e.target.value }))}
+              className="px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-[11px] text-slate-200"
+            >
+              <option value="canales">Sólo canales de la lista</option>
+              <option value="todos">Todos los streams</option>
+              <option value="con_salida">Con salida UDP</option>
+              <option value="sin_salida">Sin salida UDP</option>
+            </select>
+          </div>
+        </div>
+
+        {fsPush.message && (
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">
+            {fsPush.message}
+          </div>
+        )}
+
+        {fsPush.snapshot?.flussonic_reachable && pushVisibles.length > 0 ? (
+          <div className="overflow-x-auto rounded-xl border border-slate-800">
+            <table className="w-full text-[11px]">
+              <thead className="bg-[#0a1120] text-slate-400 uppercase tracking-wide text-[10px]">
+                <tr>
+                  <th className="px-2 py-1.5 text-left">Stream en Flussonic</th>
+                  <th className="px-2 py-1.5 text-left">Canal</th>
+                  <th className="px-2 py-1.5 text-left">Salida UDP (push)</th>
+                  <th className="px-2 py-1.5 text-center">Estado</th>
+                  <th className="px-2 py-1.5 text-right">Enviado</th>
+                  <th className="px-2 py-1.5 text-right"> </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/70">
+                {pushVisibles.map((st) => {
+                  const draft = fsPush.draft[st.name] ?? '';
+                  const enSincronia = st.in_sync;
+                  const otra = Boolean(st.push) && !enSincronia;
+                  const etiqueta = !st.push
+                    ? 'Sin salida'
+                    : enSincronia
+                      ? st.push.running
+                        ? 'Emitiendo'
+                        : 'Puesta'
+                      : 'Otra IP/puerto';
+                  return (
+                    <tr key={st.name} className="hover:bg-white/[0.02]">
+                      <td className="px-2 py-1.5">
+                        <div className="font-mono text-indigo-300">{st.name}</div>
+                        {st.title && st.title !== st.name && (
+                          <div className="text-[10px] text-slate-500 truncate max-w-[180px]">{st.title}</div>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        {st.channel ? (
+                          <span className="text-slate-200">
+                            <span className="font-mono text-cyan-300 font-bold">CH{st.channel.catv_ch}</span> ·{' '}
+                            {st.channel.name}
+                            <span className="ml-1 text-[10px] text-slate-500">{st.channel.method}</span>
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">—</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <input
+                          type="text"
+                          value={draft}
+                          placeholder={st.channel?.dest || 'udp://IP:PUERTO'}
+                          onChange={(e) => setPushDraft(st.name, e.target.value)}
+                          className="w-full min-w-[230px] px-2 py-1 rounded-lg bg-[#090e1a] border border-slate-700 text-emerald-300 font-mono text-[11px]"
+                        />
+                        {st.push && !enSincronia && (
+                          <div className="text-[10px] text-amber-300/80 mt-0.5 font-mono truncate max-w-[260px]" title={st.push.url}>
+                            ahora en Flussonic: {st.push.url}
+                          </div>
+                        )}
+                        {st.udp_outputs?.length > 1 && (
+                          <div className="text-[10px] text-amber-300/80 mt-0.5">
+                            {st.udp_outputs.length} salidas UDP guardadas
+                          </div>
+                        )}
+                        {st.other_outputs?.length ? (
+                          <div className="text-[10px] text-slate-500 mt-0.5 truncate max-w-[260px]" title={st.other_outputs.join(' · ')}>
+                            también: {st.other_outputs.join(' · ')}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="px-2 py-1.5 text-center">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            enSincronia
+                              ? 'bg-emerald-500/15 text-emerald-300'
+                              : otra
+                                ? 'bg-amber-500/15 text-amber-300'
+                                : 'bg-slate-500/15 text-slate-300'
+                          }`}
+                          title={st.push?.url || 'Sin salidas UDP'}
+                        >
+                          {enSincronia ? <CheckCircle2 className="w-3 h-3" /> : otra ? <AlertTriangle className="w-3 h-3" /> : null}
+                          {etiqueta}
+                        </span>
+                        {!st.alive && <div className="text-[10px] text-rose-300 mt-0.5">stream caído</div>}
+                      </td>
+                      <td className="px-2 py-1.5 text-right text-slate-300">
+                        {st.push?.mb ? `${st.push.mb} MB` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => handlePushSaveRow(st.name)}
+                          disabled={Boolean(fsPush.busy)}
+                          className="px-2 py-0.5 rounded-lg bg-emerald-600/80 hover:bg-emerald-500 text-white text-[10px] font-bold disabled:opacity-40"
+                        >
+                          {fsPush.busy === `row:${st.name}` ? '…' : 'Guardar'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handlePushSaveRow(st.name, true)}
+                          disabled={Boolean(fsPush.busy) || !st.push}
+                          className="ml-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 text-[10px] font-bold disabled:opacity-40"
+                        >
+                          Quitar
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        {fsPush.snapshot?.flussonic_reachable && pushStreams.length > pushVisibles.length && (
+          <div className="text-[10px] text-slate-500">
+            Mostrando {pushVisibles.length} de {pushStreams.length}. Usa el rango para trabajar por tandas.
+          </div>
+        )}
+
+        {fsPush.snapshot?.channels_sin_stream?.length ? (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200 space-y-1">
+            <div className="font-bold">
+              {fsPush.snapshot.channels_sin_stream.length} canal(es) de la lista sin stream reconocido en Flussonic
+            </div>
+            {fsPush.snapshot.channels_sin_stream.slice(0, 6).map((c) => (
+              <div key={`ps${c.catv_ch}`} className="text-amber-200/80">
+                CH{c.catv_ch} · {c.name}
+                {c.dest ? ` · destino ${c.dest}` : ''}
+              </div>
+            ))}
+            <div className="text-[10px] text-amber-200/60">
+              Al pulsar «Ver plan del rango» se listan con las sugerencias de nombre más parecido.
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {/* ── Control de Flussonic: quién empuja el UDP a los moduladores ── */}

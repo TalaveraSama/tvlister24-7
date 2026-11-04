@@ -3029,6 +3029,55 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.34: las salidas UDP de Flussonic se ponen desde el panel (push)
+
+**Lo pedido:** «los canales ya los tiene Flussonic y yo sólo agrego en push la salida UDP de manera manual;
+quería una sección que controle los canales de Flussonic y agregue la salida UDP, más sencillo, más práctico».
+
+#### 1. Tarjeta «Salidas UDP de Flussonic (push)»
+
+En **UDP / CATV**, arriba del control avanzado. Lista **todos los streams** de Flussonic con:
+
+| Dato | Detalle |
+| --- | --- |
+| Canal | A qué canal de la lista corresponde (`CH12 · CANAL 12`) y por qué método se emparejó |
+| Salida UDP | La URL del push, **editable**; debajo se ve la que tiene ahora si es distinta a la del canal |
+| Estado | `Emitiendo`, `Puesta`, `Otra IP/puerto`, `Sin salida`; avisa si el stream está caído |
+| Enviado | MB que reporta Flussonic (`stats.push`), como el `running · 134.2 MB` de su pantalla |
+| Guardar / Quitar | `PATCH /streamer/api/v3/streams/{nombre}` con sólo `outputs` |
+
+Las salidas **no UDP** (rtmp, srt, http) se muestran y **nunca se tocan**. Si un stream tenía otra salida UDP y
+se aplica desde la lista, queda **una sola**: la del canal.
+
+#### 2. Por rango, con la lista de canales
+
+- **Ver plan del rango** (`dry_run`): calcula `CH → stream → udp://IP:PUERTO` y lo pone en la tabla sin escribir.
+- **Poner salida UDP del rango**: aplica (4 peticiones en paralelo) y guarda el mapeo usado.
+- **Quitar salidas del rango**: quita sólo la UDP del canal.
+- **Interfaz**: `ens37` produce `udp://ens37@IP:PUERTO` (formato de la pantalla de Flussonic) y se recuerda.
+- **Apagar TVLister en esos canales** (marcado por defecto): pone `udp_engine='flussonic'`, para el worker local
+  y deja el delegado; el reconciliador lo mantiene aunque el panel se reinicie.
+
+#### 3. Terminal y API
+
+```bash
+tvlister-admin catv flussonic push                                  # estado
+tvlister-admin catv flussonic push --range 2-125                    # vista previa
+tvlister-admin catv flussonic push --range 2-125 --iface ens37 --apply
+tvlister-admin catv flussonic push --range 2-125 --remove --apply
+tvlister-admin catv flussonic push --stream "NACIONAL 2" --url udp://ens37@239.1.1.2:1002 --apply
+```
+
+`GET /api/wk2500/flussonic-push` · `POST /api/wk2500/flussonic-push` (`from_channels` o `items`) ·
+`POST /api/wk2500/flussonic-push/interface`.
+
+#### 4. Pruebas
+
+`scripts/test_catv_flussonic_push.mjs` **39 OK** (destino con/sin interfaz, vista previa sin PATCH, reemplazo de
+la UDP anterior, rtmp intacto, quitar, edición de fila, URL inválida, stream inexistente, `take_over` con **0
+datagramas** de TVLister y Flussonic caído sin tumbar el panel) y `scripts/test_catv_flussonic_push_ui.mjs`
+**33 OK** (jsdom). Sin regresiones del control de Flussonic, pacer, VOD y balanceo.
+
 ### v2.6.33: los canales salen por Flussonic (controlado) y el UDP nativo vuelve a como estaba
 
 **Lo pedido:** «ahora se pega, no está fluido; necesito controlar Flussonic, ya Flussonic recibe los canales,

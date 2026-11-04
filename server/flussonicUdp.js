@@ -78,7 +78,8 @@ export function buildFlussonicUdpOutputUrl(slot = {}) {
 export function outputTargetKey(url = '') {
   const m = String(url).match(/^(?:udp|rtp):\/\/([^/?#]+)/i);
   if (!m) return '';
-  return m[1].replace(/^@/, '').toLowerCase();
+  // Flussonic escribe la interfaz de salida delante: udp://ens37@239.1.1.2:1002
+  return m[1].replace(/^[^@]*@/, '').replace(/^@/, '').toLowerCase();
 }
 
 function headersFor(srv) {
@@ -354,6 +355,39 @@ export function nameSimilarity(a = '', b = '') {
  * Streams que tiene el Flussonic registrado, con su estado. Se lee de la API
  * v3 (`/streams`) y se aprovechan los `stats` que ya trae cada stream.
  */
+/**
+ * Estado de las salidas (el «running · 134.2 MB» de la pantalla *Push live*).
+ * La API v3 lo pone en sitios distintos según la versión: se busca en todos y
+ * se devuelve la lista plana; si no viene, queda vacía (la columna muestra —).
+ */
+function extractPushStats(item = {}) {
+  const pockets = [
+    item.stats?.push,
+    item.stats?.outputs,
+    item.push?.outputs,
+    item.push,
+    item.outputs,
+    item.stats?.output
+  ];
+  const out = [];
+  for (const pocket of pockets) {
+    const list = Array.isArray(pocket) ? pocket : pocket && typeof pocket === 'object' ? [pocket] : [];
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue;
+      const url = String(entry.url || entry.id || entry.name || '').trim();
+      if (!url) continue;
+      out.push({
+        url,
+        state: String(entry.state || entry.status || (entry.running === true ? 'running' : '') || ''),
+        bytes: Number(entry.bytes || entry.bytes_sent || entry.total_bytes || 0),
+        speed: Number(entry.speed || entry.bitrate || 0),
+        errors: Number(entry.errors || 0)
+      });
+    }
+  }
+  return out;
+}
+
 export async function listFlussonicStreams({ serverId = null } = {}) {
   const srv = getFlussonicServer(serverId);
   if (!srv) return { ok: false, error: 'No hay ningún servidor Flussonic dado de alta.', streams: [] };
@@ -382,6 +416,14 @@ export async function listFlussonicStreams({ serverId = null } = {}) {
       bitrate_kbps: Math.round(Number(stats.bitrate || 0)),
       clients: Number(stats.client_count || 0),
       outputs: normalizeOutputs(item.outputs).map((o) => o.url),
+      output_details: normalizeOutputs(item.outputs).map((o) => ({
+        url: o.url,
+        enabled: o.enabled !== false && o.disabled !== true,
+        comment: String(o.comment || ''),
+        state: String(o.state || o.status || ''),
+        bytes: Number(o.bytes || o.bytes_sent || 0)
+      })),
+      push_stats: extractPushStats(item),
       static: item.static !== false && !item.ondemand
     };
   });
@@ -404,27 +446,12 @@ function slotFlussonicCandidates(slot = {}) {
  * un nombre contiene al otro → parecido por palabras (sólo si ≥ 0,6). Nunca
  * repite un stream: el primero que lo toma se lo queda.
  */
-export async function autoMapFlussonicChannels({ serverId = null, dryRun = true, overwrite = false, minScore = 0.6 } = {}) {
-  const listed = await listFlussonicStreams({ serverId });
-  if (!listed.ok) return { ok: false, error: listed.error, mapped: [], unmatched: [] };
-
-  const pool = listed.streams.filter((s) => s.name);
-  const taken = new Map(); // stream -> catv_ch
+export function computeChannelStreamMap(pool = [], slots = [], { overwrite = false, minScore = 0.6 } = {}) {
+  const taken = new Map(); // stream -> catv_ch (el primero que lo toma se lo queda)
   for (const row of db.prepare("SELECT catv_ch, flussonic_stream FROM wk2500_channels WHERE udp_engine = 'flussonic'").all()) {
     const nm = String(row.flussonic_stream || '').trim();
     if (nm && pool.some((s) => s.name === nm)) taken.set(nm, Number(row.catv_ch));
   }
-
-  const slots = db
-    .prepare(
-      `SELECT w.catv_ch, w.custom_name, w.stream_id, w.flussonic_stream, w.udp_engine, w.enabled,
-              s.name AS stream_name, s.flussonic_stream_name AS mapped_flussonic_name
-         FROM wk2500_channels w
-         LEFT JOIN streams s ON s.id = w.stream_id
-        WHERE w.stream_id IS NOT NULL OR w.custom_source_url <> ''
-        ORDER BY w.catv_ch ASC`
-    )
-    .all();
 
   const mapped = [];
   const unmatched = [];
@@ -509,6 +536,27 @@ export async function autoMapFlussonicChannels({ serverId = null, dryRun = true,
     });
     if (current !== best.stream.name) updates.push({ catv_ch: slot.catv_ch, stream: best.stream.name });
   }
+
+  return { mapped, unmatched, updates, taken };
+}
+
+export async function autoMapFlussonicChannels({ serverId = null, dryRun = true, overwrite = false, minScore = 0.6 } = {}) {
+  const listed = await listFlussonicStreams({ serverId });
+  if (!listed.ok) return { ok: false, error: listed.error, mapped: [], unmatched: [] };
+
+  const pool = listed.streams.filter((s) => s.name);
+  const slots = db
+    .prepare(
+      `SELECT w.catv_ch, w.custom_name, w.stream_id, w.flussonic_stream, w.udp_engine, w.enabled,
+              s.name AS stream_name, s.flussonic_stream_name AS mapped_flussonic_name
+         FROM wk2500_channels w
+         LEFT JOIN streams s ON s.id = w.stream_id
+        WHERE w.stream_id IS NOT NULL OR w.custom_source_url <> ''
+        ORDER BY w.catv_ch ASC`
+    )
+    .all();
+
+  const { mapped, unmatched, updates } = computeChannelStreamMap(pool, slots, { overwrite, minScore });
 
   if (!dryRun) {
     const stmt = db.prepare('UPDATE wk2500_channels SET flussonic_stream = ?, updated_at = datetime(\'now\') WHERE catv_ch = ?');
@@ -595,5 +643,507 @@ export async function flussonicControlSnapshot({ serverId = null, refresh = true
     channels,
     counts,
     ready: listed.ok && channels.length > 0 && channels.every((c) => c.verdict === 'ok')
+  };
+}
+
+// ================== PUSH UDP DE FLUSSONIC (v2.6.34) ========================
+// Lo mismo que se hace a mano en «Push live video to certain URLs» de
+// Flussonic, pero desde el panel y con la lista de canales de TVLister:
+//   stream ya existente en Flussonic → se le pone/quita la salida UDP del canal.
+// No cambia el motor de TVLister salvo que se pida (takeOver), y nunca toca
+// las salidas que no son UDP (rtmp/srt/http) del usuario.
+
+const PUSH_IFACE_KEY = 'catv_push_interface';
+
+export function getPushInterface() {
+  try {
+    return String(db.prepare('SELECT value FROM settings WHERE key = ?').get(PUSH_IFACE_KEY)?.value || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+export function setPushInterface(value) {
+  const v = String(value || '').trim();
+  try {
+    db.prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    ).run(PUSH_IFACE_KEY, v);
+  } catch {
+    /* preferencia, no crítica */
+  }
+  return v;
+}
+
+export function isUdpPush(url = '') {
+  return /^(?:udp|rtp):\/\//i.test(String(url).trim());
+}
+
+/**
+ * udp://[interfaz@]host:puerto[?...]  →  piezas.
+ * La interfaz delante (`ens37@239.1.1.2:1002`) es la forma que usa Flussonic
+ * en su pantalla de push; se devuelve tal cual, sin reinterpretarla.
+ */
+export function parsePushUrl(raw = '') {
+  const url = String(raw || '').trim();
+  const m = /^(udp|rtp):\/\/(.+)$/i.exec(url);
+  if (!m) return null;
+  let rest = m[2];
+  const q = rest.indexOf('?');
+  const params = q >= 0 ? rest.slice(q + 1) : '';
+  rest = q >= 0 ? rest.slice(0, q) : rest;
+  const slash = rest.indexOf('/');
+  if (slash >= 0) rest = rest.slice(0, slash);
+  const at = rest.lastIndexOf('@');
+  const iface = at >= 0 ? rest.slice(0, at) : '';
+  const hostPort = at >= 0 ? rest.slice(at + 1) : rest;
+  const hp = /^\[([0-9a-fA-F:]+)\]:(\d{1,5})$/.exec(hostPort) || /^([^:]+):(\d{1,5})$/.exec(hostPort);
+  if (!hp) return null;
+  const port = Number(hp[2]);
+  if (!port || port > 65535) return null;
+  return {
+    proto: m[1].toLowerCase(),
+    iface,
+    host: hp[1],
+    port,
+    params,
+    multicast: /^2(2[4-9]|3\d)\./.test(hp[1]) || /^ff/i.test(hp[1])
+  };
+}
+
+export function formatPushUrl({ proto = 'udp', iface = '', host = '', port = 0, params = '' } = {}) {
+  if (!host || !port) return '';
+  const pre = iface ? `${iface}@` : '';
+  return `${proto}://${pre}${host}:${port}${params ? `?${params}` : ''}`;
+}
+
+/** Añade la interfaz de salida (ens37@) si la URL no la trae. */
+export function withPushInterface(url = '', iface = '') {
+  const parsed = parsePushUrl(url);
+  if (!parsed || parsed.iface || !iface) return String(url || '').trim();
+  return formatPushUrl({ ...parsed, iface });
+}
+
+/** URL de push del canal: udp://[interfaz@]IP:PUERTO, tal cual el destino. */
+export function buildPushUrlFromChannel(slot = {}, iface = '') {
+  const host = String(slot.udp_host || '').trim();
+  const port = Number(slot.udp_port) || 0;
+  if (!host || !port) return '';
+  return formatPushUrl({ proto: Number(slot.rtp) === 1 ? 'rtp' : 'udp', iface, host, port });
+}
+
+function pushStatusFor(stream, url) {
+  const key = outputTargetKey(url);
+  if (!key) return { state: '', running: false, bytes: 0, mb: 0 };
+  const hit = (stream.push_stats || []).find((p) => outputTargetKey(p.url) === key);
+  if (hit) {
+    const state = String(hit.state || '').toLowerCase();
+    const running = /run|active|play|connect/.test(state) || hit.bytes > 0;
+    return { state: hit.state || (running ? 'running' : ''), running, bytes: hit.bytes || 0, mb: Number(((hit.bytes || 0) / 1048576).toFixed(1)) };
+  }
+  const det = (stream.output_details || []).find((o) => outputTargetKey(o.url) === key);
+  if (det) {
+    const running = Boolean(det.state && /run|active|play/.test(String(det.state).toLowerCase()));
+    return { state: det.state || '', running, bytes: det.bytes || 0, mb: Number(((det.bytes || 0) / 1048576).toFixed(1)) };
+  }
+  return { state: '', running: false, bytes: 0, mb: 0 };
+}
+
+function channelSlotsForPush() {
+  return db
+    .prepare(
+      `SELECT w.catv_ch, w.custom_name, w.udp_host, w.udp_port, w.ttl, w.pkt_size, w.rtp, w.local_interface_ip,
+              w.flussonic_stream, w.flussonic_output_url, w.flussonic_server_id, w.udp_engine, w.enabled,
+              w.stream_id, w.custom_source_url,
+              s.name AS stream_name, s.flussonic_stream_name AS mapped_flussonic_name
+         FROM wk2500_channels w
+         LEFT JOIN streams s ON s.id = w.stream_id
+        WHERE w.stream_id IS NOT NULL OR w.custom_source_url <> ''
+        ORDER BY w.catv_ch ASC`
+    )
+    .all();
+}
+
+/**
+ * Foto para la tarjeta: todos los streams de Flussonic con su push UDP actual,
+ * su estado y el canal de la lista al que corresponden.
+ */
+export async function flussonicPushSnapshot({ serverId = null, refresh = true } = {}) {
+  const srv = getFlussonicServer(serverId);
+  const iface = getPushInterface();
+  if (!srv) {
+    return {
+      ok: true,
+      server: null,
+      flussonic_reachable: false,
+      flussonic_error: 'No hay ningún servidor Flussonic dado de alta.',
+      iface,
+      streams: [],
+      total: 0,
+      with_push: 0,
+      channels_sin_stream: []
+    };
+  }
+
+  let listed = { ok: true, streams: [], server: null, error: '' };
+  if (refresh) listed = await listFlussonicStreams({ serverId });
+  const pool = (listed.streams || []).filter((s) => s.name);
+  const slots = channelSlotsForPush();
+  const { mapped } = computeChannelStreamMap(pool, slots, {});
+  const byCh = new Map(mapped.map((m) => [Number(m.catv_ch), m]));
+  const channelByStream = new Map();
+  const channelsSinStream = [];
+  for (const slot of slots) {
+    const m = byCh.get(Number(slot.catv_ch));
+    if (!m) {
+      channelsSinStream.push({
+        catv_ch: Number(slot.catv_ch),
+        name: slot.custom_name || slot.stream_name || `CH ${slot.catv_ch}`,
+        dest: buildPushUrlFromChannel(slot, iface)
+      });
+      continue;
+    }
+    channelByStream.set(m.stream, {
+      catv_ch: Number(slot.catv_ch),
+      name: slot.custom_name || slot.stream_name || `CH ${slot.catv_ch}`,
+      dest: buildPushUrlFromChannel(slot, iface),
+      host: slot.udp_host,
+      port: Number(slot.udp_port) || 0,
+      engine: slot.udp_engine || 'local',
+      enabled: Boolean(slot.enabled),
+      method: m.method,
+      flussonic_output_url: slot.flussonic_output_url || ''
+    });
+  }
+
+  const streams = pool.map((s) => {
+    const channel = channelByStream.get(s.name) || null;
+    const udpUrls = (s.outputs || []).filter(isUdpPush);
+    const suggested = channel?.dest || '';
+    const primary =
+      (suggested && udpUrls.find((u) => outputTargetKey(u) === outputTargetKey(suggested))) || udpUrls[0] || '';
+    const rt = primary ? pushStatusFor(s, primary) : { state: '', running: false, bytes: 0, mb: 0 };
+    return {
+      name: s.name,
+      title: s.title,
+      alive: s.alive,
+      bitrate_kbps: s.bitrate_kbps,
+      clients: s.clients,
+      udp_outputs: udpUrls,
+      other_outputs: (s.outputs || []).filter((u) => !isUdpPush(u)),
+      push: primary ? { url: primary, ...rt } : null,
+      channel,
+      suggested_url: suggested,
+      in_sync: Boolean(primary && suggested && outputTargetKey(primary) === outputTargetKey(suggested))
+    };
+  });
+
+  return {
+    ok: true,
+    server: listed.server || { id: srv.id, name: srv.name, base_url: srv.base_url },
+    flussonic_reachable: listed.ok,
+    flussonic_error: listed.ok ? '' : listed.error || '',
+    iface,
+    streams,
+    total: streams.length,
+    with_push: streams.filter((s) => s.push).length,
+    in_sync: streams.filter((s) => s.in_sync).length,
+    channels_sin_stream: channelsSinStream
+  };
+}
+
+/**
+ * Pone (o quita) la salida UDP de UN stream.
+ *   replaceUdp=true  → deja una sola salida UDP, la indicada (la del canal).
+ *   replaceUdp=false → sólo añade/actualiza la del mismo destino; las demás UDP
+ *                      del usuario se conservan.
+ * Las salidas que no son UDP nunca se tocan.
+ */
+export async function applyStreamPush({
+  serverId = null,
+  streamName,
+  url = '',
+  iface = null,
+  remove = false,
+  replaceUdp = false,
+  removeAllUdp = false
+} = {}) {
+  // iface=null → la interfaz guardada; iface='' → no añadir ninguna.
+  const outIface = iface === null || iface === undefined ? getPushInterface() : String(iface);
+  const srv = getFlussonicServer(serverId);
+  if (!srv) return { ok: false, error: 'No hay ningún servidor Flussonic dado de alta.' };
+  const name = String(streamName || '').trim();
+  if (!name) return { ok: false, error: 'Falta el nombre del stream de Flussonic.' };
+
+  const got = await getStreamConfig(srv, name);
+  if (got.error) return { ok: false, error: got.error, stream: name };
+
+  const existing = normalizeOutputs(got.config.outputs);
+  const wanted = String(url || '').trim();
+  if (!remove && !wanted) return { ok: false, error: 'Falta la URL de salida UDP.', stream: name };
+  if (!remove && !parsePushUrl(withPushInterface(wanted, outIface))) {
+    return { ok: false, error: `La salida no es una URL UDP válida: ${wanted}`, stream: name };
+  }
+  const target = withPushInterface(remove ? url : wanted, outIface);
+  const key = outputTargetKey(target);
+
+  let outputs;
+  if (remove) {
+    const isMine = (o) => isUdpPush(o.url) && (removeAllUdp || !key || outputTargetKey(o.url) === key);
+    outputs = existing.filter((o) => !isMine(o));
+  } else {
+    const sameIdx = existing.findIndex((o) => isUdpPush(o.url) && outputTargetKey(o.url) === key);
+    if (replaceUdp) {
+      const others = existing.filter((o) => !isUdpPush(o.url));
+      outputs = [...others, sameIdx >= 0 ? { ...existing[sameIdx], url: target } : { url: target }];
+    } else if (sameIdx >= 0) {
+      outputs = existing.map((o, i) => (i === sameIdx ? { ...o, url: target } : o));
+    } else {
+      outputs = [...existing, { url: target }];
+    }
+  }
+
+  const before = existing.map((o) => o.url);
+  const after = outputs.map((o) => o.url);
+  if (before.length === after.length && before.every((u, i) => u === after[i])) {
+    return { ok: true, already: true, action: 'sin cambios', stream: name, url: target, outputs: after, removed: 0 };
+  }
+
+  const written = await putOutputs(srv, name, outputs, got.config);
+  if (!written.ok) return { ok: false, error: written.error, stream: name };
+  return {
+    ok: true,
+    already: false,
+    action: remove ? 'quitada' : 'puesta',
+    stream: name,
+    url: remove ? '' : target,
+    outputs: after,
+    removed: before.length - after.length,
+    method: written.method
+  };
+}
+
+/** Plan (sin escribir) de las salidas UDP de los canales de un rango. */
+export async function planChannelPushes({ serverId = null, chStart = 2, chEnd = 125, iface = '' } = {}) {
+  const listed = await listFlussonicStreams({ serverId });
+  if (!listed.ok) return { ok: false, error: listed.error, plan: [], sin_stream: [] };
+  const pool = (listed.streams || []).filter((s) => s.name);
+  const byName = new Map(pool.map((s) => [s.name, s]));
+  const from = Math.max(2, Number(chStart) || 2);
+  const to = Math.min(125, Number(chEnd) || 125);
+  const slots = channelSlotsForPush().filter((s) => Number(s.catv_ch) >= from && Number(s.catv_ch) <= to);
+  const { mapped, unmatched } = computeChannelStreamMap(pool, slots, {});
+  const used = new Set();
+
+  const plan = [];
+  for (const m of mapped) {
+    const slot = slots.find((s) => Number(s.catv_ch) === Number(m.catv_ch));
+    if (!slot) continue;
+    if (used.has(m.stream)) continue;
+    used.add(m.stream);
+    const url = buildPushUrlFromChannel(slot, iface);
+    const stream = byName.get(m.stream);
+    const udpUrls = (stream?.outputs || []).filter(isUdpPush);
+    const current = url ? udpUrls.find((u) => outputTargetKey(u) === outputTargetKey(url)) || udpUrls[0] || '' : '';
+    plan.push({
+      catv_ch: Number(slot.catv_ch),
+      name: slot.custom_name || slot.stream_name || `CH ${slot.catv_ch}`,
+      stream: m.stream,
+      method: m.method,
+      url,
+      current_url: current,
+      ok: Boolean(url),
+      error: url ? '' : 'El canal no tiene IP/puerto de destino UDP',
+      engine: slot.udp_engine || 'local'
+    });
+  }
+
+  const sinStream = unmatched.map((u) => ({
+    catv_ch: u.catv_ch,
+    name: u.name,
+    reason: u.reason || 'sin stream de Flussonic reconocido',
+    suggestions: u.suggestions || []
+  }));
+
+  return {
+    ok: true,
+    server: listed.server,
+    range: { from, to },
+    iface,
+    plan,
+    sin_stream: sinStream,
+    listos: plan.filter((p) => p.ok).length,
+    con_salida: plan.filter((p) => p.current_url).length,
+    available_streams: pool.length
+  };
+}
+
+async function inPool(items, size, worker) {
+  const out = [];
+  let i = 0;
+  const runners = Array.from({ length: Math.min(size, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i;
+      i += 1;
+      out[idx] = await worker(items[idx], idx);
+    }
+  });
+  await Promise.all(runners);
+  return out;
+}
+
+/**
+ * Aplica en Flussonic la salida UDP de cada canal del rango.
+ * takeOver=true deja el canal en modo Flussonic (TVLister deja de emitir).
+ */
+export async function applyChannelPushes({
+  serverId = null,
+  chStart = 2,
+  chEnd = 125,
+  iface = '',
+  remove = false,
+  dryRun = true,
+  takeOver = false
+} = {}) {
+  const planned = await planChannelPushes({ serverId, chStart, chEnd, iface: iface || getPushInterface() });
+  if (!planned.ok) return { ...planned };
+
+  const items = planned.plan.filter((p) => p.ok && p.url);
+  if (dryRun) {
+    return {
+      ok: true,
+      dryRun: true,
+      remove,
+      iface: planned.iface,
+      plan: planned.plan,
+      sin_stream: planned.sin_stream,
+      applied: 0,
+      failed: 0,
+      changed: items.filter((p) => (remove ? p.current_url : !p.current_url)).length,
+      detail: items.map((p) => ({ catv_ch: p.catv_ch, stream: p.stream, url: p.url, action: 'pendiente' })),
+      taken_over: []
+    };
+  }
+
+  const results = await inPool(items, 4, async (p) => {
+    const r = await applyStreamPush({
+      serverId,
+      streamName: p.stream,
+      url: p.url,
+      iface: planned.iface,
+      remove,
+      replaceUdp: !remove
+    });
+    if (r.ok) {
+      rememberOutputUrl(p.catv_ch, remove ? '' : r.url || p.url);
+      try {
+        db.prepare("UPDATE wk2500_channels SET flussonic_stream = ?, updated_at = datetime('now') WHERE catv_ch = ?").run(
+          p.stream,
+          p.catv_ch
+        );
+      } catch {
+        /* el mapeo ya venía del nombre; no es crítico */
+      }
+    }
+    return { catv_ch: p.catv_ch, name: p.name, stream: p.stream, url: r.url || p.url, ok: Boolean(r.ok), already: Boolean(r.already), error: r.error || '' };
+  });
+
+  const takenOver = [];
+  if (takeOver && !remove) {
+    for (const r of results) {
+      if (!r.ok) continue;
+      const slot = db.prepare('SELECT udp_engine FROM wk2500_channels WHERE catv_ch = ?').get(r.catv_ch);
+      if (!slot) continue;
+      if ((slot.udp_engine || 'local') !== 'flussonic') {
+        db.prepare("UPDATE wk2500_channels SET udp_engine = 'flussonic', updated_at = datetime('now') WHERE catv_ch = ?").run(r.catv_ch);
+        takenOver.push(r.catv_ch);
+      }
+    }
+  }
+
+  const applied = results.filter((r) => r.ok).length;
+  return {
+    ok: results.every((r) => r.ok),
+    dryRun: false,
+    remove,
+    iface: planned.iface,
+    range: planned.range,
+    plan: planned.plan,
+    sin_stream: planned.sin_stream,
+    detail: results,
+    applied,
+    failed: results.length - applied,
+    taken_over: takenOver,
+    message: remove
+      ? `${applied} de ${results.length} stream(s) sin la salida UDP del canal.`
+      : `${applied} de ${results.length} stream(s) con la salida UDP del canal${takenOver.length ? ` · ${takenOver.length} canal(es) pasados a Flussonic` : ''}.`
+  };
+}
+
+/** Aplica/quito el push de una lista concreta de streams (edición fila a fila). */
+export async function applyStreamPushItems({ serverId = null, items = [], dryRun = false, takeOver = false, iface = '' } = {}) {
+  const list = (Array.isArray(items) ? items : [])
+    .map((i) => ({
+      stream: String(i.stream || i.name || '').trim(),
+      url: String(i.url || '').trim(),
+      remove: i.remove === true
+    }))
+    .filter((i) => i.stream);
+  if (!list.length) return { ok: false, error: 'No hay streams que actualizar.', detail: [] };
+  if (dryRun) {
+    // La vista previa también valida: no se enseña como buena una URL que la
+    // API rechazaría al aplicarla.
+    const detail = list.map((i) => {
+      const url = withPushInterface(i.url, iface === null || iface === undefined ? getPushInterface() : String(iface));
+      const bad = !i.remove && (!url || !parsePushUrl(url));
+      return { ...i, url, ok: !bad, action: bad ? 'error' : 'pendiente', error: bad ? 'La salida no es una URL UDP válida' : '' };
+    });
+    const failed = detail.filter((d) => !d.ok).length;
+    return { ok: failed === 0, dryRun: true, detail, applied: 0, failed };
+  }
+
+  const channelByStream = new Map();
+  for (const slot of channelSlotsForPush()) {
+    const nm = String(slot.flussonic_stream || slot.mapped_flussonic_name || '').trim();
+    if (nm && !channelByStream.has(nm)) channelByStream.set(nm, slot);
+  }
+
+  const detail = [];
+  for (const it of list) {
+    const r = await applyStreamPush({ serverId, streamName: it.stream, url: it.url, iface, remove: it.remove });
+    const slot = channelByStream.get(it.stream);
+    if (r.ok && slot) rememberOutputUrl(slot.catv_ch, it.remove ? '' : r.url || it.url);
+    detail.push({
+      stream: it.stream,
+      url: r.url || it.url,
+      catv_ch: slot ? Number(slot.catv_ch) : null,
+      ok: Boolean(r.ok),
+      already: Boolean(r.already),
+      action: r.action || '',
+      error: r.error || ''
+    });
+  }
+
+  const takenOver = [];
+  if (takeOver) {
+    for (const d of detail) {
+      if (!d.ok || !d.catv_ch) continue;
+      const slot = db.prepare('SELECT udp_engine FROM wk2500_channels WHERE catv_ch = ?').get(d.catv_ch);
+      if (slot && (slot.udp_engine || 'local') !== 'flussonic') {
+        db.prepare("UPDATE wk2500_channels SET udp_engine = 'flussonic', updated_at = datetime('now') WHERE catv_ch = ?").run(d.catv_ch);
+        takenOver.push(d.catv_ch);
+      }
+    }
+  }
+
+  const applied = detail.filter((d) => d.ok).length;
+  return {
+    ok: detail.every((d) => d.ok),
+    dryRun: false,
+    detail,
+    applied,
+    failed: detail.length - applied,
+    taken_over: takenOver,
+    message: `${applied} de ${detail.length} stream(s) actualizados${takenOver.length ? ` · ${takenOver.length} canal(es) pasados a Flussonic` : ''}.`
   };
 }

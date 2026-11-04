@@ -2890,6 +2890,7 @@ cmd_catv() {
       if [ "${fs_action}" = "map" ] && [ "${3:-}" = "--apply" ]; then fs_apply="1"; fs_target="2-125"; fi
       if [ "${fs_action}" = "apply" ] && [ "${3:-}" = "--apply" ]; then fs_target="${4:-2-125}"; fi
       FS_ACTION="$fs_action" FS_TARGET="$fs_target" FS_APPLY="$fs_apply" \
+      FS_PUSH_ARGS="$(printf '%s\x1f' "${@:3}")" \
         "$NODE_BIN" --no-warnings --input-type=module -e '
         import { initDb, db } from "./server/db.js";
         import { autoMapFlussonicChannels, flussonicControlSnapshot } from "./server/flussonicUdp.js";
@@ -2906,6 +2907,100 @@ cmd_catv() {
           if (Number.isFinite(one) && one > 0) return { from: one, to: one };
           return { from: 2, to: 125 };
         };
+
+        if (action === "push") {
+          const pushMod = await import("./server/flussonicUdp.js");
+          // Los argumentos llegan separados por 0x1f para no romper los nombres
+          // de stream con espacios ("NACIONAL 2").
+          const argv = String(process.env.FS_PUSH_ARGS || "").split("\x1f").filter(Boolean);
+          const opt = { apply: false, remove: false, iface: "", range: "2-125", rangeGiven: false, stream: "", url: "" };
+          for (let i = 0; i < argv.length; i += 1) {
+            const a = argv[i];
+            if (a === "--apply") opt.apply = true;
+            else if (a === "--remove") opt.remove = true;
+            else if (a === "--iface") opt.iface = argv[++i] || "";
+            else if (a === "--range" || a === "-r") { opt.range = argv[++i] || "2-125"; opt.rangeGiven = true; }
+            else if (a === "--stream") opt.stream = argv[++i] || "";
+            else if (a === "--url") opt.url = argv[++i] || "";
+            else if (/^\d+(-\d+)?$/.test(a)) { opt.range = a; opt.rangeGiven = true; }
+          }
+          if (opt.iface) pushMod.setPushInterface(opt.iface);
+          const iface = pushMod.getPushInterface();
+          const rng = parseRange(opt.range);
+
+          if (opt.stream) {
+            if (!opt.url && !opt.remove) {
+              console.error("  Falta --url udp://IP:PUERTO (o --remove para quitarla).");
+              process.exit(1);
+            }
+            const r = await pushMod.applyStreamPushItems({
+              items: [{ stream: opt.stream, url: opt.url, remove: opt.remove }],
+              dryRun: !opt.apply,
+              iface: ""
+            });
+            const d = r.detail?.[0] || {};
+            console.log("============================================================");
+            console.log("  " + (opt.remove ? "Quitar" : "Poner") + " salida UDP en «" + opt.stream + "»");
+            console.log("============================================================");
+            console.log("  " + (opt.url || "(la del canal)"));
+            console.log("------------------------------------------------------------");
+            console.log("  " + (d.ok ? "[OK] " + (d.already ? "ya estaba asi" : "aplicado") : "[!!] " + (d.error || "error")));
+            if (!opt.apply) console.log("  Vista previa: escribe con --apply");
+            console.log("============================================================");
+            process.exit(d.ok ? 0 : 1);
+          }
+
+          if (opt.remove || opt.apply || opt.rangeGiven) {
+            const r = await pushMod.applyChannelPushes({
+              chStart: rng.from,
+              chEnd: rng.to,
+              iface,
+              remove: opt.remove,
+              dryRun: !opt.apply,
+              takeOver: !opt.remove
+            });
+            if (!r.ok) { console.error("  " + (r.error || "No se pudo leer Flussonic.")); process.exit(1); }
+            console.log("============================================================");
+            console.log("  " + (opt.remove ? "Quitando la salida UDP" : "Poniendo la salida UDP") + " en Flussonic (CH " + rng.from + "-" + rng.to + ")");
+            console.log("============================================================");
+            const rows = r.detail?.length ? r.detail : r.plan || [];
+            for (const x of rows.slice(0, 40)) {
+              console.log("  " + (x.ok === false ? "[!!]" : "[OK]") + " CH" + pad(x.catv_ch, 5) + pad(x.stream, 26) + (x.url || ""));
+            }
+            if (rows.length > 40) console.log("  ... y " + (rows.length - 40) + " mas");
+            console.log("------------------------------------------------------------");
+            console.log("  " + (opt.apply ? (r.message || r.applied + " aplicados") : "Vista previa: " + r.changed + " cambiarian (nada escrito)"));
+            if (r.sin_stream?.length) console.log("  " + r.sin_stream.length + " canal(es) sin stream de Flussonic reconocido");
+            if (!opt.apply) console.log("  Escribe con: tvlister-admin catv flussonic push --range " + rng.from + "-" + rng.to + " --apply");
+            console.log("============================================================");
+            process.exit(r.failed ? 1 : 0);
+          }
+
+          const snap = await pushMod.flussonicPushSnapshot({ refresh: true });
+          console.log("============================================================");
+          console.log("  Salidas UDP en Flussonic (Push live)");
+          console.log("============================================================");
+          console.log("  Flussonic: " + (snap.flussonic_reachable ? "responde (" + snap.total + " streams)" : "NO responde: " + snap.flussonic_error));
+          console.log("  Con salida UDP: " + snap.with_push + " · interfaz de salida: " + (snap.iface || "automatica"));
+          const filas = snap.streams.filter((x) => x.channel || x.push).slice(0, 60);
+          if (filas.length) {
+            console.log("");
+            console.log("  " + pad("CH", 6) + pad("STREAM", 26) + pad("SALIDA UDP", 40) + pad("ESTADO", 12) + "MB");
+            for (const x of filas) {
+              const estado = !x.push ? "sin salida" : x.in_sync ? (x.push.running ? "emitindo" : "puesta") : "otra IP/puerto";
+              console.log("  " + pad(x.channel ? "CH" + x.channel.catv_ch : "-", 6) + pad(x.name, 26) + pad(x.push?.url || x.suggested_url || "-", 40) + pad(estado, 12) + (x.push?.mb ? x.push.mb : "-"));
+            }
+            if (snap.streams.filter((x) => x.channel || x.push).length > 60) console.log("  ... y mas streams (usa --range)");
+          }
+          if (snap.channels_sin_stream?.length) console.log("  " + snap.channels_sin_stream.length + " canal(es) de la lista sin stream de Flussonic");
+          console.log("------------------------------------------------------------");
+          console.log("  Ver plan de un rango:  tvlister-admin catv flussonic push --range 2-125");
+          console.log("  Aplicarlo:             tvlister-admin catv flussonic push --range 2-125 --apply");
+          console.log("  Quitarlo:              tvlister-admin catv flussonic push --range 2-125 --remove --apply");
+          console.log("  Un stream suelto:      tvlister-admin catv flussonic push --stream NOMBRE --url udp://IP:PUERTO --apply");
+          console.log("============================================================");
+          process.exit(0);
+        }
 
         if (action === "map") {
           const r = await autoMapFlussonicChannels({ dryRun: !apply });
@@ -3003,6 +3098,8 @@ cmd_catv() {
         }
 
         console.log("  Uso: tvlister-admin catv flussonic [status|map [--apply]|apply [rango]|verify|local [rango]]");
+        console.log("       tvlister-admin catv flussonic push [--range 2-125] [--iface ens37] [--apply|--remove]");
+        console.log("       tvlister-admin catv flussonic push --stream NOMBRE --url udp://IP:PUERTO [--apply]");
       '
       ;;
 
