@@ -436,6 +436,10 @@ export class CatvUdpPacer {
 
     if (this.fixedKbps > 0) return; // muxrate fijo: manda el operador
     if (!this.autoTarget) return;
+    // Sin datos del origen no se mueve el objetivo: durante un corte el
+    // modulador debe seguir viendo EXACTAMENTE el mismo ritmo, no uno que se
+    // va cayendo poco a poco.
+    if (this.lastPayloadAtMs && now - this.lastPayloadAtMs > 4000) return;
 
     // El promedio de la ventana se suaviza antes de mover el objetivo: la
     // fuente real no es perfectamente periódica y un salto cada segundo se
