@@ -1143,8 +1143,8 @@ un paquete verificado:
 curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/install.sh | sudo bash
 
 # versión exacta (el puerto por defecto ya es el 80)
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.32/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.32
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.33/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.33
 ```
 
 La segunda forma **no depende de los adjuntos del release**: si el `.tar.gz` no está, el script baja
@@ -3029,7 +3029,52 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
-### v2.6.32: estabilizador de salida UDP (pacer) — el canal sale plano, como Astra
+### v2.6.33: los canales salen por Flussonic (controlado) y el UDP nativo vuelve a como estaba
+
+**Lo pedido:** «ahora se pega, no está fluido; necesito controlar Flussonic, ya Flussonic recibe los canales,
+sería enviarlos desde Flussonic mejor, después estabilizamos el UDP nativo».
+
+#### 1. El estabilizador pasa a ser opcional (se acabaron los tirones)
+
+El pacer de la v2.6.32 entregaba el TS a ritmo fijo. Con vídeo **VBR** (un I-frame grande llega de golpe), esos
+paquetes esperaban en la cola del pacer y el modulador veía micro-tirones: la media era correcta pero la
+fluidez no. Estabilizar bien exige **re-multiplexar** (CBR con PCR coherente), no trocear el socket.
+
+- **Por defecto ya NO se usa** (`TVLISTER_CATV_PACER=off`). La salida es exactamente la de la v2.6.31:
+  FFmpeg escribe directo a `udp://…` y el motor directo usa su empaquetador de siempre.
+- Sigue disponible y probado con `TVLISTER_CATV_PACER=on` para quien lo quiera (útil en origen CBR).
+- Además se corrigió un fallo real del pacer: si el origen llegaba desalineado (empezaba a mitad de paquete TS),
+  troceaba todo corrido. Ahora **resincroniza a 0x47**.
+
+#### 2. Control de Flussonic desde el panel
+
+| Acción | Qué hace |
+| --- | --- |
+| **Detectar canal → stream** | Lee los streams de Flussonic y empareja cada canal CATV: nombre escrito a mano → nombre exacto → nombre contenido → parecido por palabras (≥ 0,6). Nunca asigna el mismo stream a dos canales; los que no casan salen con **sugerencias** |
+| **Enviar todos por Flussonic** | Mapea lo que falte, **apaga el motor local**, pone la salida UDP por la API (`PATCH /streamer/api/v3/streams/{nombre}`) y verifica después que quedó puesta |
+| **Volver todo a TVLister** | **Quita primero** la salida en Flussonic y luego arranca el motor local: nunca dos emisores al mismo grupo |
+| Tabla por canal | stream, destino UDP, estado (**Emitiendo / Stream caído / Sin salida / Stream no existe**) y Mbps que reporta Flussonic |
+| **Verificar** | Relee Flussonic cada 15 s: si un stream se cae o pierde la salida, se ve al instante |
+
+**Sin reiniciar:** un reconciliador (`reconcileCatvEngines`, cada 4 s) compara el motor que corre con el que dice
+la base; si cambió (panel, API o terminal) recrea el worker del canal.
+
+**API:** `GET /api/wk2500/flussonic-control` · `POST …/auto-map` · `POST …/switch` (`{engine, all|ch_start/ch_end|catv_ch}`).
+**Terminal:**
+
+```bash
+tvlister-admin catv flussonic status     # quién empuja el UDP y cómo está cada canal
+tvlister-admin catv flussonic map        # mapeo (vista previa) · map --apply para guardar
+tvlister-admin catv flussonic apply 2-125
+tvlister-admin catv flussonic local 2-125
+```
+
+**Pruebas:** `node scripts/test_catv_flussonic_control.mjs` — **25 OK** contra el panel real y un Flussonic
+simulado (mapeo exacto/por parecido, salida aplicada con el host:puerto exacto, verificación, **0 datagramas**
+locales mientras está delegado, vuelta a local quitando la salida). `node scripts/test_catv_flussonic_ui.mjs` —
+**23 OK** sobre la pantalla real.
+
+### v2.6.32: estabilizador de salida UDP (pacer) — el canal sale plano, como Astra (ahora opcional)
 
 **Síntoma:** en *UDP / CATV*, hacia los moduladores analógicos, se ven **ráfagas de 33 Mbps** en un canal de
 2 Mbps. La media es correcta, pero el modulador mide la entrada por ventanas y ve el pico.

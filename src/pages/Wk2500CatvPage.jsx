@@ -113,10 +113,79 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     form: { engine: 'local', from: 2, to: 125, stream: '' }
   });
 
+  // Control de Flussonic: quién empuja el UDP de verdad, por canal.
+  const [fsControl, setFsControl] = useState({
+    loading: false,
+    busy: '',
+    snapshot: null,
+    mapping: null,
+    message: '',
+    range: { from: 2, to: 125 }
+  });
+
   const showToast = (msg) => {
     setErrorNotice('');
     setNotice(msg);
     setTimeout(() => setNotice(''), 9000);
+  };
+
+  const loadFlussonicControl = async (silent = false) => {
+    if (!silent) setFsControl((prev) => ({ ...prev, loading: true }));
+    try {
+      const snap = await apiFetch('/api/wk2500/flussonic-control');
+      setFsControl((prev) => ({ ...prev, loading: false, snapshot: snap }));
+    } catch (err) {
+      setFsControl((prev) => ({ ...prev, loading: false, message: err.message }));
+    }
+  };
+
+  const handleAutoMap = async (apply = false) => {
+    setFsControl((prev) => ({ ...prev, busy: apply ? 'mapping-apply' : 'mapping' }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-control/auto-map', {
+        method: 'POST',
+        body: JSON.stringify({ dryRun: !apply })
+      });
+      setFsControl((prev) => ({
+        ...prev,
+        busy: '',
+        mapping: r,
+        message: apply
+          ? `✅ Mapeo aplicado: ${r.written} canal(es) saben ya qué stream de Flussonic los empuja.` +
+            (r.unmatched?.length ? ` · ${r.unmatched.length} sin coincidencia.` : '')
+          : `Vista previa: ${r.mapped?.length || 0} de ${r.available_streams || 0} streams de Flussonic ` +
+            `reconocidos${r.unmatched?.length ? ` · ${r.unmatched.length} canal(es) sin coincidencia` : ''}.`
+      }));
+      await loadFlussonicControl(true);
+    } catch (err) {
+      setFsControl((prev) => ({ ...prev, busy: '', message: err.message }));
+    }
+  };
+
+  const handleFlussonicSwitch = async (engine, scope = {}) => {
+    setFsControl((prev) => ({ ...prev, busy: `switch-${engine}` }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-control/switch', {
+        method: 'POST',
+        body: JSON.stringify({ engine, ...scope })
+      });
+      const fallos = (r.detail || []).filter((d) => !d.ok);
+      setFsControl((prev) => ({
+        ...prev,
+        busy: '',
+        snapshot: r.snapshot || prev.snapshot,
+        message:
+          (r.message || 'Hecho.') +
+          (fallos.length ? ' · ' + fallos.slice(0, 3).map((f) => `CH${f.catv_ch}: ${f.error}`).join(' | ') : '') +
+          (engine === 'flussonic' && r.autoMap?.unmatched
+            ? ` · ${r.autoMap.unmatched} canal(es) sin stream de Flussonic`
+            : '')
+      }));
+      await loadPlan(true);
+      await loadUdpEngine();
+    } catch (err) {
+      setFsControl((prev) => ({ ...prev, busy: '', message: err.message }));
+    }
   };
 
   const loadUdpEngine = async () => {
@@ -246,6 +315,14 @@ export default function Wk2500CatvPage({ setActiveTab }) {
   useEffect(() => {
     loadPlan(false);
     const t = setInterval(() => loadPlan(true), 4000);
+    return () => clearInterval(t);
+  }, []);
+
+  // La foto de Flussonic se refresca cada 15 s (una petición a su API, no una
+  // por canal): así se ve al instante si un stream se cae o pierde la salida.
+  useEffect(() => {
+    loadFlussonicControl(true);
+    const t = setInterval(() => loadFlussonicControl(true), 15000);
     return () => clearInterval(t);
   }, []);
 
@@ -1412,12 +1489,237 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         )}
       </div>
 
+      {/* ── Control de Flussonic: quién empuja el UDP a los moduladores ── */}
+      <div className="rounded-2xl bg-[#0e1526] border border-indigo-500/35 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
+            <Cpu className="w-4 h-4 text-indigo-400" />
+            Flussonic: enviar los canales desde ahí
+          </h2>
+          <div className="flex flex-wrap items-center gap-2 text-[10px]">
+            {fsControl.snapshot ? (
+              fsControl.snapshot.flussonic_reachable ? (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-bold">
+                  Flussonic responde · {fsControl.snapshot.streams_available} streams
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 font-bold" title={fsControl.snapshot.flussonic_error}>
+                  Flussonic no responde
+                </span>
+              )
+            ) : null}
+            <span className="px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 font-bold">
+              Flussonic: {fsControl.snapshot?.flussonic_channels ?? 0}
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-bold">
+              TVLister: {fsControl.snapshot?.local_channels ?? 0}
+            </span>
+          </div>
+        </div>
+
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Flussonic ya recibe los canales: aquí se le pide que sea <strong className="text-slate-200">él</strong> quien
+          empuje el MPEG-TS a la IP/puerto de cada modulador. TVLister deja de abrir sockets para esos canales, pone la
+          salida por la API y comprueba que quedó puesta. Al volver a TVLister se quita primero la salida de Flussonic,
+          para que nunca haya dos emisores al mismo destino.
+        </p>
+
+        {fsControl.snapshot && !fsControl.snapshot.server && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+            No hay ningún servidor Flussonic dado de alta. Añádelo en «Flussonic 23.12» para poder enviar desde ahí.
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => handleAutoMap(false)}
+            disabled={Boolean(fsControl.busy)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[11px] font-bold disabled:opacity-40"
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            {fsControl.busy === 'mapping' ? 'Buscando…' : 'Detectar canal → stream'}
+          </button>
+          {fsControl.mapping && fsControl.mapping.dryRun ? (
+            <button
+              type="button"
+              onClick={() => handleAutoMap(true)}
+              disabled={Boolean(fsControl.busy) || !fsControl.mapping.candidates}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold disabled:opacity-40"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              {fsControl.busy === 'mapping-apply' ? 'Guardando…' : `Guardar mapeo (${fsControl.mapping.candidates || 0})`}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => handleFlussonicSwitch('flussonic', { all: true })}
+            disabled={Boolean(fsControl.busy) || !fsControl.snapshot?.flussonic_reachable}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold disabled:opacity-40"
+          >
+            <Tv className="w-3.5 h-3.5" />
+            {fsControl.busy === 'switch-flussonic' ? 'Enviando…' : 'Enviar todos por Flussonic'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleFlussonicSwitch('local', { all: true })}
+            disabled={Boolean(fsControl.busy) || !fsControl.snapshot?.flussonic_channels}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700/70 hover:bg-emerald-600 border border-emerald-500/40 text-white text-[11px] font-bold disabled:opacity-40"
+          >
+            <ArrowLeftRight className="w-3.5 h-3.5" />
+            {fsControl.busy === 'switch-local' ? 'Volviendo…' : 'Volver todo a TVLister'}
+          </button>
+          <button
+            type="button"
+            onClick={() => loadFlussonicControl(false)}
+            disabled={Boolean(fsControl.busy || fsControl.loading)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[11px] font-bold disabled:opacity-40"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${fsControl.loading ? 'animate-spin' : ''}`} /> Verificar
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 items-end text-xs">
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Desde CH</label>
+            <input
+              type="number"
+              min={1}
+              max={125}
+              value={fsControl.range.from}
+              onChange={(e) => setFsControl((prev) => ({ ...prev, range: { ...prev.range, from: Number(e.target.value) } }))}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-cyan-300 font-bold"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">Hasta CH</label>
+            <input
+              type="number"
+              min={1}
+              max={125}
+              value={fsControl.range.to}
+              onChange={(e) => setFsControl((prev) => ({ ...prev, range: { ...prev.range, to: Number(e.target.value) } }))}
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#090e1a] border border-slate-700 text-cyan-300 font-bold"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              handleFlussonicSwitch('flussonic', { ch_start: fsControl.range.from, ch_end: fsControl.range.to })
+            }
+            disabled={Boolean(fsControl.busy) || !fsControl.snapshot?.flussonic_reachable}
+            className="px-3 py-1.5 rounded-xl bg-indigo-600/70 hover:bg-indigo-500 border border-indigo-400/40 text-white font-bold disabled:opacity-40"
+          >
+            Enviar rango
+          </button>
+          <button
+            type="button"
+            onClick={() => handleFlussonicSwitch('local', { ch_start: fsControl.range.from, ch_end: fsControl.range.to })}
+            disabled={Boolean(fsControl.busy) || !fsControl.snapshot?.flussonic_channels}
+            className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold disabled:opacity-40"
+          >
+            Volver rango
+          </button>
+          <div className="text-[10px] text-slate-500 leading-tight">
+            El rango usa sólo canales que tengan señal asignada.
+          </div>
+        </div>
+
+        {fsControl.message && (
+          <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-[11px] text-indigo-200">
+            {fsControl.message}
+          </div>
+        )}
+
+        {fsControl.snapshot?.channels?.length ? (
+          <div className="overflow-x-auto rounded-xl border border-slate-800">
+            <table className="w-full text-[11px]">
+              <thead className="bg-[#0a1120] text-slate-400 uppercase tracking-wide text-[10px]">
+                <tr>
+                  <th className="px-2 py-1.5 text-left">CH</th>
+                  <th className="px-2 py-1.5 text-left">Canal</th>
+                  <th className="px-2 py-1.5 text-left">Stream en Flussonic</th>
+                  <th className="px-2 py-1.5 text-left">Destino UDP</th>
+                  <th className="px-2 py-1.5 text-center">Estado</th>
+                  <th className="px-2 py-1.5 text-right">Mbps</th>
+                  <th className="px-2 py-1.5 text-right"> </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/70">
+                {fsControl.snapshot.channels.map((c) => {
+                  const malo = c.verdict !== 'ok';
+                  const etiqueta =
+                    c.verdict === 'ok'
+                      ? 'Emitiendo'
+                      : c.verdict === 'stream_caido'
+                        ? 'Stream caído'
+                        : c.verdict === 'sin_salida'
+                          ? 'Sin salida'
+                          : c.verdict === 'stream_inexistente'
+                            ? 'Stream no existe'
+                            : c.verdict === 'sin_stream'
+                              ? 'Sin stream'
+                              : 'Sin verificar';
+                  return (
+                    <tr key={c.catv_ch} className="hover:bg-white/[0.02]">
+                      <td className="px-2 py-1.5 font-mono text-cyan-300 font-bold">{c.catv_ch}</td>
+                      <td className="px-2 py-1.5 text-slate-200">{c.name}</td>
+                      <td className="px-2 py-1.5 text-indigo-300 font-mono">{c.stream || '—'}</td>
+                      <td className="px-2 py-1.5 text-slate-400 font-mono">{c.dest}</td>
+                      <td className="px-2 py-1.5 text-center">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            malo ? 'bg-amber-500/15 text-amber-300' : 'bg-emerald-500/15 text-emerald-300'
+                          }`}
+                          title={c.outputs?.length ? c.outputs.join(' · ') : 'Sin salidas en Flussonic'}
+                        >
+                          {malo ? <AlertTriangle className="w-3 h-3" /> : <CheckCircle2 className="w-3 h-3" />}
+                          {etiqueta}
+                        </span>
+                      </td>
+                      <td className="px-2 py-1.5 text-right text-slate-300">
+                        {c.bitrate_kbps ? (c.bitrate_kbps / 1000).toFixed(1) : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right">
+                        <button
+                          type="button"
+                          onClick={() => handleFlussonicSwitch('local', { catv_ch: c.catv_ch })}
+                          disabled={Boolean(fsControl.busy)}
+                          className="px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 text-[10px] font-bold disabled:opacity-40"
+                        >
+                          Volver a local
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        {fsControl.mapping?.unmatched?.length ? (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200 space-y-1">
+            <div className="font-bold">
+              {fsControl.mapping.unmatched.length} canal(es) sin stream de Flussonic reconocido
+            </div>
+            {fsControl.mapping.unmatched.slice(0, 6).map((u) => (
+              <div key={`u${u.catv_ch}`} className="text-amber-200/80">
+                CH{u.catv_ch} · {u.name}
+                {u.reason ? ` · ${u.reason}` : ''}
+                {u.suggestions?.length ? ` · quizá: ${u.suggestions.map((sg) => sg.name).join(' / ')}` : ''}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
       {/* ── Motor UDP: TVLister o Flussonic 23.12 ─────────────────────── */}
       <div className="rounded-2xl bg-[#0e1526] border border-cyan-500/35 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-wide">
             <Network className="w-4 h-4 text-cyan-400" />
-            Motor UDP: quién empuja el TS a los moduladores
+            Motor UDP: ajuste manual por rango
           </h2>
           <div className="flex items-center gap-2 text-[10px]">
             <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-bold">

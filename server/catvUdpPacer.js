@@ -235,9 +235,29 @@ export class CatvUdpPacer {
    * Encola MPEG-TS. Devuelve `false` cuando la cola pasó el máximo: quien
    * alimenta debe esperar `drain()` en vez de seguir metiendo datos.
    */
+  /**
+   * El MPEG-TS de un origen HTTP/UDP puede empezar a mitad de paquete. Si se
+   * trocea sin resincronizar, TODOS los datagramas van desalineados y el
+   * modulador se queda con la imagen congelada a ratos. Aquí se busca el
+   * límite 0x47 ... (+188) 0x47 y se descarta la basura de delante.
+   */
+  _align(data) {
+    if (!data.length || data[0] === 0x47) return data;
+    let pos = -1;
+    const limit = Math.min(data.length - TS_PACKET, 65536);
+    for (let i = 1; i < limit; i += 1) {
+      if (data[i] === 0x47 && (i + TS_PACKET >= data.length || data[i + TS_PACKET] === 0x47)) {
+        pos = i;
+        break;
+      }
+    }
+    this.resyncs = (this.resyncs || 0) + 1;
+    return pos === -1 ? Buffer.alloc(0) : data.subarray(pos);
+  }
+
   push(chunk) {
     if (!chunk || chunk.length === 0 || this.stopped) return true;
-    const data = this.rest.length ? Buffer.concat([this.rest, chunk]) : chunk;
+    const data = this._align(this.rest.length ? Buffer.concat([this.rest, chunk]) : chunk);
     const usable = data.length - (data.length % TS_PACKET);
     if (usable > 0) {
       // Copia: quien alimenta puede reutilizar su memoria (chunks del socket).
@@ -480,6 +500,7 @@ export class CatvUdpPacer {
       settled: this.settled,
       rtp: this.rtp,
       pkt_size: this.pktSize,
+      resyncs: this.resyncs || 0,
       socket_errors: this.socketErrors,
       last_error: this.lastError
     };
@@ -513,9 +534,13 @@ export class CatvUdpPacer {
  * efectivo (tamaño de datagrama / RTP). Devuelve `null` si el estabilizador
  * está desactivado por entorno (TVLISTER_CATV_PACER=off).
  */
+export function pacerEnabled() {
+  const v = String(process.env.TVLISTER_CATV_PACER ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
 export function createCatvPacer({ slotRow = {}, transport = {}, bindIp = '', onSend = null } = {}) {
-  const off = String(process.env.TVLISTER_CATV_PACER ?? '').trim().toLowerCase();
-  if (off === '0' || off === 'off' || off === 'false' || off === 'no') return null;
+  if (!pacerEnabled()) return null;
   const targetKbps = Math.max(0, Number(slotRow.muxrate_kbps) || 0);
   const queueMs = Number(process.env.TVLISTER_CATV_PACER_QUEUE_MS) || 4000;
   const pacer = new CatvUdpPacer({

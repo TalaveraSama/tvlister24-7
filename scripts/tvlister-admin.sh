@@ -2878,6 +2878,134 @@ cmd_catv() {
       esac
       ;;
 
+    flussonic | fs)
+      # Control de Flussonic como emisor del UDP hacia los moduladores.
+      # Uso: tvlister-admin catv flussonic [status|map|apply [rango]|verify|local [rango]]
+      #   status          quién empuja cada canal y si Flussonic lo tiene puesto
+      #   map [--apply]   empareja canal CATV -> stream de Flussonic
+      #   apply [rango]   pone esos canales a salir por Flussonic (por defecto: 2-125)
+      #   verify          vuelve a leer de Flussonic la salida de cada canal
+      #   local [rango]   vuelve a TVLister (quita antes la salida en Flussonic)
+      local fs_action="${2:-status}" fs_target="${3:-2-125}" fs_apply="0"
+      if [ "${fs_action}" = "map" ] && [ "${3:-}" = "--apply" ]; then fs_apply="1"; fs_target="2-125"; fi
+      if [ "${fs_action}" = "apply" ] && [ "${3:-}" = "--apply" ]; then fs_target="${4:-2-125}"; fi
+      FS_ACTION="$fs_action" FS_TARGET="$fs_target" FS_APPLY="$fs_apply" \
+        "$NODE_BIN" --no-warnings --input-type=module -e '
+        import { initDb, db } from "./server/db.js";
+        import { autoMapFlussonicChannels, flussonicControlSnapshot } from "./server/flussonicUdp.js";
+        initDb();
+        const action = process.env.FS_ACTION;
+        const target = String(process.env.FS_TARGET || "2-125");
+        const apply = process.env.FS_APPLY === "1";
+        const pad = (s, n) => String(s ?? "").padEnd(n);
+
+        const parseRange = (txt) => {
+          const m = /^(\d+)\s*-\s*(\d+)$/.exec(String(txt || "").trim());
+          if (m) return { from: Number(m[1]), to: Number(m[2]) };
+          const one = Number(txt);
+          if (Number.isFinite(one) && one > 0) return { from: one, to: one };
+          return { from: 2, to: 125 };
+        };
+
+        if (action === "map") {
+          const r = await autoMapFlussonicChannels({ dryRun: !apply });
+          if (!r.ok) { console.error("  " + r.error); process.exit(1); }
+          console.log("============================================================");
+          console.log("  Canales CATV -> streams de Flussonic (" + (r.available_streams || 0) + " streams)");
+          console.log("============================================================");
+          for (const m of r.mapped) {
+            console.log("  CH" + pad(m.catv_ch, 5) + pad(m.stream, 28) + pad(m.method, 18) + (m.title || ""));
+          }
+          console.log("------------------------------------------------------------");
+          console.log("  " + r.mapped.length + " emparejados · " + r.unmatched.length + " sin coincidencia" +
+            (apply ? " · " + r.written + " guardados" : " · vista previa (nada escrito)"));
+          if (r.unmatched.length) {
+            for (const u of r.unmatched.slice(0, 10)) {
+              const sug = (u.suggestions || []).map((s) => s.name).join(" / ");
+              console.log("  [!!] CH" + pad(u.catv_ch, 4) + (u.reason || "sin coincidencia") + (sug ? "  quizá: " + sug : ""));
+            }
+          }
+          if (!apply) console.log("  Escribe con: tvlister-admin catv flussonic map --apply");
+          console.log("============================================================");
+          process.exit(0);
+        }
+
+        if (action === "status" || action === "verify") {
+          const s = await flussonicControlSnapshot({ refresh: true });
+          console.log("============================================================");
+          console.log("  Quien empuja el UDP a los moduladores");
+          console.log("============================================================");
+          console.log("  Flussonic: " + (s.flussonic_reachable ? "responde (" + s.streams_available + " streams)" : "NO responde: " + s.flussonic_error));
+          console.log("  Canales por Flussonic: " + s.flussonic_channels + " · por TVLister: " + s.local_channels);
+          if (s.channels.length) {
+            console.log("");
+            console.log("  " + pad("CH", 6) + pad("STREAM", 26) + pad("DESTINO UDP", 34) + pad("ESTADO", 18) + "Mbps");
+            for (const c of s.channels) {
+              const estado = c.verdict === "ok" ? "OK" : c.verdict;
+              const dest = String(c.dest || "").replace(/\?.*$/, "");
+              console.log("  " + pad("CH" + c.catv_ch, 6) + pad(c.stream || "-", 26) + pad(dest, 34) + pad(estado, 18) +
+                (c.bitrate_kbps ? (c.bitrate_kbps / 1000).toFixed(1) : "-"));
+            }
+          }
+          console.log("------------------------------------------------------------");
+          console.log(s.ready ? "  [OK] Todos los canales delegados estan emitiendo desde Flussonic." :
+            "  [!!] Hay canales delegados que Flussonic no esta emitiendo (mira ESTADO).");
+          console.log("============================================================");
+          process.exit(0);
+        }
+
+        if (action === "apply" || action === "local") {
+          // Se hace con los mismos módulos que usa el panel, sin depender de
+          // la contraseña: el panel reconcilia el motor en <= 4 s.
+          const range = parseRange(target);
+          const rows = db.prepare(
+            "SELECT catv_ch FROM wk2500_channels WHERE catv_ch BETWEEN ? AND ? AND (stream_id IS NOT NULL OR custom_source_url <> \x27\x27) ORDER BY catv_ch"
+          ).all(range.from, range.to).map((r) => r.catv_ch);
+          if (!rows.length) { console.log("  No hay canales con senal en " + range.from + "-" + range.to + "."); process.exit(0); }
+          const { applyFlussonicUdp, removeFlussonicUdp } = await import("./server/flussonicUdp.js");
+          let mapInfo = null;
+          if (action === "apply") mapInfo = await autoMapFlussonicChannels({ dryRun: false });
+          const upd = db.prepare("UPDATE wk2500_channels SET udp_engine = ?, updated_at = datetime(\x27now\x27) WHERE catv_ch = ?");
+          const changed = db.prepare("SELECT catv_ch, udp_engine FROM wk2500_channels WHERE catv_ch BETWEEN ? AND ?").all(range.from, range.to);
+          const previous = new Map(changed.map((r) => [Number(r.catv_ch), String(r.udp_engine || "local")]));
+          const okList = [];
+          const badList = [];
+          for (const ch of rows) {
+            const slot = db.prepare("SELECT * FROM wk2500_channels WHERE catv_ch = ?").get(ch);
+            const name = String(slot.flussonic_stream || "").trim();
+            if (action === "apply") {
+              if (!name) { badList.push({ catv_ch: ch, error: "sin stream de Flussonic" }); continue; }
+              if (previous.get(Number(ch)) !== "flussonic") db.prepare("UPDATE wk2500_channels SET udp_engine = \x27local\x27 WHERE catv_ch = ?").run(ch);
+              const r = await applyFlussonicUdp({ serverId: slot.flussonic_server_id, streamName: name, slot });
+              if (r.ok) { upd.run("flussonic", ch); okList.push({ catv_ch: ch, stream: name }); }
+              else badList.push({ catv_ch: ch, error: r.error });
+            } else {
+              if (previous.get(Number(ch)) === "flussonic") {
+                const r = await removeFlussonicUdp({ serverId: slot.flussonic_server_id, streamName: name, slot });
+                if (!r.ok && !r.already) { badList.push({ catv_ch: ch, error: r.error }); continue; }
+              }
+              upd.run("local", ch);
+              okList.push({ catv_ch: ch, stream: name });
+            }
+          }
+          console.log("============================================================");
+          console.log("  " + (action === "apply" ? "Canales puestos a salir por Flussonic" : "Canales devueltos a TVLister"));
+          console.log("============================================================");
+          for (const x of okList) console.log("  [OK] CH" + pad(x.catv_ch, 5) + (x.stream || ""));
+          for (const x of badList) console.log("  [!!] CH" + pad(x.catv_ch, 5) + (x.error || ""));
+          console.log("------------------------------------------------------------");
+          console.log("  " + okList.length + " aplicados · " + badList.length + " con error");
+          if (mapInfo) console.log("  Mapeo: " + mapInfo.mapped.length + " canales · " + mapInfo.unmatched.length + " sin stream de Flussonic");
+          console.log("  El panel cambia el motor de esos canales en <= 4 s (no hace falta reiniciar).");
+          console.log("  Comprueba con:  tvlister-admin catv flussonic status");
+          console.log("============================================================");
+          process.exit(badList.length ? 1 : 0);
+        }
+
+        console.log("  Uso: tvlister-admin catv flussonic [status|map [--apply]|apply [rango]|verify|local [rango]]");
+      '
+      ;;
+
     steady)
       # Comprueba (y si se pide, aplica) que la salida UDP salga CONSTANTE:
       # cada canal por FFmpeg con -re, y opcionalmente con muxrate (CBR).
@@ -3038,7 +3166,7 @@ cmd_catv() {
       '
       ;;
     *)
-      echo "Uso: tvlister-admin catv [check|fill|watch|steady] [id_equipo] [--apply]"
+      echo "Uso: tvlister-admin catv [check|fill|watch|steady|flussonic] [id_equipo] [--apply]"
       echo "     tvlister-admin catv watch [--secs 5] [--ch 2,3,5] [--ip 192.168.200.8]"
       return 1
       ;;

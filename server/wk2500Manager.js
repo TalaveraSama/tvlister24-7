@@ -28,7 +28,7 @@ import {
   getFreshLocalHlsManifestPath
 } from './streamEngine.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
-import { createCatvPacer } from './catvUdpPacer.js';
+import { createCatvPacer, pacerEnabled } from './catvUdpPacer.js';
 
 export const wk2500Router = express.Router();
 
@@ -641,15 +641,17 @@ function catvPacingEnabled() {
 }
 
 /**
- * Estabilizador de salida (pacer). Es lo que convierte la entrega del origen en
- * una línea plana en la entrada del modulador: se emite al ritmo del canal y se
- * rellena con nulos, como Astra. Sin él, un segmento de 2 s entra en 30 ms y el
- * modulador lo lee como una ráfaga de decenas de Mbps.
- * Se puede apagar con TVLISTER_CATV_PACER=off (vuelve al comportamiento anterior).
+ * Estabilizador de salida (pacer). Es OPT-IN desde la v2.6.33:
+ *   TVLISTER_CATV_PACER=on   → el socket emite a ritmo constante con nulos
+ *   (por defecto)            → salida directa de FFmpeg, como hasta la v2.6.31
+ *
+ * Se dejó apagado por defecto porque el re-mux a ritmo constante introduce
+ * espera en los picos de VBR (un I-frame grande espera en la cola) y en los
+ * moduladores analógicos eso se ve como tirones. La estabilización correcta
+ * (CBR con PCR coherente) se hará sobre el muxer, no troceando el socket.
  */
 export function catvPacerEnabled() {
-  const v = String(process.env.TVLISTER_CATV_PACER ?? '').trim().toLowerCase();
-  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+  return pacerEnabled();
 }
 
 export function buildFfmpegUdpOutputArgs(slotRow, inputSpec, opts = {}) {
@@ -937,6 +939,7 @@ export function startWk2500ChannelWorker(catvCh) {
       stopped: false,
       status: 'delegated',
       engine: 'flussonic_api',
+      engineKind: 'flussonic',
       upstream_proto: 'flussonic',
       flussonicStream: slotRow.flussonic_stream || '',
       startedAtMs: Date.now(),
@@ -995,6 +998,7 @@ export function startWk2500ChannelWorker(catvCh) {
     stopped: false,
     status: 'connecting',
     engine: 'direct_dgram',
+    engineKind: 'local',
     upstream_proto: classifyUpstreamProto(up.rawPrimary),
     startedAtMs: Date.now(),
     bytesWindow: 0,
@@ -1526,6 +1530,59 @@ export function catvOutputPlan({ unitId = null, onlyEnabled = true } = {}) {
     });
   }
   return rows;
+}
+
+/**
+ * Vigila que el motor que corre sea el que dice la BD. Permite cambiar de
+ * TVLister a Flussonic (o al revés) desde el panel, la API o
+ * `tvlister-admin catv flussonic` sin reiniciar nada: en <= 4 s el worker del
+ * canal se recrea con el motor nuevo. Sólo actúa cuando hay discrepancia, así
+ * que no toca los canales que están bien.
+ */
+export function reconcileCatvEngines() {
+  let rows = [];
+  try {
+    rows = db
+      .prepare(
+        "SELECT catv_ch, udp_engine, enabled FROM wk2500_channels WHERE enabled = 1 AND (stream_id IS NOT NULL OR custom_source_url <> '')"
+      )
+      .all();
+  } catch {
+    return { checked: 0, restarted: [] };
+  }
+  const restarted = [];
+  for (const row of rows) {
+    const ch = Number(row.catv_ch);
+    const expected = String(row.udp_engine || 'local') === 'flussonic' ? 'flussonic' : 'local';
+    const running = udpWorkers.get(ch);
+    if (!running) continue; // lo arranca el arranque del panel o el botón Iniciar
+    if (running.engineKind === expected) continue;
+    try {
+      restartWk2500ChannelWorker(ch);
+      restarted.push({ catv_ch: ch, engine: expected });
+    } catch {
+      // se reintenta en la siguiente pasada
+    }
+  }
+  return { checked: rows.length, restarted };
+}
+
+let engineReconciler = null;
+export function startCatvEngineReconciler(intervalMs = 4000) {
+  if (engineReconciler) return engineReconciler;
+  engineReconciler = setInterval(() => {
+    try {
+      reconcileCatvEngines();
+    } catch {
+      // nunca debe tumbar el panel
+    }
+  }, Math.max(1500, Number(intervalMs) || 4000));
+  engineReconciler.unref?.();
+  return engineReconciler;
+}
+export function stopCatvEngineReconciler() {
+  if (engineReconciler) clearInterval(engineReconciler);
+  engineReconciler = null;
 }
 
 export function resumeEnabledWk2500Channels() {
@@ -3498,6 +3555,154 @@ wk2500Router.post('/api/wk2500/udp-engine', requireAuth, requireAdmin, async (re
   });
 });
 
+// ================== CONTROL DE FLUSSONIC (v2.6.33) ==========================
+// Panel: mandar los canales a Flussonic (que es quien empuja el UDP al
+// modulador), ver quién está emitiendo de verdad y volver a local sin dejar a
+// dos emisores sobre el mismo grupo.
+
+wk2500Router.get('/api/wk2500/flussonic-control', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const m = await import('./flussonicUdp.js');
+    const serverId = req.query.server_id ? Number(req.query.server_id) : null;
+    const snapshot = await m.flussonicControlSnapshot({ serverId, refresh: req.query.refresh !== '0' });
+    res.json(snapshot);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+wk2500Router.post('/api/wk2500/flussonic-control/auto-map', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const m = await import('./flussonicUdp.js');
+    const b = req.body || {};
+    const r = await m.autoMapFlussonicChannels({
+      serverId: b.flussonic_server_id ? Number(b.flussonic_server_id) : null,
+      dryRun: b.dryRun !== false,
+      overwrite: b.overwrite === true
+    });
+    res.json(r);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * Cambia el motor de una lista de canales y deja Flussonic (o TVLister) con la
+ * salida correcta, todo en un paso:
+ *   engine=flussonic → mapea si hace falta, para el motor local, pide la salida
+ *                      a Flussonic y verifica que quedó puesta.
+ *   engine=local     → retira primero la salida en Flussonic (para que no haya
+ *                      dos emisores) y vuelve a arrancar el motor local.
+ */
+wk2500Router.post('/api/wk2500/flussonic-control/switch', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    ensureCatvSlotsInitialized();
+    const m = await import('./flussonicUdp.js');
+    const b = req.body || {};
+    const engine = String(b.engine || '').toLowerCase() === 'local' ? 'local' : 'flussonic';
+    const serverId = b.flussonic_server_id ? Number(b.flussonic_server_id) : null;
+    const autoMap = b.autoMap !== false;
+
+    // Qué canales: todos, un rango o uno suelto.
+    let targets = [];
+    if (b.all === true) {
+      targets = db
+        .prepare("SELECT catv_ch FROM wk2500_channels WHERE stream_id IS NOT NULL OR custom_source_url <> '' ORDER BY catv_ch")
+        .all()
+        .map((r) => Number(r.catv_ch));
+    } else if (b.catv_ch !== undefined && b.catv_ch !== null && b.catv_ch !== '') {
+      targets = [Number(b.catv_ch)];
+    } else {
+      const from = Math.max(CATV_MIN_CH, Number(b.ch_start) || CATV_MIN_CH);
+      const to = Math.min(CATV_MAX_CH, Number(b.ch_end) || CATV_MAX_CH);
+      targets = db
+        .prepare(
+          "SELECT catv_ch FROM wk2500_channels WHERE catv_ch BETWEEN ? AND ? AND (stream_id IS NOT NULL OR custom_source_url <> '') ORDER BY catv_ch"
+        )
+        .all(from, to)
+        .map((r) => Number(r.catv_ch));
+    }
+    if (!targets.length) return res.status(400).json({ error: 'No hay canales con señal en el rango indicado.' });
+
+    const mapReport = engine === 'flussonic' && autoMap ? await m.autoMapFlussonicChannels({ serverId, dryRun: false }) : null;
+    if (engine === 'flussonic' && mapReport && !mapReport.ok) {
+      return res.status(400).json({ ok: false, error: mapReport.error || 'No se pudo leer Flussonic.' });
+    }
+
+    const detail = [];
+    for (const ch of targets) {
+      const slot = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(ch);
+      if (!slot) continue;
+      const current = slot.udp_engine || 'local';
+      const stream = String(
+        slot.flussonic_stream ||
+          (slot.stream_id ? db.prepare('SELECT flussonic_stream_name FROM streams WHERE id = ?').get(slot.stream_id)?.flussonic_stream_name : '') ||
+          ''
+      ).trim();
+
+      if (engine === 'flussonic') {
+        if (!stream) {
+          detail.push({ catv_ch: ch, ok: false, error: 'Sin stream de Flussonic para este canal (revisa el mapeo).' });
+          continue;
+        }
+        // Primero se apaga el motor local: nunca dos emisores al mismo grupo.
+        if (current !== 'flussonic') stopWk2500ChannelWorker(ch);
+        db.prepare(
+          "UPDATE wk2500_channels SET udp_engine = 'flussonic', flussonic_server_id = COALESCE(?, flussonic_server_id), updated_at = datetime('now') WHERE catv_ch = ?"
+        ).run(serverId, ch);
+        const fresh = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(ch);
+        const applied = await m.applyFlussonicUdp({ serverId: fresh.flussonic_server_id || serverId, streamName: stream, slot: fresh });
+        // Worker «delegado»: no abre socket, sólo vigila que Flussonic mantenga
+        // la salida puesta (y la reaplica si alguien la borra allí).
+        if (applied.ok && fresh.enabled) startWk2500ChannelWorker(ch);
+        detail.push({ catv_ch: ch, ok: Boolean(applied.ok), stream, already: Boolean(applied.already), error: applied.error || '', from: current });
+      } else {
+        // Se retira de Flussonic ANTES de arrancar el motor local.
+        if (current === 'flussonic') {
+          const removed = await m.removeFlussonicUdp({
+            serverId: slot.flussonic_server_id || serverId,
+            streamName: stream,
+            slot
+          });
+          if (!removed.ok && !removed.already) {
+            detail.push({ catv_ch: ch, ok: false, stream, error: `Flussonic no quitó la salida: ${removed.error}` });
+            continue;
+          }
+        }
+        db.prepare("UPDATE wk2500_channels SET udp_engine = 'local', updated_at = datetime('now') WHERE catv_ch = ?").run(ch);
+        if (slot.enabled) startWk2500ChannelWorker(ch);
+        detail.push({ catv_ch: ch, ok: true, stream, from: current });
+      }
+    }
+
+    const snapshot = await m.flussonicControlSnapshot({ serverId, refresh: true });
+    const done = detail.filter((d) => d.ok).length;
+    res.json({
+      ok: detail.every((d) => d.ok),
+      engine,
+      requested: targets.length,
+      switched: done,
+      failed: detail.filter((d) => !d.ok).length,
+      detail,
+      autoMap: mapReport
+        ? {
+            mapped: mapReport.mapped.length,
+            unmatched: mapReport.unmatched.length,
+            available_streams: mapReport.available_streams,
+            unmatched_list: mapReport.unmatched.slice(0, 20)
+          }
+        : null,
+      snapshot,
+      message:
+        engine === 'flussonic'
+          ? `${done} de ${targets.length} canal(es) ahora salen por Flussonic.`
+          : `${done} de ${targets.length} canal(es) vuelven al motor propio de TVLister.`
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 // Reconciliar: reaplica en Flussonic las salidas UDP de los canales en ese modo.
 wk2500Router.post('/api/wk2500/flussonic-udp/sync', requireAuth, requireAdmin, async (req, res) => {
   try {
@@ -3864,5 +4069,8 @@ wk2500Router.get('/api/wk2500/export-units', requireAuth, requireAdmin, (req, re
 
 // El verificador necesita ver los workers vivos sin acoplarse a este archivo.
 setCatvWorkerSnapshot(() => udpWorkers);
+
+// El motor de cada canal se reconcilia solo con lo que diga la BD (4 s).
+startCatvEngineReconciler();
 // La guardia de estabilidad reengancha canales sin importar este archivo.
 globalThis.__tvlisterCatvRestartWorker = (ch) => restartWk2500ChannelWorker(ch);

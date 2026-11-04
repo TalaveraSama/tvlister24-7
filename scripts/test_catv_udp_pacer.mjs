@@ -22,7 +22,7 @@ import dgram from 'node:dgram';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'tvlister-pacer-'));
 process.env.TVLISTER_DB_PATH = path.join(TMP, 'pacer.db');
 process.env.TVLISTER_STREAMS_RUNTIME = path.join(TMP, 'streams_runtime');
-delete process.env.TVLISTER_CATV_PACER;
+process.env.TVLISTER_CATV_PACER = 'on'; // opt-in desde la v2.6.33
 delete process.env.TVLISTER_CATV_DIRECT;
 process.env.TVLISTER_CATV_PACING = '1';
 
@@ -259,9 +259,33 @@ const { CatvUdpPacer, buildNullDatagram, createCatvPacer } = await import('../se
 }
 
 {
-  const off = ((process.env.TVLISTER_CATV_PACER = 'off'), createCatvPacer({ slotRow: { udp_host: '127.0.0.1', udp_port: 1 }, transport: { pktSize: 1316 } }));
+  // Por defecto está APAGADO: la salida nativa vuelve a ser la de siempre.
+  const guardado = process.env.TVLISTER_CATV_PACER;
   delete process.env.TVLISTER_CATV_PACER;
-  ok('Se puede apagar con TVLISTER_CATV_PACER=off (vuelve al comportamiento anterior)', off === null);
+  const off = createCatvPacer({ slotRow: { udp_host: '127.0.0.1', udp_port: 1 }, transport: { pktSize: 1316 } });
+  process.env.TVLISTER_CATV_PACER = guardado;
+  ok('Por defecto NO se usa el pacer (salida nativa de siempre)', off === null);
+}
+
+{
+  // Origen desalineado (empieza a mitad de paquete): el pacer resincroniza a
+  // 0x47. Sin esto, todos los datagramas salen corridos y el modulador congela.
+  const out = [];
+  const pacer = new CatvUdpPacer({ host: 'x', port: 1, targetKbps: 3000, send: (b) => out.push(b) });
+  const base = Buffer.alloc(188 * 20, 0xff);
+  for (let i = 0; i < base.length; i += 188) {
+    base[i] = 0x47;
+    base[i + 1] = 0x11;
+    base[i + 2] = 0x02;
+    base[i + 3] = 0x10;
+  }
+  pacer.push(base.subarray(100)); // arranca 100 bytes dentro de un paquete
+  await sleep(400);
+  await pacer.close();
+  const dg = out.find((b) => b.length === 1316) || Buffer.alloc(0);
+  let alineado = Boolean(dg.length);
+  for (let i = 0; i < dg.length; i += 188) if (dg[i] !== 0x47) alineado = false;
+  ok('Origen desalineado: el pacer resincroniza a 0x47', alineado, `${out.length} datagrama(s), resyncs ${pacer.stats().resyncs}`);
 }
 
 // ===================== 2. Motor real: FFmpeg simulado ======================
@@ -345,7 +369,7 @@ try {
       `pico/media ${m.ratio} · media ${(m.avg / 1000).toFixed(2)} Mbps · pico ${(m.peak / 1000).toFixed(2)} Mbps`
     );
   }
-  delete process.env.TVLISTER_CATV_PACER;
+  process.env.TVLISTER_CATV_PACER = 'on';
   delete process.env.TVLISTER_CATV_DIRECT;
 
   // --- 2d. El plan de salida lo anuncia --------------------------------

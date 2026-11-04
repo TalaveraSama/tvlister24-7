@@ -19,7 +19,13 @@ según la ficha de TMDB, con prioridad y renombrado configurables (una comedia r
 botón **Aplicar** que lo recoloca por lotes, creando las categorías que falten. Si TMDB no encuentra
 un título, se queda en la categoría que tenía y no se repite la consulta.
 
-📡 **El UDP sale estabilizado, como Astra (v2.6.32)**: el motor ya no reenvía el flujo al socket tal como
+🔀 **Los canales salen por Flussonic, controlado desde el panel (v2.6.33)**: en *UDP / CATV* hay una tarjeta
+que **detecta** qué stream de Flussonic corresponde a cada canal, los **pasa a Flussonic** con un clic y muestra
+por canal si está **emitiendo**, si el stream está **caído** o si **perdió la salida**. «Volver a TVLister» quita
+primero la salida de Flussonic, así nunca hay dos emisores al mismo destino. También por terminal:
+`tvlister-admin catv flussonic status|map|apply|verify|local`.
+
+📡 **El UDP sale estabilizado, como Astra (v2.6.32, opcional)**: el motor ya no reenvía el flujo al socket tal como
 llega. Un estabilizador propio emite al **ritmo exacto del canal** y rellena con paquetes nulos MPEG-TS hasta
 ese ritmo (CBR), así el modulador lee **una línea plana** y no ráfagas de 33 Mbps en un canal de 2 Mbps.
 En *UDP / CATV* cada portadora muestra su **pico** y si está **estable**; el objetivo se calcula solo desde el
@@ -103,15 +109,15 @@ Descarga el paquete oficial del release, comprueba su **SHA256** e instala sin c
 
 ```bash
 # última versión publicada
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.32/scripts/install_release.sh \
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.33/scripts/install_release.sh \
   | sudo bash
 ```
 
 Para fijar una versión concreta (recomendado en producción):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.32/scripts/install_release.sh \
-  | sudo bash -s -- --tag v2.6.32
+curl -fsSL https://raw.githubusercontent.com/TalaveraSama/tvlister24-7/v2.6.33/scripts/install_release.sh \
+  | sudo bash -s -- --tag v2.6.33
 ```
 
 Esta vía no depende de que el release tenga el `.tar.gz` adjunto: si falta (o su descarga falla), el
