@@ -5,7 +5,7 @@
 // el operador y lo que se manda al panel:
 //   · streams de Flussonic con su canal de la lista, su URL de push y su MB
 //   · editar una fila → Guardar / Quitar
-//   · «Ver plan del rango» (no escribe) y «Poner salida UDP del rango»
+//   · «Ver plan del rango» (no escribe) y «Poner salida UDP a todo el rango»
 //   · «Quitar salidas del rango»
 //   · el aviso de canales sin stream y el filtro de streams sueltos
 //
@@ -375,8 +375,8 @@ ok(previewCall?.body?.iface === 'ens37', 'manda la interfaz de salida', previewC
 ok(text().includes('Vista previa'), 'avisa de que es una vista previa');
 
 // --- 5. Aplicar el rango ------------------------------------------------
-const applyBtn = byText('button', 'Poner salida UDP del rango');
-ok(Boolean(applyBtn), 'existe «Poner salida UDP del rango»');
+const applyBtn = byText('button', 'Poner salida UDP a todo el rango');
+ok(Boolean(applyBtn), 'existe «Poner salida UDP a todo el rango»');
 if (applyBtn) await click(applyBtn);
 const applyCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push' && c.body?.from_channels).pop();
 ok(applyCall?.body?.dry_run !== true, 'aplicar escribe de verdad');
@@ -400,8 +400,21 @@ const ch3Row = [...document.querySelectorAll('tr')].find(
 const ch3Input = ch3Row?.querySelector('input[type="text"]');
 ok(Boolean(ch3Input), 'la fila del canal tiene su URL editable', ch3Input?.value);
 if (ch3Input) await type(ch3Input, 'udp://ens37@239.25.0.3:5003');
-const saveRow = [...(ch3Row?.querySelectorAll('button') || [])].find((b) => b.textContent.trim() === 'Guardar');
-ok(Boolean(saveRow), 'cada fila tiene su botón Guardar');
+const saveRow = [...(ch3Row?.querySelectorAll('button') || [])].find((b) =>
+  b.textContent.includes('Guardar en Flussonic')
+);
+ok(Boolean(saveRow), 'cada fila tiene su botón «Guardar en Flussonic»');
+ok(
+  [...(ch3Row?.querySelectorAll('button') || [])].length >= 2,
+  'y a su lado el de quitar, sin depender del botón del rango'
+);
+ok(
+  Boolean(byText('p', 'Cada fila se guarda sola')) || text().includes('Cada fila se guarda sola'),
+  'el recuadro explica que cada fila se guarda sola'
+);
+const bulkBtn = byText('button', 'Poner salida UDP a todo el rango');
+ok(Boolean(bulkBtn), 'el botón del rango dice que es a todo el rango');
+ok(/\(\d+\)/.test(bulkBtn?.textContent || ''), 'y cuántos canales toca', bulkBtn?.textContent.trim());
 if (saveRow) await click(saveRow);
 const rowCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push' && c.body?.items).pop();
 ok(rowCall?.body?.items?.[0]?.stream === 'a0cq', 'guarda la salida del stream correcto', JSON.stringify(rowCall?.body?.items));

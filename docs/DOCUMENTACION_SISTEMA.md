@@ -3029,6 +3029,14 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.46: guardar la salida canal por canal
+
+En la tarjeta de salida UDP de Flussonic, cada fila tiene **«Guardar en Flussonic»**: escribe la salida de **ese**
+canal, relee el stream y confirma. El botón del rango se llama ahora **«Poner salida UDP a todo el rango (N)»**,
+para que quede claro que toca N canales de golpe. Además se incluye `tools/flussonic_push.py`, un script suelto
+(Python 3.8+, sin dependencias) con las mismas operaciones (`probe` / `set` / `--remove`) para ejecutar desde
+cualquier PC contra el Flussonic.
+
 ### v2.6.45: la forma de cada salida se copia del propio servidor
 
 Antes de escribir, el panel mira una salida que el stream ya tenga y escribe **igual que él**:

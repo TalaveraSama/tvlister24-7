@@ -1969,8 +1969,8 @@ export default function Wk2500CatvPage({ setActiveTab }) {
           <div className="flex items-center gap-2 px-2 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[10px] text-emerald-200 col-span-2">
             <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
             <span>
-              <strong>El panel no emite este UDP:</strong> sólo escribe la salida en Flussonic. Al guardar, TVLister
-              apaga su emisor de ese canal para que no haya dos.
+              <strong>El panel no emite este UDP:</strong> sólo escribe la salida en Flussonic. Cada fila se guarda
+              sola con <strong>«Guardar en Flussonic»</strong> (un canal); el botón del rango los hace todos de una vez.
             </span>
           </div>
         </div>
@@ -1992,7 +1992,9 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold disabled:opacity-40"
           >
             <Save className="w-3.5 h-3.5" />
-            {fsPush.busy === 'apply' ? 'Aplicando…' : 'Poner salida UDP del rango'}
+            {fsPush.busy === 'apply'
+              ? 'Aplicando…'
+              : `Poner salida UDP a todo el rango${pushChannelRows.length ? ` (${pushChannelRows.length})` : ''}`}
           </button>
           <button
             type="button"
@@ -2163,14 +2165,17 @@ export default function Wk2500CatvPage({ setActiveTab }) {
                           type="button"
                           onClick={() => handlePushSaveRow(c.stream)}
                           disabled={Boolean(fsPush.busy) || !c.stream}
-                          className="px-2 py-0.5 rounded-lg bg-violet-600/80 hover:bg-violet-500 text-white text-[10px] font-bold disabled:opacity-40"
+                          title="Escribe la salida UDP de ESTE canal en su stream de Flussonic, la relee y confirma"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-violet-600/80 hover:bg-violet-500 text-white text-[10px] font-bold disabled:opacity-40"
                         >
-                          {fsPush.busy === `row:${c.stream}` ? '…' : 'Guardar'}
+                          <Upload className="w-3 h-3" />
+                          {fsPush.busy === `row:${c.stream}` ? 'Guardando…' : 'Guardar en Flussonic'}
                         </button>
                         <button
                           type="button"
                           onClick={() => handlePushSaveRow(c.stream, true)}
                           disabled={Boolean(fsPush.busy) || !c.stream || !c.push}
+                          title="Quita esta salida del stream en Flussonic (no toca las demás)"
                           className="ml-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 text-[10px] font-bold disabled:opacity-40"
                         >
                           Quitar
