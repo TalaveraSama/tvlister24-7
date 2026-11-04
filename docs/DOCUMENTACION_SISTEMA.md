@@ -3029,6 +3029,19 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.40: devolver a TVLister los canales que quedaron sin salida
+
+Sobre v2.6.39, para poder recuperar un panel que ya quedó con canales «en Flussonic y sin salida»:
+
+- `GET /api/wk2500/flussonic-push` devuelve `has_source` por canal; la caja ámbar **«N canal(es) están en
+  Flussonic pero sin salida UDP»** y el botón **Devolver a TVLister** usan ese dato.
+- Devolver un canal **sin stream mapeado** ya no falla con «Falta el nombre del stream»: no hay nada que quitar
+  en Flussonic.
+- Un canal **sin fuente local** se rechaza con motivo («vive sólo en Flussonic») en vez de arrancar un emisor
+  sin señal.
+- `POST /api/wk2500/flussonic-control/switch` acepta `channels: [2,3,4]` para actuar sólo sobre esos canales.
+- `has_output` = el stream tiene alguna salida UDP; `in_sync` = es exactamente la del canal.
+
 ### v2.6.39: el push escribe de verdad en Flussonic 23.12 (HTTP 400 corregido)
 
 **El fallo:** al pulsar «Poner salida UDP del rango» el panel decía `0 de 105 stream(s) con la salida UDP del

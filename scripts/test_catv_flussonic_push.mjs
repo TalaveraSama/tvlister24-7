@@ -558,6 +558,23 @@ try {
     noGuarda?.detail?.[0]?.error
   );
 
+  // --- 5h. Devolver a TVLister los que se quedaron sin salida -----------
+  raw.prepare("UPDATE wk2500_channels SET udp_engine = 'flussonic', flussonic_stream = '' WHERE catv_ch = 9").run();
+  const snap9 = ((await api('GET', '/api/wk2500/flussonic-push')).data?.channels || []).find((c) => c.catv_ch === 9);
+  ok('la tabla dice si el canal tiene fuente local', snap9?.has_source === true, JSON.stringify(snap9?.has_source));
+  const back9 = (await api('POST', '/api/wk2500/flussonic-control/switch', { engine: 'local', channels: [9] })).data;
+  ok(
+    'un canal en Flussonic sin stream mapeado vuelve a TVLister',
+    back9?.detail?.[0]?.ok === true,
+    JSON.stringify(back9?.detail)
+  );
+  const back12 = (await api('POST', '/api/wk2500/flussonic-control/switch', { engine: 'local', channels: [12] })).data;
+  ok(
+    'un canal sin fuente local no se puede devolver (y lo dice)',
+    back12?.detail?.[0]?.ok === false && /no tiene fuente/i.test(back12?.detail?.[0]?.error || ''),
+    JSON.stringify(back12?.detail)
+  );
+
   // --- 6. take_over: el canal pasa a Flussonic -------------------------
   const before = await countDatagrams(4776, 3500);
   ok('antes del take over el canal emite desde TVLister', before > 0, `${before} datagramas`);

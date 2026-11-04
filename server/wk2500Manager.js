@@ -3695,8 +3695,9 @@ wk2500Router.post('/api/wk2500/flussonic-control/switch', requireAuth, requireAd
           });
           continue;
         }
-        // Se retira de Flussonic ANTES de arrancar el motor local.
-        if (current === 'flussonic') {
+        // Se retira de Flussonic ANTES de arrancar el motor local. Si el canal
+        // nunca se emparejó con un stream no hay nada que quitar allí.
+        if (current === 'flussonic' && stream) {
           const removed = await m.removeFlussonicUdp({
             serverId: slot.flussonic_server_id || serverId,
             streamName: stream,

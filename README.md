@@ -24,12 +24,13 @@ interfaz dedicada, nombres de las portadoras, grilla de canales) · **2 · Fluss
 verificar y volver sin dos emisores) · **3 · Flussonic UDP · push** (la salida UDP de cada canal). Ya no se mezcla
 lo nativo con lo de Flussonic.
 
-🛠️ **El push vuelve a escribir en Flussonic 23.12 (v2.6.39)**: Flussonic actualiza con **PUT** y JSON merge
+🛠️ **El push vuelve a escribir en Flussonic 23.12 (v2.6.39 + v2.6.40)**: Flussonic actualiza con **PUT** y JSON merge
 patch, y rechaza el cuerpo entero si le llegan `inputs` con sus campos de estado (`stats`, `id`). El panel
 mandaba PATCH y, al fallar, reenviaba el stream entero: de ahí el `HTTP 400 · parsing_parameters` y los
 canales «sin salida». Ahora manda **sólo** `{"outputs":[…]}` y **relee** el stream para confirmar que la
 salida quedó puesta; si Flussonic no la guarda, el canal **no** se pasa a Flussonic y se avisa. Los que se
-hayan quedado sin salida tienen un botón **Devolver a TVLister**.
+hayan quedado sin salida tienen un botón **Devolver a TVLister** (v2.6.40: también los que no tienen stream
+mapeado; los que no tienen fuente local se avisan, no se arrancan en vacío).
 
 🔎 **La tabla del push abre en «canales con stream asignado» (v2.6.38)**: antes salían los 124 canales del
 rango y había que buscar a mano; ahora se ve de entrada lo que ya tiene stream, con un selector para ver

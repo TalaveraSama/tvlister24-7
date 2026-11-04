@@ -932,7 +932,6 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
       enabled: Boolean(slot.enabled),
       method: m.method,
       flussonic_output_url: slot.flussonic_output_url || '',
-      has_source: Boolean(slot.stream_name || String(slot.custom_source_url || '').trim()),
       stream_title: ''
     });
   }
@@ -980,8 +979,10 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
       stream_exists: Boolean(st),
       stream_alive: st ? st.alive : null,
       push: st ? st.push : null,
+      // «Tiene salida puesta» = el stream tiene alguna salida UDP (se marque la
+      // del canal o no); `in_sync` dice si es exactamente la del canal.
       has_output: Boolean(st && st.push),
-      has_output: Boolean(st && st.push && dest && outputTargetKey(st.push.url) === outputTargetKey(dest)),
+      has_source: Boolean(slot.stream_name || String(slot.custom_source_url || '').trim()),
       in_sync: Boolean(st && st.in_sync),
       other_udp: st ? st.udp_outputs.filter((u) => outputTargetKey(u) !== outputTargetKey(dest)) : [],
       other_outputs: st ? st.other_outputs : [],
