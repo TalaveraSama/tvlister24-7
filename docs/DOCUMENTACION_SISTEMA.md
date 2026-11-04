@@ -3029,6 +3029,26 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.43: la forma de escribir la salida la dicta el esquema del servidor
+
+Cuando el `PUT` de la salida UDP devuelve `400` con cualquier cuerpo, el panel deja de adivinar y le pregunta
+al servidor:
+
+- `GET /streamer/api/v3/schema` (el OpenAPI que sirve el propio Flussonic) → ruta `PUT /streams/{name}` →
+  `requestBody` → la propiedad de tipo **lista** llamada `outputs`, `push` o `udp`, y si sus elementos son
+  **objetos** (`{url}`) o **texto**. Esa forma (`schema:outputs:obj`, `schema:push:text`…) se prueba **antes**
+  que las seis fijas y se guarda en `settings.flussonic_schema_shape`; si el esquema no se puede leer, no se
+  vuelve a pedir.
+- **`schema:full`**: si todo lo demás falla, se reenvía el propio stream del `GET` recortado a las propiedades
+  que admite su esquema (sin `stats`/`effective`/`named_by`, entradas reducidas a `url`) y con la salida puesta.
+  Cubre los 23.12 que exigen el objeto completo o que rechazan claves que no están en su OpenAPI. Si funciona se
+  recuerda (`settings.flussonic_write_shape = schema:full`) y las escrituras siguientes van directas.
+- `catv flussonic probe <stream>` imprime versión del esquema, campo de salidas, tipo, propiedades del cuerpo y
+  prueba también `schema:full`.
+- **Cambio de motor seguro**: en `flussonic-control/switch` y en el guardado por canales, primero se escribe y
+  se verifica la salida en Flussonic y **después** se apaga el emisor local. Si Flussonic falla, el canal
+  mantiene su motor y sigue emitiendo (la fila muestra el error).
+
 ### v2.6.42: detectar `config_external` cuando Flussonic rechaza todo
 
 Si **todas** las formas de escritura fallan con 400, hay una causa que explica el patrón entero: el servidor

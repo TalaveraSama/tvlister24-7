@@ -3670,17 +3670,36 @@ wk2500Router.post('/api/wk2500/flussonic-control/switch', requireAuth, requireAd
           detail.push({ catv_ch: ch, ok: false, error: 'Sin stream de Flussonic para este canal (revisa el mapeo).' });
           continue;
         }
-        // Primero se apaga el motor local: nunca dos emisores al mismo grupo.
-        if (current !== 'flussonic') stopWk2500ChannelWorker(ch);
+        // PRIMERO se escribe la salida en Flussonic y se comprueba. Sólo si
+        // Flussonic la acepta se le pasa el control y TVLister deja de emitir:
+        // si fallara, el canal se quedaría sin emisor (y sin señal en CATV).
+        const applied = await m.applyFlussonicUdp({
+          serverId: slot.flussonic_server_id || serverId,
+          streamName: stream,
+          slot
+        });
+        if (!applied.ok) {
+          if (current !== 'flussonic' && slot.enabled) startWk2500ChannelWorker(ch);
+          detail.push({
+            catv_ch: ch,
+            ok: false,
+            stream,
+            from: current,
+            keeps: 'local',
+            error: applied.error || 'Flussonic no aceptó la salida UDP'
+          });
+          continue;
+        }
+        // Flussonic ya emite ese UDP: ahora sí se apaga TVLister.
+        stopWk2500ChannelWorker(ch);
         db.prepare(
           "UPDATE wk2500_channels SET udp_engine = 'flussonic', flussonic_server_id = COALESCE(?, flussonic_server_id), updated_at = datetime('now') WHERE catv_ch = ?"
         ).run(serverId, ch);
         const fresh = db.prepare('SELECT * FROM wk2500_channels WHERE catv_ch = ?').get(ch);
-        const applied = await m.applyFlussonicUdp({ serverId: fresh.flussonic_server_id || serverId, streamName: stream, slot: fresh });
         // Worker «delegado»: no abre socket, sólo vigila que Flussonic mantenga
         // la salida puesta (y la reaplica si alguien la borra allí).
-        if (applied.ok && fresh.enabled) startWk2500ChannelWorker(ch);
-        detail.push({ catv_ch: ch, ok: Boolean(applied.ok), stream, already: Boolean(applied.already), error: applied.error || '', from: current });
+        if (fresh.enabled) startWk2500ChannelWorker(ch);
+        detail.push({ catv_ch: ch, ok: true, stream, already: Boolean(applied.already), from: current, engine_after: 'flussonic' });
       } else {
         // Un canal cuya fuente vive sólo en Flussonic no puede volver a local:
         // se dice en vez de arrancar un emisor sin señal.

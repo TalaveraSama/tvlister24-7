@@ -212,6 +212,18 @@ Con **4 equipos de 32 canales** el panel reparte la grilla completa en un clic: 
 que excedan la capacidad del modelo o que se solapen con otro equipo, y avisa si algún canal queda sin
 modulador. Ver `docs/DOCUMENTACION_SISTEMA.md` §8.22.
 
+### Salida UDP puesta por Flussonic (opt-in, por canal)
+
+En *Canales* cada canal puede quedar **controlado por Flussonic**: el panel escribe la salida UDP con la API
+(`PUT /streamer/api/v3/streams/<stream>`) y **deja de emitir** por su cuenta, así que nunca hay dos emisores en
+el mismo grupo. La forma del cuerpo la dicta el propio servidor: si el `PUT` normal devuelve `400`, el panel lee
+su OpenAPI (`GET /streamer/api/v3/schema`), escribe con el campo y el tipo que declara y, como última baza,
+reenvía el stream del `GET` recortado a las propiedades que su esquema admite (`schema:full`). El cambio de
+motor es seguro: primero se verifica la salida en Flussonic y sólo entonces TVLister suelta el canal.
+
+Diagnóstico en el servidor: `sudo /opt/tvlister24-7/scripts/tvlister-admin.sh catv flussonic probe a0ed`
+(deja el stream como estaba y enseña la respuesta exacta de cada intento).
+
 Cada equipo se declara con **su marca y modelo** — `CATVSCOPE CSP-2500C` (32 en 1, el más común),
 `Wolck WK-2500C`, `Softel SFT2500C`, `SKD1709B`, `CatCast`, `Ustarlink`, `Shineco` o **genérico** — y con
 **estándar de TV** (`NTSC-M` por defecto en Nicaragua, más PAL B/G, D/K, I, N y M) y **transporte**

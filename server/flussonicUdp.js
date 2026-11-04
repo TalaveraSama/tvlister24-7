@@ -156,6 +156,10 @@ function normalizeOutputs(raw) {
  * recuerda en `settings` para no repetir el tanteo en los 105 canales.
  */
 const WRITE_SHAPES = ['outputs', 'outputs_text', 'push', 'push_text', 'full', 'full_text'];
+// Forma especial: reenviar el stream tal como lo da el servidor, recortado a
+// las propiedades de su propio esquema. No es un cuerpo fijo: se construye en
+// el momento con el GET + el OpenAPI del servidor.
+const FULL_SHAPE = 'schema:full';
 
 // Claves del stream que el GET devuelve pero el PUT no acepta (estado/derivadas).
 const READ_ONLY_STREAM_KEYS = new Set([
@@ -191,7 +195,39 @@ function fullStreamPayload(config, streamName, urls, asText) {
   return payload;
 }
 
+/**
+ * Cuerpo «tal cual lo da el servidor»: se reenvía el propio stream recortado a
+ * las propiedades que su esquema admite y con la salida puesta. Es la última
+ * baza cuando el servidor rechaza cualquier cuerpo parcial (400 al analizar
+ * parámetros): no se inventa nada, se devuelve lo que él mismo publicó.
+ */
+function schemaFullPayload(meta, config, streamName, urls) {
+  const src = config && typeof config === 'object' ? config : {};
+  const allowed = new Set(Array.isArray(meta?.properties) ? meta.properties : []);
+  const payload = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (READ_ONLY_STREAM_KEYS.has(k) || String(k).startsWith('$')) continue;
+    if (allowed.size && !allowed.has(k)) continue;
+    if (k === 'inputs' || k === 'outputs' || k === 'push') continue;
+    payload[k] = v;
+  }
+  if (!allowed.size || allowed.has('inputs')) {
+    const inputs = (Array.isArray(src.inputs) ? src.inputs : [])
+      .map((i) => (typeof i === 'string' ? { url: i } : i && i.url ? { url: i.url } : null))
+      .filter((i) => i && i.url);
+    if (inputs.length) payload.inputs = inputs;
+  }
+  if (!allowed.size || allowed.has('name')) payload.name = src.name || streamName;
+  payload[meta?.key || 'outputs'] = outputsValue(urls, Boolean(meta?.asText));
+  return payload;
+}
+
 function shapeBody(shape, urls, config, streamName) {
+  if (String(shape).startsWith('schema:')) {
+    // Forma descubierta en el /schema del propio servidor: schema:<clave>:obj|text
+    const [, key, kind] = String(shape).split(':');
+    return { [key || 'outputs']: outputsValue(urls, kind === 'text') };
+  }
   switch (shape) {
     case 'outputs':
       return { outputs: outputsValue(urls, false) };
@@ -210,12 +246,117 @@ function shapeBody(shape, urls, config, streamName) {
   }
 }
 
+/**
+ * Lee el OpenAPI del propio servidor (`/streamer/api/v3/schema`) y averigua
+ * cómo se llama la lista de salidas y si sus elementos son objetos o texto.
+ * Es lo que hace que el panel funcione con cualquier versión de Flussonic sin
+ * adivinar: 23.12 y otras usan nombres distintos (`outputs`, `push`…).
+ */
+function resolveSchemaRef(doc, node, depth = 0) {
+  if (!node || typeof node !== 'object' || depth > 8) return node;
+  if (!node.$ref) return node;
+  const path = String(node.$ref).replace(/^#\//, '').split('/');
+  let cur = doc;
+  for (const p of path) cur = cur?.[p];
+  return resolveSchemaRef(doc, cur, depth + 1);
+}
+
+function schemaArrayProp(doc, schema) {
+  const props = schema && typeof schema === 'object' ? schema.properties || {} : {};
+  const names = Object.keys(props);
+  const wanted = names.find((n) => /^(outputs?|push(es)?|udp(2)?)$/i.test(n) && isArraySchema(resolveSchemaRef(doc, props[n])));
+  return wanted || '';
+}
+
+function isArraySchema(node) {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'array') return true;
+  if (Array.isArray(node.oneOf)) return node.oneOf.some((o) => isArraySchema(o));
+  if (Array.isArray(node.anyOf)) return node.anyOf.some((o) => isArraySchema(o));
+  if (Array.isArray(node.allOf)) return node.allOf.some((o) => isArraySchema(o));
+  return false;
+}
+
+function arrayItems(doc, node) {
+  const n = resolveSchemaRef(doc, node);
+  if (Array.isArray(n?.oneOf)) return arrayItems(doc, n.oneOf[0]);
+  if (Array.isArray(n?.anyOf)) return arrayItems(doc, n.anyOf[0]);
+  if (Array.isArray(n?.allOf)) return arrayItems(doc, n.allOf[0]);
+  return resolveSchemaRef(doc, n?.items || null);
+}
+
+export async function discoverStreamWriteShape(srv) {
+  try {
+    const r = await fetchJsonWithTimeout(`${apiBase(srv)}/schema`, { headers: headersFor(srv) }, 20000);
+    if (!r.ok) return { ok: false, error: `El servidor no da /streamer/api/v3/schema (HTTP ${r.status}).` };
+    const doc = r.json || {};
+    const version = String(doc?.info?.version || '');
+    const paths = doc.paths || {};
+    const pathKey =
+      Object.keys(paths).find((p) => /\^?\/streams\/\{[a-z_]+\}$/i.test(p)) ||
+      Object.keys(paths).find((p) => /\/streams\//.test(p) && (paths[p].put || paths[p].patch));
+    const op = pathKey ? paths[pathKey].put || paths[pathKey].patch : null;
+    const bodySchema = resolveSchemaRef(
+      doc,
+      op?.requestBody?.content?.['application/json']?.schema || op?.requestBody?.content?.['application/json; charset=utf-8']?.schema
+    );
+    const key = schemaArrayProp(doc, bodySchema);
+    if (!key) {
+      return {
+        ok: false,
+        version,
+        properties: Object.keys(bodySchema?.properties || {}).sort(),
+        error: `No encuentro la lista de salidas en el esquema (${pathKey || 'sin ruta'}).`
+      };
+    }
+    const items = arrayItems(doc, bodySchema.properties[key]);
+    const asText = String(items?.type || '') === 'string';
+    return {
+      ok: true,
+      version,
+      key,
+      asText,
+      shape: `schema:${key}:${asText ? 'text' : 'obj'}`,
+      properties: Object.keys(bodySchema?.properties || {}).sort()
+    };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err).slice(0, 160) };
+  }
+}
+
 const WRITE_SHAPE_KEY = 'flussonic_write_shape';
+const SCHEMA_HINT_KEY = 'flussonic_schema_shape';
+
+function getSetting(key) {
+  try {
+    return String(db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value || '');
+  } catch {
+    return '';
+  }
+}
+
+function setSetting(key, value) {
+  try {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(
+      key,
+      value
+    );
+  } catch {
+    /* no es crítico */
+  }
+}
+
+export function forgetWriteShape() {
+  setSetting(WRITE_SHAPE_KEY, '');
+  setSetting(SCHEMA_HINT_KEY, '');
+}
+
+
 
 export function getWriteShape() {
   try {
     const v = String(db.prepare('SELECT value FROM settings WHERE key = ?').get(WRITE_SHAPE_KEY)?.value || '');
-    return WRITE_SHAPES.includes(v) ? v : '';
+    return WRITE_SHAPES.includes(v) || v === FULL_SHAPE ? v : '';
   } catch {
     return '';
   }
@@ -275,10 +416,33 @@ async function putOutputs(srv, streamName, outputs, config) {
   const urls = outputs.map((o) => o.url).filter(Boolean);
 
   const learned = getWriteShape();
-  const order = learned ? [learned, ...WRITE_SHAPES.filter((x) => x !== learned)] : [...WRITE_SHAPES];
+  const schemaHint = getSetting(SCHEMA_HINT_KEY);
+  const order = [];
+  if (learned) order.push(learned);
+  if (schemaHint && !order.includes(schemaHint)) order.push(schemaHint);
+  if (!order.length && schemaHint !== 'none') {
+    // Primera escritura: se pregunta al propio servidor cómo se llama el campo.
+    const found = await discoverStreamWriteShape(srv);
+    if (found.ok) {
+      setSetting(SCHEMA_HINT_KEY, found.shape);
+      order.push(found.shape);
+    } else {
+      // Se recuerda el fallo para no pedir el esquema en cada canal.
+      setSetting(SCHEMA_HINT_KEY, 'none');
+    }
+  }
+  for (const shape of WRITE_SHAPES) if (!order.includes(shape)) order.push(shape);
+  if (!order.includes(FULL_SHAPE)) order.push(FULL_SHAPE);
   const attempts = [];
   for (const shape of order) {
-    const body = JSON.stringify(shapeBody(shape, urls, config, streamName));
+    let body = '';
+    if (shape === FULL_SHAPE) {
+      const meta = await discoverStreamWriteShape(srv);
+      if (!meta.ok || !Array.isArray(meta.properties) || !meta.properties.length) continue;
+      body = JSON.stringify(schemaFullPayload(meta, config, streamName, urls));
+    } else {
+      body = JSON.stringify(shapeBody(shape, urls, config, streamName));
+    }
     const put = await fetchJsonWithTimeout(url, { method: 'PUT', headers, body }, 8000);
     const detail = rawDetail(put);
     attempts.push({ shape, status: Number(put.status) || 0, detail });
@@ -389,9 +553,34 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
   } catch {
     /* sin dato */
   }
+  // Qué dice el OpenAPI del propio servidor sobre el campo de salidas.
+  try {
+    const disc = await discoverStreamWriteShape(srv);
+    report.schema = {
+      ok: Boolean(disc.ok),
+      version: disc.version || '',
+      key: disc.key || '',
+      as_text: Boolean(disc.asText),
+      shape: disc.shape || '',
+      properties: disc.properties || [],
+      error: disc.error || ''
+    };
+  } catch (err) {
+    report.schema = { ok: false, error: String(err?.message || err).slice(0, 160) };
+  }
 
-  for (const shape of WRITE_SHAPES) {
-    const body = JSON.stringify(shapeBody(shape, [testUrl], cfg, name));
+  const probeShapes = [...WRITE_SHAPES, FULL_SHAPE];
+  for (const shape of probeShapes) {
+    let body = '';
+    if (shape === FULL_SHAPE) {
+      const meta = report.schema || {};
+      if (!meta.ok || !Array.isArray(meta.properties) || !meta.properties.length) continue;
+      body = JSON.stringify(
+        schemaFullPayload({ key: meta.key, asText: meta.as_text, properties: meta.properties }, cfg, name, [testUrl])
+      );
+    } else {
+      body = JSON.stringify(shapeBody(shape, [testUrl], cfg, name));
+    }
     const put = await fetchJsonWithTimeout(apiUrl, { method: 'PUT', headers, body }, 8000);
     const after = await readOutputs(srv, name);
     const saved = Array.isArray(after) && after.some((u) => outputTargetKey(u) === outputTargetKey(testUrl));

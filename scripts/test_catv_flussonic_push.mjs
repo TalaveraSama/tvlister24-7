@@ -74,8 +74,14 @@ const streamsState = new Map([
   ['RECHAZA', { name: 'RECHAZA', title: 'rechaza el cuerpo', alive: true, bitrate: 1000000, outputs: [], push: [] }],
   ['NOGUARDA', { name: 'NOGUARDA', title: 'dice ok y no guarda', alive: true, bitrate: 1000000, outputs: [], push: [] }],
   // SOLOPUSH: sólo acepta la forma antigua `{"push": [...]}`.
-  ['SOLOPUSH', { name: 'SOLOPUSH', title: 'sólo acepta push', alive: true, bitrate: 1000000, outputs: [], push: [] }]
+  ['SOLOPUSH', { name: 'SOLOPUSH', title: 'sólo acepta push', alive: true, bitrate: 1000000, outputs: [], push: [] }],
+  // ESQUEMA: sólo acepta lo que anuncia su propio /schema (`push` de texto).
+  ['ESQUEMA', { name: 'ESQUEMA', title: 'sólo acepta push de texto', alive: true, bitrate: 1000000, outputs: [], push: [] }],
+  // ESQUEMAFULL: exige el objeto completo y sólo las propiedades del esquema.
+  ['ESQUEMAFULL', { name: 'ESQUEMAFULL', title: 'exige el objeto entero', alive: true, bitrate: 900000, outputs: [], push: [], mpegts: { service_name: 'X' } }]
 ]);
+// Qué dice el /schema del fake: 'outputs' (lista de objetos) o 'push_text'.
+let schemaProfile = 'outputs';
 const patchCalls = [];
 const fake = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
@@ -83,6 +89,72 @@ const fake = http.createServer((req, res) => {
     res.writeHead(code, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(obj));
   };
+  if (url.pathname === '/__schema') {
+    schemaProfile = String(url.searchParams.get('p') || 'outputs');
+    return send({ schema: schemaProfile });
+  }
+  if (url.pathname === '/streamer/api/v3/schema') {
+    // OpenAPI mínimo, como el que sirve el Flussonic real.
+    const outs =
+      schemaProfile === 'push_text'
+        ? { push: { type: 'array', items: { type: 'string' } } }
+        : { outputs: { type: 'array', items: { type: 'object', properties: { url: { type: 'string' } } } } };
+    if (schemaProfile === 'strict') {
+      // Esquema estricto: el cuerpo sólo admite name, inputs y outputs.
+      return send({
+        openapi: '3.1.0',
+        info: { title: 'Flussonic Media Server API', version: '23.12' },
+        paths: {
+          '/streams/{name}': {
+            put: {
+              requestBody: {
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/stream' } } }
+              }
+            }
+          }
+        },
+        components: {
+          schemas: {
+            stream: {
+              type: 'object',
+              required: ['name'],
+              properties: {
+                name: { type: 'string' },
+                inputs: { type: 'array', items: { type: 'object', properties: { url: { type: 'string' } } } },
+                outputs: { type: 'array', items: { type: 'object', properties: { url: { type: 'string' } } } }
+              }
+            }
+          }
+        }
+      });
+    }
+    return send({
+      openapi: '3.1.0',
+      info: { title: 'Flussonic Media Server API', version: '23.12' },
+      paths: {
+        '/streams/{name}': {
+          put: {
+            requestBody: {
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/stream' } } }
+            }
+          }
+        }
+      },
+      components: {
+        schemas: {
+          stream: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              title: { type: 'string' },
+              inputs: { type: 'array', items: { type: 'object', properties: { url: { type: 'string' } } } },
+              ...outs
+            }
+          }
+        }
+      }
+    });
+  }
   if (url.pathname === '/streamer/api/v3/streams' && req.method === 'GET') {
     return send({
       streams: [...streamsState.values()].map((s) => ({
@@ -137,6 +209,28 @@ const fake = http.createServer((req, res) => {
         }
         if (name === 'NOGUARDA') {
           send({ ok: true });
+          return;
+        }
+        if (name === 'ESQUEMAFULL') {
+          // Rechaza claves que no están en su esquema y exige `name`.
+          const allowed = ['name', 'inputs', 'outputs'];
+          const bad = Object.keys(parsed || {}).find((k) => !allowed.includes(k));
+          if (bad || !parsed.name || !Array.isArray(parsed.outputs)) {
+            send({ name: 'request_body', while: 'parsing_parameters', input1: { unknown: bad || 'name' } }, 400);
+            return;
+          }
+          st.outputs = parsed.outputs.map((o) => (typeof o === 'string' ? { url: o } : o));
+          send({ ok: true, name: st.name });
+          return;
+        }
+        if (name === 'ESQUEMA') {
+          if (!Array.isArray(parsed.push) || parsed.push.some((o) => typeof o !== 'string')) {
+            send({ name: 'request_body', while: 'parsing_parameters', input1: { disabled: false } }, 400);
+            return;
+          }
+          st.outputs = parsed.push.map((o) => ({ url: o }));
+          st.push = [{ url: parsed.push[0], state: 'running', bytes: 4096 }];
+          send({ ok: true, name: st.name });
           return;
         }
         if (name === 'SOLOPUSH') {
@@ -552,7 +646,7 @@ const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
   ok(
     'el aviso nombra el HTTP, lo probado y el comando de diagnóstico',
     /HTTP 400/.test(rechaza?.detail?.[0]?.error || '') &&
-      /Probado: outputs→400/.test(rechaza?.detail?.[0]?.error || '') &&
+      /Probado: [^ ]*outputs[^ ]*→400/.test(rechaza?.detail?.[0]?.error || '') &&
       /flussonic probe/.test(rechaza?.detail?.[0]?.error || ''),
     rechaza?.detail?.[0]?.error
   );
@@ -611,6 +705,72 @@ const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
   ok('el diagnóstico encuentra la forma que funciona', probe?.winner === 'push', JSON.stringify(probe?.winner));
   ok('dice qué respondió cada intento', (probe?.attempts || [])[0]?.status === 400, JSON.stringify(probe?.attempts?.[0]));
   ok('y deja el stream como estaba', probe?.restored === true, JSON.stringify(probe?.outputs_before));
+  ok(
+    'el probe dice qué forma anuncia el esquema del servidor',
+    probe?.schema?.ok === true && probe?.schema?.key === 'outputs' && probe?.schema?.as_text === false,
+    JSON.stringify(probe?.schema)
+  );
+
+  // --- 5k. El esquema del propio servidor manda sobre las formas fijas ---
+  // El fake cambia lo que publica en /schema: ahora dice que la salida es
+  // `push`, una lista de texto. El panel debe creerle al servidor y escribir
+  // así a la primera, sin quedarse en las seis formas de siempre.
+  await fetch(`http://127.0.0.1:${flussonicPort}/__schema?p=push_text`);
+  mod.forgetWriteShape();
+  const srvRow = mod.getFlussonicServer();
+  const disc = await mod.discoverStreamWriteShape(srvRow);
+  ok(
+    'lee el esquema y saca el nombre del campo de salida',
+    disc?.ok === true && disc?.key === 'push' && disc?.asText === true,
+    JSON.stringify(disc)
+  );
+  const before5k = patchCalls.length;
+  const viaSchema = await mod.applyFlussonicUdp({
+    streamName: 'ESQUEMA',
+    slot: { catv_ch: 15, udp_host: '127.0.0.1', udp_port: 4796, udp_enabled: 1 }
+  });
+  ok('escribe con la forma que anuncia el esquema', viaSchema?.ok === true, JSON.stringify(viaSchema));
+  const firstCall = patchCalls[before5k];
+  ok(
+    'y lo hace en el primer intento, con push de texto',
+    Array.isArray(firstCall?.body?.push) && typeof firstCall.body.push[0] === 'string',
+    JSON.stringify(firstCall?.body)
+  );
+  ok(
+    'el servidor guarda esa salida',
+    (udpOf('ESQUEMA') || []).some((u) => u.endsWith('127.0.0.1:4796')),
+    JSON.stringify(udpOf('ESQUEMA'))
+  );
+  // --- 5l. Un servidor que exige el objeto completo (y sólo SUS campos) --
+  await fetch(`http://127.0.0.1:${flussonicPort}/__schema?p=strict`);
+  mod.forgetWriteShape();
+  const before5l = patchCalls.length;
+  const viaFull = await mod.applyFlussonicUdp({
+    streamName: 'ESQUEMAFULL',
+    slot: { catv_ch: 15, udp_host: '127.0.0.1', udp_port: 4797, udp_enabled: 1 }
+  });
+  ok('si el servidor exige el objeto entero, se le devuelve el suyo', viaFull?.ok === true, JSON.stringify(viaFull));
+  const fullCall = patchCalls.filter((c) => c.name === 'ESQUEMAFULL').pop();
+  ok(
+    'y sólo con las propiedades que admite su esquema',
+    JSON.stringify(Object.keys(fullCall?.body || {}).sort()) === JSON.stringify(['inputs', 'name', 'outputs']),
+    JSON.stringify(Object.keys(fullCall?.body || {}))
+  );
+  ok('la forma se recuerda como schema:full', mod.getWriteShape() === 'schema:full', mod.getWriteShape());
+  const before5l2 = patchCalls.length;
+  const viaFull2 = await mod.applyFlussonicUdp({
+    streamName: 'ESQUEMAFULL',
+    slot: { catv_ch: 15, udp_host: '127.0.0.1', udp_port: 4798, udp_enabled: 1 }
+  });
+  ok(
+    'la siguiente escritura va directa (un solo PUT)',
+    viaFull2?.ok === true && patchCalls.length - before5l2 === 1,
+    `${patchCalls.length - before5l2} escrituras`
+  );
+  ok('y la salida queda puesta', (udpOf('ESQUEMAFULL') || []).some((u) => u.endsWith(':4798')), JSON.stringify(udpOf('ESQUEMAFULL')));
+
+  await fetch(`http://127.0.0.1:${flussonicPort}/__schema?p=outputs`);
+  mod.forgetWriteShape();
 
   // --- 6. take_over: el canal pasa a Flussonic -------------------------
   const before = await countDatagrams(4776, 3500);
