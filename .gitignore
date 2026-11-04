@@ -14,3 +14,7 @@ streams_runtime/
 
 # Paquetes generados por scripts/build_release.sh
 release/
+
+# Restos de Python al ejecutar las herramientas
+__pycache__/
+*.pyc
