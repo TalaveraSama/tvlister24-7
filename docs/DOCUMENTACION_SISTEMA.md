@@ -3067,7 +3067,7 @@ tvlister-admin catv watch --secs 10 # mide el grupo de verdad: forma «constante
 `TVLISTER_CATV_PACER=off` vuelve al comportamiento anterior (envío directo), y
 `TVLISTER_CATV_PACER_QUEUE_MS` ajusta la cola máxima (4000 ms por defecto, suficiente para segmentos de 4 s).
 
-**Pruebas:** `node scripts/test_catv_udp_pacer.mjs` — **17 OK**, con FFmpeg simulado y receptor UDP real.
+**Pruebas:** `node scripts/test_catv_udp_pacer.mjs` — **18 OK**, con FFmpeg simulado y receptor UDP real.
 Sin pacer el mismo canal sale a **16 Mbps de pico en una media de 2 Mbps** (la regresión); con pacer,
 **2,45 Mbps planos (**pico/media 1,03**)**.
 

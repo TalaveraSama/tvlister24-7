@@ -51,7 +51,7 @@ sudo tvlister-admin catv steady --apply --clear
 
 ## Pruebas
 
-`node scripts/test_catv_udp_pacer.mjs` — **17 comprobaciones OK**, con el motor real, un FFmpeg simulado que
+`node scripts/test_catv_udp_pacer.mjs` — **18 comprobaciones OK**, con el motor real, un FFmpeg simulado que
 entrega a trozos y un receptor UDP que mide ventanas de 250 ms (lo mismo que mide el modulador):
 
 | Caso | Resultado |
@@ -64,6 +64,7 @@ entrega a trozos y un receptor UDP que mide ventanas de 250 ms (lo mismo que mid
 | Contrapresión | 1 MB en cola sin perder un datagrama |
 | Objetivo automático | se queda en 2,25 Mbps para un canal de 2 Mbps (+10 %) |
 | Origen cortado | 86 % relleno, portadora viva, «sin datos» a los 4,5 s |
+| Bucle de eventos cargado (8 ms bloqueado cada 30 ms) | **2250 kbps de 2250** (antes se quedaba corto y la cola crecía sin fin) |
 
 Sin regresiones: `test_vod_genres`, `test_balancer_lb`, `test_node_affinity`, `test_vod_paging` OK y
 `npm run build` OK.

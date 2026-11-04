@@ -232,6 +232,33 @@ const { CatvUdpPacer, buildNullDatagram, createCatvPacer } = await import('../se
 }
 
 {
+  // Bucle de eventos cargado (SQLite, HTTP, 100 canales): el pacer no debe
+  // perder ritmo por ello. Fue un fallo real: con el crédito limitado a 12 ms,
+  // un retraso de 100 ms dejaba la salida corta y la cola crecía sin fin.
+  const pacer = new CatvUdpPacer({ host: 'x', port: 1, targetKbps: 2250, send: () => {} });
+  const CHUNK = Math.round((2000 * 1000 / 8) * 2);
+  const data = Buffer.alloc(CHUNK, 0x47);
+  const feeder = setInterval(() => pacer.push(data), 2000);
+  const busy = setInterval(() => {
+    const t = Date.now();
+    while (Date.now() - t < 8) {
+      /* bloquea el hilo 8 ms cada 30 ms */
+    }
+  }, 30);
+  pacer.push(data);
+  await sleep(8000);
+  clearInterval(feeder);
+  clearInterval(busy);
+  const st = pacer.stats();
+  await pacer.close();
+  ok(
+    'Con el bucle de eventos cargado mantiene el ritmo (sin quedarse corto)',
+    st.sent_kbps > 2250 * 0.9 && st.sent_kbps < 2250 * 1.1,
+    `${st.sent_kbps} kbps de 2250 · cola ${st.queue_ms} ms`
+  );
+}
+
+{
   const off = ((process.env.TVLISTER_CATV_PACER = 'off'), createCatvPacer({ slotRow: { udp_host: '127.0.0.1', udp_port: 1 }, transport: { pktSize: 1316 } }));
   delete process.env.TVLISTER_CATV_PACER;
   ok('Se puede apagar con TVLISTER_CATV_PACER=off (vuelve al comportamiento anterior)', off === null);

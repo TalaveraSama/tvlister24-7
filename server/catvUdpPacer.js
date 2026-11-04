@@ -359,12 +359,15 @@ export class CatvUdpPacer {
 
     const target = this.targetKbps;
     const bytesPerMs = (target * 1000) / 8 / 1000;
-    // Tope de crédito: como mucho ~12 ms de datos por tick (nada de ráfagas).
-    const burstBytes = Math.max(this.pktSize, bytesPerMs * 12);
-    this.tokens = Math.min(this.tokens + bytesPerMs * elapsedMs, burstBytes);
+    // Crédito acumulado: si el bucle de eventos se retrasa (SQLite, HTTP, otros
+    // canales), el pacer NO pierde ritmo; paga la deuda en los ticks siguientes.
+    // La deuda se limita a 0,5 s y cada tick emite como mucho 20 ms de datos:
+    // así un retraso de 100 ms no se convierte nunca en una ráfaga grande.
+    this.tokens = Math.min(this.tokens + bytesPerMs * elapsedMs, bytesPerMs * 500);
+    let budget = Math.min(this.tokens, Math.max(this.pktSize, bytesPerMs * 20));
 
     let guard = 0;
-    while (this.tokens >= this.pktSize && guard < 4096) {
+    while (budget >= this.pktSize && guard < 4096) {
       guard += 1;
       let payload = null;
       const taken = this._take(this.pktSize);
@@ -380,6 +383,7 @@ export class CatvUdpPacer {
       }
       this._emit(payload);
       this.tokens -= this.pktSize;
+      budget -= this.pktSize;
     }
 
     this._tickTelemetry();
