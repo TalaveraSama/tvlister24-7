@@ -63,6 +63,9 @@ export function buildFlussonicUdpOutputUrl(slot = {}) {
   const host = String(slot.udp_host || '').trim();
   const port = Number(slot.udp_port) || 0;
   if (!host || !port) return '';
+  // Si el operador fijó una interfaz de salida (ens37), el motor delegado
+  // escribe la salida igual que la tarjeta de push: udp://ens37@IP:PUERTO.
+  const pushIface = String(slot.push_interface || getPushInterface() || '').trim();
   const params = [];
   const pkt = Number(slot.pkt_size) || 0;
   if (pkt === 188 || pkt === 1316) params.push(`pkt_size=${pkt}`);
@@ -71,7 +74,7 @@ export function buildFlussonicUdpOutputUrl(slot = {}) {
   const bindIp = String(slot.local_interface_ip || '').trim();
   if (bindIp) params.push(`localaddr=${encodeURIComponent(bindIp)}`);
   const proto = Number(slot.rtp) === 1 ? 'rtp' : 'udp';
-  return `${proto}://${host}:${port}${params.length ? '?' + params.join('&') : ''}`;
+  return `${proto}://${pushIface ? pushIface + '@' : ''}${host}:${port}${params.length ? '?' + params.join('&') : ''}`;
 }
 
 /** host:puerto de una salida (para reconocer la nuestra entre las demás). */
@@ -192,9 +195,11 @@ export async function applyFlussonicUdp({ serverId = null, streamName, slot }) {
   const sameTarget = existing.filter(isOurs);
   const others = existing.filter((o) => !isOurs(o));
 
-  if (sameTarget.length === 1 && sameTarget[0].url === url) {
-    rememberOutputUrl(slot?.catv_ch, url);
-    return { ok: true, already: true, url, streamName: name, server: srv.name, method: 'sin cambios' };
+  // Misma IP:puerto = ya está bien; no se pisa lo que el operador escribió
+  // (interfaz, ttl, pkt_size) ni se pelea con la tarjeta de push cada 4 s.
+  if (sameTarget.length === 1 && outputTargetKey(sameTarget[0].url) === key) {
+    rememberOutputUrl(slot?.catv_ch, sameTarget[0].url);
+    return { ok: true, already: true, url: sameTarget[0].url, streamName: name, server: srv.name, method: 'sin cambios' };
   }
 
   const outputs = [...others, { url }];

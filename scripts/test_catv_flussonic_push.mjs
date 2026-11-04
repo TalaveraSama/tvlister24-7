@@ -386,6 +386,15 @@ try {
   const ch6 = (plan?.slots || plan?.channels || []).find((c) => c.catv_ch === 6);
   ok('el canal queda con motor Flussonic en el plan', ch6?.live_engine === 'flussonic_api', `engine=${ch6?.live_engine}`);
 
+  // El reconciliador (cada 4 s) no debe pisar la salida que puso el push:
+  // misma IP:puerto, con su interfaz y sin parámetros añadidos.
+  await sleep(5200);
+  ok(
+    'el reconciliador respeta la salida del push (no la reescribe)',
+    udpOf('CANAL 6').length === 1 && udpOf('CANAL 6')[0] === 'udp://ens37@127.0.0.1:4776',
+    JSON.stringify(udpOf('CANAL 6'))
+  );
+
   // --- 7. Flussonic caído: el panel sigue en pie -----------------------
   fake.close();
   await sleep(300);

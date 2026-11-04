@@ -3029,7 +3029,11 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
-### v2.6.34: las salidas UDP de Flussonic se ponen desde el panel (push)
+### v2.6.35: las salidas UDP de Flussonic se ponen desde el panel (push)
+
+**Corrección (v2.6.35):** con `take_over`, el reconciliador de 4 s reescribía la salida recién puesta
+(perdía `ens37@` y añadía `ttl`/`pkt_size`). Ahora no toca una salida que ya apunta al mismo `IP:puerto`
+y, si tiene que escribirla, usa el mismo formato con interfaz. Prueba: `test_catv_flussonic_push` **40 OK**.
 
 **Lo pedido:** «los canales ya los tiene Flussonic y yo sólo agrego en push la salida UDP de manera manual;
 quería una sección que controle los canales de Flussonic y agregue la salida UDP, más sencillo, más práctico».
