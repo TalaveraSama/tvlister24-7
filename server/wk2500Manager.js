@@ -3764,6 +3764,24 @@ wk2500Router.get('/api/wk2500/flussonic-push', requireAuth, requireAdmin, async 
 });
 
 /** Asignar a mano el stream de Flussonic de un canal (a0ek → CH4, etc.). */
+/** Diagnóstico de escritura: qué cuerpo acepta ESTE Flussonic (no aplica nada). */
+wk2500Router.post('/api/wk2500/flussonic-push/probe', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const m = await import('./flussonicUdp.js');
+    const b = req.body || {};
+    const stream = String(b.stream || b.stream_name || '').trim();
+    if (!stream) return res.status(400).json({ ok: false, error: 'Indica el stream de Flussonic.' });
+    const r = await m.probeStreamWrite({
+      serverId: b.flussonic_server_id ? Number(b.flussonic_server_id) : null,
+      streamName: stream,
+      url: String(b.url || '')
+    });
+    res.status(r.ok ? 200 : 400).json(r);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 wk2500Router.post('/api/wk2500/flussonic-push/map', requireAuth, requireAdmin, async (req, res) => {
   try {
     ensureCatvSlotsInitialized();

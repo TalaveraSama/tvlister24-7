@@ -72,7 +72,9 @@ const streamsState = new Map([
   //  · RECHAZA   → HTTP 400 con «parsing_parameters» (cuerpo que no le gusta)
   //  · NOGUARDA  → HTTP 200 pero no guarda nada
   ['RECHAZA', { name: 'RECHAZA', title: 'rechaza el cuerpo', alive: true, bitrate: 1000000, outputs: [], push: [] }],
-  ['NOGUARDA', { name: 'NOGUARDA', title: 'dice ok y no guarda', alive: true, bitrate: 1000000, outputs: [], push: [] }]
+  ['NOGUARDA', { name: 'NOGUARDA', title: 'dice ok y no guarda', alive: true, bitrate: 1000000, outputs: [], push: [] }],
+  // SOLOPUSH: sólo acepta la forma antigua `{"push": [...]}`.
+  ['SOLOPUSH', { name: 'SOLOPUSH', title: 'sólo acepta push', alive: true, bitrate: 1000000, outputs: [], push: [] }]
 ]);
 const patchCalls = [];
 const fake = http.createServer((req, res) => {
@@ -135,6 +137,15 @@ const fake = http.createServer((req, res) => {
         }
         if (name === 'NOGUARDA') {
           send({ ok: true });
+          return;
+        }
+        if (name === 'SOLOPUSH') {
+          if (!Array.isArray(parsed.push)) {
+            send({ name: 'request_body', while: 'parsing_parameters', input1: { disabled: false } }, 400);
+            return;
+          }
+          st.outputs = parsed.push.map((o) => (typeof o === 'string' ? { url: o } : o));
+          send({ ok: true, name: st.name });
           return;
         }
         // El Flussonic real (23.12) no acepta PATCH: 400 y a otra cosa.
@@ -325,7 +336,8 @@ try {
   await sleep(2500);
 
   // --- 0. Utilidades de URL (multicast + interfaz) -----------------------
-  const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
+  process.env.TVLISTER_DB_PATH = path.join(TMP, 't.db');
+const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
   ok('parsea udp://ens37@239.1.1.2:1002', mod.parsePushUrl('udp://ens37@239.1.1.2:1002')?.iface === 'ens37');
   ok(
     'la misma salida con o sin interfaz es el mismo destino',
@@ -538,8 +550,10 @@ try {
   })).data;
   ok('si Flussonic rechaza el cuerpo, la fila lo dice', rechaza?.detail?.[0]?.ok === false, rechaza?.detail?.[0]?.error);
   ok(
-    'el aviso nombra el HTTP y qué hacer',
-    /HTTP 400/.test(rechaza?.detail?.[0]?.error || '') && /sólo la lista/i.test(rechaza?.detail?.[0]?.error || ''),
+    'el aviso nombra el HTTP, lo probado y el comando de diagnóstico',
+    /HTTP 400/.test(rechaza?.detail?.[0]?.error || '') &&
+      /Probado: outputs→400/.test(rechaza?.detail?.[0]?.error || '') &&
+      /flussonic probe/.test(rechaza?.detail?.[0]?.error || ''),
     rechaza?.detail?.[0]?.error
   );
   ok('y el canal NO se pasa a Flussonic', !(rechaza?.taken_over || []).includes(13), JSON.stringify(rechaza?.taken_over));
@@ -574,6 +588,29 @@ try {
     back12?.detail?.[0]?.ok === false && /no tiene fuente/i.test(back12?.detail?.[0]?.error || ''),
     JSON.stringify(back12?.detail)
   );
+
+  // --- 5i. Un Flussonic que sólo acepta `push`: el panel se adapta ------
+  await api('POST', '/api/wk2500/flussonic-push/map', { catv_ch: 15, stream: 'SOLOPUSH' });
+  const soloPush = (await api('POST', '/api/wk2500/flussonic-push', {
+    items: [{ stream: 'SOLOPUSH', url: 'udp://127.0.0.1:4793' }]
+  })).data;
+  ok('si el servidor sólo acepta «push», el panel lo encuentra solo', soloPush?.detail?.[0]?.ok === true, JSON.stringify(soloPush?.detail));
+  ok(
+    'y deja la salida puesta de verdad',
+    (udpOf('SOLOPUSH') || []).some((u) => u.includes('127.0.0.1:4793')),
+    JSON.stringify(udpOf('SOLOPUSH'))
+  );
+  // La forma aprendida se recuerda: la siguiente escritura ya no tantea.
+  const soloPush2 = (await api('POST', '/api/wk2500/flussonic-push', {
+    items: [{ stream: 'SOLOPUSH', url: 'udp://127.0.0.1:4794' }]
+  })).data;
+  ok('la forma aprendida se reutiliza', soloPush2?.detail?.[0]?.ok === true, JSON.stringify(soloPush2?.detail));
+
+  // --- 5j. Diagnóstico: el probe dice qué forma acepta el servidor ------
+  const probe = await mod.probeStreamWrite({ streamName: 'SOLOPUSH', url: 'udp://127.0.0.1:4795' });
+  ok('el diagnóstico encuentra la forma que funciona', probe?.winner === 'push', JSON.stringify(probe?.winner));
+  ok('dice qué respondió cada intento', (probe?.attempts || [])[0]?.status === 400, JSON.stringify(probe?.attempts?.[0]));
+  ok('y deja el stream como estaba', probe?.restored === true, JSON.stringify(probe?.outputs_before));
 
   // --- 6. take_over: el canal pasa a Flussonic -------------------------
   const before = await countDatagrams(4776, 3500);

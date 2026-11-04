@@ -24,6 +24,11 @@ interfaz dedicada, nombres de las portadoras, grilla de canales) · **2 · Fluss
 verificar y volver sin dos emisores) · **3 · Flussonic UDP · push** (la salida UDP de cada canal). Ya no se mezcla
 lo nativo con lo de Flussonic.
 
+🧪 **Si Flussonic sigue rechazando el cuerpo (v2.6.41)**: el panel prueba las formas conocidas de escritura
+(`outputs`, `push`, stream completo; con objetos y con texto) y se queda con la que el servidor **acepta y
+guarda** (lo comprueba releyendo). Si ninguna funciona, el aviso trae la respuesta exacta de cada intento y
+el comando `tvlister-admin catv flussonic probe <stream>` para verlo todo y dejarlo como estaba.
+
 🛠️ **El push vuelve a escribir en Flussonic 23.12 (v2.6.39 + v2.6.40)**: Flussonic actualiza con **PUT** y JSON merge
 patch, y rechaza el cuerpo entero si le llegan `inputs` con sus campos de estado (`stats`, `id`). El panel
 mandaba PATCH y, al fallar, reenviaba el stream entero: de ahí el `HTTP 400 · parsing_parameters` y los

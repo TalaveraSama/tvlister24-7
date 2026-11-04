@@ -149,31 +149,110 @@ function normalizeOutputs(raw) {
  * Nunca reenvía `inputs`: el GET los devuelve con estado (`stats`, `id`) y el
  * servidor real responde 400 «parsing_parameters».
  */
+/**
+ * Formas del cuerpo que entienden las distintas versiones de Flussonic.
+ * Se prueban en orden y **cada una se verifica releyendo el stream**: si no
+ * deja la salida puesta, no vale y se pasa a la siguiente. La que funciona se
+ * recuerda en `settings` para no repetir el tanteo en los 105 canales.
+ */
+const WRITE_SHAPES = ['outputs', 'outputs_text', 'push', 'push_text', 'full', 'full_text'];
+
+// Claves del stream que el GET devuelve pero el PUT no acepta (estado/derivadas).
+const READ_ONLY_STREAM_KEYS = new Set([
+  'stats',
+  'effective',
+  'named_by',
+  'position',
+  'sessions',
+  'schema',
+  '$schema',
+  'media_info'
+]);
+
+function outputsValue(urls, asText) {
+  return asText ? [...urls] : urls.map((u) => ({ url: u }));
+}
+
+/** Config completa y «limpia» (sin estado), por si la versión exige el stream entero. */
+function fullStreamPayload(config, streamName, urls, asText) {
+  const src = config && typeof config === 'object' ? config : {};
+  const payload = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (READ_ONLY_STREAM_KEYS.has(k) || String(k).startsWith('$')) continue;
+    if (k === 'inputs' || k === 'outputs' || k === 'push') continue;
+    payload[k] = v;
+  }
+  const inputs = (Array.isArray(src.inputs) ? src.inputs : [])
+    .map((i) => (typeof i === 'string' ? { url: i } : i && i.url ? { url: i.url } : null))
+    .filter((i) => i && i.url);
+  if (inputs.length) payload.inputs = inputs;
+  payload.name = src.name || streamName;
+  payload.outputs = outputsValue(urls, asText);
+  return payload;
+}
+
+function shapeBody(shape, urls, config, streamName) {
+  switch (shape) {
+    case 'outputs':
+      return { outputs: outputsValue(urls, false) };
+    case 'outputs_text':
+      return { outputs: outputsValue(urls, true) };
+    case 'push':
+      return { push: outputsValue(urls, false) };
+    case 'push_text':
+      return { push: outputsValue(urls, true) };
+    case 'full':
+      return fullStreamPayload(config, streamName, urls, false);
+    case 'full_text':
+      return fullStreamPayload(config, streamName, urls, true);
+    default:
+      return { outputs: outputsValue(urls, false) };
+  }
+}
+
+const WRITE_SHAPE_KEY = 'flussonic_write_shape';
+
+export function getWriteShape() {
+  try {
+    const v = String(db.prepare('SELECT value FROM settings WHERE key = ?').get(WRITE_SHAPE_KEY)?.value || '');
+    return WRITE_SHAPES.includes(v) ? v : '';
+  } catch {
+    return '';
+  }
+}
+
+function rememberWriteShape(shape) {
+  try {
+    db.prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    ).run(WRITE_SHAPE_KEY, shape);
+  } catch {
+    /* el acierto no es crítico */
+  }
+}
+
+function rawDetail(resp, max = 160) {
+  const raw = String(resp?.text || resp?.json?.error || '').replace(/\s+/g, ' ').trim();
+  return raw.length > max ? raw.slice(0, max) + '…' : raw;
+}
+
 function outputsHint(resp, config) {
   const raw = String(resp?.text || resp?.json?.error || '');
   const status = Number(resp?.status) || 0;
-  // 400 típico del servidor real: rechaza el cuerpo entero por campos de sólo
-  // lectura (`stats`, `id`…) que vienen en el GET y no se pueden reenviar.
-  if (status === 400 && /parsing_parameters|request_body/i.test(raw)) {
-    return (
-      'Flussonic no aceptó la salida UDP (HTTP 400): rechazó el cuerpo del cambio. ' +
-      'El panel manda sólo la lista `outputs`; revisa que la API sea /streamer/api/v3 y que el ' +
-      'usuario tenga permiso de edición.'
-    );
-  }
   if (status === 409) return 'El nombre de stream ya está en uso (HTTP 409).';
   if (status === 401 || status === 403) {
     return 'Flussonic rechazó las credenciales (revisa usuario/clave o api_token).';
   }
   if (config && config.__note) return String(config.__note);
-  return '';
+  return raw ? '' : '';
 }
 
 /**
- * Escribe la lista de salidas del stream. Flussonic 23.12 actualiza con **PUT**
- * y JSON merge patch: el cuerpo lleva sólo `{"outputs": [...]}`, nunca `inputs`
- * ni campos de estado (el GET los devuelve y el servidor real los rechaza con
- * HTTP 400 «parsing_parameters»).
+ * Escribe la lista de salidas del stream probando las formas conocidas.
+ * En 23.12 lo normal es `{"outputs":[...]}` por **PUT**; hay instalaciones que
+ * sólo aceptan `push`, o que exigen el stream entero. Nunca se manda `inputs`
+ * con sus campos de estado (el GET los devuelve y el servidor los rechaza con
+ * 400 «parsing_parameters»).
  */
 async function putOutputs(srv, streamName, outputs, config) {
   const enc = String(streamName).split('/').map(encodeURIComponent).join('/');
@@ -181,37 +260,163 @@ async function putOutputs(srv, streamName, outputs, config) {
   const headers = headersFor(srv);
   const urls = outputs.map((o) => o.url).filter(Boolean);
 
-  // Dos formas del mismo cuerpo: la API nueva usa lista de objetos ({url}),
-  // y hay instalaciones que aceptan la lista de URLs a secas.
-  const bodies = [JSON.stringify({ outputs: urls.map((u) => ({ url: u })) }), JSON.stringify({ outputs: urls })];
-  let last = null;
-  let lastBody = '';
-  for (const body of bodies) {
-    lastBody = body;
+  const learned = getWriteShape();
+  const order = learned ? [learned, ...WRITE_SHAPES.filter((x) => x !== learned)] : [...WRITE_SHAPES];
+  const attempts = [];
+  for (const shape of order) {
+    const body = JSON.stringify(shapeBody(shape, urls, config, streamName));
     const put = await fetchJsonWithTimeout(url, { method: 'PUT', headers, body }, 8000);
-    last = put;
-    if (put.ok) return finishWrite(srv, streamName, outputs, 'PUT', put.status);
-    // Sólo se prueba la siguiente forma si el problema es el cuerpo.
-    if (![400, 422].includes(Number(put.status))) break;
+    const detail = rawDetail(put);
+    attempts.push({ shape, status: Number(put.status) || 0, detail });
+    if (put.ok) {
+      const done = await finishWrite(srv, streamName, outputs, 'PUT', put.status, shape);
+      if (done.ok) {
+        rememberWriteShape(shape);
+        return done;
+      }
+      // Aceptó el cuerpo pero no guardó nada: se sigue probando.
+      attempts[attempts.length - 1].detail = 'no quedó guardada';
+      continue;
+    }
+    // 401/403/404 no se arreglan cambiando el cuerpo.
+    if ([401, 403, 404].includes(Number(put.status))) break;
   }
-  // Servidores con proxy que sólo deja pasar PATCH, o versiones antiguas.
-  if (last && [400, 404, 405, 422, 500, 501].includes(Number(last.status))) {
-    const patch = await fetchJsonWithTimeout(url, { method: 'PATCH', headers, body: lastBody }, 8000);
-    if (patch.ok) return finishWrite(srv, streamName, outputs, 'PATCH', patch.status);
+
+  // Último recurso: PATCH con la forma más habitual (proxies que sólo dejan PATCH).
+  const patchBody = JSON.stringify(shapeBody('outputs', urls, config, streamName));
+  const patch = await fetchJsonWithTimeout(url, { method: 'PATCH', headers, body: patchBody }, 8000);
+  attempts.push({ shape: 'patch', status: Number(patch.status) || 0, detail: rawDetail(patch) });
+  if (patch.ok) {
+    const done = await finishWrite(srv, streamName, outputs, 'PATCH', patch.status, 'outputs');
+    if (done.ok) {
+      rememberWriteShape('outputs');
+      return done;
+    }
   }
-  const hint = outputsHint(last, config);
-  const base = apiError(last, 'Flussonic no aceptó la salida UDP');
+
+  const last = attempts[attempts.length - 1] || {};
+  const shown = attempts
+    .slice(0, 3)
+    .map((a) => `${a.shape}→${a.status}${a.detail ? ` ${String(a.detail).slice(0, 90)}` : ''}`);
+  if (attempts.length > 3) shown.push(`… (+${attempts.length - 3})`);
+  const tried = shown.join(' | ');
+  const all2xx = attempts.length > 0 && attempts.every((a) => a.status >= 200 && a.status < 300);
+  const hint = outputsHint({ status: last.status, text: last.detail }, config);
+  const head = all2xx
+    ? `Flussonic respondió ${last.status} pero la salida no quedó guardada`
+    : `Flussonic no aceptó la salida UDP (HTTP ${last.status || 0})`;
   return {
     ok: false,
-    // Con el 400 de cuerpo no se repite el JSON crudo: no aporta nada al operador.
-    error: hint ? hint : base
+    attempts,
+    error:
+      `${head}${hint ? `: ${hint}` : ''}. Probado: ${tried}` +
+      ' — ejecuta `tvlister-admin catv flussonic probe <stream>` para ver la respuesta exacta.'
   };
 }
 
+/**
+ * Diagnóstico: prueba cada forma de cuerpo contra el Flussonic real y devuelve
+ * la respuesta exacta de cada intento. Al final deja el stream como estaba.
+ * Uso:  tvlister-admin catv flussonic probe <stream> [--url udp://...]
+ */
+export async function probeStreamWrite({ serverId = null, streamName, url = '' } = {}) {
+  const srv = getFlussonicServer(serverId);
+  if (!srv) return { ok: false, error: 'No hay servidor Flussonic configurado.' };
+  const name = String(streamName || '').trim();
+  if (!name) return { ok: false, error: 'Falta el nombre del stream de Flussonic.' };
+  const got = await getStreamConfig(srv, name);
+  if (got.error) return { ok: false, error: got.error };
+  const cfg = got.config || {};
+  const before = normalizeOutputs(cfg.outputs).map((o) => o.url);
+  const testUrl = String(url || '').trim() || before[0] || '';
+  if (!testUrl) {
+    return {
+      ok: false,
+      error: 'El stream no tiene salidas: indica la URL a probar con --url udp://ens37@239.1.1.2:1002'
+    };
+  }
+  const enc = String(name).split('/').map(encodeURIComponent).join('/');
+  const apiUrl = `${apiBase(srv)}/streams/${enc}`;
+  const headers = headersFor(srv);
+
+  const report = {
+    ok: true,
+    server: srv.name,
+    api: apiBase(srv),
+    stream: name,
+    stream_keys: Object.keys(cfg).sort(),
+    static: cfg.static === true,
+    named_by: cfg.named_by || '',
+    inputs: (Array.isArray(cfg.inputs) ? cfg.inputs : [])
+      .map((i) => (typeof i === 'string' ? i : i && i.url ? i.url : ''))
+      .filter(Boolean),
+    outputs_before: before,
+    test_url: testUrl,
+    attempts: []
+  };
+
+  for (const shape of WRITE_SHAPES) {
+    const body = JSON.stringify(shapeBody(shape, [testUrl], cfg, name));
+    const put = await fetchJsonWithTimeout(apiUrl, { method: 'PUT', headers, body }, 8000);
+    const after = await readOutputs(srv, name);
+    const saved = Array.isArray(after) && after.some((u) => outputTargetKey(u) === outputTargetKey(testUrl));
+    report.attempts.push({
+      shape,
+      status: Number(put.status) || 0,
+      raw: rawDetail(put, 220),
+      body: body.slice(0, 260),
+      saved
+    });
+    if (saved) {
+      report.winner = shape;
+      break;
+    }
+  }
+
+  // Diagnóstico extra: la misma salida SIN la interfaz (udp://IP:PUERTO).
+  // Si sólo funciona así, el problema es el prefijo «eth@» en la URL.
+  if (!report.winner) {
+    const bare = String(testUrl).replace(/^(udp|rtp):\/\/[^@/]+@/i, '$1://');
+    if (bare !== testUrl) {
+      const body = JSON.stringify({ outputs: [{ url: bare }] });
+      const put = await fetchJsonWithTimeout(apiUrl, { method: 'PUT', headers, body }, 8000);
+      const after = await readOutputs(srv, name);
+      const saved = Array.isArray(after) && after.some((u) => outputTargetKey(u) === outputTargetKey(bare));
+      report.attempts.push({
+        shape: 'outputs_sin_iface',
+        status: Number(put.status) || 0,
+        raw: rawDetail(put, 220),
+        body: body.slice(0, 260),
+        saved,
+        diagnostic: true
+      });
+      if (saved) report.winner = 'outputs_sin_iface';
+    }
+  }
+
+  // Dejar el stream como estaba (si algo se llegó a escribir).
+  report.restored = true;
+  const now = await readOutputs(srv, name);
+  if (Array.isArray(now) && JSON.stringify(now) !== JSON.stringify(before)) {
+    report.restored = false;
+    for (const shape of [report.winner || 'outputs', 'outputs', 'outputs_text']) {
+      const body = JSON.stringify(shapeBody(shape, before, cfg, name));
+      const put = await fetchJsonWithTimeout(apiUrl, { method: 'PUT', headers, body }, 8000);
+      if (!put.ok) continue;
+      const after = await readOutputs(srv, name);
+      if (Array.isArray(after) && JSON.stringify(after) === JSON.stringify(before)) {
+        report.restored = true;
+        break;
+      }
+    }
+  }
+  return report;
+}
+
 /** Un 200 no basta: se relee el stream y se comprueba que la salida quedó. */
-async function finishWrite(srv, streamName, outputs, method, status) {
+async function finishWrite(srv, streamName, outputs, method, status, shape = '') {
   const check = await verifyOutputs(srv, streamName, outputs);
-  if (check.ok) return { ok: true, method, verified: true };
+  if (check.ok) return { ok: true, method, shape, verified: true };
   return {
     ok: false,
     error:

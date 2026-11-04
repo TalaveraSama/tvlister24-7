@@ -2908,6 +2908,37 @@ cmd_catv() {
           return { from: 2, to: 125 };
         };
 
+        if (action === "probe") {
+          // Prueba qué cuerpo acepta ESTE Flussonic y no deja nada cambiado.
+          const mod = await import("./server/flussonicUdp.js");
+          const argv = String(process.env.FS_PUSH_ARGS || "").split("\x1f").filter(Boolean);
+          const stream = argv.find((a) => !String(a).startsWith("--"));
+          const ui = argv.indexOf("--url");
+          const url = ui >= 0 ? String(argv[ui + 1] || "") : "";
+          if (!stream) {
+            console.log("Uso: tvlister-admin catv flussonic probe <stream> [--url udp://ens37@239.1.1.2:1002]");
+            process.exit(1);
+          }
+          const r = await mod.probeStreamWrite({ streamName: stream, url });
+          if (!r.ok) {
+            console.log("❌ " + (r.error || "no se pudo probar"));
+            process.exit(1);
+          }
+          console.log("Servidor: " + r.server + "  ·  API: " + r.api);
+          console.log("Stream:   " + r.stream + "  (static=" + r.static + ", named_by=" + (r.named_by || "-") + ")");
+          console.log("Entradas: " + (r.inputs.join(", ") || "(ninguna)"));
+          console.log("Salidas : " + (r.outputs_before.join(", ") || "(ninguna)"));
+          console.log("Prueba  : " + r.test_url);
+          console.log("");
+          for (const a of r.attempts) {
+            console.log(`  ${a.saved ? "✅" : "  "} ${pad(a.shape, 13)} HTTP ${String(a.status).padEnd(4)} ${a.raw}`);
+          }
+          console.log("");
+          console.log(r.winner ? "✅ Forma que funciona: " + r.winner : "❌ Ninguna forma funcionó");
+          console.log(r.restored ? "   (el stream quedó como estaba)" : "   ⚠️ NO se pudo dejar el stream como estaba: revisa sus salidas en Flussonic");
+          process.exit(r.winner ? 0 : 2);
+        }
+
         if (action === "push") {
           const pushMod = await import("./server/flussonicUdp.js");
           // Los argumentos llegan separados por 0x1f para no romper los nombres

@@ -3029,6 +3029,26 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.41: el panel se adapta al Flussonic que haya y, si no puede, lo enseña
+
+Algunos Flussonic 23.12 siguen contestando `HTTP 400` al `PUT` de la salida UDP aunque el cuerpo sea mínimo.
+En vez de adivinar una sola forma:
+
+- El panel prueba, en orden: `{"outputs":[{"url":…}]}`, `{"outputs":[…]}`, `{"push":[{"url":…}]}`,
+  `{"push":[…]}`, el stream completo saneado (sin `stats`/`id`/`effective`, con las entradas reducidas a su
+  `url`) y su variante en texto. **Cada intento se verifica releyendo el stream**: sólo vale si la salida
+  quedó puesta.
+- La forma que funciona se guarda en `settings` (`flussonic_write_shape`) y se usa para los demás canales, así
+  que el tanteo se paga una vez.
+- Si ninguna funciona, el error incluye `Probado: outputs→400 … | push→400 …` con el texto del servidor y el
+  comando `tvlister-admin catv flussonic probe <stream> [--url …]`, que:
+  1. enseña el stream (claves, `static`, `named_by`, entradas y salidas),
+  2. prueba cada forma y muestra **HTTP y respuesta exacta**,
+  3. prueba también la URL **sin la interfaz** (`udp://IP:PUERTO`) para saber si el problema es el prefijo
+     `ens37@`,
+  4. **deja el stream como estaba**.
+- `POST /api/wk2500/flussonic-push/probe {stream, url}` hace lo mismo desde la API.
+
 ### v2.6.40: devolver a TVLister los canales que quedaron sin salida
 
 Sobre v2.6.39, para poder recuperar un panel que ya quedó con canales «en Flussonic y sin salida»:
