@@ -187,10 +187,10 @@ const click = (el) =>
     await new Promise((r) => setTimeout(r, 250));
   });
 
-// --- 0. La página está separada en tres mundos --------------------------
+// --- 0. La página está separada en dos mundos ---------------------------
 ok(text().includes('1 · Nativo TVLister'), 'la pestaña de lo nativo está a la vista');
 ok(text().includes('2 · Flussonic · quién emite'), 'la pestaña de Flussonic está a la vista');
-ok(text().includes('3 · Flussonic UDP · push'), 'la pestaña de la salida UDP está a la vista');
+ok(!text().includes('Flussonic UDP · push'), 'la salida UDP de Flussonic ya no está en el panel (v2.6.49)');
 ok(!text().includes('Flussonic · quién emite cada canal'), 'al abrir, sólo se ve lo nativo (sin revoltijo)');
 
 // --- 1. La tarjeta está y cuenta quién emite -----------------------------

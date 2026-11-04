@@ -3029,6 +3029,26 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.49: fuera la pestaña «Flussonic UDP · push»; la página CATV se queda con los WK2500
+
+Se retira del panel la **salida UDP de Flussonic por canal** (la pestaña `3 · Flussonic UDP · push`): el tema
+UDP/Flussonic queda para después y la pantalla CATV se queda con lo que hace falta hoy.
+
+- **Qué se fue**: la pestaña y todo su bloque (tabla de streams, rango, interfaz de salida, mapeo canal→stream,
+  «Nombre del canal en el TS»), su API `GET/POST /api/wk2500/flussonic-push`, `/probe`, `/map`, `/titles`,
+  `/interface` y el subcomando `tvlister-admin catv flussonic push`. También sus dos pruebas
+  (`test_catv_flussonic_push.mjs`, `test_catv_flussonic_push_ui.mjs`).
+- **Qué se queda**: las **dos** pestañas que importan —`1 · Nativo TVLister` (moduladores 32/64/125, armado rápido,
+  interfaz dedicada, nombres de portadoras, grilla de canales y **plantillas CSV**) y `2 · Flussonic · quién emite`
+  (emparejar cada canal con su stream y pasar el canal a Flussonic o devolverlo, sin dos emisores)—. La API de esa
+  segunda pestaña (`/api/wk2500/flussonic-control…` y `/api/wk2500/flussonic-udp/…`) no cambia.
+- La escritura de la salida UDP que hace el panel al pasar un canal a Flussonic sigue igual (las formas
+  `outputs`/`schema:full` y la relectura de confirmación). El diagnóstico `tvlister-admin catv flussonic probe
+  <stream>` también: no deja nada cambiado y sirve para el 23.12.
+- Las tablas y columnas (`udp_engine`, `flussonic_output_url`, `catv_push_interface`…) se quedan como están: no se
+  borra ningún dato de la base.
+- Pruebas: `test_catv_flussonic_ui.mjs` ahora comprueba que la pestaña **no** está; `control` 25 OK y `pacer` OK.
+
 ### v2.6.48: un canal 24/7 puede salir de un directo de YouTube
 
 El formulario de **Canales 24/7** pregunta de dónde sale la señal: **Parrilla 24/7** (lo de siempre) o

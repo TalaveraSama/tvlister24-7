@@ -19,10 +19,11 @@ según la ficha de TMDB, con prioridad y renombrado configurables (una comedia r
 botón **Aplicar** que lo recoloca por lotes, creando las categorías que falten. Si TMDB no encuentra
 un título, se queda en la categoría que tenía y no se repite la consulta.
 
-🧭 **La página CATV, ordenada en tres pestañas (v2.6.36)**: **1 · Nativo TVLister** (moduladores y armado rápido,
-interfaz dedicada, nombres de las portadoras, grilla de canales) · **2 · Flussonic · quién emite** (enviar,
-verificar y volver sin dos emisores) · **3 · Flussonic UDP · push** (la salida UDP de cada canal). Ya no se mezcla
-lo nativo con lo de Flussonic.
+🧭 **La página CATV, ordenada en dos pestañas (v2.6.49)**: **1 · Nativo TVLister** (moduladores de 32/64/125,
+armado rápido, interfaz dedicada, nombres de las portadoras, grilla de canales y plantillas CSV) · **2 · Flussonic ·
+quién emite** (enviar, verificar y volver sin dos emisores). La pestaña **«Flussonic UDP · push»** se retiró del
+panel: el tema UDP/Flussonic queda para después y la página se queda con lo que hace falta hoy, las plantillas de
+los WK2500.
 
 🧪 **Si Flussonic sigue rechazando el cuerpo (v2.6.41)**: el panel prueba las formas conocidas de escritura
 (`outputs`, `push`, stream completo; con objetos y con texto) y se queda con la que el servidor **acepta y
@@ -31,7 +32,7 @@ el comando `tvlister-admin catv flussonic probe <stream>` para verlo todo y deja
 servidor tiene `config_external` (los streams los define un backend externo) el panel lo detecta y lo dice:
 en ese modo Flussonic rechaza cualquier cambio por API.
 
-🛠️ **El push vuelve a escribir en Flussonic 23.12 (v2.6.39 + v2.6.40)**: Flussonic actualiza con **PUT** y JSON merge
+🛠️ **La salida UDP se escribe bien en Flussonic 23.12 (v2.6.39 + v2.6.40)**: Flussonic actualiza con **PUT** y JSON merge
 patch, y rechaza el cuerpo entero si le llegan `inputs` con sus campos de estado (`stats`, `id`). El panel
 mandaba PATCH y, al fallar, reenviaba el stream entero: de ahí el `HTTP 400 · parsing_parameters` y los
 canales «sin salida». Ahora manda **sólo** `{"outputs":[…]}` y **relee** el stream para confirmar que la
@@ -39,23 +40,16 @@ salida quedó puesta; si Flussonic no la guarda, el canal **no** se pasa a Fluss
 hayan quedado sin salida tienen un botón **Devolver a TVLister** (v2.6.40: también los que no tienen stream
 mapeado; los que no tienen fuente local se avisan, no se arrancan en vacío).
 
-🔎 **La tabla del push abre en «canales con stream asignado» (v2.6.38)**: antes salían los 124 canales del
-rango y había que buscar a mano; ahora se ve de entrada lo que ya tiene stream, con un selector para ver
-*todos*, los *sin stream* (para emparejarlos) o los que tienen *salida UDP puesta*. Al emparejar un canal, la
-tabla vuelve sola a «con stream» para ver la fila recién asignada.
-
 ⚡ **El panel no emite cuando manda Flussonic (v2.6.37)**: al guardar la salida UDP de un canal en Flussonic, el
 canal pasa a Flussonic y **TVLister cierra su emisor** en ese mismo momento (cero datagramas, comprobado
 midiendo). El panel sólo **escribe el texto de la salida** en Flussonic y vigila que siga puesta. Vale también
 para canales cuya fuente vive sólo en Flussonic (sin stream local). `--keep-local` queda como excepción a
 propósito, con aviso de dos emisores.
 
-🔌 **Las salidas UDP de Flussonic, por canal (v2.6.36)**: la tabla del push es la lista de canales: eliges con un
-desplegable **qué stream de Flussonic** emite cada uno (con su título, `A3 Cine · a0cq`), pones su
-`udp://[interfaz@]IP:PUERTO` y ves el estado (`running · 134.2 MB`) sin tocar las salidas que no son UDP. El
-emparejamiento automático **nunca** usa un nombre repetido como `NACIONAL`: esos se eligen a mano, una vez. Y con
-**«Nombre del canal en el TS»** Flussonic lleva el nombre de la portadora en la SDT, para que el canal salga
-identificado al escanear. Terminal: `tvlister-admin catv flussonic push [--map 4 --stream a0ek] [--titles --apply]`.
+🔌 **El push UDP de Flussonic se retiró del panel (v2.6.49)**: la pantalla que escribía la salida UDP de cada canal
+en Flussonic ya no está, ni su API (`/api/wk2500/flussonic-push…`), ni sus pruebas. Se queda el emparejamiento
+automático de **quién emite** (pestaña 2) y la plantilla de los WK2500 (pestaña 1). El tema UDP/Flussonic se retoma
+después; el diagnóstico `tvlister-admin catv flussonic probe <stream>` sigue disponible y no deja nada cambiado.
 
 🔀 **Control de quién emite (v2.6.33)**: la tarjeta de control **detecta** qué stream de Flussonic corresponde a
 cada canal, los **pasa a Flussonic** con un clic y muestra por canal si está **emitiendo**, si el stream está
