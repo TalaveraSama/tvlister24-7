@@ -79,6 +79,8 @@ const streamsState = new Map([
   ['ESQUEMA', { name: 'ESQUEMA', title: 'sólo acepta push de texto', alive: true, bitrate: 1000000, outputs: [], push: [] }],
   // ESQUEMAFULL: exige el objeto completo y sólo las propiedades del esquema.
   ['ESQUEMAFULL', { name: 'ESQUEMAFULL', title: 'exige el objeto entero', alive: true, bitrate: 900000, outputs: [], push: [], mpegts: { service_name: 'X' } }],
+  // IFACEFIELD: guarda la interfaz en un campo aparte y rechaza «@» en la url.
+  ['IFACEFIELD', { name: 'IFACEFIELD', title: 'interfaz en campo aparte', alive: true, bitrate: 850000, outputs: [{ url: 'udp://239.1.1.9:9001', interface: 'ens37', type: 'udp' }], push: [] }],
   // YATIENE: ya tiene la salida pedida y rechaza cualquier PUT (400).
   ['YATIENE', { name: 'YATIENE', title: 'ya tiene la salida', alive: true, bitrate: 800000, outputs: [{ url: 'udp://127.0.0.1:4801' }], push: [] }]
 ]);
@@ -211,6 +213,18 @@ const fake = http.createServer((req, res) => {
         }
         if (name === 'NOGUARDA') {
           send({ ok: true });
+          return;
+        }
+        if (name === 'IFACEFIELD') {
+          const bad = (parsed.outputs || []).find(
+            (o) => typeof o !== 'object' || String(o.url || '').includes('@') || !o.interface
+          );
+          if (!Array.isArray(parsed.outputs) || bad) {
+            send({ name: 'request_body', while: 'parsing_parameters', input1: { url: 'mal' } }, 400);
+            return;
+          }
+          st.outputs = parsed.outputs.map((o) => ({ url: o.url, interface: o.interface, type: o.type || 'udp' }));
+          send({ ok: true, name: st.name });
           return;
         }
         if (name === 'YATIENE') {
@@ -449,7 +463,7 @@ const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
   // --- 1. Foto: streams, push actual y canal ---------------------------
   let snap = (await api('GET', '/api/wk2500/flussonic-push')).data;
   ok('Flussonic responde', snap?.flussonic_reachable === true, `${snap?.total} streams`);
-  ok('cuenta los streams con salida UDP', snap?.with_push === 2, `${snap?.with_push}`);
+  ok('cuenta los streams con salida UDP', snap?.with_push === 3, `${snap?.with_push}`);
   const row2 = (snap?.streams || []).find((s) => s.name === 'NACIONAL 2');
   ok('empareja el stream con su canal de la lista', row2?.channel?.catv_ch === 2, JSON.stringify(row2?.channel));
   ok('muestra la salida UDP que ya tenía', row2?.push?.url === 'udp://ens37@239.9.9.9:9999', row2?.push?.url);
@@ -787,6 +801,28 @@ const mod = await import(path.join(ROOT, 'server/flussonicUdp.js'));
     `${patchCalls.length - before5l2} escrituras`
   );
   ok('y la salida queda puesta', (udpOf('ESQUEMAFULL') || []).some((u) => u.endsWith(':4798')), JSON.stringify(udpOf('ESQUEMAFULL')));
+
+  // --- 5m. Si el servidor guarda la interfaz aparte, se escribe como él ---
+  mod.forgetWriteShape();
+  const viaIface = await mod.applyFlussonicUdp({
+    streamName: 'IFACEFIELD',
+    slot: { catv_ch: 15, udp_host: '239.1.1.9', udp_port: 9101, udp_enabled: 1 }
+  });
+  ok('se imita la forma del servidor (interfaz en campo aparte)', viaIface?.ok === true, JSON.stringify(viaIface));
+  const ifaceCall = patchCalls.filter((c) => c.name === 'IFACEFIELD').pop();
+  const ifaceOut = (ifaceCall?.body?.outputs || []).find((o) => String(o.url).endsWith(':9101'));
+  ok(
+    'la url va limpia y la interfaz en «interface»',
+    ifaceOut?.url === 'udp://239.1.1.9:9101' && ifaceOut?.interface === 'ens37',
+    JSON.stringify(ifaceCall?.body?.outputs)
+  );
+  ok('y se conservan los campos que añade el servidor (type)', ifaceOut?.type === 'udp', JSON.stringify(ifaceOut));
+  const probeIface = await mod.probeStreamWrite({ streamName: 'IFACEFIELD', url: 'udp://ens37@239.1.1.9:9102' });
+  ok(
+    'el probe enseña cómo guarda el servidor sus salidas',
+    probeIface?.style?.iface_field === true && Array.isArray(probeIface?.outputs_raw),
+    JSON.stringify(probeIface?.style)
+  );
 
   await fetch(`http://127.0.0.1:${flussonicPort}/__schema?p=outputs`);
   mod.forgetWriteShape();

@@ -3029,6 +3029,19 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.45: la forma de cada salida se copia del propio servidor
+
+Antes de escribir, el panel mira una salida que el stream ya tenga y escribe **igual que él**:
+
+- interfaz **dentro** de la url (`udp://ens37@239.1.1.2:1002`) o en un **campo aparte**
+  (`{"url":"udp://239.1.1.2:1002","interface":"ens37"}`), según lo que publique su `GET`;
+- los campos extra que añada ese servidor (`type`, `ttl`, `bitrate`…) se copian tal cual, sin inventar valores;
+- además hay una forma de respaldo `iface_field` (url sin `@` + `"interface"`).
+
+`catv flussonic probe <stream>` imprime el **JSON real** de salidas y entradas y una línea `Formato` con la
+convención detectada. El `405` que puede aparecer en un intento es el del último recurso `PATCH`, que Flussonic
+no admite: no indica un endpoint equivocado.
+
 ### v2.6.44: el probe exige que el servidor acepte el cuerpo
 
 Un `PUT` rechazado con `400` no borra la salida que el stream ya tenía, así que comprobar sólo «la salida sigue

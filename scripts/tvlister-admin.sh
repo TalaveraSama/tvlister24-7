@@ -2936,6 +2936,17 @@ cmd_catv() {
           }
           console.log("Entradas: " + (r.inputs.join(", ") || "(ninguna)"));
           console.log("Salidas : " + (r.outputs_before.join(", ") || "(ninguna)"));
+          if (r.style) {
+            console.log(
+              "Formato : " + (r.style.iface_field
+                ? "la interfaz va en un campo «interface» aparte de la url"
+                : "la interfaz va dentro de la url (udp://ens37@…)") +
+              (r.style.extra_keys && r.style.extra_keys.length ? "  ·  otros campos: " + r.style.extra_keys.join(", ") : "")
+            );
+          }
+          if (r.outputs_raw && r.outputs_raw.length) {
+            console.log("JSON    : " + JSON.stringify(r.outputs_raw).slice(0, 500));
+          }
           console.log("Prueba  : " + r.test_url + (r.test_url_already ? "  ⚠️ (el stream ya tenía esa salida: que «siga» no prueba que el PUT se acepte)" : ""));
           console.log("");
           for (const a of r.attempts) {

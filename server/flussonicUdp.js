@@ -155,7 +155,7 @@ function normalizeOutputs(raw) {
  * deja la salida puesta, no vale y se pasa a la siguiente. La que funciona se
  * recuerda en `settings` para no repetir el tanteo en los 105 canales.
  */
-const WRITE_SHAPES = ['outputs', 'outputs_text', 'push', 'push_text', 'full', 'full_text'];
+const WRITE_SHAPES = ['outputs', 'iface_field', 'outputs_text', 'push', 'push_text', 'full', 'full_text'];
 // Forma especial: reenviar el stream tal como lo da el servidor, recortado a
 // las propiedades de su propio esquema. No es un cuerpo fijo: se construye en
 // el momento con el GET + el OpenAPI del servidor.
@@ -173,8 +173,65 @@ const READ_ONLY_STREAM_KEYS = new Set([
   'media_info'
 ]);
 
-function outputsValue(urls, asText) {
-  return asText ? [...urls] : urls.map((u) => ({ url: u }));
+// Campos que el GET devuelve en cada salida pero que no son configuración.
+const OUTPUT_RUNTIME_KEYS = new Set([
+  'url',
+  'stats',
+  'state',
+  'status',
+  'running',
+  'bytes',
+  'started_at',
+  'opened_at',
+  'bitrate_kbps',
+  'error',
+  'clients',
+  'sessions'
+]);
+
+/**
+ * Cómo guarda ESTE servidor una salida UDP. Se mira una que ya tenga el stream:
+ *  · si la interfaz va dentro de la URL (`udp://ens37@239.1.1.2:1002`), se
+ *    escribe igual;
+ *  · si va en un campo aparte (`"interface": "ens37"`), se escribe así;
+ *  · si añade `type`, `ttl`, `bitrate`… se copian tal cual.
+ * No se inventa nada: se imita lo que el propio servidor publica.
+ */
+function outputStyle(config) {
+  const list = normalizeOutputs(config?.outputs);
+  const sample = list.find((o) => isUdpPush(o.url)) || null;
+  const extra = {};
+  let ifaceField = false;
+  if (sample) {
+    for (const [k, v] of Object.entries(sample)) {
+      if (OUTPUT_RUNTIME_KEYS.has(k)) continue;
+      extra[k] = v;
+    }
+    ifaceField = typeof sample.interface === 'string' && sample.interface.length > 0;
+  }
+  return { sample, ifaceField, extra };
+}
+
+/** Una entrada de `outputs`, con la forma que usa el servidor. */
+function outputEntry(url, style) {
+  const parsed = parsePushUrl(url);
+  const entry = { ...(style?.extra || {}) };
+  delete entry.url;
+  if (style?.ifaceField && parsed) {
+    entry.url = formatPushUrl({ ...parsed, iface: '' });
+    entry.interface = parsed.iface || entry.interface || '';
+    return entry;
+  }
+  entry.url = url;
+  if (style?.ifaceField === false && parsed && parsed.iface) {
+    // La interfaz viaja dentro de la URL; no se duplica en otro campo.
+    delete entry.interface;
+  }
+  return entry;
+}
+
+function outputsValue(urls, asText, style) {
+  return asText ? [...urls] : urls.map((u) => outputEntry(u, style));
 }
 
 /** Config completa y «limpia» (sin estado), por si la versión exige el stream entero. */
@@ -191,7 +248,7 @@ function fullStreamPayload(config, streamName, urls, asText) {
     .filter((i) => i && i.url);
   if (inputs.length) payload.inputs = inputs;
   payload.name = src.name || streamName;
-  payload.outputs = outputsValue(urls, asText);
+  payload.outputs = outputsValue(urls, asText, outputStyle(src));
   return payload;
 }
 
@@ -218,25 +275,35 @@ function schemaFullPayload(meta, config, streamName, urls) {
     if (inputs.length) payload.inputs = inputs;
   }
   if (!allowed.size || allowed.has('name')) payload.name = src.name || streamName;
-  payload[meta?.key || 'outputs'] = outputsValue(urls, Boolean(meta?.asText));
+  payload[meta?.key || 'outputs'] = outputsValue(urls, Boolean(meta?.asText), outputStyle(src));
   return payload;
 }
 
 function shapeBody(shape, urls, config, streamName) {
+  const style = outputStyle(config);
   if (String(shape).startsWith('schema:')) {
     // Forma descubierta en el /schema del propio servidor: schema:<clave>:obj|text
     const [, key, kind] = String(shape).split(':');
-    return { [key || 'outputs']: outputsValue(urls, kind === 'text') };
+    return { [key || 'outputs']: outputsValue(urls, kind === 'text', style) };
   }
   switch (shape) {
     case 'outputs':
-      return { outputs: outputsValue(urls, false) };
+      return { outputs: outputsValue(urls, false, style) };
+    case 'iface_field': {
+      // udp://IP:PUERTO + "interface": "ens37" (interfaz en un campo aparte)
+      return {
+        outputs: urls.map((u) => {
+          const p = parsePushUrl(u);
+          return p && p.iface ? { url: formatPushUrl({ ...p, iface: '' }), interface: p.iface } : { url: u };
+        })
+      };
+    }
     case 'outputs_text':
-      return { outputs: outputsValue(urls, true) };
+      return { outputs: outputsValue(urls, true, style) };
     case 'push':
-      return { push: outputsValue(urls, false) };
+      return { push: outputsValue(urls, false, style) };
     case 'push_text':
-      return { push: outputsValue(urls, true) };
+      return { push: outputsValue(urls, true, style) };
     case 'full':
       return fullStreamPayload(config, streamName, urls, false);
     case 'full_text':
@@ -543,6 +610,13 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
       .map((i) => (typeof i === 'string' ? i : i && i.url ? i.url : ''))
       .filter(Boolean),
     outputs_before: before,
+    // Cómo los publica el servidor, tal cual: de aquí sale la forma de escribir.
+    outputs_raw: (Array.isArray(cfg.outputs) ? cfg.outputs : []).map((o) =>
+      typeof o === 'string' ? o : JSON.parse(JSON.stringify(o))
+    ),
+    inputs_raw: (Array.isArray(cfg.inputs) ? cfg.inputs : []).map((i) =>
+      typeof i === 'string' ? i : JSON.parse(JSON.stringify(i))
+    ),
     test_url: testUrl,
     test_url_already: before.some((u) => outputTargetKey(u) === outputTargetKey(testUrl)),
     config_external: '',
@@ -553,6 +627,17 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
     report.config_external = String(global?.config_external || '').trim();
   } catch {
     /* sin dato */
+  }
+  // Cómo guarda el servidor sus propias salidas (interfaz aparte o dentro).
+  try {
+    const st = outputStyle(cfg);
+    report.style = {
+      iface_field: st.ifaceField,
+      extra_keys: Object.keys(st.extra).filter((k) => k !== 'interface').sort(),
+      sample: st.sample ? JSON.parse(JSON.stringify(st.sample)) : null
+    };
+  } catch {
+    report.style = { iface_field: false, extra_keys: [], sample: null };
   }
   // Qué dice el OpenAPI del propio servidor sobre el campo de salidas.
   try {
@@ -570,7 +655,9 @@ export async function probeStreamWrite({ serverId = null, streamName, url = '' }
     report.schema = { ok: false, error: String(err?.message || err).slice(0, 160) };
   }
 
-  const probeShapes = [...WRITE_SHAPES, FULL_SHAPE];
+  const probeShapes = [...WRITE_SHAPES, FULL_SHAPE].filter(
+    (sh) => sh !== 'iface_field' || Boolean(parsePushUrl(testUrl)?.iface)
+  );
   for (const shape of probeShapes) {
     let body = '';
     if (shape === FULL_SHAPE) {
