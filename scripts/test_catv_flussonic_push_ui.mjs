@@ -78,6 +78,7 @@ const mkChannel = (ch, name, stream, title, extra = {}) => ({
   stream_alive: Boolean(stream),
   push: extra.push || null,
   has_output: Boolean(extra.push),
+  has_source: extra.has_source ?? true,
   in_sync: Boolean(extra.in_sync),
   other_udp: [],
   other_outputs: [],
@@ -192,6 +193,17 @@ globalThis.fetch = async (url, options = {}) => {
     data = { slots: [], units: [], streams: [], models: [], brands: [], tv_standards: [], coverage: {}, summary: {}, dedicated_nic: null };
   else if (key === 'GET /api/wk2500/udp-engine') data = { servers: [], channels: [] };
   else if (key === 'POST /api/wk2500/flussonic-push/interface') data = { ok: true, iface: body?.iface || '' };
+  else if (key === 'POST /api/wk2500/flussonic-control/switch')
+    data = {
+      ok: true,
+      engine: body?.engine,
+      requested: (body?.channels || []).length,
+      switched: (body?.channels || []).length,
+      failed: 0,
+      detail: (body?.channels || []).map((ch) => ({ catv_ch: ch, ok: true })),
+      message: `${(body?.channels || []).length} de ${(body?.channels || []).length} canal(es) vuelven al motor propio de TVLister.`,
+      snapshot: pushSnapshot()
+    };
   else if (key === 'POST /api/wk2500/flussonic-push/map') {
     const ch = channels.find((c) => c.catv_ch === body.catv_ch);
     if (ch) {
@@ -428,6 +440,31 @@ if (ifaceInput) {
   const ifaceCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-push/interface').pop();
   ok(ifaceCall?.body?.iface === 'ens38', 'guarda la interfaz nueva', JSON.stringify(ifaceCall?.body));
 }
+
+// --- 10. Canales que Flussonic dejó sin salida -------------------------
+// El fallo de producción: el canal queda en Flussonic, la escritura falla y
+// se queda sin emisor. La pantalla lo avisa y ofrece devolverlo a TVLister.
+channels.push({
+  ...mkChannel(6, 'CANAL 6', 'CANAL 6', 'Canal 6', {}),
+  engine: 'flussonic',
+  push: null,
+  has_output: false,
+  has_source: true,
+  panel_emitting: false
+});
+const refreshBtn = byText('button', 'Actualizar');
+if (refreshBtn) await click(refreshBtn);
+ok(text().includes('sin salida UDP'), 'avisa de los canales que no emiten por nadie');
+const returnBtn = byText('button', 'Devolver a TVLister');
+ok(Boolean(returnBtn), 'ofrece devolverlos a TVLister');
+if (returnBtn) await click(returnBtn);
+const returnCall = calls.filter((c) => c.key === 'POST /api/wk2500/flussonic-control/switch').pop();
+ok(
+  returnCall?.body?.engine === 'local' && (returnCall.body.channels || []).includes(6),
+  'devuelve sólo los canales sin salida',
+  JSON.stringify(returnCall?.body)
+);
+ok(text().includes('vuelven al motor propio'), 'y confirma la vuelta');
 
 console.log(fails.length === 0 ? '\nTODO OK' : `\n${fails.length} fallo(s): ${fails.join(' | ')}`);
 process.exit(fails.length ? 1 : 0);

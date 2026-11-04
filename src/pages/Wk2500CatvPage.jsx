@@ -297,6 +297,46 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     }
   };
 
+  // Devolver a TVLister los que Flussonic dejó sin salida (no emiten por nadie).
+  const handlePushReturnEmpty = async () => {
+    const chans = (fsPush.snapshot?.channels || [])
+      .filter((c) => c.engine === 'flussonic' && !c.has_output && c.has_source)
+      .map((c) => Number(c.catv_ch));
+    const sinFuente = (fsPush.snapshot?.channels || []).filter(
+      (c) => c.engine === 'flussonic' && !c.has_output && !c.has_source
+    ).length;
+    if (!chans.length) {
+      setFsPush((prev) => ({
+        ...prev,
+        message: sinFuente
+          ? `Los ${sinFuente} canal(es) sin salida no tienen fuente en TVLister: vuelve a ponerles la salida UDP en Flussonic.`
+          : 'No hay canales que devolver: todos tienen su salida puesta.'
+      }));
+      return;
+    }
+    setFsPush((prev) => ({ ...prev, busy: 'return' }));
+    try {
+      const r = await apiFetch('/api/wk2500/flussonic-control/switch', {
+        method: 'POST',
+        body: JSON.stringify({ engine: 'local', channels: chans })
+      });
+      const fallos = (r.detail || []).filter((d) => !d.ok);
+      setFsPush((prev) => ({
+        ...prev,
+        busy: '',
+        message:
+          (r.message || 'Hecho.') +
+          (fallos.length ? ' · ' + fallos.slice(0, 3).map((f) => `CH${f.catv_ch}: ${f.error}`).join(' | ') : '') +
+          (sinFuente ? ` · ${sinFuente} canal(es) sin fuente local siguen en Flussonic.` : '')
+      }));
+      await loadFlussonicPush(true);
+      await loadPlan(true);
+      await loadUdpEngine();
+    } catch (err) {
+      setFsPush((prev) => ({ ...prev, busy: '', message: err.message }));
+    }
+  };
+
   const handlePushSaveRow = async (stream, remove = false) => {
     const url = String(fsPush.draft[stream] || '').trim();
     if (!remove && !url) return handlePushSaveRow(stream, true);
@@ -1098,6 +1138,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     );
   });
   const pushChannelRows = pushChannels.slice(0, 200);
+  // Canales que Flussonic controla pero que se quedaron sin salida UDP: no
+  // emiten por nadie. Se pueden devolver a TVLister (si tienen fuente local).
+  const pushSinSalida = (fsPush.snapshot?.channels || []).filter(
+    (c) => c.engine === 'flussonic' && !c.has_output
+  );
   const pushStreamOptions = [...pushAll]
     .filter((st) => st.name)
     .sort((a, b) => String(a.title || a.name).localeCompare(String(b.title || b.name)));
@@ -1990,6 +2035,25 @@ export default function Wk2500CatvPage({ setActiveTab }) {
         {fsPush.message && (
           <div className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-[11px] text-violet-200">
             {fsPush.message}
+          </div>
+        )}
+
+        {pushSinSalida.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              <strong>{pushSinSalida.length} canal(es) están en Flussonic pero sin salida UDP</strong>: ahora mismo no
+              emiten por nadie. Si Flussonic no acepta la salida, devuélvelos a TVLister.
+            </span>
+            <button
+              type="button"
+              onClick={handlePushReturnEmpty}
+              disabled={Boolean(fsPush.busy) || !pushSinSalida.some((c) => c.has_source)}
+              className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-amber-600/80 hover:bg-amber-500 border border-amber-400/40 text-white font-bold disabled:opacity-40"
+            >
+              <ArrowLeftRight className="w-3.5 h-3.5" />
+              {fsPush.busy === 'return' ? 'Devolviendo…' : 'Devolver a TVLister'}
+            </button>
           </div>
         )}
 

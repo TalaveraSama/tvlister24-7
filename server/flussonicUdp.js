@@ -19,32 +19,6 @@ import {
 
 export const UDP_ENGINES = ['local', 'flussonic'];
 
-// Campos de StreamConfig que se pueden reenviar en un PUT completo.
-// (El GET devuelve además stats/estado de sólo lectura que Flussonic rechaza.)
-const WRITABLE_STREAM_FIELDS = [
-  'name',
-  'title',
-  'comment',
-  'static',
-  'inputs',
-  'outputs',
-  'transcoder',
-  'source_timeout',
-  'retry_interval',
-  'disabled',
-  'authorization',
-  'meta',
-  'options',
-  'srt',
-  'dvr',
-  'archive',
-  'push',
-  'hls',
-  'mp4',
-  'subtitles',
-  'thumbnails'
-];
-
 export function getFlussonicServer(id = null) {
   const rows = db.prepare('SELECT * FROM flussonic_servers ORDER BY id ASC').all();
   if (!rows.length) return null;
@@ -121,35 +95,24 @@ async function getStreamConfig(srv, streamName) {
 }
 
 /**
- * PATCH parcial de un stream (sólo los campos que se mandan). Se usa para el
+ * Cambio parcial de un stream (sólo los campos que se mandan). Se usa para el
  * nombre de servicio del TS y para el título, sin tocar entradas ni salidas.
  */
 async function patchStream(srv, streamName, patch) {
   const enc = String(streamName).split('/').map(encodeURIComponent).join('/');
   const headers = headersFor(srv);
-  const r = await fetchJsonWithTimeout(
-    `${apiBase(srv)}/streams/${enc}`,
-    { method: 'PATCH', headers, body: JSON.stringify(patch) },
-    8000
-  );
-  if (r.ok) return { ok: true, method: 'PATCH' };
-  const unsupported = [400, 404, 405, 422, 500, 501].includes(Number(r.status));
-  if (!unsupported) return { ok: false, error: apiError(r, 'Flussonic no aceptó el cambio') };
-  // Algunos 23.12 no admiten PATCH parcial: PUT con el stream tal cual + el campo.
-  const got = await getStreamConfig(srv, streamName);
-  if (got.error) return { ok: false, error: got.error };
-  const payload = {};
-  for (const key of WRITABLE_STREAM_FIELDS) {
-    if (got.config && got.config[key] !== undefined) payload[key] = got.config[key];
-  }
-  payload.name = got.config?.name || streamName;
-  Object.assign(payload, patch);
-  const put = await fetchJsonWithTimeout(
-    `${apiBase(srv)}/streams/${enc}`,
-    { method: 'PUT', headers, body: JSON.stringify(payload) },
-    8000
-  );
+  const body = JSON.stringify(patch);
+  // La API v3 de Flussonic 23.12 se actualiza con PUT y JSON merge patch: se
+  // manda SÓLO el campo que cambia. (Antes se probaba PATCH primero; en el
+  // servidor real devuelve 400 y el respaldo reenviaba `inputs` con sus
+  // campos de estado, que Flussonic rechaza.)
+  const put = await fetchJsonWithTimeout(`${apiBase(srv)}/streams/${enc}`, { method: 'PUT', headers, body }, 8000);
   if (put.ok) return { ok: true, method: 'PUT' };
+  if (![400, 404, 405, 422, 500, 501].includes(Number(put.status))) {
+    return { ok: false, error: apiError(put, 'Flussonic no aceptó el cambio') };
+  }
+  const r = await fetchJsonWithTimeout(`${apiBase(srv)}/streams/${enc}`, { method: 'PATCH', headers, body }, 8000);
+  if (r.ok) return { ok: true, method: 'PATCH' };
   return { ok: false, error: apiError(put, 'Flussonic no aceptó el cambio') };
 }
 
@@ -182,45 +145,105 @@ function normalizeOutputs(raw) {
 
 /**
  * Escribe la lista de salidas en el stream de Flussonic.
- * Intenta PATCH (cambio parcial); si el servidor no lo admite, hace GET + PUT
- * con sólo los campos escribibles, para no tocar transcoder/inputs.
+ * Manda la lista completa por PUT (JSON merge patch); sólo el campo `outputs`.
+ * Nunca reenvía `inputs`: el GET los devuelve con estado (`stats`, `id`) y el
+ * servidor real responde 400 «parsing_parameters».
+ */
+function outputsHint(resp, config) {
+  const raw = String(resp?.text || resp?.json?.error || '');
+  const status = Number(resp?.status) || 0;
+  // 400 típico del servidor real: rechaza el cuerpo entero por campos de sólo
+  // lectura (`stats`, `id`…) que vienen en el GET y no se pueden reenviar.
+  if (status === 400 && /parsing_parameters|request_body/i.test(raw)) {
+    return (
+      'Flussonic no aceptó la salida UDP (HTTP 400): rechazó el cuerpo del cambio. ' +
+      'El panel manda sólo la lista `outputs`; revisa que la API sea /streamer/api/v3 y que el ' +
+      'usuario tenga permiso de edición.'
+    );
+  }
+  if (status === 409) return 'El nombre de stream ya está en uso (HTTP 409).';
+  if (status === 401 || status === 403) {
+    return 'Flussonic rechazó las credenciales (revisa usuario/clave o api_token).';
+  }
+  if (config && config.__note) return String(config.__note);
+  return '';
+}
+
+/**
+ * Escribe la lista de salidas del stream. Flussonic 23.12 actualiza con **PUT**
+ * y JSON merge patch: el cuerpo lleva sólo `{"outputs": [...]}`, nunca `inputs`
+ * ni campos de estado (el GET los devuelve y el servidor real los rechaza con
+ * HTTP 400 «parsing_parameters»).
  */
 async function putOutputs(srv, streamName, outputs, config) {
   const enc = String(streamName).split('/').map(encodeURIComponent).join('/');
   const url = `${apiBase(srv)}/streams/${enc}`;
   const headers = headersFor(srv);
+  const urls = outputs.map((o) => o.url).filter(Boolean);
 
-  const patch = await fetchJsonWithTimeout(url, {
-    method: 'PATCH',
-    headers,
-    body: JSON.stringify({ outputs })
-  }, 8000);
-  if (patch.ok) return { ok: true, method: 'PATCH' };
-
-  const patchUnsupported = [400, 404, 405, 422, 500, 501].includes(Number(patch.status));
-  if (!patchUnsupported) {
-    return { ok: false, error: apiError(patch, 'Flussonic no aceptó la salida UDP') };
+  // Dos formas del mismo cuerpo: la API nueva usa lista de objetos ({url}),
+  // y hay instalaciones que aceptan la lista de URLs a secas.
+  const bodies = [JSON.stringify({ outputs: urls.map((u) => ({ url: u })) }), JSON.stringify({ outputs: urls })];
+  let last = null;
+  let lastBody = '';
+  for (const body of bodies) {
+    lastBody = body;
+    const put = await fetchJsonWithTimeout(url, { method: 'PUT', headers, body }, 8000);
+    last = put;
+    if (put.ok) return finishWrite(srv, streamName, outputs, 'PUT', put.status);
+    // Sólo se prueba la siguiente forma si el problema es el cuerpo.
+    if (![400, 422].includes(Number(put.status))) break;
   }
-
-  const payload = {};
-  for (const key of WRITABLE_STREAM_FIELDS) {
-    if (config && config[key] !== undefined) payload[key] = config[key];
+  // Servidores con proxy que sólo deja pasar PATCH, o versiones antiguas.
+  if (last && [400, 404, 405, 422, 500, 501].includes(Number(last.status))) {
+    const patch = await fetchJsonWithTimeout(url, { method: 'PATCH', headers, body: lastBody }, 8000);
+    if (patch.ok) return finishWrite(srv, streamName, outputs, 'PATCH', patch.status);
   }
-  payload.name = config?.name || streamName;
-  payload.outputs = outputs;
+  const hint = outputsHint(last, config);
+  const base = apiError(last, 'Flussonic no aceptó la salida UDP');
+  return {
+    ok: false,
+    // Con el 400 de cuerpo no se repite el JSON crudo: no aporta nada al operador.
+    error: hint ? hint : base
+  };
+}
 
-  const put = await fetchJsonWithTimeout(url, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(payload)
-  }, 8000);
-  if (put.ok) return { ok: true, method: 'PUT' };
+/** Un 200 no basta: se relee el stream y se comprueba que la salida quedó. */
+async function finishWrite(srv, streamName, outputs, method, status) {
+  const check = await verifyOutputs(srv, streamName, outputs);
+  if (check.ok) return { ok: true, method, verified: true };
   return {
     ok: false,
     error:
-      apiError(put, 'Flussonic no aceptó la salida UDP') +
-      (Number(put.status) === 409 ? ' (¿nombre de stream en uso?)' : '')
+      `Flussonic respondió ${method} ${status || 200} pero la salida no quedó guardada` +
+      ` (tiene: ${check.outputs.length ? check.outputs.join(', ') : 'ninguna'}).`
   };
+}
+
+/** Lee las salidas actuales del stream (urls). Devuelve null si no se pudo. */
+async function readOutputs(srv, streamName) {
+  const got = await getStreamConfig(srv, streamName);
+  if (got.error) return null;
+  return normalizeOutputs(got.config?.outputs).map((o) => o.url);
+}
+
+/**
+ * Comprueba leyendo el stream que la salida quedó puesta de verdad. Un 200 de
+ * Flussonic no basta: si el cuerpo no le gustó, no cambia nada.
+ */
+async function verifyOutputs(srv, streamName, wanted) {
+  const want = new Set(wanted.map((o) => outputTargetKey(o.url)).filter(Boolean));
+  let have = [];
+  for (let i = 0; i < 3; i += 1) {
+    const got = await readOutputs(srv, streamName);
+    if (got) {
+      have = got;
+      const keys = new Set(got.map(outputTargetKey).filter(Boolean));
+      if (keys.size === want.size && [...want].every((k) => keys.has(k))) return { ok: true, outputs: got };
+    }
+    if (i < 2) await new Promise((r) => setTimeout(r, 250));
+  }
+  return { ok: false, outputs: have };
 }
 
 /**
@@ -909,6 +932,7 @@ export async function flussonicPushSnapshot({ serverId = null, refresh = true } 
       enabled: Boolean(slot.enabled),
       method: m.method,
       flussonic_output_url: slot.flussonic_output_url || '',
+      has_source: Boolean(slot.stream_name || String(slot.custom_source_url || '').trim()),
       stream_title: ''
     });
   }

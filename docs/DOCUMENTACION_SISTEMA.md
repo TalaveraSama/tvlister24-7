@@ -3029,6 +3029,33 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.39: el push escribe de verdad en Flussonic 23.12 (HTTP 400 corregido)
+
+**El fallo:** al pulsar «Poner salida UDP del rango» el panel decía `0 de 105 stream(s) con la salida UDP del
+canal` y cada fila traía `HTTP 400 — {"name":"request_body","while":"parsing_parameters","input1":{…}}`. Las
+filas seguían en «Sin salida» y los canales, con el control en Flussonic, se quedaban **sin emisor**.
+
+**La causa:** la API v3 de Flussonic se actualiza con **PUT** (JSON merge patch). El panel probaba primero
+`PATCH`, que el servidor real rechaza; el respaldo hacía `GET` del stream y **reenviaba el stream entero**,
+incluidos `inputs` con campos de estado (`stats`, `id`, `mixer_strategy`). Flussonic valida el cuerpo contra su
+esquema y contesta 400 «parsing_parameters» al primer campo que no es de escritura.
+
+**El arreglo:**
+
+- `putOutputs()` manda **sólo** `{"outputs":[{"url":"udp://…"}]}` por **PUT**. Si una instalación vieja no
+  acepta la lista de objetos, reintenta con la lista de URLs; el `PATCH` queda como último recurso.
+- Se **relee el stream después de escribir** (`verifyOutputs`). Un `200` no basta: si la salida no quedó, la
+  fila se marca en rojo con lo que Flussonic tiene de verdad.
+- El **cambio de motor sólo ocurre si la escritura se confirma** (`ok`), así que un fallo de Flussonic ya no
+  deja canales apagados: siguen emitiendo desde TVLister.
+- `writeServiceName`/`patchStream` también usan PUT parcial y no reenvían `inputs`.
+- Aviso nuevo en la tarjeta: **«N canal(es) están en Flussonic pero sin salida UDP»**, con el botón
+  **Devolver a TVLister** (sólo los que tienen fuente local; el resto se avisa).
+- El mensaje de error del 400 ya no vuelca el JSON crudo: dice qué pasó y qué revisar.
+
+**Para recuperar un panel que quedó así:** actualizar, Ctrl+F5 y pulsar otra vez «Poner salida UDP del rango»;
+si algún canal no tiene fuente local, el aviso permite devolver los demás a TVLister.
+
 ### v2.6.38: la tabla del push, sólo lo que importa
 
 La tarjeta de salidas UDP abría con los 124 canales del rango; con la lista real (32/64/125 canales) se

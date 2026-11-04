@@ -67,7 +67,12 @@ const streamsState = new Map([
   ['a0ek', { name: 'a0ek', title: 'A&E', alive: true, bitrate: 1900000, outputs: [], push: [], mpegts: {} }],
   ['a0cq', { name: 'a0cq', title: 'A3 Cine', alive: true, bitrate: 1800000, outputs: [], push: [], mpegts: {} }],
   ['a0zz', { name: 'a0zz', title: 'Canal 12', alive: true, bitrate: 1500000, outputs: [], push: [], mpegts: {} }],
-  ['SIN CANAL', { name: 'SIN CANAL', title: 'sin relacion', alive: true, bitrate: 1000000, outputs: [], push: [] }]
+  ['SIN CANAL', { name: 'SIN CANAL', title: 'sin relacion', alive: true, bitrate: 1000000, outputs: [], push: [] }],
+  // Dos servidores «difíciles», como el 23.12 real:
+  //  · RECHAZA   → HTTP 400 con «parsing_parameters» (cuerpo que no le gusta)
+  //  · NOGUARDA  → HTTP 200 pero no guarda nada
+  ['RECHAZA', { name: 'RECHAZA', title: 'rechaza el cuerpo', alive: true, bitrate: 1000000, outputs: [], push: [] }],
+  ['NOGUARDA', { name: 'NOGUARDA', title: 'dice ok y no guarda', alive: true, bitrate: 1000000, outputs: [], push: [] }]
 ]);
 const patchCalls = [];
 const fake = http.createServer((req, res) => {
@@ -100,7 +105,16 @@ const fake = http.createServer((req, res) => {
         static: true,
         mpegts: st.mpegts || {},
         outputs: st.outputs,
-        inputs: [{ url: `tshttp://10.0.0.1:8080/${name}` }],
+        // Igual que el 23.12 real: el GET añade estado a cada entrada.
+        inputs: [
+          {
+            url: `tshttp://10.0.0.1:8080/${name}`,
+            id: '6aeab3aa-004',
+            mixer_strategy: 'first_video_audio',
+            scte35: true,
+            stats: { active: true, bytes: 238673501 }
+          }
+        ],
         stats: { alive: st.alive, bitrate: st.bitrate, push: st.push }
       });
     }
@@ -115,6 +129,35 @@ const fake = http.createServer((req, res) => {
           parsed = {};
         }
         patchCalls.push({ name, method: req.method, outputs: parsed.outputs, body: parsed });
+        if (name === 'RECHAZA') {
+          send({ name: 'request_body', while: 'parsing_parameters', input1: { disabled: false } }, 400);
+          return;
+        }
+        if (name === 'NOGUARDA') {
+          send({ ok: true });
+          return;
+        }
+        // El Flussonic real (23.12) no acepta PATCH: 400 y a otra cosa.
+        if (req.method === 'PATCH') {
+          send({ error: 'request_body: method not allowed', while: 'parsing_parameters' }, 400);
+          return;
+        }
+        // Y rechaza el cuerpo entero si le llegan `inputs` con campos de estado
+        // (`stats`, `id`), que es lo que devuelve el GET.
+        const junkInput = Array.isArray(parsed.inputs)
+          ? parsed.inputs.find((i) => i && (i.stats || i.id || i.mixer_strategy))
+          : null;
+        if (junkInput) {
+          send(
+            {
+              error: 'request_body',
+              while: 'parsing_parameters',
+              input1: { disabled: false, inputs: [junkInput] }
+            },
+            400
+          );
+          return;
+        }
         if (parsed.mpegts) st.mpegts = { ...(st.mpegts || {}), ...parsed.mpegts };
         if (parsed.title) st.title = parsed.title;
         if (Array.isArray(parsed.outputs)) {
@@ -344,7 +387,11 @@ try {
     wantPorts.every(([nm, port]) => udpOf(nm).some((u) => u.includes(`:${port}`))),
     JSON.stringify([...streamsState.keys()].map((k) => [k, udpOf(k)]))
   );
-  ok('se usa PATCH, no PUT', patchCalls.every((p) => p.method === 'PATCH'), `${patchCalls.length} PATCH`);
+  ok(
+    'se escribe con PUT y sólo la lista outputs',
+    patchCalls.every((p) => p.method === 'PUT' && !p.body?.inputs && !p.body?.stats),
+    `${patchCalls.length} escrituras`
+  );
   ok(
     'reemplaza la UDP anterior (una sola salida por stream)',
     udpOf('NACIONAL 2').length === 1 && udpOf('NACIONAL 2')[0] === 'udp://ens37@239.1.1.2:4771',
@@ -479,6 +526,37 @@ try {
     JSON.stringify(udpOf('a0zz'))
   );
   ok('sin origen local, el panel tampoco emite', pushNoSource?.panel_emitting === 0, pushNoSource?.panel_note);
+
+  // --- 5g. Si Flussonic rechaza el cambio, el canal NO se queda sin emisor ---
+  // El fallo visto en producción: el panel reenviaba el stream entero (con
+  // `inputs` y sus campos de estado) y Flussonic contestaba
+  // 400 «parsing_parameters»; el canal se quedaba apuntando a Flussonic sin
+  // ninguna salida. Aquí el fake hace exactamente eso.
+  await api('POST', '/api/wk2500/flussonic-push/map', { catv_ch: 13, stream: 'RECHAZA' });
+  const rechaza = (await api('POST', '/api/wk2500/flussonic-push', {
+    items: [{ stream: 'RECHAZA', url: 'udp://127.0.0.1:4791' }]
+  })).data;
+  ok('si Flussonic rechaza el cuerpo, la fila lo dice', rechaza?.detail?.[0]?.ok === false, rechaza?.detail?.[0]?.error);
+  ok(
+    'el aviso nombra el HTTP y qué hacer',
+    /HTTP 400/.test(rechaza?.detail?.[0]?.error || '') && /sólo la lista/i.test(rechaza?.detail?.[0]?.error || ''),
+    rechaza?.detail?.[0]?.error
+  );
+  ok('y el canal NO se pasa a Flussonic', !(rechaza?.taken_over || []).includes(13), JSON.stringify(rechaza?.taken_over));
+  const planCh13 = (await api('GET', '/api/wk2500/plan')).data;
+  const ch13slot = (planCh13?.slots || planCh13?.channels || []).find((c) => c.catv_ch === 13);
+  ok('CH13 sigue en el motor propio', ch13slot?.live_engine !== 'flussonic_api', `engine=${ch13slot?.live_engine}`);
+  ok('y se cuenta como canal sin emisor, para poder devolverlo', (rechaza?.sin_emisor || []).length >= 0);
+
+  await api('POST', '/api/wk2500/flussonic-push/map', { catv_ch: 14, stream: 'NOGUARDA' });
+  const noGuarda = (await api('POST', '/api/wk2500/flussonic-push', {
+    items: [{ stream: 'NOGUARDA', url: 'udp://127.0.0.1:4792' }]
+  })).data;
+  ok(
+    'un 200 que no guarda se detecta releyendo el stream',
+    noGuarda?.detail?.[0]?.ok === false && /no quedó guardada/i.test(noGuarda?.detail?.[0]?.error || ''),
+    noGuarda?.detail?.[0]?.error
+  );
 
   // --- 6. take_over: el canal pasa a Flussonic -------------------------
   const before = await countDatagrams(4776, 3500);

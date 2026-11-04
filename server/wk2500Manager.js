@@ -3634,6 +3634,9 @@ wk2500Router.post('/api/wk2500/flussonic-control/switch', requireAuth, requireAd
         .map((r) => Number(r.catv_ch));
     } else if (b.catv_ch !== undefined && b.catv_ch !== null && b.catv_ch !== '') {
       targets = [Number(b.catv_ch)];
+    } else if (Array.isArray(b.channels) && b.channels.length) {
+      // Lista explícita: devolver a TVLister sólo los que se quedaron sin salida.
+      targets = [...new Set(b.channels.map((n) => Number(n)).filter((n) => Number.isFinite(n)))];
     } else {
       const from = Math.max(CATV_MIN_CH, Number(b.ch_start) || CATV_MIN_CH);
       const to = Math.min(CATV_MAX_CH, Number(b.ch_end) || CATV_MAX_CH);
@@ -3679,6 +3682,19 @@ wk2500Router.post('/api/wk2500/flussonic-control/switch', requireAuth, requireAd
         if (applied.ok && fresh.enabled) startWk2500ChannelWorker(ch);
         detail.push({ catv_ch: ch, ok: Boolean(applied.ok), stream, already: Boolean(applied.already), error: applied.error || '', from: current });
       } else {
+        // Un canal cuya fuente vive sólo en Flussonic no puede volver a local:
+        // se dice en vez de arrancar un emisor sin señal.
+        const hasLocal = Boolean(slot.stream_id || String(slot.custom_source_url || '').trim());
+        if (!hasLocal) {
+          detail.push({
+            catv_ch: ch,
+            ok: false,
+            stream,
+            from: current,
+            error: 'El canal no tiene fuente en TVLister (vive sólo en Flussonic): no se puede devolver a local.'
+          });
+          continue;
+        }
         // Se retira de Flussonic ANTES de arrancar el motor local.
         if (current === 'flussonic') {
           const removed = await m.removeFlussonicUdp({

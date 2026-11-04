@@ -76,6 +76,12 @@ const fake = http.createServer((req, res) => {
         stats: { alive: st.alive, bitrate: st.bitrate }
       });
     }
+    if (req.method === 'PATCH') {
+      let body = '';
+      req.on('data', (d) => (body += d));
+      req.on('end', () => send({ error: 'request_body', while: 'parsing_parameters' }, 400));
+      return undefined;
+    }
     if (req.method === 'PATCH' || req.method === 'PUT') {
       let body = '';
       req.on('data', (d) => (body += d));
@@ -253,7 +259,11 @@ try {
     CHANNELS.every((c) => outputsNow.some((u) => u.includes(`127.0.0.1:${c.dest}`))),
     outputsNow.join(' ')
   );
-  ok('PATCH es lo que se usa (no reescribe el stream entero)', patchCalls.every((p) => p.method === 'PATCH'), `${patchCalls.length} PATCH`);
+  ok(
+    'se escribe con PUT parcial (no reescribe el stream entero)',
+    patchCalls.every((p) => p.method === 'PUT'),
+    `${patchCalls.length} escrituras`
+  );
 
   // --- 3b. El motor del panel se reconcilia solo --------------------------
   // El cambio se hizo por la API; los canales tienen que quedar con un worker
