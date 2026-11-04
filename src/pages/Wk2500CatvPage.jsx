@@ -1138,6 +1138,11 @@ export default function Wk2500CatvPage({ setActiveTab }) {
     );
   });
   const pushChannelRows = pushChannels.slice(0, 200);
+  // Lo que toca el botón del rango: canales del rango con stream asignado,
+  // sin importar el filtro ni la búsqueda de la tabla.
+  const pushRangeCount = (fsPush.snapshot?.channels || []).filter(
+    (c) => c.catv_ch >= fsPush.range.from && c.catv_ch <= fsPush.range.to && c.stream
+  ).length;
   // Canales que Flussonic controla pero que se quedaron sin salida UDP: no
   // emiten por nadie. Se pueden devolver a TVLister (si tienen fuente local).
   const pushSinSalida = (fsPush.snapshot?.channels || []).filter(
@@ -1994,7 +1999,7 @@ export default function Wk2500CatvPage({ setActiveTab }) {
             <Save className="w-3.5 h-3.5" />
             {fsPush.busy === 'apply'
               ? 'Aplicando…'
-              : `Poner salida UDP a todo el rango${pushChannelRows.length ? ` (${pushChannelRows.length})` : ''}`}
+              : `Poner salida UDP a todo el rango${pushRangeCount ? ` (${pushRangeCount})` : ''}`}
           </button>
           <button
             type="button"

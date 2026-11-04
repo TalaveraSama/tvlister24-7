@@ -3029,6 +3029,11 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.47: el número del botón del rango es el que se escribe
+
+El contador del botón del rango se calculaba con las filas visibles (filtro/búsqueda incluidos) mientras la
+acción escribe todos los canales del rango con stream asignado. Ahora el número es ese, para que no engañe.
+
 ### v2.6.46: guardar la salida canal por canal
 
 En la tarjeta de salida UDP de Flussonic, cada fila tiene **«Guardar en Flussonic»**: escribe la salida de **ese**
