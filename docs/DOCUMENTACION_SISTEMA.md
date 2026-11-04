@@ -3029,6 +3029,35 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.50: desinstalador (`tvlister-admin uninstall`)
+
+Hasta ahora para quitar el panel había que hacerlo a mano y con cuidado de no llevarse por delante XUI.one. Ya no:
+
+```bash
+sudo /opt/tvlister24-7/scripts/uninstall.sh      # o: sudo tvlister-admin uninstall
+```
+
+- **Por defecto guarda los datos**: copia `data/` (base de datos y lo subido) a
+  `/root/tvlister-backup-AAAAMMDD-HHMM/` antes de borrar la carpeta. Si la copia falla, **no borra `data/`**.
+- `--purge` desinstala sin copia (y borra también `/etc/tvlister` con los certificados TLS).
+- `--dry-run` sólo enseña lo que haría; `--yes` no pregunta (para scripts); `--app-dir RUTA` para instalaciones
+  fuera de `/opt/tvlister24-7`.
+- Quita el servicio y la unidad `tvlister24-7.service` (y su `service.d/` de Cloudflare), el comando
+  `tvlister-admin` (`/usr/local/bin` y `/usr/bin`), `/var/lib/tvlister24-7`, `/etc/cron.d/tvlister24-7-backup`,
+  los bloques de nginx que generó el panel (`tvlister-panel.conf`, `tvlister-streams.conf` en el nginx de XUI.one;
+  `tvlister247-*` y `tvlister-cloudflare-realip.conf` en el del sistema; los enlaces de `sites-enabled`) y
+  `/root/tvlister247_*.nginx.conf`, **recargando nginx sin cortar el servicio**.
+- Mata los procesos node/ffmpeg que queden del panel — con comprobación de `/proc/<pid>/exe`, así que **nunca**
+  toca una shell ni un proceso ajeno (probado: una shell que mencione la ruta no se toca).
+- **No toca**: `/home/xui`, el firewall (informa de los puertos abiertos y cómo cerrarlos), los backups de
+  `/root/tvlister_backup_*.tar.gz` y, salvo `--purge`, los certificados de `/etc/tvlister`.
+- Se niega a borrar una carpeta que no sea del panel (comprueba `server/index.js` + `package.json` con
+  `name: tvlister24-7`), y se auto-copia a `/tmp` para poder borrar la carpeta en la que vive.
+
+Probado en un entorno simulado (`TVLISTER_SYSROOT`): desinstalación normal (base de datos recuperable con sus
+filas), `--purge`, `--dry-run` que no cambia nada, cancelación al no escribir `SI`, carpeta ajena intacta, y
+matanza del motor node con la shell que lo lanzó intacta.
+
 ### v2.6.49: fuera la pestaña «Flussonic UDP · push»; la página CATV se queda con los WK2500
 
 Se retira del panel la **salida UDP de Flussonic por canal** (la pestaña `3 · Flussonic UDP · push`): el tema

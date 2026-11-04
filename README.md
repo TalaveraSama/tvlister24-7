@@ -187,9 +187,39 @@ Comandos principales:
 - `tvlister-admin vod-cats` — Ver cuántas películas/series tiene cada categoría y borrar las que sobran (las que crearon las carpetas). `vod-cats master` crea `Movies`/`Series` y pasa a la maestra las carpetas en modo antiguo; `vod-cats clean` borra las vacías; `vod-cats clean --all --move-to "Movies"` mueve el contenido a la maestra y borra el resto.
 - `tvlister-admin update` — Actualizar desde GitHub sin perder base de datos ni puerto.
 - `tvlister-admin release [vX.Y.Z]` — Instalar/actualizar desde un release publicado (paquete con checksum).
+- `tvlister-admin uninstall` — **Desinstalar** el panel de este servidor. Guarda la base de datos en
+  `/root/tvlister-backup-AAAAMMDD-HHMM`; con `--purge` se lo lleva todo y con `--dry-run` sólo enseña lo que haría.
+  No toca `/home/xui`, ni el firewall, ni nginx (salvo los bloques que puso el propio panel).
 
 ---
 
+## Desinstalar (sin tocar XUI.one ni el resto del servidor)
+
+```bash
+sudo /opt/tvlister24-7/scripts/uninstall.sh          # o: tvlister-admin uninstall
+```
+
+Antes de borrar nada pregunta, y por defecto **guarda la base de datos y lo subido** en
+`/root/tvlister-backup-AAAAMMDD-HHMM/` (si vuelves a instalar, copia esa carpeta en `data/` y todo sigue
+donde estaba). Modos:
+
+| Comando | Qué hace |
+| --- | --- |
+| `sudo bash scripts/uninstall.sh` | Desinstala y guarda los datos en `/root/tvlister-backup-…` |
+| `sudo bash scripts/uninstall.sh --purge` | Desinstala y **borra todo**, sin copia (access codes, canales, VOD…) |
+| `sudo bash scripts/uninstall.sh --dry-run` | Sólo enseña lo que haría: no cambia nada |
+| `sudo bash scripts/uninstall.sh --yes` | Sin preguntar (para scripts) |
+
+Quita: el servicio `tvlister24-7` y su unidad de systemd (con los ajustes de Cloudflare), el comando
+`tvlister-admin`, la carpeta `/opt/tvlister24-7`, `/var/lib/tvlister24-7` (HLS y playlists temporales), el cron
+del backup automático y **los bloques de nginx que puso el panel** (`tvlister-panel.conf`, `tvlister-streams.conf`,
+`tvlister247-*.conf`, `tvlister-cloudflare-realip.conf`) recargando nginx sin cortar nada.
+
+**No toca**: `/home/xui` (XUI.one y su nginx, con sus canales `a0*.conf`), el firewall (las reglas que abrió el
+instalador se quedan; el propio script te dice cómo verlas y quitarlas), los certificados de `/etc/tvlister`
+salvo con `--purge`, ni tus backups `/root/tvlister_backup_*.tar.gz`.
+
+---
 ## Salida UDP / CATV analógica (WK2500)
 
 El módulo *UDP / CATV* genera un SPTS MPEG-TS por número de canal (2 al 125) y lo entrega por una NIC

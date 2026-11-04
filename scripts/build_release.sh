@@ -51,6 +51,7 @@ git rev-parse --short HEAD > "${OUT}/${NAME}/COMMIT" 2>/dev/null || true
 
 chmod +x "${OUT}/${NAME}/scripts/install_ubuntu.sh" \
          "${OUT}/${NAME}/scripts/install_release.sh" \
+         "${OUT}/${NAME}/scripts/uninstall.sh" \
          "${OUT}/${NAME}/scripts/tvlister-admin.sh" 2>/dev/null || true
 
 tar -czf "${OUT}/${NAME}.tar.gz" -C "$OUT" "$NAME"

@@ -3540,6 +3540,23 @@ cmd_update() {
   PORT="$port" exec bash "$tmp_script"
 }
 
+cmd_uninstall() {
+  # Desinstala el panel de este servidor. Por defecto GUARDA la base de datos en
+  # /root/tvlister-backup-AAAAMMDD-HHMM; con --purge se lo lleva todo.
+  # Uso: tvlister-admin uninstall [--purge] [--dry-run] [--yes]
+  local src tmp_script
+  src="${APP_DIR}/scripts/uninstall.sh"
+  if [ ! -f "$src" ]; then
+    echo "❌ No se encontró ${src}. ¿Está el panel en ${APP_DIR}?"
+    return 1
+  fi
+  # Se ejecuta desde /tmp: la carpeta del panel se borra mientras corre.
+  tmp_script=$(mktemp /tmp/tvlister_uninstall.XXXXXX.sh)
+  cp -f "$src" "$tmp_script"
+  chmod +x "$tmp_script"
+  APP_DIR="$APP_DIR" exec bash "$tmp_script" "$@"
+}
+
 ACTION="${1:-menu}"
 
 case "$ACTION" in
@@ -3558,6 +3575,10 @@ case "$ACTION" in
   restart)
     systemctl restart "$SERVICE_NAME"
     echo "✅ Servicio ${SERVICE_NAME} reiniciado."
+    ;;
+  uninstall|desinstalar|uninstall-tvlister)
+    shift || true
+    cmd_uninstall "$@"
     ;;
   logs)
     journalctl -u "$SERVICE_NAME" -n 50 -f
@@ -4546,9 +4567,10 @@ case "$ACTION" in
     echo " 30) Dominios públicos: panel (Cloudflare) y video (directo) (dominios)"
     echo " 31) Certificado Let's Encrypt del dominio de video (acme)"
     echo " 32) Categorías de películas/series: maestra «Movies» y borrar las de carpeta (vod-cats)"
+    echo " 33) DESINSTALAR el panel de este servidor (uninstall) — guarda la base de datos"
     echo "  0) Salir"
     echo "============================================================"
-    read -r -p "Selecciona una opción [0-31]: " opt
+    read -r -p "Selecciona una opción [0-33]: " opt
     case "$opt" in
       1) cmd_status ;;
       2) cmd_doctor ;;
@@ -4587,6 +4609,7 @@ case "$ACTION" in
       30) "$0" dominios ;;
       31) "$0" acme ;;
       32) cmd_vod_cats list ;;
+      33) cmd_uninstall ;;
       *) exit 0 ;;
     esac
     ;;
