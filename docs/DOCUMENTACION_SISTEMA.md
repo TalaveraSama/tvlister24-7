@@ -3029,6 +3029,16 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.52: la copia temporal del desinstalador se borra sola
+
+Para poder borrar la carpeta del panel mientras se ejecuta, `uninstall.sh` **se copia a `/tmp`**
+(`/tmp/tvlister_uninstall.XXXX.sh`) y se ejecuta desde ahí; esa copia se quedaba en el servidor. Ahora se borra
+al terminar con un `trap EXIT` (éxito, cancelación o error).
+
+- Pruebas nuevas en `test_uninstall.sh`: ejecución **por tubería** (`cat uninstall.sh | bash -s -- --yes`, lo
+  mismo que hace el lanzador SSH) con y sin `--yes`, y recuento de copias en `/tmp` antes/después.
+- `bash scripts/test_uninstall.sh` → **49 comprobaciones**; `scripts/test_uninstall_ssh.sh` → **40**.
+
 ### v2.6.51: desinstalador COMPLETO del sistema + lanzador por SSH
 
 El desinstalador de la v2.6.50 se quedaba a medias a propósito: dejaba `/etc/tvlister`, no tocaba el firewall y

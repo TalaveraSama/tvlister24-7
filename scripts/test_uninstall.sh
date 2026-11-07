@@ -218,6 +218,31 @@ check "el mensaje final aclara que 80/443 no se tocan" "$(grep -q 'los puertos 8
 
 # ==============================================================================
 echo ""
+echo "== 11. Por tubería (curl | bash), como por SSH"
+sys="$WORK/s11"; app="$WORK/a11"
+build_fixture "$sys" "$app"
+cat "$app/scripts/uninstall.sh" | APP_DIR="$app" TVLISTER_SYSROOT="$sys" bash -s -- --yes 3>&1 1>/dev/null 2>&1
+check "con --yes desinstala desde una tubería"   "$(gone "$app")"
+check "y guarda el respaldo igual"               "$([ "$(backups "$sys")" = "1" ] && echo 1 || echo 0)"
+
+sys="$WORK/s12"; app="$WORK/a12"
+build_fixture "$sys" "$app"
+cat "$app/scripts/uninstall.sh" | APP_DIR="$app" TVLISTER_SYSROOT="$sys" bash -s -- </dev/null >/dev/null 2>&1
+check "sin --yes por tubería no borra nada"      "$(exists "$app/server/index.js")"
+
+# ==============================================================================
+echo ""
+echo "== 12. La copia temporal de /tmp no se queda tirada"
+sys="$WORK/s13"; app="$WORK/a13"
+build_fixture "$sys" "$app"
+BEFORE_TMP=$(ls /tmp/tvlister_uninstall.*.sh 2>/dev/null | wc -l | tr -d " ")
+run_uninstall "$sys" "$app" --yes >/dev/null
+AFTER_TMP=$(ls /tmp/tvlister_uninstall.*.sh 2>/dev/null | wc -l | tr -d " ")
+check "no deja copias del desinstalador en /tmp" "$([ "$BEFORE_TMP" = "$AFTER_TMP" ] && echo 1 || echo 0)"
+check "y la carpeta del panel se borró"          "$(gone "$app")"
+
+# ==============================================================================
+echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo "TODO OK ($OKS comprobaciones)"
   exit 0

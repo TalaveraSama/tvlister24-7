@@ -115,6 +115,11 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 fi
 
+# Si somos la copia temporal en /tmp, nos borramos al terminar (pase lo que pase).
+case "$SELF" in
+  /tmp/tvlister_uninstall.*.sh) trap 'rm -f "$SELF"' EXIT ;;
+esac
+
 APP_REAL=$(readlink -f "$APP_DIR" 2>/dev/null || echo "$APP_DIR")
 
 if [ -n "$SELF" ]; then
