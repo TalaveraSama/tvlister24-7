@@ -8,6 +8,7 @@ name: Release
 # Artefactos publicados:
 #   tvlister24-7-vX.Y.Z.tar.gz   código del panel
 #   install.sh                   instalador de una línea
+#   uninstall.sh                 desinstalador completo (para lanzarlo por SSH)
 #   SHA256SUMS                   checksums
 
 on:
@@ -67,18 +68,18 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             # El release ya existe (p. ej. creado a mano): sólo se refrescan los artefactos
             gh release upload "$TAG" \
-              "release/${NAME}.tar.gz" "release/install.sh" "release/SHA256SUMS" --clobber
+              "release/${NAME}.tar.gz" "release/install.sh" "release/uninstall.sh" "release/SHA256SUMS" --clobber
             if [ -f "$NOTES" ]; then
               gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES"
             fi
           else
             if [ -f "$NOTES" ]; then
               gh release create "$TAG" \
-                "release/${NAME}.tar.gz" "release/install.sh" "release/SHA256SUMS" \
+                "release/${NAME}.tar.gz" "release/install.sh" "release/uninstall.sh" "release/SHA256SUMS" \
                 --title "$TITLE" --notes-file "$NOTES" --latest
             else
               gh release create "$TAG" \
-                "release/${NAME}.tar.gz" "release/install.sh" "release/SHA256SUMS" \
+                "release/${NAME}.tar.gz" "release/install.sh" "release/uninstall.sh" "release/SHA256SUMS" \
                 --title "$TITLE" --generate-notes --latest
             fi
           fi

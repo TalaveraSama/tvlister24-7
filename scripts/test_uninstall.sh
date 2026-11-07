@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Prueba del desinstalador (scripts/uninstall.sh) — no toca el sistema real.
+# Prueba del desinstalador completo (scripts/uninstall.sh) — no toca el sistema.
 #
 # Monta instalaciones FALSAS dentro de un directorio temporal (TVLISTER_SYSROOT)
-# y comprueba qué se borra, qué se guarda y qué NO se toca.
+# y comprueba qué se borra, qué se guarda, qué se conserva con --keep-* y qué
+# NUNCA se toca (XUI.one, 80/443).
 #
 #   bash scripts/test_uninstall.sh
 # ==============================================================================
@@ -53,7 +54,7 @@ build_fixture() {
   printf 'cert\n' > "$sys/etc/tvlister/tls/fullchain.pem"
   printf 'server{}\n' > "$sys/root/tvlister247_tv.midominio.com.nginx.conf"
   printf 'backup viejo\n' > "$sys/root/tvlister_backup_viejo.tar.gz"
-  printf '{"name":"tvlister24-7","version":"2.6.50"}' > "$app/package.json"
+  printf '{"name":"tvlister24-7","version":"2.6.51"}' > "$app/package.json"
   printf '// panel\n' > "$app/server/index.js"
   python3 - "$app/data/tvlister.db" <<'PY'
 import sqlite3, sys
@@ -84,8 +85,10 @@ except Exception:
 PY
 }
 
+backups() { ls -d "$1"/root/tvlister-backup-* 2>/dev/null | wc -l | tr -d ' '; }
+
 # ==============================================================================
-echo "== 1. Desinstalación normal: se lleva el panel y guarda la base de datos"
+echo "== 1. Desinstalación completa: se lleva todo y guarda la base de datos"
 sys="$WORK/s1"; app="$WORK/a1"
 build_fixture "$sys" "$app"
 run_uninstall "$sys" "$app" --yes
@@ -102,7 +105,7 @@ check "el bloque del nginx del sistema se fue"     "$(gone "$sys/etc/nginx/conf.
 check "el enlace de sites-enabled se fue"          "$(gone "$sys/etc/nginx/sites-enabled/tvlister247.conf")"
 check "el .conf que dejó el asistente de dominios" "$(gone "$sys/root/tvlister247_tv.midominio.com.nginx.conf")"
 check "el canal a0ed de XUI.one SIGUE intacto"     "$(exists "$sys/home/xui/bin/nginx/conf/servers/a0ed.conf")"
-check "los certificados TLS se conservan"          "$(exists "$sys/etc/tvlister/tls/fullchain.pem")"
+check "los certificados de /etc/tvlister se borraron" "$(gone "$sys/etc/tvlister")"
 check "los backups viejos de /root se conservan"   "$(exists "$sys/root/tvlister_backup_viejo.tar.gz")"
 BK=$(ls -d "$sys"/root/tvlister-backup-* 2>/dev/null | head -1)
 check "se guardó un respaldo con la base de datos" "$(exists "${BK:-/nada}/tvlister.db")"
@@ -111,19 +114,43 @@ check "la base de datos del respaldo conserva sus filas" "$(dbfile_has_rows "${B
 
 # ==============================================================================
 echo ""
-echo "== 2. --purge: no deja ni la base de datos"
+echo "== 2. --purge: no deja ni la base de datos ni respaldos"
 sys="$WORK/s2"; app="$WORK/a2"
 build_fixture "$sys" "$app"
 run_uninstall "$sys" "$app" --purge --yes
 check "la carpeta del panel ya no está"       "$(gone "$app")"
-check "no se creó ningún respaldo"            "$([ -z "$(ls -d "$sys"/root/tvlister-backup-* 2>/dev/null)" ] && echo 1 || echo 0)"
+check "no se creó ningún respaldo"            "$([ "$(backups "$sys")" = "0" ] && echo 1 || echo 0)"
+check "el respaldo viejo también se borró"    "$(gone "$sys/root/tvlister_backup_viejo.tar.gz")"
 check "los certificados TLS se borraron"      "$(gone "$sys/etc/tvlister")"
 check "el canal a0ed de XUI.one sigue ahí"    "$(exists "$sys/home/xui/bin/nginx/conf/servers/a0ed.conf")"
 
 # ==============================================================================
 echo ""
-echo "== 3. --dry-run: no cambia absolutamente nada"
+echo "== 3. --keep-certs y --keep-backups"
 sys="$WORK/s3"; app="$WORK/a3"
+build_fixture "$sys" "$app"
+run_uninstall "$sys" "$app" --keep-certs --keep-backups --yes
+check "los certificados se conservan"          "$(exists "$sys/etc/tvlister/tls/fullchain.pem")"
+check "el respaldo viejo se conserva"          "$(exists "$sys/root/tvlister_backup_viejo.tar.gz")"
+check "el respaldo nuevo también se guarda"    "$([ "$(backups "$sys")" = "1" ] && echo 1 || echo 0)"
+check "el panel se fue igualmente"             "$(gone "$app")"
+
+# ==============================================================================
+echo ""
+echo "== 4. --keep-data: la base de datos se queda donde está"
+sys="$WORK/s4"; app="$WORK/a4"
+build_fixture "$sys" "$app"
+run_uninstall "$sys" "$app" --keep-data --yes
+check "data/ sigue en su sitio"                "$(exists "$app/data/tvlister.db")"
+check "la base conserva sus filas"             "$(dbfile_has_rows "$app/data/tvlister.db")"
+check "el código del panel se borró"           "$(gone "$app/server/index.js")"
+check "pero la carpeta del panel sigue existiendo" "$(exists "$app/data")"
+check "no se creó respaldo en /root"           "$([ "$(backups "$sys")" = "0" ] && echo 1 || echo 0)"
+
+# ==============================================================================
+echo ""
+echo "== 5. --dry-run: no cambia absolutamente nada"
+sys="$WORK/s5"; app="$WORK/a5"
 build_fixture "$sys" "$app"
 BEFORE=$( (find "$sys" "$app" | sort; find "$app" -type f -exec md5sum {} + 2>/dev/null | sort) | md5sum)
 run_uninstall "$sys" "$app" --dry-run
@@ -132,8 +159,8 @@ check "el árbol queda idéntico con --dry-run" "$([ "$BEFORE" = "$AFTER" ] && e
 
 # ==============================================================================
 echo ""
-echo "== 4. Sin confirmar (sin escribir SI) no se borra nada"
-sys="$WORK/s4"; app="$WORK/a4"
+echo "== 6. Sin confirmar (sin escribir SI) no se borra nada"
+sys="$WORK/s6"; app="$WORK/a6"
 build_fixture "$sys" "$app"
 APP_DIR="$app" TVLISTER_SYSROOT="$sys" bash "$app/scripts/uninstall.sh" </dev/null >/dev/null 2>&1
 check "la instalación sigue en su sitio" "$(exists "$app/server/index.js")"
@@ -141,8 +168,8 @@ check "su unidad de systemd sigue ahí"   "$(exists "$sys/etc/systemd/system/tvl
 
 # ==============================================================================
 echo ""
-echo "== 5. Una carpeta que no es del panel: se niega"
-sys="$WORK/s5"; app="$WORK/a5"
+echo "== 7. Una carpeta que no es del panel: se niega"
+sys="$WORK/s7"; app="$WORK/a7"
 mkdir -p "$app/server"
 printf '{"name":"otra-cosa"}' > "$app/package.json"
 printf 'x' > "$app/server/index.js"
@@ -151,8 +178,8 @@ check "no borra una carpeta ajena" "$(exists "$app/server/index.js")"
 
 # ==============================================================================
 echo ""
-echo "== 6. El motor node del panel se detiene; la shell que lo lanzó no"
-sys="$WORK/s6"; app="$WORK/a6"
+echo "== 8. El motor node del panel se detiene; la shell que lo lanzó no"
+sys="$WORK/s8"; app="$WORK/a8"
 build_fixture "$sys" "$app"
 node -e "setTimeout(()=>{},120000)" "$app/server/index.js" >/dev/null 2>&1 &
 MOTOR=$!
@@ -171,6 +198,23 @@ else
 fi
 check "la carpeta del panel ya no está" "$(gone "$app")"
 check "esta prueba sigue corriendo (no se mató la shell)" 1
+
+# ==============================================================================
+echo ""
+echo "== 9. Segunda pasada: no hay nada instalado, no falla"
+sys="$WORK/s9"; app="$WORK/a9"
+build_fixture "$sys" "$app"
+run_uninstall "$sys" "$app" --yes >/dev/null
+OUT=$(APP_DIR="$app" TVLISTER_SYSROOT="$sys" bash "$UNINSTALL" --yes 2>&1); RC=$?
+check "sale con 0"                        "$([ "$RC" -eq 0 ] && echo 1 || echo 0)"
+check "dice que no hay nada instalado"    "$(case "$OUT" in *"No parece haber nada instalado"*) echo 1 ;; *) echo 0 ;; esac)"
+
+# ==============================================================================
+echo ""
+echo "== 10. El desinstalador nunca cierra el 80/443"
+check "no hay 'ufw delete' del 80/443"      "$(grep -Eq 'ufw delete allow (80|443)/' "$UNINSTALL" && echo 0 || echo 1)"
+check "no hay iptables -D del 80/443"       "$(grep -Eq '\-\-dport (80|443) ' "$UNINSTALL" && echo 0 || echo 1)"
+check "el mensaje final aclara que 80/443 no se tocan" "$(grep -q 'los puertos 80/443 del firewall' "$UNINSTALL" && echo 1 || echo 0)"
 
 # ==============================================================================
 echo ""

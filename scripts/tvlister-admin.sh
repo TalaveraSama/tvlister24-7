@@ -3541,13 +3541,16 @@ cmd_update() {
 }
 
 cmd_uninstall() {
-  # Desinstala el panel de este servidor. Por defecto GUARDA la base de datos en
-  # /root/tvlister-backup-AAAAMMDD-HHMM; con --purge se lo lleva todo.
-  # Uso: tvlister-admin uninstall [--purge] [--dry-run] [--yes]
+  # Desinstala TODO lo que pone TVLister en este servidor (servicio, comando,
+  # carpeta, caché, cron, nginx, certificados y reglas de firewall). Por defecto
+  # GUARDA la base de datos en /root/tvlister-backup-AAAAMMDD-HHMM.
+  # Uso: tvlister-admin uninstall [--purge] [--dry-run] [--yes] [--keep-*]
   local src tmp_script
   src="${APP_DIR}/scripts/uninstall.sh"
   if [ ! -f "$src" ]; then
     echo "❌ No se encontró ${src}. ¿Está el panel en ${APP_DIR}?"
+    echo "   También puedes ejecutarlo sin tener el panel instalado:"
+    echo "   curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/uninstall.sh | sudo bash"
     return 1
   fi
   # Se ejecuta desde /tmp: la carpeta del panel se borra mientras corre.
@@ -4567,7 +4570,7 @@ case "$ACTION" in
     echo " 30) Dominios públicos: panel (Cloudflare) y video (directo) (dominios)"
     echo " 31) Certificado Let's Encrypt del dominio de video (acme)"
     echo " 32) Categorías de películas/series: maestra «Movies» y borrar las de carpeta (vod-cats)"
-    echo " 33) DESINSTALAR el panel de este servidor (uninstall) — guarda la base de datos"
+    echo " 33) DESINSTALAR todo el panel de este servidor (uninstall) — guarda la base de datos"
     echo "  0) Salir"
     echo "============================================================"
     read -r -p "Selecciona una opción [0-33]: " opt

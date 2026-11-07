@@ -187,9 +187,10 @@ Comandos principales:
 - `tvlister-admin vod-cats` — Ver cuántas películas/series tiene cada categoría y borrar las que sobran (las que crearon las carpetas). `vod-cats master` crea `Movies`/`Series` y pasa a la maestra las carpetas en modo antiguo; `vod-cats clean` borra las vacías; `vod-cats clean --all --move-to "Movies"` mueve el contenido a la maestra y borra el resto.
 - `tvlister-admin update` — Actualizar desde GitHub sin perder base de datos ni puerto.
 - `tvlister-admin release [vX.Y.Z]` — Instalar/actualizar desde un release publicado (paquete con checksum).
-- `tvlister-admin uninstall` — **Desinstalar** el panel de este servidor. Guarda la base de datos en
+- `tvlister-admin uninstall` — **Desinstalar completo** el panel de este servidor (servicio, comando, carpeta,
+  caché, cron, nginx, certificados y reglas de firewall del panel). Guarda la base de datos en
   `/root/tvlister-backup-AAAAMMDD-HHMM`; con `--purge` se lo lleva todo y con `--dry-run` sólo enseña lo que haría.
-  No toca `/home/xui`, ni el firewall, ni nginx (salvo los bloques que puso el propio panel).
+  No toca `/home/xui`, ni los puertos 80/443 de nginx/firewall (salvo los bloques del propio panel).
 
 ---
 
@@ -205,19 +206,44 @@ donde estaba). Modos:
 
 | Comando | Qué hace |
 | --- | --- |
-| `sudo bash scripts/uninstall.sh` | Desinstala y guarda los datos en `/root/tvlister-backup-…` |
-| `sudo bash scripts/uninstall.sh --purge` | Desinstala y **borra todo**, sin copia (access codes, canales, VOD…) |
+| `sudo bash scripts/uninstall.sh` | Desinstala **todo** y guarda los datos en `/root/tvlister-backup-…` |
+| `sudo bash scripts/uninstall.sh --purge` | Desinstala y **borra todo**, sin copia (access codes, canales, VOD, respaldos viejos) |
 | `sudo bash scripts/uninstall.sh --dry-run` | Sólo enseña lo que haría: no cambia nada |
-| `sudo bash scripts/uninstall.sh --yes` | Sin preguntar (para scripts) |
+| `sudo bash scripts/uninstall.sh --yes` | Sin preguntar (para scripts y SSH) |
+| `--keep-data` / `--keep-certs` / `--keep-firewall` / `--keep-backups` | Se queda esa parte |
 
-Quita: el servicio `tvlister24-7` y su unidad de systemd (con los ajustes de Cloudflare), el comando
-`tvlister-admin`, la carpeta `/opt/tvlister24-7`, `/var/lib/tvlister24-7` (HLS y playlists temporales), el cron
-del backup automático y **los bloques de nginx que puso el panel** (`tvlister-panel.conf`, `tvlister-streams.conf`,
-`tvlister247-*.conf`, `tvlister-cloudflare-realip.conf`) recargando nginx sin cortar nada.
+Quita: el servicio `tvlister24-7` y su unidad de systemd (con los ajustes de Cloudflare y cualquier drope-in), el
+comando `tvlister-admin` (`/usr/local/bin`, `/usr/bin`…), la carpeta `/opt/tvlister24-7`, `/var/lib/tvlister24-7`
+(HLS y playlists temporales), el cron del backup automático, **los bloques de nginx que puso el panel**
+(`tvlister-panel.conf`, `tvlister-streams.conf`, `tvlister247-*.conf`, `tvlister-cloudflare-realip.conf`,
+`/root/tvlister247_*.nginx.conf`) recargando nginx sin cortar nada, **los certificados de `/etc/tvlister`** y
+**las reglas de firewall que abrió el instalador** (puerto del panel, 1935, 19350, 8554, 8890/udp) por `ufw delete`
+y `iptables -D`.
 
-**No toca**: `/home/xui` (XUI.one y su nginx, con sus canales `a0*.conf`), el firewall (las reglas que abrió el
-instalador se quedan; el propio script te dice cómo verlas y quitarlas), los certificados de `/etc/tvlister`
-salvo con `--purge`, ni tus backups `/root/tvlister_backup_*.tar.gz`.
+**No toca nunca**: `/home/xui` (XUI.one y su nginx, con sus canales `a0*.conf`), los puertos **80/443** de nginx y
+del firewall, ni archivos de otros programas. Los respaldos `/root/tvlister_backup_*.tar.gz` se conservan salvo
+`--purge`.
+
+### Desinstalar por SSH, desde tu PC (sin entrar al servidor)
+
+```bash
+# 1) el servidor tiene que aceptar tu clave (una sola vez)
+ssh-copy-id root@192.168.200.8
+
+# 2) desinstalar desde tu PC
+bash scripts/uninstall_ssh.sh root@192.168.200.8
+```
+
+Pregunta aquí, envía el desinstalador por SSH y lo ejecuta allí con `--yes`; al final comprueba que no queda nada.
+Opciones de este lanzador: `--puerto 2222`, `--clave ~/.ssh/id_ed25519`, `--descargar` (usa el último publicado en
+GitHub en vez del script de tu PC) y `--tag v2.6.51`. Todo lo demás (`--purge`, `--dry-run`, `--keep-certs`…) se
+pasa al desinstalador del servidor.
+
+Si no puedes entrar sin contraseña, una sola línea desde tu PC o desde la consola del servidor:
+
+```bash
+ssh root@TU_IP 'curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/uninstall.sh | bash -s -- --yes'
+```
 
 ---
 ## Salida UDP / CATV analógica (WK2500)

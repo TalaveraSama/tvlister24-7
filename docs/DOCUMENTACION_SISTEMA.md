@@ -3029,6 +3029,63 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.51: desinstalador COMPLETO del sistema + lanzador por SSH
+
+El desinstalador de la v2.6.50 se quedaba a medias a propósito: dejaba `/etc/tvlister`, no tocaba el firewall y
+mantenía los respaldos. Ahora quita **todo lo que pone TVLister** y hay una forma de lanzarlo **desde tu PC por SSH**.
+
+```bash
+# en el servidor
+sudo bash /opt/tvlister24-7/scripts/uninstall.sh          # completo, guarda la BD
+sudo bash /opt/tvlister24-7/scripts/uninstall.sh --purge   # completo y sin copia
+sudo tvlister-admin uninstall                              # lo mismo, menú 33
+
+# desde tu PC (sin entrar al servidor)
+bash scripts/uninstall_ssh.sh root@192.168.200.8
+bash scripts/uninstall_ssh.sh root@192.168.200.8 --purge --yes
+```
+
+- **Qué quita ahora**: servicio + unidad `tvlister24-7.service` **con sus drope-ins** `service.d/`, comando
+  `tvlister-admin` (en `/usr/local/bin`, `/usr/bin`, `/usr/sbin`, `/bin`), la carpeta del panel, `/var/lib/tvlister24-7`
+  (caché HLS y playlists), el cron del backup, los bloques de nginx del panel (incluidos los enlaces de
+  `sites-enabled` y los `/root/tvlister247_*.nginx.conf`), **`/etc/tvlister` con los certificados** y **las reglas de
+  firewall del panel** (puerto del panel, 1935, 19350, 8554 y 8890/udp) con `ufw delete` e `iptables -D`.
+- **Nunca toca**: `/home/xui` (ni su nginx ni sus canales `a0*.conf`), los puertos **80/443** del firewall ni de
+  nginx, ni archivos de otros programas. Antes de borrar comprueba que la carpeta sea del panel
+  (`server/index.js` + `package.json` con `name: tvlister24-7`).
+- **Datos**: por defecto copia `data/` a `/root/tvlister-backup-AAAAMMDD-HHMM/`; si la copia falla **no borra `data/`**.
+  Con `--purge` no hay copia y además borra `/root/tvlister_backup_*.tar.gz`.
+- **Se queda lo que tú digas**: `--keep-data` (deja `data/`), `--keep-certs` (deja `/etc/tvlister`),
+  `--keep-firewall` (no toca ufw/iptables), `--keep-backups` (deja los respaldos de `/root`).
+- **`curl | bash`**: sin terminal exige `--yes` y lo explica; con `--dry-run` no cambia nada.
+
+**Lanzador por SSH** (`scripts/uninstall_ssh.sh`, se ejecuta en tu PC):
+
+| Opción | Para qué |
+| --- | --- |
+| `root@IP` | servidor destino (obligatorio) |
+| `--puerto N` | SSH en otro puerto |
+| `--clave RUTA` | clave SSH concreta |
+| `--descargar` / `--tag vX.Y.Z` | usa el desinstalador publicado en vez del de tu PC |
+
+- Pregunta **aquí** (en tu PC) y luego pasa `--yes` al servidor: así funciona aunque allí no haya terminal.
+  Con `--dry-run` no pregunta y no añade `--yes`.
+- Envía el script por la entrada estándar de `ssh` (`ssh root@IP 'bash -s -- …' < uninstall.sh`): no hace falta `scp`
+  ni que el servidor tenga nada instalado.
+- Si entras como root usa root; si no, comprueba `sudo -n true` y en ese caso ejecuta con `sudo -n`. Si no hay
+  root ni sudo sin contraseña, **aborta sin tocar nada** y te dice cómo hacerlo a mano.
+- Al terminar **verifica** que no queda `/opt/tvlister24-7`, ni la unidad, ni el comando, y avisa si algo sigue.
+- Al publicar, `uninstall.sh` va también como asset del release, así que esta línea funciona sin el repo:
+
+```bash
+ssh root@TU_IP 'curl -fsSL https://github.com/TalaveraSama/tvlister24-7/releases/latest/download/uninstall.sh | bash -s -- --yes'
+```
+
+Pruebas: `bash scripts/test_uninstall.sh` (44 comprobaciones sobre un árbol simulado con `TVLISTER_SYSROOT`) y
+`bash scripts/test_uninstall_ssh.sh` (40 comprobaciones con un `ssh` de mentira que ejecuta el comando «remoto» en
+el mismo equipo: confirmación, `--yes`, `--dry-run`, `--purge`, `--keep-certs`, cancelación, servidor sin sudo y
+`--descargar`).
+
 ### v2.6.50: desinstalador (`tvlister-admin uninstall`)
 
 Hasta ahora para quitar el panel había que hacerlo a mano y con cuidado de no llevarse por delante XUI.one. Ya no:

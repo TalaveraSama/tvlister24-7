@@ -58,14 +58,20 @@ tar -czf "${OUT}/${NAME}.tar.gz" -C "$OUT" "$NAME"
 cp -p scripts/install_release.sh "${OUT}/install.sh"
 chmod +x "${OUT}/install.sh"
 
+# El desinstalador también se publica suelto: así se puede lanzar por SSH con
+# una sola línea, sin tener nada instalado:
+#   curl -fsSL .../releases/latest/download/uninstall.sh | sudo bash
+cp -p scripts/uninstall.sh "${OUT}/uninstall.sh"
+chmod +x "${OUT}/uninstall.sh"
+
 (
   cd "$OUT"
-  sha256sum "${NAME}.tar.gz" install.sh > SHA256SUMS
+  sha256sum "${NAME}.tar.gz" install.sh uninstall.sh > SHA256SUMS
 )
 
 echo "Release ${TAG} empaquetado en ${OUT}/"
-ls -lh "${OUT}/${NAME}.tar.gz" "${OUT}/install.sh" "${OUT}/SHA256SUMS" | awk '{print "  " $9 "  " $5}'
+ls -lh "${OUT}/${NAME}.tar.gz" "${OUT}/install.sh" "${OUT}/uninstall.sh" "${OUT}/SHA256SUMS" | awk '{print "  " $9 "  " $5}'
 echo
 echo "Publicar con:"
-echo "  gh release create ${TAG} ${OUT}/${NAME}.tar.gz ${OUT}/install.sh ${OUT}/SHA256SUMS \\"
+echo "  gh release create ${TAG} ${OUT}/${NAME}.tar.gz ${OUT}/install.sh ${OUT}/uninstall.sh ${OUT}/SHA256SUMS \\"
 echo "     --title \"TVLister 24/7 ${TAG}\" --notes-file docs/RELEASE_NOTES_${TAG}.md"
