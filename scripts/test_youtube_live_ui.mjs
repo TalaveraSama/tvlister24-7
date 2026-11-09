@@ -220,12 +220,14 @@ globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
   const method = (opts.method || 'GET').toUpperCase();
   let body = null;
+  // El contenido en crudo (para las cookies, que van como texto plano).
+  const raw = typeof opts.body === 'string' ? opts.body : '';
   try {
     body = opts.body ? JSON.parse(opts.body) : null;
   } catch {
     body = null;
   }
-  calls.push({ url: u, method, body });
+  calls.push({ url: u, method, body, raw });
 
   if (u === '/api/channels247' && method === 'GET') return json(channels);
   if (u === '/api/vod') return json([]);
@@ -239,10 +241,36 @@ globalThis.fetch = async (url, opts = {}) => {
             version: '2026.11.04',
             bin: '/opt/tvlister24-7/.runtime/bin/yt-dlp',
             ffmpeg: true,
-            cookies: { path: cookiesPath, exists: Boolean(cookiesPath) }
+            cookies: {
+              path: cookiesPath,
+              exists: Boolean(cookiesPath),
+              ok: Boolean(cookiesPath),
+              usable: Boolean(cookiesPath),
+              auth: Boolean(cookiesPath),
+              count: cookiesPath ? 3 : 0,
+              youtube: cookiesPath ? 3 : 0,
+              error: ''
+            }
           }
         : { installed: false, bin: '', version: '', ffmpeg: true, hint: 'Se instala solo con un clic, sin apt.' }
     );
+  }
+  if (u === '/api/youtube/cookies' && method === 'POST') {
+    // Igual que el panel: se valida y, si sirve, se guarda.
+    if (!/youtube\.com/.test(raw)) {
+      return json({ ok: false, error: 'El archivo no trae cookies de youtube.com' }, 400);
+    }
+    cookiesPath = '/opt/tvlister24-7/.runtime/youtube-cookies.txt';
+    return json({
+      ok: true,
+      path: cookiesPath,
+      message: 'Cookies guardadas: 3 de youtube.com con la sesión iniciada.',
+      cookies: { path: cookiesPath, exists: true, ok: true, usable: true, auth: true, count: 3, youtube: 3 }
+    });
+  }
+  if (u === '/api/youtube/cookies' && method === 'DELETE') {
+    cookiesPath = '';
+    return json({ ok: true, cookies: { path: '', exists: false, usable: false } });
   }
   if (u === '/api/youtube/install') {
     // Ahora arranca en segundo plano: se responde 202 y la pantalla pregunta.
@@ -268,6 +296,17 @@ globalThis.fetch = async (url, opts = {}) => {
         needs_ytdlp: true,
         error: 'Falta yt-dlp en el servidor: instálalo para leer el directo de YouTube.',
         yt_dlp: { installed: false }
+      });
+    }
+    if (/watch\?v=bot/.test(body?.url || '')) {
+      return json({
+        ok: false,
+        live: false,
+        needs_cookies: true,
+        error:
+          'YouTube pide iniciar sesión desde este servidor («Sign in to confirm you’re not a bot»). ' +
+          'Sube un archivo de cookies de youtube.com y el panel lo usará solo.',
+        detail: "ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you're not a bot. Use --cookies."
       });
     }
     if (/watch\?v=abc/.test(body?.url || '')) {
@@ -440,20 +479,86 @@ ok(
   'rellena el nombre del canal con el título del directo'
 );
 
-// ── 4b. Cookies de YouTube (opcional) ───────────────────────────────────────
+// ── 4b. El bloqueo anti-robots de YouTube y las cookies ─────────────────────
 {
-  const summary = [...document.querySelectorAll('summary')].find((s) => /no eres un robot/.test(s.textContent));
+  // YouTube contesta «Sign in to confirm you're not a bot» desde una IP de
+  // datacenter: la pantalla no debe escupir el inglés, sino decir qué hacer.
+  await setValue(urlInput, 'https://www.youtube.com/watch?v=bot123');
+  await clickText('Comprobar señal');
+  ok(/Sign in to confirm/.test(text()), 'el bloqueo de YouTube se explica en la caja de la señal');
+  ok(/archivo de cookies de youtube\.com/.test(text()), 'y dice qué hacer: subir cookies');
+  ok(buttons('Subir cookies').length > 0, 'con un botón para subirlas desde la pantalla');
+  ok(/detalle técnico/.test(text()), 'dejando el texto de yt-dlp aparte, plegado');
+
+  // El bloque de cookies, ya abierto por el propio aviso.
+  const summary = [...document.querySelectorAll('summary')].find((s) => /Usa cookies/.test(s.textContent));
   ok(Boolean(summary), 'el panel explica el bloqueo de YouTube por IP');
   const box = summary?.parentElement;
-  const input = box?.querySelector('input');
-  ok(Boolean(input), 'y deja indicar el archivo de cookies');
-  if (input) await setValue(input, '/opt/tvlister24-7/.runtime/youtube-cookies.txt');
+  const fileInput = box?.querySelector('input[type="file"]');
+  ok(Boolean(fileInput), 'y acepta el archivo .txt exportado del navegador');
+  ok(/Get cookies\.txt LOCALLY/.test(text()), 'explicando de dónde sale ese archivo');
+
+  // Subir un cookies.txt como el que exporta la extensión (Netscape, con tabuladores).
+  const cookieTxt =
+    '# Netscape HTTP Cookie File\n' +
+    '#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\t__Secure-3PSID\tabc\n' +
+    '.youtube.com\tTRUE\t/\tTRUE\t1893456000\tPREF\ttz=UTC\n';
+  const beforeUp = calls.length;
+  if (fileInput) {
+    Object.defineProperty(fileInput, 'files', {
+      value: [{ name: 'youtube-cookies.txt', text: async () => cookieTxt }],
+      configurable: true
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    });
+    await flush();
+    await flush();
+  }
+  const up = calls.slice(beforeUp).find((c) => c.url === '/api/youtube/cookies' && c.method === 'POST');
+  ok(Boolean(up), 'subir el archivo lo manda al panel');
+  ok(/Netscape HTTP Cookie File/.test(String(up?.raw || '')), 'con el contenido tal cual (formato Netscape)');
+  ok(/Cookies guardadas: 3 de youtube\.com con la sesión iniciada/.test(text()), 'y confirma cuántas cookies ha leído');
+
+  // El fallo era el anti-robots: al tener cookies, se reintenta solo.
+  const probesBefore = calls.filter((c) => c.url === '/api/youtube/probe').length;
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 150));
+  });
+  await flush();
+  await flush();
+  ok(
+    calls.filter((c) => c.url === '/api/youtube/probe').length > probesBefore,
+    'y vuelve a comprobar el enlace sin tocar nada'
+  );
+
+  // Ruta manual, para quien ya tiene el archivo en el servidor.
+  const manual = [...document.querySelectorAll('summary')].find((s) =>
+    /Ya tengo el archivo en el servidor/.test(s.textContent)
+  );
+  ok(Boolean(manual), 'y deja indicar una ruta que ya exista en el servidor');
+  const pathInput = manual?.parentElement?.querySelector('input[type="text"]');
+  if (pathInput) await setValue(pathInput, '/opt/tvlister24-7/.runtime/youtube-cookies.txt');
   await clickText('Guardar ruta');
   const put = calls.filter((c) => c.url === '/api/settings' && c.method === 'PUT').pop();
   ok(Boolean(put), 'guardar la ruta llama al panel');
-  ok(put?.body?.youtube_cookies_file === '/opt/tvlister24-7/.runtime/youtube-cookies.txt', 'con la ruta escrita', put?.body?.youtube_cookies_file);
-  ok(/Archivo encontrado/.test(text()), 'y avisa cuando el archivo ya está en el servidor');
+  ok(
+    put?.body?.youtube_cookies_file === '/opt/tvlister24-7/.runtime/youtube-cookies.txt',
+    'con la ruta escrita',
+    put?.body?.youtube_cookies_file
+  );
+  ok(/3 cookies \(3 de youtube\.com\) · con sesión/.test(text()), 'y enseña qué hay dentro del archivo');
   ok(alerts.some((a) => /Ruta de cookies guardada/.test(a)), 'confirma al operador');
+
+  // Y se pueden quitar.
+  await clickText('Quitar');
+  ok(
+    calls.some((c) => c.url === '/api/youtube/cookies' && c.method === 'DELETE'),
+    'las cookies se pueden quitar desde la pantalla'
+  );
+
+  // Se vuelve al directo normal para seguir con el resto de la prueba.
+  await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');
 }
 
 // ── 5. Guardar = POST con source_kind youtube ───────────────────────────────

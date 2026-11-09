@@ -223,7 +223,8 @@ baja el **binario autónomo** (`yt-dlp_linux`, ~39 MB), que lleva su propio Pyth
 del servidor**; el zipapp normal necesita un python3 completo (`_ssl`, `sqlite3`) y en servidores recortados
 fallaba al arrancar. El binario se prueba (`--version`) **antes** de instalarlo y la descarga va en segundo
 plano con su paso a la vista. Si YouTube pide «confirma que no eres un robot», hay un apartado para indicar un
-archivo de cookies en formato Netscape.
+archivo de cookies en formato Netscape: botón **Subir cookies (.txt)** en la propia pantalla (el panel lo valida,
+lo guarda con permisos 600 en `.runtime/youtube-cookies.txt` y lo usa solo, también al renovar el enlace).
 
 ---
 

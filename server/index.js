@@ -105,6 +105,9 @@ import {
   ensureLiveState,
   liveSourceInfo,
   cookiesInfo,
+  inspectCookiesText,
+  inspectCookiesFile,
+  COOKIES_DEFAULT_PATH,
   needsRefresh,
   liveReady,
   liveFingerprint,
@@ -2669,6 +2672,52 @@ app.post('/api/youtube/install', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
+/**
+ * Cookies de YouTube: se sube el .txt exportado del navegador y el panel lo
+ * guarda en `.runtime/youtube-cookies.txt` (0600) y lo usa solo en la próxima
+ * lectura. Sin cookies, YouTube contesta «Sign in to confirm you’re not a bot»
+ * a cualquier IP de datacenter.
+ */
+app.post(
+  '/api/youtube/cookies',
+  requireAuth,
+  requireAdmin,
+  express.text({ type: ['text/plain', 'application/octet-stream'], limit: '4mb' }),
+  (req, res) => {
+    const text = typeof req.body === 'string' ? req.body : '';
+    const info = inspectCookiesText(text);
+    if (!info.ok) return res.status(400).json({ ok: false, error: info.error, cookies: info });
+    try {
+      fs.mkdirSync(path.dirname(COOKIES_DEFAULT_PATH), { recursive: true });
+      const body = text.endsWith('\n') ? text : `${text}\n`;
+      fs.writeFileSync(COOKIES_DEFAULT_PATH, body, { mode: 0o600 });
+      try {
+        fs.chmodSync(COOKIES_DEFAULT_PATH, 0o600);
+      } catch {
+        /* el sistema de archivos manda */
+      }
+      db.prepare(
+        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      ).run('youtube_cookies_file', COOKIES_DEFAULT_PATH);
+      res.json({
+        ok: true,
+        path: COOKIES_DEFAULT_PATH,
+        message:
+          `Cookies guardadas: ${info.youtube} de youtube.com` +
+          (info.auth ? ' con la sesión iniciada.' : ' (sin sesión: puede que YouTube siga pidiendo login).'),
+        cookies: cookiesInfo()
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: `No se pudo guardar el archivo: ${err.message}` });
+    }
+  }
+);
+
+app.delete('/api/youtube/cookies', requireAuth, requireAdmin, (req, res) => {
+  db.prepare("DELETE FROM settings WHERE key = 'youtube_cookies_file'").run();
+  res.json({ ok: true, cookies: cookiesInfo() });
+});
+
 app.get('/api/youtube/install-status', requireAuth, async (req, res) => {
   const state = ytInstallState();
   // Al terminar se devuelve también el estado real del binario (versión y ruta),
@@ -2720,7 +2769,12 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       expires_at: r.expires_at_ms ? new Date(r.expires_at_ms).toISOString() : '',
       expires_in_min: r.expires_at_ms ? Math.max(0, Math.round((r.expires_at_ms - Date.now()) / 60000)) : null,
       error: r.ok ? '' : r.error || 'sin señal',
+      // Texto original de yt-dlp (recortado): para soporte, no para el operador.
+      detail: r.ok ? '' : String(r.raw || ''),
       needs_ytdlp: Boolean(r.needs_ytdlp),
+      needs_cookies: Boolean(r.needs_cookies),
+      using_cookies: Boolean(r.using_cookies),
+      cookies: cookiesInfo(),
       yt_dlp: await getYtDlpInfo()
     });
   } catch (err) {
@@ -4998,12 +5052,29 @@ app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
     }
   }
 
+  // Cookies de YouTube: si se guarda una ruta, se avisa YA de si el archivo
+  // existe y si sirve (Netscape, de youtube.com, con sesión), en vez de
+  // descubrirlo cuando el directo falla con «Sign in to confirm you’re not a bot».
+  const warnings = [];
+  if (Object.prototype.hasOwnProperty.call(updates, 'youtube_cookies_file')) {
+    const ckPath = String(updates.youtube_cookies_file ?? '').trim();
+    if (ckPath) {
+      if (!fs.existsSync(ckPath)) {
+        warnings.push(`El archivo de cookies no existe en el servidor (${ckPath}). Súbelo con «Subir cookies».`);
+      } else {
+        const ck = inspectCookiesFile(ckPath);
+        if (!ck.ok) warnings.push(`El archivo de cookies no sirve: ${ck.error}`);
+        else if (ck.warn) warnings.push(ck.warn);
+      }
+    }
+  }
+
   for (const [k, v] of Object.entries(updates)) {
     upsert.run(String(k), String(v));
   }
   invalidateFirewallCache();
   invalidateAudioLevelingCache();
-  res.json({ ok: true });
+  res.json({ ok: true, warnings });
 });
 
 app.get('/api/backup/export', requireAuth, requireAdmin, (req, res) => {

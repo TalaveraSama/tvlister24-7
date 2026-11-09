@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Tv2,
   Plus,
@@ -50,6 +50,9 @@ export default function Channels247Page({ onPreview }) {
   const [probe, setProbe] = useState(null);
   const [liveBusy, setLiveBusy] = useState('');
   const [cookiesPath, setCookiesPath] = useState('');
+  const [cookiesBusy, setCookiesBusy] = useState(false);
+  const [cookiesMsg, setCookiesMsg] = useState(null);
+  const cookiesFileRef = useRef(null);
 
   const [customTitle, setCustomTitle] = useState('');
   const [customUrl, setCustomUrl] = useState('');
@@ -210,16 +213,47 @@ export default function Channels247Page({ onPreview }) {
     }
   };
 
+  // Sube el cookies.txt exportado del navegador: el panel lo valida, lo guarda
+  // con permisos 0600 y lo usa solo en la próxima lectura de YouTube.
+  const handleUploadCookies = async (file) => {
+    if (!file) return;
+    setCookiesBusy(true);
+    setCookiesMsg(null);
+    try {
+      const text = await file.text();
+      const r = await apiFetch('/api/youtube/cookies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: text
+      });
+      await loadYtStatus();
+      setCookiesMsg({ ok: true, text: r.message || 'Cookies guardadas.' });
+      // Si el fallo era el control anti-robots, se vuelve a comprobar solo.
+      if (probe?.needs_cookies && String(form.live_source_url || '').trim()) {
+        setTimeout(() => {
+          handleProbe();
+        }, 50);
+      }
+    } catch (err) {
+      setCookiesMsg({ ok: false, text: err.message || 'No se pudieron guardar las cookies.' });
+    } finally {
+      setCookiesBusy(false);
+    }
+  };
+
   const handleSaveCookies = async () => {
     try {
-      await apiFetch('/api/settings', {
+      const r = await apiFetch('/api/settings', {
         method: 'PUT',
         body: JSON.stringify({ youtube_cookies_file: String(cookiesPath || '').trim() })
       });
       await loadYtStatus();
+      const warn = Array.isArray(r?.warnings) && r.warnings.length ? r.warnings[0] : '';
       window.alert(
         String(cookiesPath || '').trim()
-          ? 'Ruta de cookies guardada. Se usará la próxima vez que el panel lea un directo.'
+          ? warn
+            ? `Ruta guardada, pero ojo: ${warn}`
+            : 'Ruta de cookies guardada y comprobada. Se usará la próxima vez que el panel lea YouTube.'
           : 'Cookies borradas: el panel leerá YouTube sin sesión.'
       );
     } catch (err) {
@@ -927,6 +961,36 @@ export default function Channels247Page({ onPreview }) {
                               <Download className="w-3.5 h-3.5" /> Instalar yt-dlp
                             </button>
                           )}
+                          {probe.needs_cookies && (
+                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCookiesMsg(null);
+                                  cookiesFileRef.current?.click();
+                                }}
+                                disabled={cookiesBusy}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-600/80 hover:bg-amber-500 text-white font-bold disabled:opacity-50"
+                              >
+                                {cookiesBusy ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                                Subir cookies
+                              </button>
+                              <span className="text-emerald-100/80">
+                                Es un .txt exportado de youtube.com («Get cookies.txt LOCALLY»). Al subirlo se vuelve a
+                                comprobar el enlace solo.
+                              </span>
+                            </div>
+                          )}
+                          {probe.detail && (
+                            <details className="text-[10px] text-slate-500">
+                              <summary className="cursor-pointer">detalle técnico</summary>
+                              <div className="mt-1 font-mono break-all text-slate-500">{probe.detail}</div>
+                            </details>
+                          )}
                         </div>
                       )}
                     </div>
@@ -954,6 +1018,11 @@ export default function Channels247Page({ onPreview }) {
                         </button>
                       </>
                     )}
+                    {probe?.using_cookies && (
+                      <span className="text-emerald-300" title="Se está usando el archivo de cookies de youtube.com">
+                        · con cookies de YouTube
+                      </span>
+                    )}
                     <span className="text-slate-500">
                       El panel renueva el enlace antes de que caduque: el canal no se corta.
                     </span>
@@ -966,33 +1035,119 @@ export default function Channels247Page({ onPreview }) {
                     </div>
                   )}
 
-                  {/* Cookies (opcional): YouTube a veces pide iniciar sesión */}
-                  <details className="rounded-xl bg-[#0e1526] border border-slate-800 px-3 py-2">
+                  {/* Cookies: la única salida limpia al «no eres un robot» de YouTube */}
+                  <details
+                    open={Boolean(probe?.needs_cookies)}
+                    className="rounded-xl bg-[#0e1526] border border-slate-800 px-3 py-2"
+                  >
                     <summary className="cursor-pointer text-[11px] text-slate-400">
-                      ¿YouTube dice «confirma que no eres un robot»? Usa cookies (opcional)
+                      ¿YouTube dice «Sign in to confirm you’re not a bot»? Usa cookies
+                      {ytStatus?.cookies?.usable ? (
+                        <span className="text-emerald-400 font-semibold">
+                          {' '}
+                          · activas ({ytStatus.cookies.count} de youtube.com
+                          {ytStatus.cookies.auth ? ', con sesión' : ', sin sesión'})
+                        </span>
+                      ) : (
+                        ''
+                      )}
                     </summary>
                     <div className="mt-2 space-y-2">
-                      <div className="flex flex-col sm:flex-row gap-2">
-                        <input
-                          type="text"
-                          value={cookiesPath}
-                          onChange={(e) => setCookiesPath(e.target.value)}
-                          placeholder="/opt/tvlister24-7/.runtime/youtube-cookies.txt"
-                          className="flex-1 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono text-[11px]"
-                        />
+                      <input
+                        ref={cookiesFileRef}
+                        type="file"
+                        accept=".txt,text/plain"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          if (f) handleUploadCookies(f);
+                        }}
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
                         <button
                           type="button"
-                          onClick={handleSaveCookies}
-                          className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-semibold"
+                          onClick={() => cookiesFileRef.current?.click()}
+                          disabled={cookiesBusy}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold disabled:opacity-50"
                         >
-                          Guardar ruta
+                          {cookiesBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                          {cookiesBusy ? 'Comprobando…' : 'Subir cookies (.txt)'}
                         </button>
+                        {ytStatus?.cookies?.usable && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await apiFetch('/api/youtube/cookies', { method: 'DELETE' });
+                                await loadYtStatus();
+                                setCookiesMsg({ ok: true, text: 'Cookies borradas: el panel leerá YouTube sin sesión.' });
+                              } catch (err) {
+                                setCookiesMsg({ ok: false, text: err.message });
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-semibold"
+                          >
+                            <Trash2 className="w-3 h-3" /> Quitar
+                          </button>
+                        )}
                       </div>
-                      <div className="text-[10px] text-slate-500">
-                        Exporta las cookies de youtube.com en formato Netscape (extensión «Get cookies.txt») y copia el
-                        archivo al servidor. Sin cookies el panel también funciona, salvo que YouTube bloquee la IP.
-                        {ytStatus?.cookies?.exists ? ' — Archivo encontrado.' : ''}
+
+                      {cookiesMsg && (
+                        <div className={`text-[11px] flex items-start gap-1 ${cookiesMsg.ok ? 'text-emerald-300' : 'text-rose-300'}`}>
+                          {cookiesMsg.ok ? (
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          ) : (
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          )}
+                          <span>{cookiesMsg.text}</span>
+                        </div>
+                      )}
+
+                      <div className="text-[10px] text-slate-500 space-y-1">
+                        <div>
+                          <b className="text-slate-300">Cómo:</b> abre <b>youtube.com</b> en tu PC con la sesión
+                          iniciada → extensión «<b>Get cookies.txt LOCALLY</b>» → Export → sube aquí el{' '}
+                          <code className="text-slate-400">.txt</code>. Se guarda en el servidor con permisos 600 y se
+                          usa solo, sin reiniciar nada.
+                        </div>
+                        <div>
+                          El archivo debe ser el <b>formato Netscape</b> (columnas separadas por tabuladores). Las
+                          cookies caducan en días: si vuelve el aviso, expórtalas otra vez.
+                        </div>
                       </div>
+
+                      <details className="pt-1">
+                        <summary className="cursor-pointer text-[10px] text-slate-500">
+                          Ya tengo el archivo en el servidor: indicar ruta
+                        </summary>
+                        <div className="mt-2 flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="text"
+                            value={cookiesPath}
+                            onChange={(e) => setCookiesPath(e.target.value)}
+                            placeholder="/opt/tvlister24-7/.runtime/youtube-cookies.txt"
+                            className="flex-1 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono text-[11px]"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleSaveCookies}
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-semibold"
+                          >
+                            Guardar ruta
+                          </button>
+                        </div>
+                        {ytStatus?.cookies?.path && (
+                          <div className="mt-1 text-[10px] text-slate-500">
+                            {ytStatus.cookies.path}
+                            {ytStatus.cookies.exists
+                              ? ytStatus.cookies.ok
+                                ? ` · ${ytStatus.cookies.count} cookies (${ytStatus.cookies.youtube} de youtube.com)${ytStatus.cookies.auth ? ' · con sesión' : ' · SIN sesión'}`
+                                : ` · no sirve: ${ytStatus.cookies.error}`
+                              : ' · no existe'}
+                          </div>
+                        )}
+                      </details>
                     </div>
                   </details>
                 </div>

@@ -81,6 +81,12 @@ if (args.includes('--version')) { console.log('2026.11.04-fake'); process.exit(0
 const counter = ${JSON.stringify(YT_COUNTER)};
 const flagsFile = ${JSON.stringify(YT_FLAGS)};
 const flags = JSON.parse(fs.readFileSync(flagsFile, 'utf8') || '{}');
+// El control anti-robots de YouTube: sólo pasa si el panel le da cookies.
+if (flags.bot && !process.argv.includes('--cookies')) {
+  console.error("ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you're not a bot. This helps protect our community. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp for more information.");
+  process.exit(1);
+}
+if (flags.bot) fs.writeFileSync(${JSON.stringify(path.join(TMP, 'yt-cookies-used.txt'))}, process.argv.slice(2).join(' '));
 let n = 0;
 try { n = Number(fs.readFileSync(counter, 'utf8')) || 0; } catch {}
 n += 1;
@@ -233,6 +239,7 @@ const child = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
     HOST: '127.0.0.1',
     NODE_ENV: 'test',
     TVLISTER_DB_PATH: DB,
+    APP_DIR: path.join(TMP, 'app'),
     TVLISTER_STREAMS_RUNTIME: path.join(TMP, 'streams_runtime'),
     FFMPEG_PATH: FAKE_FFMPEG,
     TVLISTER_YTDLP: FAKE_YTDLP,
@@ -492,6 +499,120 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     } finally {
       child2.kill('SIGTERM');
     }
+  }
+
+  // --- 1d. Cookies: la salida limpia al «Sign in to confirm you're not a bot» --
+  // YouTube bloquea las IP de datacenter y no entrega ni un formato. El panel
+  // debe explicarlo y ofrecer subir el cookies.txt (formato Netscape), no
+  // escupir el texto en inglés de yt-dlp.
+  {
+    const COOKIE_TXT = [
+      '# Netscape HTTP Cookie File',
+      '# https://curl.se/docs/http-cookies.html',
+      '#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\t__Secure-3PSID\tabc123',
+      '.youtube.com\tTRUE\t/\tTRUE\t1893456000\tPREF\ttz=UTC',
+      '.youtube.com\tTRUE\t/\tFALSE\t1893456000\tVISITOR_INFO1_LIVE\txyz'
+    ].join('\n');
+
+    // 1) El validador: qué sirve y qué no (en un proceso aparte, como el panel).
+    const unit = (() => {
+      const code = `
+        import { inspectCookiesText, explainYtDlpError, isBotCheckError } from ${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))};
+        const good = ${JSON.stringify(COOKIE_TXT)};
+        const noYt = '# Netscape HTTP Cookie File\\n.google.com\\tTRUE\\t/\\tTRUE\\t1893456000\\tSID\\tx';
+        const noAuth = '# Netscape HTTP Cookie File\\n.youtube.com\\tTRUE\\t/\\tTRUE\\t1893456000\\tPREF\\ttz=UTC';
+        const asJson = JSON.stringify([{ domain: '.youtube.com', name: 'SID', value: 'x' }], null, 2);
+        const botMsg = "ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you're not a bot. This helps protect our community. Use --cookies-from-browser or --cookies for the authentication.";
+        console.log(JSON.stringify({
+          good: inspectCookiesText(good),
+          noYt: inspectCookiesText(noYt),
+          noAuth: inspectCookiesText(noAuth),
+          asJson: inspectCookiesText(asJson),
+          empty: inspectCookiesText(''),
+          bot: isBotCheckError(botMsg),
+          notBot: isBotCheckError('ERROR: Unsupported URL: https://example.com'),
+          explained: explainYtDlpError(botMsg)
+        }));
+      `;
+      const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
+        env: { ...process.env, TVLISTER_DB_PATH: path.join(TMP, 'ck-unit.db'), APP_DIR: path.join(TMP, 'app') },
+        encoding: 'utf8'
+      });
+      return JSON.parse(out.trim().split('\n').pop() || '{}');
+    })();
+
+    ok('las cookies buenas se aceptan', unit?.good?.ok === true, `${unit?.good?.count} líneas · ${unit?.good?.youtube} de youtube.com`);
+    ok('y se detecta la sesión iniciada', unit?.good?.auth === true);
+    ok('cuenta las HttpOnly (#HttpOnly_)', unit?.good?.count === 3, `${unit?.good?.count}`);
+    ok('un archivo sin youtube.com se rechaza', unit?.noYt?.ok === false && /no trae cookies de youtube\.com/.test(unit?.noYt?.error || ''), (unit?.noYt?.error || '').slice(0, 60));
+    ok('uno sin sesión se acepta pero se avisa', unit?.noAuth?.ok === true && /falta SID/.test(unit?.noAuth?.warn || ''), (unit?.noAuth?.warn || '').slice(0, 60));
+    ok('el JSON de otra extensión se rechaza con el motivo', unit?.asJson?.ok === false && /formato Netscape/.test(unit?.asJson?.error || ''), (unit?.asJson?.error || '').slice(0, 60));
+    ok('un archivo vacío se rechaza', unit?.empty?.ok === false);
+    ok('reconoce el error anti-robots', unit?.bot === true);
+    ok('y no confunde otros errores', unit?.notBot === false);
+    ok('el error se explica con la salida (subir cookies)', /Sign in to confirm/.test(unit?.explained?.message || '') && /cookies/i.test(unit?.explained?.message || ''), (unit?.explained?.message || '').slice(0, 90));
+    ok('y se marca como needs_cookies', unit?.explained?.needs_cookies === true);
+
+    // 2) El panel real: sin cookies, YouTube «bloquea» y el probe lo explica.
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, bot: true }));
+    try {
+      fs.rmSync(path.join(TMP, 'yt-cookies-used.txt'), { force: true });
+    } catch {
+      /* no estaba */
+    }
+    const bot = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    ok('el probe con bloqueo pide cookies', bot?.ok === false && bot?.needs_cookies === true, (bot?.error || '').slice(0, 70));
+    ok('sin pegar el texto en inglés tal cual', !/^yt-dlp no pudo leer el enlace/.test(bot?.error || ''));
+    ok('y deja el texto de yt-dlp aparte (para soporte)', /Sign in to confirm/.test(bot?.detail || ''), (bot?.detail || '').slice(0, 60));
+
+    // 3) Subir el archivo: se valida, se guarda 0600 y se usa solo.
+    const postCookies = async (body) => {
+      const r = await fetch(`${BASE}/api/youtube/cookies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain', Authorization: `Bearer ${token}` },
+        body
+      });
+      let data = null;
+      try {
+        data = await r.json();
+      } catch {
+        data = null;
+      }
+      return { status: r.status, data };
+    };
+
+    const badUpload = await postCookies('{"cookies": []}');
+    ok('subir un archivo que no es Netscape da 400 con el motivo', badUpload.status === 400 && /Netscape/.test(badUpload.data?.error || ''), (badUpload.data?.error || '').slice(0, 50));
+
+    const up = await postCookies(COOKIE_TXT);
+    ok('subir el cookies.txt bueno responde ok', up.status === 200 && up.data?.ok === true, up.data?.message);
+    ok('y la ruta es la del runtime del panel', /\.runtime[\\/]youtube-cookies\.txt$/.test(up.data?.path || ''), up.data?.path);
+    let mode = '';
+    try {
+      mode = (fs.statSync(up.data.path).mode & 0o777).toString(8);
+    } catch {
+      mode = 'no-existe';
+    }
+    ok('el archivo queda con permisos 600', mode === '600', mode);
+    ok('el estado del panel lo da por usable', up.data?.cookies?.usable === true && up.data?.cookies?.auth === true);
+
+    // 4) Con cookies, el mismo enlace ya se resuelve y yt-dlp las recibe.
+    const after = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    ok('con cookies el enlace se lee', after?.ok === true && after?.live === true, after?.error);
+    ok('el probe dice que va con cookies', after?.using_cookies === true);
+    let used = '';
+    try {
+      used = fs.readFileSync(path.join(TMP, 'yt-cookies-used.txt'), 'utf8');
+    } catch {
+      used = '';
+    }
+    ok('yt-dlp recibe --cookies con el archivo guardado', /--cookies\s+\S*youtube-cookies\.txt/.test(used), used.slice(0, 120));
+
+    // 5) Quitarlas dejarlo todo como estaba.
+    const del = await fetch(`${BASE}/api/youtube/cookies`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    const delBody = await del.json().catch(() => null);
+    ok('se pueden quitar las cookies', del.status === 200 && delBody?.cookies?.path === '', delBody?.cookies?.path);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 
   // --- 2. Vista previa del directo ---------------------------------------

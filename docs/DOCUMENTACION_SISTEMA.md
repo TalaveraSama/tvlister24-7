@@ -3029,6 +3029,32 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.57: YouTube deja de contestar «no eres un robot» (cookies desde el panel)
+
+`Sign in to confirm you're not a bot` no es un fallo del panel ni del vídeo: YouTube ha marcado la **IP del
+servidor** (pasa en casi todos los VPS) y no entrega ni un formato a un visitante anónimo. La salida oficial
+es darle a yt-dlp la sesión de un navegador. Ahora se hace desde la pantalla, sin rutas a mano:
+
+- **Validación antes de guardar** (`inspectCookiesText`/`inspectCookiesFile`): formato Netscape de verdad
+  (tabuladores, acepta `#HttpOnly_`), cookies de `youtube.com` (si sólo hay de `google.com`, lo dice), y aviso
+  si **no hay sesión** (`SID` / `__Secure-3PSID`). El JSON de otra extensión se rechaza con el motivo.
+- `POST /api/youtube/cookies` (texto plano, ≤4 MB) guarda en `.runtime/youtube-cookies.txt` con **0600** y fija
+  `youtube_cookies_file`; `DELETE` lo quita. `.runtime` se excluye en `update`, así que **sobrevive** a las
+  actualizaciones.
+- `resolveLiveSource` pasa `--cookies` en **cada** lectura (también en las renovaciones de la guardia) y marca
+  `using_cookies`. Si yt-dlp falla con el control anti-robots, `explainYtDlpError` traduce el error a qué hacer
+  según el caso (no hay archivo / no existe / no sirve / sin sesión / caducadas) y devuelve `needs_cookies`.
+  El texto original queda en `detail`/`raw` para soporte.
+- `PUT /api/settings` con `youtube_cookies_file` comprueba el archivo y devuelve `warnings` si no existe o no
+  sirve (antes se guardaba a ciegas).
+- Pantalla: bloque *«¿YouTube dice «Sign in to confirm you’re not a bot»? Usa cookies»* que se abre solo con el
+  fallo, botón **Subir cookies (.txt)**, contador («48 de youtube.com, con sesión»), **Quitar**, y reintento
+  automático del enlace al subirlas. El estado añade «· con cookies de YouTube».
+
+Pruebas: `test_youtube_live.mjs` **134 OK** (validador, error reconocido y explicado, subida por HTTP con
+permisos 600, y un yt-dlp falso que **sólo** contesta si recibe `--cookies`) y `test_youtube_live_ui.mjs`
+**72 OK** (subida desde la pantalla y reintento automático).
+
 ### v2.6.56: el yt-dlp del panel arranca siempre (también sin Python del sistema)
 
 `yt-dlp se descargó pero no arranca (necesita python3 ≥ 3.9)` venía de que el enlace `yt-dlp` de GitHub

@@ -91,14 +91,209 @@ function runBinary(bin, args, { timeoutMs = 30000 } = {}) {
   });
 }
 
+// ============================================================================
+// COOKIES DE YOUTUBE
+// ============================================================================
+// En servidores de datacenter (y en muchas IP domésticas de LATAM) YouTube
+// contesta «Sign in to confirm you're not a bot» y no entrega ni un formato.
+// La única salida limpia —sin trucos ni proxies— es darle a yt-dlp la sesión
+// de un navegador: un archivo de cookies en formato Netscape.
+const RUNTIME_DIR = path.dirname(RUNTIME_BIN_DIR);
+export const COOKIES_DEFAULT_PATH = path.join(RUNTIME_DIR, 'youtube-cookies.txt');
+export const COOKIES_MAX_BYTES = 4 * 1024 * 1024;
+
+// Cookies que sólo existen si hay sesión iniciada. Con `__Secure-3PSID` y
+// compañía, yt-dlp deja de verse como visitante anónimo.
+const AUTH_COOKIE_NAMES = new Set([
+  'SID',
+  'HSID',
+  'SSID',
+  'APISID',
+  'SAPISID',
+  '__Secure-1PSID',
+  '__Secure-3PSID',
+  '__Secure-1PAPISID',
+  '__Secure-3PAPISID',
+  '__Secure-1PSIDTS',
+  '__Secure-3PSIDTS',
+  'LOGIN_INFO'
+]);
+
 /**
- * Cookies de YouTube (opcional). En servidores de datacenter YouTube suele
- * pedir «confirma que no eres un robot»; con un archivo de cookies exportado
- * de un navegador, yt-dlp lo resuelve. Sólo se devuelve la ruta.
+ * Revisa un archivo de cookies (texto) SIN guardarlo: ¿es Netscape de verdad?,
+ * ¿trae cookies de youtube.com?, ¿tiene la sesión iniciada?
+ * Se usa al subir el archivo y cada vez que se muestra el estado.
+ */
+export function inspectCookiesText(raw) {
+  const text = String(raw ?? '');
+  const out = {
+    ok: false,
+    error: '',
+    warn: '',
+    format: '',
+    count: 0,
+    youtube: 0,
+    auth: false,
+    domains: [],
+    bytes: Buffer.byteLength(text, 'utf8'),
+    updated_ms: 0
+  };
+  if (!text.trim()) {
+    out.error = 'El archivo está vacío.';
+    return out;
+  }
+  if (out.bytes > COOKIES_MAX_BYTES) {
+    out.error = 'El archivo es demasiado grande para ser un cookies.txt (¿has subido otra cosa?).';
+    return out;
+  }
+  // JSON exportado por otras extensiones: se detecta para decirlo claro.
+  if (/^\s*[[{]/.test(text) && /"name"\s*:/.test(text.slice(0, 4000))) {
+    out.error =
+      'Eso parece un JSON (otra extensión). Este panel necesita el formato Netscape: ' +
+      'un .txt con columnas separadas por tabuladores (lo da «Get cookies.txt LOCALLY»).';
+    return out;
+  }
+
+  const domains = new Set();
+  let count = 0;
+  let youtube = 0;
+  let auth = false;
+  for (const lineRaw of text.split(/\r?\n/)) {
+    // Las cookies HttpOnly llegan con el prefijo «#HttpOnly_» y NO son comentarios.
+    const line = lineRaw.startsWith('#HttpOnly_') ? lineRaw.slice('#HttpOnly_'.length) : lineRaw;
+    if (!line.trim() || line.startsWith('#')) continue;
+    const parts = line.split('\t');
+    if (parts.length < 7) continue;
+    count += 1;
+    const domain = String(parts[0] || '').trim().toLowerCase();
+    const name = String(parts[5] || '').trim();
+    if (domain) domains.add(domain.replace(/^\./, ''));
+    if (/(^|\.)youtube\.com$/.test(domain)) {
+      youtube += 1;
+      if (AUTH_COOKIE_NAMES.has(name)) auth = true;
+    }
+  }
+
+  out.count = count;
+  out.youtube = youtube;
+  out.auth = auth;
+  out.domains = [...domains].slice(0, 8);
+  out.format = count > 0 ? 'netscape' : 'unknown';
+
+  if (count === 0) {
+    out.error =
+      'No hay ni una cookie dentro. Debe ser el .txt en formato Netscape (dominio, TRUE/FALSE, ruta, ' +
+      'seguro, caducidad, nombre y valor separados por tabuladores), no un JSON ni el HTML de la página.';
+    return out;
+  }
+  if (youtube === 0) {
+    out.error =
+      'El archivo no trae cookies de youtube.com' +
+      (out.domains.length ? ` (sólo de: ${out.domains.join(', ')})` : '') +
+      '. Abre youtube.com con la sesión iniciada y exporta las cookies desde ahí.';
+    return out;
+  }
+  out.ok = true;
+  if (!auth) {
+    out.warn =
+      'Las cookies son de youtube.com pero no incluyen la sesión (falta SID/__Secure-3PSID): ' +
+      'asegúrate de haber iniciado sesión en YouTube antes de exportarlas.';
+  }
+  return out;
+}
+
+/** Igual que `inspectCookiesText`, leyendo el archivo del disco. */
+export function inspectCookiesFile(filePath) {
+  try {
+    const st = fs.statSync(filePath);
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(Math.min(st.size, COOKIES_MAX_BYTES + 1));
+    const read = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    const info = inspectCookiesText(buf.subarray(0, read).toString('utf8'));
+    info.updated_ms = st.mtimeMs || 0;
+    return info;
+  } catch (err) {
+    return {
+      ok: false,
+      error: `No se pudo leer el archivo: ${err.message}`,
+      warn: '',
+      format: '',
+      count: 0,
+      youtube: 0,
+      auth: false,
+      domains: [],
+      bytes: 0,
+      updated_ms: 0
+    };
+  }
+}
+
+/**
+ * Cookies de YouTube (opcional). Devuelve la ruta y si el archivo sirve de
+ * verdad, para que la pantalla no diga «archivo encontrado» cuando lo que hay
+ * es un JSON o un archivo sin sesión.
  */
 export function cookiesInfo() {
+  const fromEnv = !getSetting('youtube_cookies_file') && Boolean(process.env.TVLISTER_YT_COOKIES);
   const p = String(getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '').trim();
-  return { path: p, exists: Boolean(p && fs.existsSync(p)) };
+  if (!p) {
+    return { path: '', exists: false, usable: false, ok: false, source: 'none', error: '', warn: '', count: 0, youtube: 0, auth: false };
+  }
+  const exists = fs.existsSync(p);
+  const info = exists
+    ? inspectCookiesFile(p)
+    : { ok: false, error: 'La ruta guardada no existe en este servidor.', warn: '', count: 0, youtube: 0, auth: false, bytes: 0, updated_ms: 0 };
+  return {
+    ...info,
+    path: p,
+    exists,
+    // «usable» = el panel se lo pasará a yt-dlp en la próxima lectura.
+    usable: Boolean(exists && info.ok),
+    source: fromEnv ? 'env' : 'setting'
+  };
+}
+
+/**
+ * ¿El error que devolvió yt-dlp es el control anti-robots de YouTube?
+ * Aparece cuando la IP del servidor está marcada (datacenter, VPN, mucho uso).
+ */
+export function isBotCheckError(text) {
+  const t = String(text || '');
+  return (
+    /sign in to confirm/i.test(t) ||
+    /confirm you.{0,3}re not a bot/i.test(t) ||
+    /not a bot.{0,120}(--cookies|log in|sign in)/i.test(t)
+  );
+}
+
+/**
+ * Traduce el fallo de yt-dlp a algo que se pueda accionar desde el panel.
+ * Devuelve `null` si el error no es de los que sabemos explicar.
+ */
+export function explainYtDlpError(stderr) {
+  const raw = String(stderr || '').replace(/\s+/g, ' ').trim();
+  if (!isBotCheckError(raw)) return null;
+  const ck = cookiesInfo();
+  let message = 'YouTube pide iniciar sesión desde este servidor («Sign in to confirm you’re not a bot»).';
+  if (!ck.path) {
+    message +=
+      ' Sube un archivo de cookies de youtube.com (extensión «Get cookies.txt LOCALLY», estando con la sesión ' +
+      'iniciada) y el panel lo usará solo: botón «Subir cookies».';
+  } else if (!ck.exists) {
+    message += ` La ruta de cookies guardada no existe en el servidor (${ck.path}). Sube el archivo otra vez.`;
+  } else if (!ck.ok) {
+    message += ` El archivo de cookies no sirve: ${ck.error}`;
+  } else if (!ck.auth) {
+    message +=
+      ' Las cookies guardadas no traen la sesión de YouTube (falta SID/__Secure-3PSID): vuelve a exportarlas ' +
+      'con la sesión iniciada en youtube.com.';
+  } else {
+    message +=
+      ' Las cookies guardadas están caducadas o esa cuenta no puede ver este vídeo: vuelve a exportarlas ' +
+      '(caducan en días) o usa otra cuenta.';
+  }
+  return { message, needs_cookies: true, detail: raw.length > 240 ? `${raw.slice(0, 240)}…` : raw };
 }
 
 export async function getYtDlpInfo() {
@@ -686,8 +881,12 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   } else {
     args.push('--no-playlist');
   }
-  const cookies = cookiesFile || getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '';
-  if (cookies && fs.existsSync(cookies)) args.push('--cookies', cookies);
+  // Sólo se le pasa a yt-dlp un archivo que exista y sea de verdad Netscape con
+  // cookies de youtube.com: con un archivo inservible el error es más confuso.
+  const cookies = String(cookiesFile || getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '').trim();
+  const ck = cookies ? (cookiesFile ? { path: cookies, exists: fs.existsSync(cookies), ok: fs.existsSync(cookies) } : cookiesInfo()) : null;
+  const usingCookies = Boolean(ck?.exists && fs.existsSync(cookies));
+  if (usingCookies) args.push('--cookies', cookies);
   args.push(cls.url);
 
   const res = await runBinary(info.bin, args, { timeoutMs: isPlaylist ? PLAYLIST_TIMEOUT_MS : 45000 });
@@ -701,6 +900,21 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   if (!data) {
     const err = String(res.stderr || '').replace(/\s+/g, ' ').trim();
     const short = err.length > 240 ? `${err.slice(0, 240)}…` : err;
+    // El control anti-robots de YouTube se explica con lo que hay que hacer
+    // (subir cookies), no con el texto en inglés que copia y pega yt-dlp.
+    const explained = explainYtDlpError(err);
+    if (explained) {
+      return {
+        ok: false,
+        live: false,
+        mode: isPlaylist ? 'playlist' : 'live',
+        provider: 'youtube',
+        error: explained.message,
+        raw: explained.detail,
+        needs_cookies: true,
+        using_cookies: usingCookies
+      };
+    }
     return {
       ok: false,
       live: false,
@@ -709,7 +923,8 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       error: short
         ? `yt-dlp no pudo leer el enlace: ${short}`
         : 'yt-dlp no devolvió información del enlace (¿el vídeo existe y es público?).',
-      raw: short
+      raw: short,
+      using_cookies: usingCookies
     };
   }
 
@@ -787,6 +1002,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       skipped_no_format: skippedNoFormat,
       expires_at_ms: expires || Date.now() + DEFAULT_TTL_MS,
       live_status: 'playlist',
+      using_cookies: usingCookies,
       resolved_at_ms: Date.now()
     };
   }
@@ -840,6 +1056,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       live_status: liveStatus || 'is_live',
       started_at: String(entry.release_timestamp || ''),
       expires_at_ms: expires,
+      using_cookies: usingCookies,
       resolved_at_ms: Date.now()
     };
   }
@@ -912,6 +1129,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     acodec: prog.acodec,
     needs_transcode: videoNeedsTranscode(prog) || audioNeedsTranscode(prog),
     expires_at_ms: prog.expires_at_ms || Date.now() + DEFAULT_TTL_MS,
+    using_cookies: usingCookies,
     resolved_at_ms: Date.now()
   };
 }
@@ -1060,7 +1278,9 @@ export async function refreshChannelLiveSource(channel) {
     expires_at_ms: res.expires_at_ms || 0,
     checked_at: new Date().toISOString(),
     error: res.ok ? '' : res.error || 'sin señal',
-    needs_ytdlp: Boolean(res.needs_ytdlp)
+    needs_ytdlp: Boolean(res.needs_ytdlp),
+    needs_cookies: Boolean(res.needs_cookies),
+    using_cookies: Boolean(res.using_cookies)
   };
   try {
     db.prepare('UPDATE channels_247 SET live_source_state = ? WHERE id = ?').run(JSON.stringify(state), channel.id);
