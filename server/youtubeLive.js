@@ -134,6 +134,8 @@ export function inspectCookiesText(raw) {
     count: 0,
     youtube: 0,
     auth: false,
+    auth_expires_ms: 0,
+    expired_auth: false,
     domains: [],
     bytes: Buffer.byteLength(text, 'utf8'),
     updated_ms: 0
@@ -158,6 +160,8 @@ export function inspectCookiesText(raw) {
   let count = 0;
   let youtube = 0;
   let auth = false;
+  let authExpiresMs = 0;
+  const nowSec = Math.floor(Date.now() / 1000);
   for (const lineRaw of text.split(/\r?\n/)) {
     // Las cookies HttpOnly llegan con el prefijo «#HttpOnly_» y NO son comentarios.
     const line = lineRaw.startsWith('#HttpOnly_') ? lineRaw.slice('#HttpOnly_'.length) : lineRaw;
@@ -166,17 +170,29 @@ export function inspectCookiesText(raw) {
     if (parts.length < 7) continue;
     count += 1;
     const domain = String(parts[0] || '').trim().toLowerCase();
+    const expires = Number(parts[4]) || 0;
     const name = String(parts[5] || '').trim();
     if (domain) domains.add(domain.replace(/^\./, ''));
     if (/(^|\.)youtube\.com$/.test(domain)) {
       youtube += 1;
-      if (AUTH_COOKIE_NAMES.has(name)) auth = true;
+      if (AUTH_COOKIE_NAMES.has(name)) {
+        // La sesión vale mientras su caducidad no haya pasado (0 = de sesión:
+        // el navegador la borra al cerrarse y YouTube la rechaza).
+        const valid = expires === 0 ? false : expires > nowSec;
+        if (valid) {
+          auth = true;
+          authExpiresMs = Math.max(authExpiresMs, expires * 1000);
+        } else {
+          out.expired_auth = true;
+        }
+      }
     }
   }
 
   out.count = count;
   out.youtube = youtube;
   out.auth = auth;
+  out.auth_expires_ms = authExpiresMs;
   out.domains = [...domains].slice(0, 8);
   out.format = count > 0 ? 'netscape' : 'unknown';
 
@@ -194,7 +210,11 @@ export function inspectCookiesText(raw) {
     return out;
   }
   out.ok = true;
-  if (!auth) {
+  if (!auth && out.expired_auth) {
+    out.warn =
+      'Las cookies traen la sesión pero YA HAN CADUCADO: abre youtube.com con la sesión iniciada, vuelve a ' +
+      'exportarlas y súbelas otra vez. YouTube las caduca en días (a veces horas).';
+  } else if (!auth) {
     out.warn =
       'Las cookies son de youtube.com pero no incluyen la sesión (falta SID/__Secure-3PSID): ' +
       'asegúrate de haber iniciado sesión en YouTube antes de exportarlas.';
@@ -1242,6 +1262,90 @@ export function playlistNeedsTranscode(entries) {
 }
 
 // ============================================================================
+// «No hay nada que emitir»: explicar el motivo REAL
+// ============================================================================
+// yt-dlp con --ignore-no-formats-error devuelve la ficha igual aunque YouTube no
+// dé ni una pista. Ahí el texto de yt-dlp (stderr), `availability` y los campos
+// de la ficha dicen exactamente por qué. Antes se enseñaba un cajón de sastre
+// («es privado, restricción de edad o de país…») y el operador se quedaba sin
+// saber si el problema eran SUS cookies.
+export function diagnoseNoMedia(entry, stderr, { usingCookies = false, cookies = null } = {}) {
+  const err = String(stderr || '');
+  const availability = String(entry?.availability || '').toLowerCase();
+  const reasons = [];
+  const has = (re) => re.test(err);
+
+  if (has(/sign in to confirm your age|age-restricted|confirm your age|inappropriate for some users/i) || Number(entry?.age_limit) >= 18) {
+    reasons.push('tiene restricción de edad (YouTube exige una cuenta con la edad confirmada)');
+  } else if (isBotCheckError(err) || has(/sign in|login required|please log in/i)) {
+    reasons.push('YouTube exige una sesión iniciada para entregarlo');
+  }
+  if (availability === 'private' || has(/private video/i)) reasons.push('es privado');
+  if (availability === 'premium_only' || has(/premium|music premium|paid/i)) reasons.push('es sólo para suscriptores de pago');
+  if (availability === 'subscriber_only' || has(/members-only|join this channel|channel members/i)) reasons.push('es sólo para miembros del canal');
+  if (has(/(?:not|isn.t|has not).{0,40}available in your country|geo.?restrict|blocked (?:it )?in your country/i)) {
+    reasons.push('está bloqueado en el país de este servidor');
+  }
+  if (has(/video unavailable|has been removed|does not exist|no longer available/i)) reasons.push('ya no existe o YouTube lo ha retirado');
+  if (has(/live event will begin|premieres in|upcoming/i)) reasons.push('aún no ha empezado');
+
+  // Formatos sin URL = YouTube los firma con PO token / SABR y yt-dlp no los abre.
+  const formats = Array.isArray(entry?.formats) ? entry.formats : [];
+  const withUrl = formats.filter((f) => /^https?:/i.test(String(f?.url || ''))).length;
+  const poToken = formats.length > 0 && withUrl === 0;
+
+  let message;
+  if (reasons.length) {
+    // Si el motivo es de sesión y hay cookies puestas, hay que decir que NO valen.
+    const sessionIssue = reasons.some((r) => /sesión|edad|miembros|suscriptores/.test(r));
+    message = `YouTube no entrega este vídeo porque ${reasons.join(', ')}.`;
+    if (sessionIssue) {
+      if (!usingCookies) {
+        message +=
+          ' Sube cookies de una cuenta con acceso (botón «Subir cookies»): el panel las usará solo y volverá a ' +
+          'comprobar el enlace.';
+      } else if (cookies && cookies.expired_auth) {
+        message +=
+          ' Las cookies que tienes subidas están CADUCADAS: vuelve a exportarlas de youtube.com con la sesión ' +
+          'iniciada (Subir cookies) y prueba otra vez.';
+      } else if (cookies && !cookies.auth) {
+        message +=
+          ' Las cookies subidas no traen la sesión de YouTube (falta SID/__Secure-3PSID): expórtalas con la ' +
+          'cuenta ya iniciada.';
+      } else {
+        message +=
+          ' Tienes cookies subidas, pero esa cuenta no tiene acceso a este vídeo (o la sesión ya no vale): ' +
+          'comprueba que la cuenta puede verlo en el navegador y vuelve a exportar las cookies.';
+      }
+    }
+  } else if (poToken) {
+    message =
+      `YouTube ha dado ${formats.length} pistas pero NINGUNA con URL utilizable (las firma con PO token). ` +
+      'Pulsa «Actualizar yt-dlp»; si sigue igual, prueba otro enlace o espera: YouTube cambia esto cada pocas semanas.';
+  } else if (formats.length === 0) {
+    message =
+      'YouTube no ha entregado ninguna pista de vídeo para este enlace' +
+      (err ? ` (${lastLines(err, 2)})` : '') +
+      '. Suele ser una restricción del propio vídeo o una versión vieja de yt-dlp.';
+  } else {
+    message = 'Este enlace no ofrece ninguna pista que se pueda emitir (HLS o MP4 progresivo).';
+  }
+
+  return {
+    message,
+    reasons,
+    po_token: poToken,
+    formats_total: formats.length,
+    formats_with_url: withUrl,
+    availability,
+    age_limit: Number(entry?.age_limit) || 0,
+    needs_cookies: reasons.some((r) => /sesión|edad|miembros|suscriptores/.test(r)) && (!usingCookies || Boolean(cookies && (!cookies.auth || cookies.expired_auth))),
+    needs_format_fix: poToken,
+    detail: err ? (err.length > 240 ? `${err.slice(0, 240)}…` : err) : ''
+  };
+}
+
+// ============================================================================
 // «Requested format is not available»
 // ============================================================================
 // yt-dlp con -J también elige un formato por su cuenta. Si YouTube no le da
@@ -1292,6 +1396,97 @@ export function shouldRetryWithOtherClient(info, stderr) {
   if (formats.length && !hasUsableMedia(info)) return true;
   // Directo sin formatos: puede ser cosa del cliente que se usó.
   return formats.length === 0 && (info.is_live === true || String(info.live_status || '') === 'is_live');
+}
+
+// ============================================================================
+// DIAGNÓSTICO: qué ve de verdad yt-dlp (y si las cookies sirven)
+// ============================================================================
+// Cuando YouTube no entrega nada, lo único honesto es enseñar lo que responde
+// el propio yt-dlp (`-F`) en vez de adivinar. Y para las cookies, probarlas de
+// verdad: el panel las pasa a yt-dlp contra un vídeo público y mira si salen
+// formatos (una sesión caducada sigue teniendo SID, pero no abre nada).
+const COOKIE_TEST_URL = String(
+  process.env.TVLISTER_YTDLP_TEST_URL || 'https://www.youtube.com/watch?v=BaW_jenozKc'
+);
+
+/** Recorta la salida de `yt-dlp -F` a lo útil (sin avisos ni rutas internas). */
+export function trimFormatList(text, maxLines = 60) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .filter((l) => !/^\[debug\]|^WARNING:/i.test(l.trim()))
+    .slice(0, maxLines)
+    .join('\n')
+    .trim();
+}
+
+/**
+ * Lista de formatos que ofrece YouTube para un enlace (`yt-dlp -F`).
+ * Devuelve `{ ok, text, error, using_cookies }`.
+ */
+export async function listFormats(rawUrl, { timeoutMs = 60000 } = {}) {
+  const cls = classifySourceUrl(rawUrl);
+  if (!cls.ok) return { ok: false, text: '', error: cls.error, using_cookies: false };
+  const bin = findYtDlp();
+  if (!bin) return { ok: false, text: '', error: 'Falta yt-dlp: instálalo con «Instalar yt-dlp».', using_cookies: false };
+
+  const ck = cookiesInfo();
+  const usingCookies = Boolean(ck.exists && ck.ok);
+  const args = ['-F', '--no-warnings', '--no-progress', '--no-config', '--no-playlist'];
+  if (usingCookies) args.push('--cookies', ck.path);
+  args.push(cls.url);
+  const res = await runBinary(bin, args, { timeoutMs });
+  const text = trimFormatList(`${res.stdout || ''}\n${res.stderr || ''}`);
+  return {
+    ok: res.ok,
+    text,
+    error: res.ok ? '' : lastLines(`${res.stderr || ''}${res.stdout || ''}`, 3) || 'yt-dlp no pudo listar los formatos.',
+    using_cookies: usingCookies,
+    url: cls.url
+  };
+}
+
+/**
+ * ¿Las cookies guardadas sirven de algo? Se prueba con un vídeo público de
+ * YouTube: si devuelve formatos, yt-dlp está viendo YouTube con esa sesión.
+ */
+export async function testCookies({ timeoutMs = 45000 } = {}) {
+  const ck = cookiesInfo();
+  if (!ck.path) return { ok: false, error: 'No hay cookies guardadas.', cookies: ck };
+  if (!ck.exists) return { ok: false, error: 'El archivo de cookies no existe en el servidor.', cookies: ck };
+  if (!ck.ok) return { ok: false, error: ck.error || 'El archivo de cookies no sirve.', cookies: ck };
+  const bin = findYtDlp();
+  if (!bin) return { ok: false, error: 'Falta yt-dlp.', cookies: ck };
+  const args = ['-J', '--no-warnings', '--no-progress', '--no-config', '--no-playlist', '--ignore-no-formats-error', '--cookies', ck.path, COOKIE_TEST_URL];
+  const res = await runBinary(bin, args, { timeoutMs });
+  let data = null;
+  try {
+    data = JSON.parse(res.stdout);
+  } catch {
+    data = null;
+  }
+  const usable = Boolean(data && hasUsableMedia(data));
+  const err = lastLines(res.stderr, 3);
+  if (usable) {
+    return {
+      ok: true,
+      message:
+        `Las cookies funcionan: yt-dlp ha leído «${String(data.title || 'el vídeo de prueba')}» con esa sesión.`,
+      title: String(data.title || ''),
+      formats: Array.isArray(data.formats) ? data.formats.length : 0,
+      cookies: ck
+    };
+  }
+  return {
+    ok: false,
+    error:
+      (ck.expired_auth
+        ? 'Las cookies están caducadas: vuelve a exportarlas de youtube.com con la sesión iniciada.'
+        : 'YouTube no ha entregado nada con estas cookies. Vuelve a exportarlas con la sesión iniciada; si el ' +
+          'navegador ve el vídeo y el panel no, la cuenta no tiene acceso o la sesión ya no vale.') +
+      (err ? ` (${err})` : ''),
+    detail: err,
+    cookies: ck
+  };
 }
 
 /**
@@ -1366,41 +1561,70 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   } else {
     baseArgs.push('--no-playlist');
   }
-  if (usingCookies) baseArgs.push('--cookies', cookies);
+  // Un intento = recorrer la cadena de clientes con (o sin) cookies.
+  const attempt = async (withCookies) => {
+    let data = null;
+    let lastErr = '';
+    const attempts = [];
+    for (const client of YT_CLIENT_CHAIN) {
+      const args = [...baseArgs];
+      if (withCookies) args.push('--cookies', cookies);
+      if (client.extractorArgs) args.push('--extractor-args', client.extractorArgs);
+      args.push(cls.url);
 
-  let data = null;
-  let lastErr = '';
-  const attempts = [];
+      const res = await runBinary(info.bin, args, { timeoutMs: isPlaylist ? PLAYLIST_TIMEOUT_MS : 45000 });
+      let parsed = null;
+      try {
+        parsed = JSON.parse(res.stdout);
+      } catch {
+        parsed = null;
+      }
+      lastErr = String(res.stderr || '').replace(/\s+/g, ' ').trim();
+      attempts.push({
+        client: client.label,
+        cookies: withCookies,
+        ok: Boolean(parsed),
+        error: parsed ? '' : lastErr.length > 200 ? `${lastErr.slice(0, 200)}…` : lastErr
+      });
 
-  for (const client of YT_CLIENT_CHAIN) {
-    const args = [...baseArgs];
-    if (client.extractorArgs) args.push('--extractor-args', client.extractorArgs);
-    args.push(cls.url);
-
-    const res = await runBinary(info.bin, args, { timeoutMs: isPlaylist ? PLAYLIST_TIMEOUT_MS : 45000 });
-    let parsed = null;
-    try {
-      parsed = JSON.parse(res.stdout);
-    } catch {
-      parsed = null;
+      if (parsed && !shouldRetryWithOtherClient(parsed, lastErr)) return { data: parsed, lastErr, attempts };
+      if (!shouldRetryWithOtherClient(parsed, lastErr)) return { data: parsed || null, lastErr, attempts };
+      // Se sigue con el siguiente cliente; si era el último, se queda lo leído.
+      data = parsed || data;
     }
-    lastErr = String(res.stderr || '').replace(/\s+/g, ' ').trim();
-    attempts.push({
-      client: client.label,
-      ok: Boolean(parsed),
-      error: parsed ? '' : (lastErr.length > 200 ? `${lastErr.slice(0, 200)}…` : lastErr)
-    });
+    return { data, lastErr, attempts };
+  };
 
-    if (parsed && !shouldRetryWithOtherClient(parsed, lastErr)) {
-      data = parsed;
-      break;
+  let run = await attempt(usingCookies);
+  let data = run.data;
+  let lastErr = run.lastErr;
+  const attempts = [...run.attempts];
+  // Con cookies a veces va PEOR (una sesión de otra red/país hace que YouTube
+  // devuelva cero pistas). Si con ellas no hay nada que emitir, se prueba sin.
+  let retriedWithoutCookies = false;
+  if (usingCookies && !(data && !shouldRetryWithOtherClient(data, lastErr))) {
+    retriedWithoutCookies = true;
+    run = await attempt(false);
+    attempts.push(...run.attempts);
+    if (run.data && !shouldRetryWithOtherClient(run.data, run.lastErr)) {
+      data = run.data;
+      lastErr = run.lastErr;
+    } else if (!data) {
+      data = run.data;
+      lastErr = run.lastErr || lastErr;
     }
-    if (!shouldRetryWithOtherClient(parsed, lastErr)) break;
-    // Se sigue con el siguiente cliente; si era el último, se queda lo leído.
-    data = parsed || data;
   }
 
-  const clientsTried = attempts.map((a) => a.client).join(', ');
+  // ¿Se emitió con cookies o hubo que quitarlas?
+  const cookiesWorked = usingCookies && attempts.some((a) => a.cookies && a.ok);
+  const clientsTried = [...new Set(attempts.map((a) => a.client))].join(', ');
+  const cookiesNote = usingCookies
+    ? cookiesWorked
+      ? 'con cookies'
+      : retriedWithoutCookies
+        ? 'con cookies y sin ellas'
+        : 'con cookies'
+    : '';
 
   if (!data) {
     const err = lastErr;
@@ -1512,6 +1736,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       live_status: 'playlist',
       using_cookies: usingCookies,
       clients_tried: clientsTried,
+      cookies_note: cookiesNote,
       resolved_at_ms: Date.now()
     };
   }
@@ -1526,7 +1751,8 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   if (isLive) {
     const hls = pickHls(entry);
     if (!hls) {
-      const noTracks = !hasUsableMedia(entry);
+      // El motivo real sale de yt-dlp: privado, edad, miembros, país, PO token…
+      const dx = diagnoseNoMedia(entry, lastErr, { usingCookies, cookies: ck });
       return {
         ok: false,
         live: true,
@@ -1534,15 +1760,14 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         provider: 'youtube',
         title,
         live_status: liveStatus,
-        error: noTracks
-          ? 'El directo está en vivo, pero YouTube no ha entregado ninguna pista con URL ' +
-            `(probado con: ${clientsTried || 'normal'}). Suele ser una versión vieja de yt-dlp: ` +
-            'pulsa «Actualizar yt-dlp» y vuelve a comprobar.'
-          : 'El directo está en vivo pero no ofrece manifiesto HLS utilizable con -c copy ' +
-            '(puede requerir inicio de sesión o estar limitado por edad/país).',
-        needs_format_fix: noTracks,
+        error: `El directo está en vivo, pero no se puede emitir: ${dx.message}`,
+        reasons: dx.reasons,
+        needs_format_fix: dx.needs_format_fix,
+        needs_cookies: dx.needs_cookies,
+        detail: dx.detail,
         video_id: String(entry.id || ''),
-        clients_tried: clientsTried
+        clients_tried: clientsTried,
+        cookies_note: cookiesNote
       };
     }
     // La caducidad más próxima entre vídeo y audio manda (las dos van firmadas).
@@ -1573,6 +1798,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       expires_at_ms: expires,
       using_cookies: usingCookies,
       clients_tried: clientsTried,
+      cookies_note: cookiesNote,
       resolved_at_ms: Date.now()
     };
   }
@@ -1610,7 +1836,11 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   // ── Vídeo normal: se emite en bucle (24/7) ───────────────────────────────
   const prog = pickProgressive(entry);
   if (!prog || !prog.url) {
+    const dx = diagnoseNoMedia(entry, lastErr, { usingCookies, cookies: ck });
+    // Sólo se ofrece descargar si YouTube SÍ da pistas con URL (DASH/HLS): en un
+    // vídeo privado o restringido la descarga tampoco funcionaría.
     const hasFormats = Array.isArray(entry.formats) ? entry.formats.length : 0;
+    const downloadable = hasFormats > 0 && (dx.formats_with_url > 0 || dx.po_token === true);
     const cached = cachedVideoInfo(entry.id);
     if (cached) return cachedVideoState(entry.id, { title, uploader, using_cookies: usingCookies });
     return {
@@ -1624,15 +1854,19 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       video_id: String(entry.id || ''),
       uploader,
       // Se puede descargar una vez (H.264+AAC) y repetir desde el disco.
-      needs_download: Boolean(hasFormats),
-      can_download: Boolean(hasFormats),
-      error: hasFormats
+      needs_download: downloadable,
+      can_download: downloadable,
+      reasons: dx.reasons,
+      needs_cookies: dx.needs_cookies,
+      needs_format_fix: dx.needs_format_fix,
+      detail: dx.detail,
+      error: downloadable
         ? 'Este vídeo no ofrece un MP4 progresivo (sólo DASH/HLS en pistas separadas). ' +
           'El panel puede descargarlo una vez (H.264 + AAC, hasta 1080p) y repetirlo desde el disco: ' +
           'botón «Descargar vídeo». Después no caduca y no vuelve a depender de YouTube.'
-        : 'Ese vídeo no ofrece ningún formato que se pueda emitir (es privado, tiene restricción de edad ' +
-          'o de país, o YouTube no lo entrega sin iniciar sesión).',
+        : dx.message,
       using_cookies: usingCookies,
+      cookies_note: cookiesNote,
       clients_tried: clientsTried
     };
   }
@@ -1661,6 +1895,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     expires_at_ms: prog.expires_at_ms || Date.now() + DEFAULT_TTL_MS,
     using_cookies: usingCookies,
     clients_tried: clientsTried,
+    cookies_note: cookiesNote,
     resolved_at_ms: Date.now()
   };
 }
@@ -1815,6 +2050,8 @@ export async function refreshChannelLiveSource(channel) {
     needs_ytdlp: Boolean(res.needs_ytdlp),
     needs_cookies: Boolean(res.needs_cookies),
     needs_format_fix: Boolean(res.needs_format_fix),
+    reasons: Array.isArray(res.reasons) ? res.reasons : [],
+    cookies_note: String(res.cookies_note || ''),
     // Vídeo descargado al disco (se repite desde ahí) o que se puede descargar.
     local: Boolean(res.local),
     bytes: Number(res.bytes) || 0,

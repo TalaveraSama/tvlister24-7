@@ -231,7 +231,9 @@ otros clientes (`tv`, `web_safari`, `ios`) y avisa cuando la versión instalada 
 (botón **Actualizar yt-dlp**, que al terminar recomprueba el enlace solo). Si YouTube pide «confirma que no eres
 un robot», hay un apartado para indicar un
 archivo de cookies en formato Netscape: botón **Subir cookies (.txt)** en la propia pantalla (el panel lo valida,
-lo guarda con permisos 600 en `.runtime/youtube-cookies.txt` y lo usa solo, también al renovar el enlace).
+lo guarda con permisos 600 en `.runtime/youtube-cookies.txt` y lo usa solo, también al renovar el enlace),
+**«Probar cookies»** (las usa contra YouTube de verdad) y, cuando algo falla, **«Ver qué formatos ve yt-dlp»**
+con el motivo exacto que da YouTube.
 
 ---
 

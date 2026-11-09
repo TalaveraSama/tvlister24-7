@@ -52,6 +52,7 @@ export default function Channels247Page({ onPreview }) {
   const [cookiesPath, setCookiesPath] = useState('');
   const [cookiesBusy, setCookiesBusy] = useState(false);
   const [cookiesMsg, setCookiesMsg] = useState(null);
+  const [fmtDiag, setFmtDiag] = useState(null); // { busy, ok, text, error }
   const cookiesFileRef = useRef(null);
 
   const [customTitle, setCustomTitle] = useState('');
@@ -299,6 +300,35 @@ export default function Channels247Page({ onPreview }) {
       }
     } catch (err) {
       setProbe({ ...(probe || {}), busy: false, downloading: false, error: err.message });
+    }
+  };
+
+  // Prueba REAL de las cookies: se le pasan a yt-dlp contra un vídeo público.
+  // Una sesión caducada sigue teniendo SID, pero no abre nada.
+  const handleTestCookies = async () => {
+    setCookiesBusy(true);
+    setCookiesMsg({ ok: true, text: 'Probando las cookies con YouTube…' });
+    try {
+      const r = await apiFetch('/api/youtube/cookies/test', { method: 'POST', body: JSON.stringify({}) });
+      setCookiesMsg({ ok: Boolean(r.ok), text: r.ok ? r.message : r.error || 'Las cookies no han funcionado.' });
+      await loadYtStatus();
+    } catch (err) {
+      setCookiesMsg({ ok: false, text: err.message });
+    } finally {
+      setCookiesBusy(false);
+    }
+  };
+
+  // Lo que yt-dlp ve de verdad para este enlace (`-F`): formatos o el motivo.
+  const handleShowFormats = async () => {
+    const url = String(form.live_source_url || '').trim();
+    if (!url) return;
+    setFmtDiag({ busy: true });
+    try {
+      const r = await apiFetch('/api/youtube/formats', { method: 'POST', body: JSON.stringify({ url }) });
+      setFmtDiag({ busy: false, ok: Boolean(r.ok), text: r.text || '', error: r.error || '' });
+    } catch (err) {
+      setFmtDiag({ busy: false, ok: false, text: '', error: err.message });
     }
   };
 
@@ -909,7 +939,10 @@ export default function Channels247Page({ onPreview }) {
                     <input
                       type="text"
                       value={form.live_source_url}
-                      onChange={(e) => setForm({ ...form, live_source_url: e.target.value })}
+                      onChange={(e) => {
+                        setForm({ ...form, live_source_url: e.target.value });
+                        setFmtDiag(null);
+                      }}
                       placeholder="…/@canal/live · …/watch?v=… · …/playlist?list=…"
                       className="flex-1 px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
                     />
@@ -1058,6 +1091,11 @@ export default function Channels247Page({ onPreview }) {
                             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                             <span>{probe.error || 'No hay directo disponible en ese enlace.'}</span>
                           </div>
+                          {Array.isArray(probe.reasons) && probe.reasons.length > 0 && (
+                            <div className="text-emerald-100/80">
+                              Motivo: {probe.reasons.join(' · ')}
+                            </div>
+                          )}
                           {probe.needs_ytdlp && (
                             <button
                               type="button"
@@ -1126,6 +1164,34 @@ export default function Channels247Page({ onPreview }) {
                                 comprobar el enlace solo.
                               </span>
                             </div>
+                          )}
+                          <div className="pt-0.5">
+                            <button
+                              type="button"
+                              onClick={handleShowFormats}
+                              disabled={fmtDiag?.busy}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 font-semibold disabled:opacity-50"
+                            >
+                              {fmtDiag?.busy ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Terminal className="w-3 h-3" />
+                              )}
+                              Ver qué formatos ve yt-dlp
+                            </button>
+                          </div>
+                          {fmtDiag?.text && (
+                            <div className="mt-1 rounded-lg bg-black/40 border border-slate-700 p-2">
+                              <div className="text-[10px] text-slate-400 mb-1">
+                                Salida de <code>yt-dlp -F</code> para este enlace:
+                              </div>
+                              <pre className="text-[10px] leading-tight text-slate-300 overflow-x-auto whitespace-pre">
+                                {fmtDiag.text}
+                              </pre>
+                            </div>
+                          )}
+                          {fmtDiag?.error && !fmtDiag?.busy && (
+                            <div className="text-[10px] text-rose-300">{fmtDiag.error}</div>
                           )}
                           {probe.detail && (
                             <details className="text-[10px] text-slate-500">
@@ -1201,10 +1267,14 @@ export default function Channels247Page({ onPreview }) {
                     <summary className="cursor-pointer text-[11px] text-slate-400">
                       ¿YouTube dice «Sign in to confirm you’re not a bot»? Usa cookies
                       {ytStatus?.cookies?.usable ? (
-                        <span className="text-emerald-400 font-semibold">
+                        <span
+                          className={
+                            ytStatus.cookies.auth ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'
+                          }
+                        >
                           {' '}
-                          · activas ({ytStatus.cookies.count} de youtube.com
-                          {ytStatus.cookies.auth ? ', con sesión' : ', sin sesión'})
+                          · {ytStatus.cookies.auth ? 'activas' : 'SIN sesión'} ({ytStatus.cookies.count} de youtube.com
+                          {ytStatus.cookies.expired_auth ? ', caducadas' : ytStatus.cookies.auth ? ', con sesión' : ''})
                         </span>
                       ) : (
                         ''
@@ -1247,6 +1317,17 @@ export default function Channels247Page({ onPreview }) {
                             className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-semibold"
                           >
                             <Trash2 className="w-3 h-3" /> Quitar
+                          </button>
+                        )}
+                        {ytStatus?.cookies?.usable && (
+                          <button
+                            type="button"
+                            onClick={handleTestCookies}
+                            disabled={cookiesBusy}
+                            className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-semibold disabled:opacity-50"
+                          >
+                            {cookiesBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                            Probar cookies
                           </button>
                         )}
                       </div>

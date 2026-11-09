@@ -118,6 +118,8 @@ import {
   ytDlpReleaseInfo,
   warmYtDlpReleaseInfo,
   isYtDlpOutdated,
+  listFormats,
+  testCookies,
   startVideoDownload,
   videoDownloadState,
   cachedVideoInfo,
@@ -2730,6 +2732,30 @@ app.post(
   }
 );
 
+/**
+ * Diagnóstico: lo que yt-dlp ve de verdad para un enlace (`-F`). Sirve cuando
+ * YouTube no entrega pistas: aquí se ve si lista formatos, si dice «private
+ * video», si pide login… sin adivinar nada.
+ */
+app.post('/api/youtube/formats', requireAuth, requireAdmin, async (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL.' });
+  try {
+    res.json({ ok: true, ...(await listFormats(url)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/** ¿Sirven las cookies guardadas? Se prueban contra un vídeo público. */
+app.post('/api/youtube/cookies/test', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    res.json(await testCookies());
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.delete('/api/youtube/cookies', requireAuth, requireAdmin, (req, res) => {
   db.prepare("DELETE FROM settings WHERE key = 'youtube_cookies_file'").run();
   res.json({ ok: true, cookies: cookiesInfo() });
@@ -2817,6 +2843,9 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       needs_ytdlp: Boolean(r.needs_ytdlp),
       needs_cookies: Boolean(r.needs_cookies),
       needs_format_fix: Boolean(r.needs_format_fix),
+      // Motivos concretos que dio YouTube (privado, edad, país, miembros…).
+      reasons: Array.isArray(r.reasons) ? r.reasons : [],
+      cookies_note: r.cookies_note || '',
       // Vídeo sin MP4 progresivo: se puede descargar una vez y emitir del disco.
       needs_download: Boolean(r.needs_download),
       can_download: Boolean(r.can_download),

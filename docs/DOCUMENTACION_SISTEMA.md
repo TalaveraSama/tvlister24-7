@@ -3029,6 +3029,29 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.60: cuando YouTube no entrega nada, se explica el motivo real (y se comprueba)
+
+El aviso «es privado, tiene restricción de edad o de país, o no lo entrega sin iniciar sesión» era un cajón de
+sastre que no miraba la respuesta de yt-dlp: con cookies subidas dejaba al operador sin saber si el problema era
+suyo.
+
+- **`diagnoseNoMedia(entry, stderr, {usingCookies, cookies})`**: lee el `stderr` de yt-dlp y los campos de la
+  ficha (`availability`, `age_limit`) y devuelve el motivo concreto (privado · edad · país · miembros · de pago ·
+  retirado · PO token sin URL). Si el motivo es de sesión, el mensaje cambia según el estado real de las cookies
+  (sin cookies / caducadas / sin `SID` / con sesión pero sin acceso). Sale en `reasons[]` y la pantalla lo pinta
+  como «Motivo: …». `needs_cookies` sólo se marca cuando subir otras cookies **serviría**.
+- **Cookies caducadas**: `inspectCookiesText` guarda `auth_expires_ms` y `expired_auth`; una sesión con fecha
+  pasada (o una cookie «de sesión», sin fecha) ya no cuenta como sesión. El bloque muestra «SIN sesión (…,
+  caducadas)» y el `warn` manda a exportarlas otra vez.
+- **Reintento sin cookies**: con una sesión de otra red/país YouTube puede devolver cero pistas; si con cookies
+  no hay nada que emitir, `resolveLiveSource` repite la lectura **sin** `--cookies` y se queda con lo que funcione
+  (`cookies_note` = «con cookies y sin ellas»).
+- **Diagnóstico honesto**: `listFormats()` ejecuta `yt-dlp -F` (`POST /api/youtube/formats`) y `testCookies()`
+  pasa las cookies a yt-dlp contra el vídeo público de prueba `BaW_jenozKc` (`POST /api/youtube/cookies/test`).
+  Botones **«Ver qué formatos ve yt-dlp»** y **«Probar cookies»** en la pantalla.
+
+Pruebas: `test_youtube_live.mjs` **189 OK** y `test_youtube_live_ui.mjs` **119 OK**.
+
 ### v2.6.59: enlace del navegador (vídeo + lista) y vídeos que sólo dan DASH/HLS
 
 - **`watch?v=…&list=…`** —lo que copia el navegador al ver un vídeo dentro de una lista— se resuelve ahora como

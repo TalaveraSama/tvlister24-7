@@ -73,6 +73,8 @@ let installs = 0;
 let downloadJob = null;
 let downloads = 0;
 let cookiesPath = '';
+let cookiesExpired = false;
+let cookieTests = 0;
 
 const channels = [
   {
@@ -255,7 +257,8 @@ globalThis.fetch = async (url, opts = {}) => {
               exists: Boolean(cookiesPath),
               ok: Boolean(cookiesPath),
               usable: Boolean(cookiesPath),
-              auth: Boolean(cookiesPath),
+              auth: Boolean(cookiesPath) && !cookiesExpired,
+              expired_auth: Boolean(cookiesPath) && cookiesExpired,
               count: cookiesPath ? 3 : 0,
               youtube: cookiesPath ? 3 : 0,
               error: ''
@@ -263,6 +266,26 @@ globalThis.fetch = async (url, opts = {}) => {
           }
         : { installed: false, bin: '', version: '', ffmpeg: true, hint: 'Se instala solo con un clic, sin apt.' }
     );
+  }
+  if (u === '/api/youtube/cookies/test') {
+    cookieTests += 1;
+    return json(
+      cookiesExpired || !cookiesPath
+        ? { ok: false, error: 'Las cookies están caducadas: vuelve a exportarlas de youtube.com con la sesión iniciada.' }
+        : { ok: true, message: 'Las cookies funcionan: yt-dlp ha leído «youtube-dl test video» con esa sesión.' }
+    );
+  }
+  if (u === '/api/youtube/formats') {
+    return json({
+      ok: true,
+      using_cookies: Boolean(cookiesPath),
+      text: [
+        '[youtube] ioSKlIL4Hs8: Downloading webpage',
+        'ID  EXT   RESOLUTION FPS CH │   FILESIZE   TBR PROTO │ VCODEC          ACODEC',
+        '137 mp4   1920x1080   30    │    512.00MiB 4000 https │ avc1.640028     none',
+        '140 m4a   audio only        │      3.50MiB  128 https │ audio only      mp4a.40.2'
+      ].join('\n')
+    });
   }
   if (u === '/api/youtube/cookies' && method === 'POST') {
     // Igual que el panel: se valida y, si sirve, se guarda.
@@ -356,6 +379,18 @@ globalThis.fetch = async (url, opts = {}) => {
         bytes: 734003200,
         expires_in_min: null,
         error: ''
+      });
+    }
+    if (/watch\?v=blocked/.test(body?.url || '')) {
+      return json({
+        ok: false,
+        live: false,
+        reasons: ['tiene restricción de edad (YouTube exige una cuenta con la edad confirmada)'],
+        needs_cookies: false,
+        error:
+          'YouTube no entrega este vídeo porque tiene restricción de edad (YouTube exige una cuenta con la edad confirmada). ' +
+          'Tienes cookies subidas, pero esa cuenta no tiene acceso a este vídeo (o la sesión ya no vale).',
+        detail: 'ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm your age.'
       });
     }
     if (/watch\?v=nofmt/.test(body?.url || '')) {
@@ -720,6 +755,57 @@ ok(
   ok(/Vídeo descargado \(700 MB · 62m 0s\)/.test(text()), 'al terminar dice cuánto ocupa y cuánto dura');
   ok(/Se repite desde el disco: no caduca/.test(text()), 'y que ya no depende de YouTube');
   ok(/VÍDEO EN BUCLE — Documental grabado/.test(text()), 'el enlace queda resuelto en bucle', text().slice(-120));
+
+  // Se vuelve al directo normal para seguir con el resto de la prueba.
+  await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');
+}
+
+// ── 4e. Motivo real, «Probar cookies» y «Ver qué formatos ve yt-dlp» ────────
+{
+  // Se vuelven a subir cookies (la sección 4b las quitó al final).
+  const cookieTxt =
+    '# Netscape HTTP Cookie File\n' +
+    '#HttpOnly_.youtube.com\tTRUE\t/TRUE\t1893456000\t__Secure-3PSID\tabc\n' +
+    '.youtube.com\tTRUE\t/\tTRUE\t1893456000\tPREF\ttz=UTC\n';
+  const fileInput = [...document.querySelectorAll('input[type="file"]')][0];
+  ok(Boolean(fileInput), 'el panel tiene el selector del archivo de cookies');
+  if (fileInput) {
+    Object.defineProperty(fileInput, 'files', {
+      value: [{ name: 'youtube-cookies.txt', text: async () => cookieTxt }],
+      configurable: true
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    });
+    await flush();
+    await flush();
+  }
+  ok(/Cookies guardadas/.test(text()), 'las cookies se suben y se confirman');
+
+  await setValue(urlInput, 'https://www.youtube.com/watch?v=blocked123');
+  await clickText('Comprobar señal');
+  ok(/restricción de edad/.test(text()), 'el motivo real de YouTube se explica en la caja');
+  ok(/Motivo: tiene restricción de edad/.test(text()), 'y se muestra aparte, en claro');
+  ok(/Tienes cookies subidas, pero esa cuenta no tiene acceso/.test(text()), 'con cookies puestas, dice que esa cuenta no vale');
+  ok(!/Sube cookies de una cuenta/.test(text()), 'sin volver a pedir cookies que ya están subidas');
+
+  // Lo que ve yt-dlp de verdad.
+  await clickText('Ver qué formatos ve yt-dlp');
+  ok(/Salida de/.test(text()), 'el botón enseña la salida de yt-dlp -F');
+  ok(/137 mp4/.test(text()) && /140 m4a/.test(text()), 'con las pistas que ve YouTube');
+
+  // Probar las cookies contra un vídeo público.
+  await clickText('Probar cookies');
+  ok(cookieTests >= 1, '«Probar cookies» las prueba contra YouTube', `${cookieTests} pruebas`);
+  ok(/Las cookies funcionan/.test(text()), 'y confirma que funcionan');
+  ok(/youtube-dl test video/.test(text()), 'diciendo qué ha leído con ellas');
+
+  // Cookies caducadas: la prueba falla con el motivo y el bloque lo marca.
+  cookiesExpired = true;
+  await clickText('Probar cookies');
+  ok(/Las cookies están caducadas/.test(text()), 'si han caducado, la prueba lo dice claro');
+  ok(/caducadas/.test(text()), 'y el bloque de cookies lo marca');
+  cookiesExpired = false;
 
   // Se vuelve al directo normal para seguir con el resto de la prueba.
   await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');

@@ -107,6 +107,19 @@ try { fs.appendFileSync(${JSON.stringify(path.join(TMP, 'yt-argv.txt'))}, JSON.s
 // «Requested format is not available»: el cliente normal no recibe ninguna pista
 // con URL (PO token / SABR). Con player_client=tv, sí. Con 'all', ninguno.
 const clientArg = String((args[args.indexOf('--extractor-args') + 1]) || '');
+// Diagnóstico: yt-dlp -F enseña la tabla de formatos.
+if (args.includes('-F')) {
+  console.log('[youtube] ioSKlIL4Hs8: Downloading webpage');
+  console.log('ID  EXT   RESOLUTION FPS CH │   FILESIZE   TBR PROTO │ VCODEC          ACODEC');
+  console.log('137 mp4   1920x1080   30    │    512.00MiB 4000 https │ avc1.640028     none');
+  console.log('140 m4a   audio only        │      3.50MiB  128 https │ audio only      mp4a.40.2');
+  process.exit(0);
+}
+// Cookies que estorban: con --cookies YouTube no entrega nada, sin ellas sí.
+if (flags.brokenWithCookies && args.includes('--cookies')) {
+  console.error('ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you' + String.fromCharCode(39) + 're not a bot. Use --cookies-from-browser or --cookies for the authentication.');
+  process.exit(1);
+}
 if (flags.noFormats === 'all' || (flags.noFormats === 'tv' && !/player_client=tv/.test(clientArg))) {
   console.error('ERROR: [youtube] ioSKlIL4Hs8: Requested format is not available. Use --list-formats for a list of available formats');
   process.exit(1);
@@ -123,6 +136,22 @@ n += 1;
 fs.writeFileSync(counter, String(n));
 
 const target = String(args[args.length - 1] || '');
+// Restricciones reales de YouTube: la ficha llega, pero sin ninguna pista.
+if (flags.blocked === 'private' || flags.blocked === 'age' || flags.blocked === 'region' || flags.blocked === 'members') {
+  const map = {
+    private: { availability: 'private', age_limit: 0, err: "ERROR: [youtube] ioSKlIL4Hs8: Private video. Sign in if you've been granted access to this video" },
+    age: { availability: 'needs_auth', age_limit: 18, err: 'ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm your age. This video may be inappropriate for some users.' },
+    region: { availability: 'needs_auth', age_limit: 0, err: 'ERROR: [youtube] ioSKlIL4Hs8: The uploader has not made this video available in your country' },
+    members: { availability: 'subscriber_only', age_limit: 0, err: 'ERROR: [youtube] ioSKlIL4Hs8: Join this channel to get access to members-only content' }
+  };
+  const m = map[flags.blocked];
+  console.error(m.err);
+  console.log(JSON.stringify({
+    id: 'ioSKlIL4Hs8', title: 'Vídeo bloqueado', is_live: false, live_status: 'not_live',
+    availability: m.availability, age_limit: m.age_limit, duration: 120, formats: []
+  }));
+  process.exit(0);
+}
 const isPlaylistUrl = /playlist\\?list=|[?&]list=/.test(target) && !args.includes('--no-playlist');
 const ttl = Number(flags.ttl || ${YT_TTL});
 const exp = Math.floor(Date.now() / 1000) + ttl;
@@ -138,6 +167,14 @@ const mp4 = (name, extra) => Object.assign({
   vcodec: codec, acodec: 'mp4a.40.2', width: 1280, height: 720, tbr: 1500, http_headers: headers
 }, extra || {});
 
+// Vídeo de prueba de yt-dlp (para «Probar cookies»): público y con formatos.
+if (/BaW_jenozKc/.test(target)) {
+  console.log(JSON.stringify({
+    id: 'BaW_jenozKc', title: 'youtube-dl test video', is_live: false, live_status: 'not_live',
+    duration: 10, formats: [mp4('test')]
+  }));
+  process.exit(0);
+}
 if (isPlaylistUrl) {
   const count = Number(flags.entries || 3);
   const entries = [];
@@ -745,6 +782,104 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     ok('sin avisar cuando es la misma', rel?.same === false);
     ok('ni cuando la instalada es más nueva', rel?.newer === false);
     ok('el binario autónomo también se compara bien', rel?.standalone === true);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
+  // --- 1f. «no hay nada que emitir»: el motivo REAL y el diagnóstico -------
+  // Antes se decía «es privado, o tiene restricción…» sin mirar lo que había
+  // respondido yt-dlp. Con cookies subidas eso dejaba al operador sin saber si
+  // el problema era su cuenta. Ahora se explica el motivo y se puede ver lo que
+  // yt-dlp ve de verdad (yt-dlp -F) y probar las cookies contra un vídeo público.
+  {
+    const unit = (() => {
+      const code = `
+        import { inspectCookiesText } from ${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))};
+        const head = '# Netscape HTTP Cookie File\\n';
+        const past = Math.floor(Date.now() / 1000) - 3600;
+        const future = Math.floor(Date.now() / 1000) + 86400;
+        const line = (exp) => '.youtube.com\\tTRUE\\t/\\tTRUE\\t' + exp + '\\t__Secure-3PSID\\txyz';
+        console.log(JSON.stringify({
+          vigentes: inspectCookiesText(head + line(future)),
+          caducadas: inspectCookiesText(head + line(past)),
+          sesion: inspectCookiesText(head + line(0))
+        }));
+      `;
+      const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
+        env: { ...process.env, TVLISTER_DB_PATH: path.join(TMP, 'ck2.db'), APP_DIR: path.join(TMP, 'app') },
+        encoding: 'utf8'
+      });
+      return JSON.parse(out.trim().split('\n').pop() || '{}');
+    })();
+    ok('una sesión vigente cuenta como sesión', unit?.vigentes?.auth === true && unit?.vigentes?.auth_expires_ms > Date.now(), String(unit?.vigentes?.auth_expires_ms));
+    ok('una sesión caducada se detecta', unit?.caducadas?.auth === false && unit?.caducadas?.expired_auth === true);
+    ok('y se avisa de que hay que volver a exportarlas', /CADUCADO/.test(unit?.caducadas?.warn || ''), (unit?.caducadas?.warn || '').slice(0, 50));
+    ok('una cookie de sesión (sin fecha) no vale como sesión', unit?.sesion?.auth === false);
+
+    // Se suben cookies otra vez (la sección 1d las quitó): así se prueba el caso
+    // real del operador, que YA tiene cookies puestas y YouTube sigue sin dar nada.
+    const CK2 = [
+      '# Netscape HTTP Cookie File',
+      '#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\t__Secure-3PSID\tqwe',
+      '.youtube.com\tTRUE\t/\tTRUE\t1893456000\tPREF\ttz=UTC'
+    ].join('\n');
+    const up2 = await fetch(`${BASE}/api/youtube/cookies`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain', Authorization: `Bearer ${token}` },
+      body: CK2
+    });
+    ok('se pueden volver a subir las cookies', up2.status === 200, String(up2.status));
+
+    const probeWith = async (flags) => {
+      fs.writeFileSync(YT_FLAGS, JSON.stringify(flags));
+      return (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    };
+
+    // Privado: se dice «privado», no un cajón de sastre.
+    const priv = await probeWith({ live: false, blocked: 'private' });
+    ok('un vídeo privado se explica como privado', priv?.ok === false && /privado/.test(priv?.error || ''), (priv?.error || '').slice(0, 80));
+    ok('y no ofrece descargarlo (no serviría)', priv?.can_download === false);
+    ok('con los motivos en un campo aparte', (priv?.reasons || []).some((r) => /privado/.test(r)), JSON.stringify(priv?.reasons));
+
+    // Edad: con cookies puestas pero sin acceso, se dice que la cuenta no vale.
+    const age = await probeWith({ live: false, blocked: 'age' });
+    ok('la restricción de edad se explica', /restricción de edad/.test(age?.error || ''), (age?.error || '').slice(0, 80));
+    ok('y con cookies subidas avisa de que esa cuenta no tiene acceso', /cookies subidas/.test(age?.error || ''), (age?.error || '').slice(-90));
+    ok('sin volver a pedir que suba otras cookies', age?.needs_cookies === false);
+
+    // País y miembros.
+    const region = await probeWith({ live: false, blocked: 'region' });
+    ok('el bloqueo por país se explica', /país/.test(region?.error || ''), (region?.error || '').slice(0, 70));
+    const members = await probeWith({ live: false, blocked: 'members' });
+    ok('el contenido de miembros se explica', /miembros/.test(members?.error || ''), (members?.error || '').slice(0, 70));
+
+    // Cookies que estorban: se reintenta SIN ellas y el enlace se resuelve.
+    const argvLines = () => {
+      try {
+        return fs.readFileSync(path.join(TMP, 'yt-argv.txt'), 'utf8').split('\n').filter(Boolean).length;
+      } catch {
+        return 0;
+      }
+    };
+    const callsBefore = argvLines();
+    const rescued = await probeWith({ live: true, brokenWithCookies: true });
+    ok('si las cookies estorban, se reintenta sin ellas', rescued?.ok === true, rescued?.error);
+    ok('y se dice cómo se resolvió', /con cookies y sin ellas/.test(rescued?.cookies_note || ''), rescued?.cookies_note);
+    ok('con más de un intento', argvLines() - callsBefore >= 2, `${argvLines() - callsBefore} llamadas`);
+
+    // Diagnóstico: la tabla de yt-dlp -F, tal cual.
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+    const fmt = (await api('POST', '/api/youtube/formats', { url: 'https://youtu.be/ioSKlIL4Hs8' })).data;
+    ok('el diagnóstico lista los formatos con yt-dlp -F', fmt?.ok === true && /RESOLUTION/.test(fmt?.text || ''), (fmt?.text || '').split('\n')[1]);
+    ok('y la tabla trae las pistas', /137 mp4/.test(fmt?.text || '') && /140 m4a/.test(fmt?.text || ''));
+    ok('dice si usó cookies', fmt?.using_cookies === true);
+
+    // Probar cookies de verdad contra un vídeo público.
+    const ckTest = (await api('POST', '/api/youtube/cookies/test', {})).data;
+    ok('«Probar cookies» las usa contra YouTube', ckTest?.ok === true && /funcionan/.test(ckTest?.message || ''), (ckTest?.error || ckTest?.message || '').slice(0, 70));
+    ok('y confirma que yt-dlp ha leído el vídeo de prueba', /youtube-dl test video/.test(ckTest?.message || ''), (ckTest?.message || '').slice(0, 70));
+
+    // Se dejan las cookies quitadas para el resto de la prueba.
+    await fetch(`${BASE}/api/youtube/cookies`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 
