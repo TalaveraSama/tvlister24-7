@@ -117,7 +117,11 @@ import {
   ytInstallState,
   ytDlpReleaseInfo,
   warmYtDlpReleaseInfo,
-  isYtDlpOutdated
+  isYtDlpOutdated,
+  startVideoDownload,
+  videoDownloadState,
+  cachedVideoInfo,
+  removeCachedVideo
 } from './youtubeLive.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
@@ -2731,6 +2735,32 @@ app.delete('/api/youtube/cookies', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true, cookies: cookiesInfo() });
 });
 
+/**
+ * Descarga un vídeo al disco para repetirlo en bucle (24/7) sin depender de la
+ * URL firmada de YouTube, que caduca. Va en segundo plano: un vídeo puede tardar
+ * minutos y el proxy corta las peticiones largas. Mismo patrón que la
+ * instalación de yt-dlp: se lanza y se pregunta por `download-status`.
+ */
+app.post('/api/youtube/download', requireAuth, requireAdmin, (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL del vídeo.' });
+  try {
+    const state = startVideoDownload(url);
+    res.status(state.running ? 202 : 400).json({ ok: Boolean(!state.result || state.result.ok), ...state });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/youtube/download-status', requireAuth, (req, res) => {
+  res.json(videoDownloadState());
+});
+
+app.delete('/api/youtube/videos/:videoId', requireAuth, requireAdmin, (req, res) => {
+  const removed = removeCachedVideo(req.params.videoId);
+  res.json({ ok: removed, cached: cachedVideoInfo(req.params.videoId) });
+});
+
 app.get('/api/youtube/install-status', requireAuth, async (req, res) => {
   const state = ytInstallState();
   // Al terminar se devuelve también el estado real del binario (versión y ruta),
@@ -2787,6 +2817,11 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       needs_ytdlp: Boolean(r.needs_ytdlp),
       needs_cookies: Boolean(r.needs_cookies),
       needs_format_fix: Boolean(r.needs_format_fix),
+      // Vídeo sin MP4 progresivo: se puede descargar una vez y emitir del disco.
+      needs_download: Boolean(r.needs_download),
+      can_download: Boolean(r.can_download),
+      local: Boolean(r.local),
+      bytes: Number(r.bytes) || 0,
       clients_tried: r.clients_tried || '',
       using_cookies: Boolean(r.using_cookies),
       cookies: cookiesInfo(),

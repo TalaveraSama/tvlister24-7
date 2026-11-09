@@ -79,6 +79,27 @@ const fs = require('fs');
 const args = process.argv.slice(2);
 if (args.includes('--version')) { console.log('2026.11.04-fake'); process.exit(0); }
 const counter = ${JSON.stringify(YT_COUNTER)};
+// ── Descarga al disco (modo «vídeo sin MP4 progresivo») ──────────────────────
+if (args.includes('--write-info-json')) {
+  const flagsDl = (() => { try { return JSON.parse(fs.readFileSync(${JSON.stringify(YT_FLAGS)}, 'utf8')); } catch { return {}; } })();
+  const tpl = String(args[args.indexOf('-o') + 1] || '');
+  if (flagsDl.dlFail) {
+    console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden');
+    process.exit(1);
+  }
+  const out = tpl.replace('%(ext)s', 'mp4');
+  fs.mkdirSync(require('path').dirname(out), { recursive: true });
+  fs.writeFileSync(out, Buffer.alloc(188 * 500, 0x47));
+  fs.writeFileSync(out + '.info.json', JSON.stringify({
+    id: 'ioSKlIL4Hs8', title: 'Documental grabado', duration: 125,
+    vcodec: 'avc1.64001F', acodec: 'mp4a.40.2', format_id: '137+140'
+  }));
+  console.log('[download]   0.0% of ~  12.00MiB at  1.00MiB/s ETA 00:12');
+  console.log('[download]  50.0% of ~  12.00MiB at  1.00MiB/s ETA 00:06');
+  console.log('[Merger] Merging formats into "' + out + '"');
+  console.log('[download] 100% of  12.00MiB in 00:10');
+  process.exit(0);
+}
 const flagsFile = ${JSON.stringify(YT_FLAGS)};
 const flags = JSON.parse(fs.readFileSync(flagsFile, 'utf8') || '{}');
 // Registro de argumentos de cada llamada (para comprobar --cookies, --extractor-args…).
@@ -108,6 +129,8 @@ const exp = Math.floor(Date.now() / 1000) + ttl;
 const seg = 'http://127.0.0.1:${ORIGIN_PORT}';
 const live = flags.live !== false;
 const wantVideo = flags.video !== false;
+// Sólo pistas DASH/HLS separadas, sin MP4 progresivo (lo que ya hace YouTube).
+const dashOnly = flags.onlyDash === true;
 const codec = flags.codec === 'vp9' ? 'vp09.00.10.08' : 'avc1.64001F';
 const headers = { 'User-Agent': 'Mozilla/5.0 (FakeYT)', Referer: 'https://www.youtube.com/' };
 const mp4 = (name, extra) => Object.assign({
@@ -185,7 +208,12 @@ console.log(JSON.stringify({
   is_live: false,
   live_status: looksLive ? 'post_live' : 'not_live',
   http_headers: headers,
-  formats: wantVideo ? [mp4('x')] : []
+  formats: dashOnly
+    ? [
+        { format_id: '137', protocol: 'https', url: seg + '/video137.mp4?expire=' + exp, vcodec: 'avc1.640028', acodec: 'none', height: 1080, tbr: 4000, http_headers: headers },
+        { format_id: '140', protocol: 'https', url: seg + '/audio140.m4a?expire=' + exp, vcodec: 'none', acodec: 'mp4a.40.2', tbr: 128, http_headers: headers }
+      ]
+    : wantVideo ? [mp4('x')] : []
 }));
 `,
   { mode: 0o755 }
@@ -734,10 +762,92 @@ fs.writeFileSync(out, body, { mode: 0o755 });
   ok('y sin recodificar (H.264 + AAC 720p)', vid?.needs_transcode === false);
   ok('dice que no es un directo', vid?.live === false);
 
-  // Si el vídeo no ofrece MP4 (sólo HLS/DASH), se explica por qué no vale.
+  // Sin ningún formato (privado / con restricción): se explica por qué no vale.
   fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, video: false }));
   const noMp4 = (await api('POST', '/api/youtube/probe', { url: 'https://youtu.be/abc123' })).data;
-  ok('sin MP4 utilizable lo dice claro', noMp4?.ok === false && /MP4\/WebM/.test(noMp4?.error || ''), noMp4?.error);
+  ok(
+    'sin formatos lo dice claro y no promete descargar',
+    noMp4?.ok === false && /privado|restricción/.test(noMp4?.error || '') && noMp4?.can_download === false,
+    (noMp4?.error || '').slice(0, 80)
+  );
+
+  // ── Vídeo que sólo ofrece DASH/HLS: se descarga una vez y se repite del disco ──
+  // Es lo que ya hace YouTube con muchos vídeos: sin MP4 progresivo no hay bucle.
+  const VIDEO_URL = 'https://www.youtube.com/watch?v=ioSKlIL4Hs8';
+  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, onlyDash: true }));
+  const dashOnly = (await api('POST', '/api/youtube/probe', { url: VIDEO_URL })).data;
+  ok('un vídeo DASH-only se explica y ofrece descargarlo', dashOnly?.ok === false && dashOnly?.can_download === true, (dashOnly?.error || '').slice(0, 70));
+  ok('dice que se repite desde el disco y no caduca', /descargarlo una vez/.test(dashOnly?.error || '') && /disco/.test(dashOnly?.error || ''));
+
+  // La descarga va en segundo plano (un vídeo puede tardar minutos).
+  const dl1 = await api('POST', '/api/youtube/download', { url: VIDEO_URL });
+  ok('lanzar la descarga responde 202 al instante', dl1.status === 202 && dl1.data?.running === true, `${dl1.status} · ${dl1.data?.step || ''}`);
+  let dlState = null;
+  const dlDeadline = Date.now() + 30000;
+  while (Date.now() < dlDeadline) {
+    dlState = (await api('GET', '/api/youtube/download-status')).data;
+    if (!dlState?.running) break;
+    await sleep(200);
+  }
+  ok('la descarga termina y deja el archivo en el disco', dlState?.result?.ok === true && fs.existsSync(dlState.result.path || ''), dlState?.result?.path);
+  ok('con su ficha (título y duración)', /Documental grabado/.test(dlState?.result?.title || '') && dlState?.result?.duration_sec === 125, `${dlState?.result?.title} · ${dlState?.result?.duration_sec}s`);
+  ok('no deja temporales por medio', !fs.readdirSync(path.dirname(dlState.result.path)).some((f) => f.includes('.tmp')), '');
+
+  // Ahora el mismo enlace sale del disco: sin caducidad y sin volver a YouTube.
+  const ytBefore = ytCalls();
+  const fromDisk = (await api('POST', '/api/youtube/probe', { url: VIDEO_URL })).data;
+  ok('el enlace ya se resuelve desde el archivo', fromDisk?.ok === true && fromDisk?.local === true, fromDisk?.error);
+  ok('con la duración del vídeo', fromDisk?.duration_sec === 125, `${fromDisk?.duration_sec}s`);
+  ok('sin volver a llamar a yt-dlp', ytCalls() === ytBefore, `${ytBefore} → ${ytCalls()}`);
+  ok('y sin caducidad (no hay URL firmada)', !fromDisk?.expires_at || fromDisk?.expires_in_min === null, JSON.stringify(fromDisk?.expires_in_min));
+
+  // El canal lo emite desde el disco y no se refresca nunca.
+  {
+    const ch = await api('POST', '/api/channels247', {
+      name: 'Canal del disco',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: VIDEO_URL,
+      engine_mode: 'virtual'
+    });
+    const id = ch.data?.id;
+    // El alta resuelve la señal en segundo plano: se espera a que la guarde.
+    let mine = null;
+    const waitCh = Date.now() + 8000;
+    while (Date.now() < waitCh) {
+      const list = (await api('GET', '/api/channels247')).data || [];
+      mine = list.find((c) => c.id === id);
+      if (mine?.liveSource?.ready) break;
+      await sleep(200);
+    }
+    ok('el canal queda listo con el vídeo descargado', mine?.liveSource?.ready === true && mine?.liveSource?.local === true, JSON.stringify(mine?.liveSource?.local));
+    ok('y dice de dónde sale', /disco/i.test(JSON.stringify(mine?.liveSource || {})) || mine?.liveSource?.local === true);
+    if (id) await api('DELETE', `/api/channels247/${id}`);
+  }
+
+  // Borrar el archivo lo deshace: vuelve a ofrecer descargar (y avisa si falla).
+  const delVid = await api('DELETE', '/api/youtube/videos/ioSKlIL4Hs8');
+  ok('se puede borrar el vídeo descargado', delVid.data?.ok === true && delVid.data?.cached === null);
+  const again = (await api('POST', '/api/youtube/probe', { url: VIDEO_URL })).data;
+  ok('sin el archivo vuelve a ofrecer la descarga', again?.ok === false && again?.can_download === true);
+
+  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, onlyDash: true, dlFail: true }));
+  const dlBad = await api('POST', '/api/youtube/download', { url: VIDEO_URL });
+  let badState = { running: true };
+  const badDeadline = Date.now() + 20000;
+  while (Date.now() < badDeadline && badState?.running) {
+    await sleep(150);
+    badState = (await api('GET', '/api/youtube/download-status')).data;
+  }
+  ok('si la descarga falla, el error dice la causa', badState?.result?.ok === false && /403/.test(badState?.result?.error || ''), (badState?.result?.error || '').slice(0, 70));
+  ok('y no deja un archivo a medias', !fs.existsSync(path.join(path.dirname(dlState.result.path), 'ioSKlIL4Hs8.mp4')));
+
+  // watch?v=…&list=… (lo que copia el navegador) es la LISTA, no un vídeo suelto.
+  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, entries: 3 }));
+  const browserUrl = 'https://www.youtube.com/watch?v=ioSKlIL4Hs8&list=PLpbdLXz_BiMWFZH3nKMEaD3b9iAg7mLi7';
+  const fromBrowser = (await api('POST', '/api/youtube/probe', { url: browserUrl })).data;
+  ok('un enlace del navegador con lista se trata como lista', fromBrowser?.ok === true && fromBrowser?.mode === 'playlist', JSON.stringify({ mode: fromBrowser?.mode, error: fromBrowser?.error }));
+  ok('y se emiten sus vídeos', fromBrowser?.entries > 0, `${fromBrowser?.entries} vídeos`);
 
   // Lista completa: sus vídeos en orden; se omiten los directos y lo inservible.
   fs.writeFileSync(

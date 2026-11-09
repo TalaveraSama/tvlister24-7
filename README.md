@@ -203,6 +203,7 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
 | --- | --- |
 | `youtube.com/watch?v=…` · `youtu.be/…` · `/shorts/…` | **Vídeo en bucle**: el mismo vídeo, una y otra vez (`-re -stream_loop -1`) |
 | `youtube.com/playlist?list=…` | **Lista completa**: sus vídeos en orden y, al terminar el último, vuelve al primero |
+| `watch?v=…&list=…` (el del navegador) | Se trata como **lista completa**; la pantalla ofrece «Sólo ese vídeo» si quieres el vídeo suelto |
 | `…/live/…` · `/@canal/live` · `/channel/UC…/live` | **Directo**, tal cual (se copia el HLS, sin recodificar) |
 
 - **Copia exacta (copy/copy) en los directos**: el vídeo y el audio salen tal como llegan, sin recodificar (0 % de
@@ -215,6 +216,9 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
   formatos mezclados, se pasa a **H.264 2500k + AAC 128k** para que ningún cliente se quede sin imagen.
 - La URL firmada se renueva sola antes de caducar (guardia cada minuto); si el directo termina, el canal queda
   **SIN SEÑAL** sin borrar nada y se reengancha cuando vuelve.
+- Si un vídeo **sólo ofrece DASH/HLS** (sin MP4 progresivo, cada vez más común), el panel lo **descarga una vez**
+  (H.264 + AAC, hasta 1080p) y lo repite **desde el disco**: sin caducidad, sin renovar y sin volver a YouTube.
+  Se marca con `⛁ DESDE EL DISCO` y vive en `.runtime/videos` (se conserva al actualizar).
 - En modo **virtual** (sin motor) se entrega un directo o un vídeo con 302; una lista necesita el motor FFmpeg
   (responde 503 explicándolo).
 

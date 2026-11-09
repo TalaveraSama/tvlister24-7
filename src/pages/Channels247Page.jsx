@@ -58,6 +58,13 @@ export default function Channels247Page({ onPreview }) {
   const [customUrl, setCustomUrl] = useState('');
   const [customDur, setCustomDur] = useState(600);
 
+  // watch?v=…&list=… (lo que copia el navegador al ver un vídeo dentro de una
+  // lista): se avisa de que se emitirá la lista y se ofrece quitar la lista.
+  const watchListHint = (() => {
+    const u = String(form.live_source_url || '');
+    return /[?&]v=[^&]+/.test(u) && /[?&]list=/.test(u);
+  })();
+
   const [epgModal, setEpgModal] = useState(null);
   const [ffmpegModal, setFfmpegModal] = useState(null);
 
@@ -246,6 +253,52 @@ export default function Channels247Page({ onPreview }) {
       setCookiesMsg({ ok: false, text: err.message || 'No se pudieron guardar las cookies.' });
     } finally {
       setCookiesBusy(false);
+    }
+  };
+
+  // Descarga el vídeo al servidor (una vez) para repetirlo desde el disco.
+  // Igual que la instalación de yt-dlp: se lanza y se pregunta por el avance.
+  const handleDownloadVideo = async () => {
+    const url = String(form.live_source_url || '').trim();
+    if (!url) {
+      setProbe({ ok: false, live: false, error: 'Pega primero el enlace del vídeo.' });
+      return;
+    }
+    setProbe({ ...(probe || {}), busy: true, downloading: true, step: 'empezando la descarga…' });
+    try {
+      const first = await apiFetch('/api/youtube/download', { method: 'POST', body: JSON.stringify({ url }) });
+      let state = first;
+      for (let i = 0; i < 3600; i += 1) {
+        if (!state?.running) break;
+        await new Promise((r) => setTimeout(r, 2000));
+        state = await apiFetch('/api/youtube/download-status');
+        if (state?.running) {
+          setProbe({ ...(probe || {}), busy: true, downloading: true, step: state.step || 'descargando…' });
+        }
+      }
+      const r = state?.result || null;
+      if (r?.ok) {
+        // Ya está en el disco: se vuelve a comprobar el enlace, que ahora sale del archivo.
+        await handleProbe();
+        setProbe((prev) => ({
+          ...(prev || {}),
+          busy: false,
+          downloading: false,
+          downloaded:
+            `Vídeo descargado (${Math.round((r.bytes || 0) / (1024 * 1024))} MB` +
+            `${r.duration_sec ? ` · ${Math.floor(r.duration_sec / 60)}m ${Math.round(r.duration_sec % 60)}s` : ''}). ` +
+            'Se repite desde el disco: no caduca y no vuelve a depender de YouTube.'
+        }));
+      } else {
+        setProbe({
+          ...(probe || {}),
+          busy: false,
+          downloading: false,
+          error: r?.error || 'La descarga no terminó. Vuelve a intentarlo.'
+        });
+      }
+    } catch (err) {
+      setProbe({ ...(probe || {}), busy: false, downloading: false, error: err.message });
     }
   };
 
@@ -456,6 +509,14 @@ export default function Channels247Page({ onPreview }) {
                             {modeBadge(ch.liveSource)}
                           </span>
                         )}
+                        {ch.source_kind === 'youtube' && ch.liveSource?.local && (
+                          <span
+                            className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-teal-500/15 text-teal-200 border-teal-500/40"
+                            title="El vídeo está descargado en el servidor: se repite desde el disco, sin caducidad ni volver a YouTube."
+                          >
+                            ⛁ DESDE EL DISCO
+                          </span>
+                        )}
                         {ch.source_kind === 'youtube' && ch.liveSource?.ready && (
                           <span
                             className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
@@ -484,7 +545,7 @@ export default function Channels247Page({ onPreview }) {
                               ch.liveSource?.mode === 'playlist'
                                 ? ` · ${ch.liveSource?.entries || 0} vídeos`
                                 : ch.liveSource?.mode === 'video'
-                                  ? ' · repetido en bucle'
+                                  ? ` · repetido en bucle${ch.liveSource?.local ? ' (descargado)' : ''}`
                                   : ''
                             }`
                           : `${ch.playlist?.length || 0} programas`}{' '}
@@ -859,9 +920,46 @@ export default function Channels247Page({ onPreview }) {
                       className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold disabled:opacity-50"
                     >
                       {probe?.busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                      {probe?.installing ? 'Instalando yt-dlp…' : 'Comprobar señal'}
+                      {probe?.installing
+                        ? 'Instalando yt-dlp…'
+                        : probe?.downloading
+                          ? 'Descargando…'
+                          : 'Comprobar señal'}
                     </button>
                   </div>
+
+                  {watchListHint && (
+                    <div className="text-[11px] text-slate-400 flex flex-wrap items-center gap-2">
+                      <span>
+                        Ese enlace trae <b className="text-slate-200">vídeo + lista</b>: se emitirá la{' '}
+                        <b className="text-slate-200">lista completa</b> (hasta 30 vídeos, en orden). Si quieres
+                        sólo ese vídeo repetido en bucle, quita la lista.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const u = String(form.live_source_url || '');
+                          const clean = u
+                            .replace(/([?&])list=[^&]*&?/g, '$1')
+                            .replace(/[?&]$/, '')
+                            .replace(/([?&])index=\d+&?/g, '$1')
+                            .replace(/[?&]$/, '');
+                          setForm((prev) => ({ ...prev, live_source_url: clean }));
+                          setProbe(null);
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-semibold"
+                      >
+                        <X className="w-3 h-3" /> Sólo ese vídeo
+                      </button>
+                    </div>
+                  )}
+
+                  {probe?.downloaded && (
+                    <div className="text-[11px] text-teal-300 flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{probe.downloaded}</span>
+                    </div>
+                  )}
 
                   {probe?.installing && (
                     <div className="text-[11px] text-cyan-300 flex items-start gap-1.5">
@@ -968,6 +1066,26 @@ export default function Channels247Page({ onPreview }) {
                             >
                               <Download className="w-3.5 h-3.5" /> Instalar yt-dlp
                             </button>
+                          )}
+                          {probe.needs_download && (
+                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={handleDownloadVideo}
+                                disabled={probe?.busy}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold disabled:opacity-50"
+                              >
+                                {probe.downloading ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                                {probe.downloading ? 'Descargando…' : 'Descargar vídeo (una vez)'}
+                              </button>
+                              <span className="text-emerald-100/80">
+                                Se guarda en el servidor y se repite desde el disco: sin caducidad ni volver a YouTube.
+                              </span>
+                            </div>
                           )}
                           {probe.needs_format_fix && (
                             <div className="flex flex-wrap items-center gap-2 pt-0.5">

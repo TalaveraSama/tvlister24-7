@@ -70,6 +70,8 @@ const calls = [];
 let ytInstalled = false;
 let installJob = null;
 let installs = 0;
+let downloadJob = null;
+let downloads = 0;
 let cookiesPath = '';
 
 const channels = [
@@ -147,7 +149,10 @@ const channels = [
       title: 'Documental grabado',
       duration_sec: 3720,
       needs_transcode: false,
-      expires_in_min: 300,
+      local: true,
+      local_path: '/opt/tvlister24-7/.runtime/videos/vid123.mp4',
+      bytes: 734003200,
+      expires_in_min: null,
       has_url: true,
       error: ''
     },
@@ -276,6 +281,29 @@ globalThis.fetch = async (url, opts = {}) => {
     cookiesPath = '';
     return json({ ok: true, cookies: { path: '', exists: false, usable: false } });
   }
+  if (u === '/api/youtube/download' && method === 'POST') {
+    if (!/watch\?v=/.test(raw)) return json({ ok: false, error: 'Sólo se puede descargar el enlace de un vídeo suelto.' }, 400);
+    downloads += 1;
+    downloadJob = { running: true, step: 'descargando 42.0 % (512.00MiB)', result: null, video_id: 'ioSKlIL4Hs8' };
+    return json({ ok: true, ...downloadJob }, 202);
+  }
+  if (u === '/api/youtube/download-status') {
+    if (downloadJob?.running) {
+      downloadJob = {
+        running: false,
+        step: '',
+        video_id: 'ioSKlIL4Hs8',
+        result: {
+          ok: true,
+          path: '/opt/tvlister24-7/.runtime/videos/ioSKlIL4Hs8.mp4',
+          bytes: 734003200,
+          duration_sec: 3720,
+          title: 'Documental grabado'
+        }
+      };
+    }
+    return json(downloadJob || { running: false, result: null });
+  }
   if (u === '/api/youtube/install') {
     // Ahora arranca en segundo plano: se responde 202 y la pantalla pregunta.
     installs += 1;
@@ -301,6 +329,33 @@ globalThis.fetch = async (url, opts = {}) => {
         needs_ytdlp: true,
         error: 'Falta yt-dlp en el servidor: instálalo para leer el directo de YouTube.',
         yt_dlp: { installed: false }
+      });
+    }
+    if (/watch\?v=dashonly/.test(body?.url || '')) {
+      if (!downloads) {
+        return json({
+          ok: false,
+          live: false,
+          needs_download: true,
+          can_download: true,
+          video_id: 'ioSKlIL4Hs8',
+          duration_sec: 3720,
+          error:
+            'Este vídeo no ofrece un MP4 progresivo (sólo DASH/HLS en pistas separadas). El panel puede ' +
+            'descargarlo una vez (H.264 + AAC, hasta 1080p) y repetirlo desde el disco: botón «Descargar vídeo».'
+        });
+      }
+      return json({
+        ok: true,
+        ready: true,
+        live: false,
+        mode: 'video',
+        local: true,
+        title: 'Documental grabado',
+        duration_sec: 3720,
+        bytes: 734003200,
+        expires_in_min: null,
+        error: ''
       });
     }
     if (/watch\?v=nofmt/.test(body?.url || '')) {
@@ -343,7 +398,7 @@ globalThis.fetch = async (url, opts = {}) => {
     if (/watch\?v=abc/.test(body?.url || '')) {
       return json({ ok: false, live: false, error: 'Ese enlace no está en directo ahora (no es un directo).' });
     }
-    if (/playlist\?list=/.test(body?.url || '')) {
+    if (/playlist\?list=/.test(body?.url || '') || /[?&]list=/.test(body?.url || '')) {
       return json({
         ok: true,
         ready: true,
@@ -435,6 +490,8 @@ ok(/⧉ COPIA EXACTA/.test(text()), 'los canales que copian sin recodificar lo d
 ok(/⧉ COPIA · AUDIO AAC/.test(text()), 'y se distingue cuando sólo se copia el vídeo');
 ok(/↻ RECODIFICA/.test(text()), 'y cuando hay que recodificar');
 ok(/uniendo sus dos pistas/.test(text()), 'el directo de pistas separadas explica que las une al copiar');
+ok(/⛁ DESDE EL DISCO/.test(text()), 'el vídeo descargado se marca como emitido desde el disco');
+ok(/repetido en bucle \(descargado\)/.test(text()), 'y la línea del canal lo dice');
 
 // ── 2. Renovar señal llama al panel ─────────────────────────────────────────
 const beforeRefresh = calls.length;
@@ -624,6 +681,45 @@ ok(
   );
   ok(/EN VIVO — Noticias 24 Horas \(directo\)/.test(text()), 'con el directo ya resuelto', text().slice(-160));
   ok(!/Requested format is not available/.test(text()), 'sin quedarse el error viejo en pantalla');
+
+  // Se vuelve al directo normal para seguir con el resto de la prueba.
+  await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');
+}
+
+// ── 4d. Enlace del navegador (watch?v=…&list=…) y vídeo sin MP4 ─────────────
+{
+  await setValue(urlInput, 'https://www.youtube.com/watch?v=ioSKlIL4Hs8&list=PLpbdLXz_BiMWFZH3nKMEaD3b9iAg7mLi7');
+  ok(/Ese enlace trae[\s\S]*vídeo \+ lista/.test(text()), 'avisa de que el enlace del navegador trae vídeo y lista');
+  ok(/lista completa[\s\S]{0,60}30 vídeos/.test(text()), 'y de que se emitirá la lista completa');
+  ok(buttons('Sólo ese vídeo').length > 0, 'con un botón para quedarse sólo con el vídeo');
+
+  await clickText('Comprobar señal');
+  ok(/LISTA · 3/.test(text()) || /Señal de YouTube/.test(text()), 'comprobar el enlace del navegador lo trata como lista');
+
+  // Volver al enlace del navegador y quitarle la lista.
+  await setValue(urlInput, 'https://www.youtube.com/watch?v=ioSKlIL4Hs8&list=PLpbdLXz_BiMWFZH3nKMEaD3b9iAg7mLi7');
+  await clickText('Sólo ese vídeo');
+  const stripped = [...document.querySelectorAll('input')].find((i) => (i.placeholder || '').includes('@canal/live'));
+  ok(stripped?.value === 'https://www.youtube.com/watch?v=ioSKlIL4Hs8', 'el botón deja sólo el vídeo', stripped?.value);
+  ok(!/Ese enlace trae/.test(text()), 'y el aviso desaparece');
+
+  // Vídeo que sólo da DASH/HLS: se descarga una vez y se repite del disco.
+  await setValue(urlInput, 'https://www.youtube.com/watch?v=dashonly123');
+  await clickText('Comprobar señal');
+  ok(/no ofrece un MP4 progresivo/.test(text()), 'el vídeo DASH-only se explica en la caja de la señal');
+  ok(buttons('Descargar vídeo (una vez)').length > 0, 'y ofrece descargarlo una vez');
+  ok(/se repite desde el disco/.test(text()), 'explicando que después no caduca');
+
+  await clickText('Descargar vídeo (una vez)');
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 2600));
+  });
+  await flush();
+  await flush();
+  ok(downloads === 1, 'la descarga se lanza contra el panel', `${downloads}`);
+  ok(/Vídeo descargado \(700 MB · 62m 0s\)/.test(text()), 'al terminar dice cuánto ocupa y cuánto dura');
+  ok(/Se repite desde el disco: no caduca/.test(text()), 'y que ya no depende de YouTube');
+  ok(/VÍDEO EN BUCLE — Documental grabado/.test(text()), 'el enlace queda resuelto en bucle', text().slice(-120));
 
   // Se vuelve al directo normal para seguir con el resto de la prueba.
   await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');

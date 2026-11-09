@@ -3029,6 +3029,27 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.59: enlace del navegador (vídeo + lista) y vídeos que sólo dan DASH/HLS
+
+- **`watch?v=…&list=…`** —lo que copia el navegador al ver un vídeo dentro de una lista— se resuelve ahora como
+  **lista completa** (`parseYouTubeUrl` → `kind: 'playlist'`, con `start_video_id` anotado). La pantalla avisa
+  («se emitirá la lista completa, hasta 30 vídeos») y ofrece **«Sólo ese vídeo»**, que quita `list=`/`index=`.
+- **Vídeos sin MP4 progresivo** (DASH/HLS con pistas separadas, PO token): `resolveLiveSource` devuelve
+  `needs_download`/`can_download` en vez de un error seco, y `startVideoDownload()` los baja **ya mezclados**
+  (`-f 'bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]/…b'`, `--merge-output-format mp4`, `--write-info-json`,
+  `--cookies` si hay) a `.runtime/videos/<id>.mp4` con su ficha `<id>.mp4.json`.
+- **Trabajo en segundo plano** (`videoDownloadState()`): `POST /api/youtube/download` responde `202` y la
+  pantalla pregunta por `GET /api/youtube/download-status`; los pasos salen del propio yt-dlp (`descargando 42 %
+  (512 MiB)`, `uniendo vídeo y audio…`). Los temporales se limpian siempre y un fallo no deja archivo a medias.
+- **Se emite desde el disco**: `cachedVideoState()` devuelve `mode: 'video'`, `local: true`, `url` = ruta del
+  archivo, `copy_video/copy_audio: true` y **sin caducidad**; el motor ya lo repite con `-re -stream_loop -1 -i`.
+  `needsRefresh()` no renueva un vídeo local salvo que falte el archivo, y `resolveLiveSource` lo devuelve sin
+  llamar a yt-dlp. `DELETE /api/youtube/videos/:id` borra archivo y ficha.
+- Pantalla: botón **Descargar vídeo (una vez)** con avance, mensaje final con MB y duración, chip
+  **`⛁ DESDE EL DISCO`** en la tarjeta y «repetido en bucle (descargado)».
+
+Pruebas: `test_youtube_live.mjs` **168 OK** y `test_youtube_live_ui.mjs` **102 OK**.
+
 ### v2.6.58: «Requested format is not available» (selección de formato de yt-dlp y clientes)
 
 Dos causas, una nuestra: `-J` **también hace selección de formato** y, si YouTube no da ninguna pista que
