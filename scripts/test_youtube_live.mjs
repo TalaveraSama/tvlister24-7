@@ -81,6 +81,15 @@ if (args.includes('--version')) { console.log('2026.11.04-fake'); process.exit(0
 const counter = ${JSON.stringify(YT_COUNTER)};
 const flagsFile = ${JSON.stringify(YT_FLAGS)};
 const flags = JSON.parse(fs.readFileSync(flagsFile, 'utf8') || '{}');
+// Registro de argumentos de cada llamada (para comprobar --cookies, --extractor-args…).
+try { fs.appendFileSync(${JSON.stringify(path.join(TMP, 'yt-argv.txt'))}, JSON.stringify(args) + '\\n'); } catch {}
+// «Requested format is not available»: el cliente normal no recibe ninguna pista
+// con URL (PO token / SABR). Con player_client=tv, sí. Con 'all', ninguno.
+const clientArg = String((args[args.indexOf('--extractor-args') + 1]) || '');
+if (flags.noFormats === 'all' || (flags.noFormats === 'tv' && !/player_client=tv/.test(clientArg))) {
+  console.error('ERROR: [youtube] ioSKlIL4Hs8: Requested format is not available. Use --list-formats for a list of available formats');
+  process.exit(1);
+}
 // El control anti-robots de YouTube: sólo pasa si el panel le da cookies.
 if (flags.bot && !process.argv.includes('--cookies')) {
   console.error("ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you're not a bot. This helps protect our community. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp for more information.");
@@ -244,7 +253,8 @@ const child = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
     FFMPEG_PATH: FAKE_FFMPEG,
     TVLISTER_YTDLP: FAKE_YTDLP,
     TVLISTER_LIVE_WATCHDOG_MS: '3000',
-    TVLISTER_LIVE_OFFAIR_RECHECK_MS: '6000'
+    TVLISTER_LIVE_OFFAIR_RECHECK_MS: '6000',
+    TVLISTER_YTDLP_RELEASES: '0'
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
@@ -612,6 +622,101 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     const del = await fetch(`${BASE}/api/youtube/cookies`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     const delBody = await del.json().catch(() => null);
     ok('se pueden quitar las cookies', del.status === 200 && delBody?.cookies?.path === '', delBody?.cookies?.path);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
+  // --- 1e. «Requested format is not available»: no se queda a oscuras ------
+  // YouTube cambia cada pocas semanas qué cliente entrega pistas con URL. El
+  // panel no debe rendirse con el primero: -J no debe abortar por selección de
+  // formato, y si no hay ni una pista, se prueban otros clientes.
+  {
+    const argvLog = () => {
+      try {
+        return fs
+          .readFileSync(path.join(TMP, 'yt-argv.txt'), 'utf8')
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l));
+      } catch {
+        return [];
+      }
+    };
+    const clearArgv = () => {
+      try {
+        fs.rmSync(path.join(TMP, 'yt-argv.txt'), { force: true });
+      } catch {
+        /* no estaba */
+      }
+    };
+
+    clearArgv();
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, noFormats: 'tv' }));
+    const fallback = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    const argvs = argvLog();
+    ok('con el cliente normal sin pistas, se reintenta con otro cliente', fallback?.ok === true, fallback?.error);
+    ok('y la señal queda lista para copiar', fallback?.live === true && fallback?.copy_kind);
+    ok(
+      'el reintento usa --extractor-args youtube:player_client=tv',
+      argvs.some((a) => a.includes('--extractor-args') && a.includes('youtube:player_client=tv')),
+      `${argvs.length} llamadas`
+    );
+    ok(
+      'todas las lecturas llevan --ignore-no-formats-error',
+      argvs.length > 0 && argvs.every((a) => a.includes('--ignore-no-formats-error')),
+      JSON.stringify(argvs[0]?.slice(0, 3) || [])
+    );
+    ok('y dice con qué clientes se probó', /normal/.test(fallback?.clients_tried || '') && /tv/.test(fallback?.clients_tried || ''), fallback?.clients_tried);
+
+    // Ningún cliente da pistas: mensaje que se puede accionar, no el inglés.
+    clearArgv();
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, noFormats: 'all' }));
+    const none = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    ok('si ningún cliente da pistas, se dice claro', none?.ok === false && none?.needs_format_fix === true, (none?.error || '').slice(0, 70));
+    ok('con la salida: actualizar yt-dlp', /Actualizar yt-dlp/.test(none?.error || ''));
+    ok('sin pegar el inglés tal cual delante', !/^yt-dlp no pudo leer el enlace/.test(none?.error || ''));
+    ok('y se probaron los cuatro clientes', (none?.clients_tried || '').split(',').length === 4, none?.clients_tried);
+    ok('el texto original queda en el detalle', /Requested format is not available/.test(none?.detail || ''), (none?.detail || '').slice(0, 60));
+
+    // El estado del canal lo guarda: la tarjeta puede avisar sin volver a probar.
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+    ok('vuelve a funcionar al quitar el fallo', (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data?.ok === true);
+
+    // ── ¿Hay versión nueva de yt-dlp? (consulta cacheada, best-effort) ───────
+    // El servidor de prueba va DENTRO del proceso hijo: execFileSync bloquearía
+    // el bucle de este proceso y nadie contestaría a la petición.
+    const relCode = `
+      import http from 'node:http';
+      const srv = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ tag_name: '2099.01.01' }));
+      });
+      await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+      process.env.TVLISTER_YTDLP_RELEASE_API = 'http://127.0.0.1:' + srv.address().port + '/releases/latest';
+      const m = await import(${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))});
+      const rel = await m.ytDlpReleaseInfo({ waitMs: 4000 });
+      srv.close();
+      console.log(JSON.stringify({
+        rel,
+        older: m.isYtDlpOutdated('2026.11.04', rel.tag),
+        same: m.isYtDlpOutdated(rel.tag, rel.tag),
+        newer: m.isYtDlpOutdated('2099.02.02', rel.tag),
+        standalone: m.isYtDlpOutdated('2026.10.26-standalone', '2026.11.04')
+      }));
+    `;
+    const relOut = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', relCode], {
+      env: {
+        ...process.env,
+        TVLISTER_DB_PATH: path.join(TMP, 'rel.db'),
+        APP_DIR: path.join(TMP, 'app')
+      },
+      encoding: 'utf8'
+    });
+    const rel = JSON.parse(relOut.trim().split('\n').pop() || '{}');
+    ok('consulta la última versión publicada de yt-dlp', rel?.rel?.tag === '2099.01.01', JSON.stringify(rel?.rel?.tag));
+    ok('y sabe cuándo la instalada es vieja', rel?.older === true);
+    ok('sin avisar cuando es la misma', rel?.same === false);
+    ok('ni cuando la instalada es más nueva', rel?.newer === false);
+    ok('el binario autónomo también se compara bien', rel?.standalone === true);
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 

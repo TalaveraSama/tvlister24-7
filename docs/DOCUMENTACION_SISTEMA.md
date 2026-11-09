@@ -3029,6 +3029,28 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.58: «Requested format is not available» (selección de formato de yt-dlp y clientes)
+
+Dos causas, una nuestra: `-J` **también hace selección de formato** y, si YouTube no da ninguna pista que
+encaje (directos con PO token, cookies que no ven las pistas), yt-dlp aborta aunque la ficha sea válida.
+
+- **`--ignore-no-formats-error` en todas las lecturas** (`resolveLiveSource`): `-J` vuelca la información y el
+  panel elige sus pistas (`pickHls`/`pickProgressive`).
+- **Cadena de clientes** `YT_CLIENT_CHAIN`: `normal` → `tv` → `web_safari` → `ios` con
+  `--extractor-args youtube:player_client=…`. Sólo se reintenta si el problema es de formatos
+  (`shouldRetryWithOtherClient`): error de formatos, formatos sin URL, o directo sin formatos. Un vídeo privado
+  o que pide login no gasta reintentos. El resultado guarda `clients_tried`.
+- **Mensaje accionable** (`explainYtDlpError` → `needs_format_fix`): explicación + «Actualizar yt-dlp»; el texto
+  original va en `detail`. La rama de directo sin pistas distingue «no hay pistas con URL» de «no hay HLS».
+- **Versión de yt-dlp**: `ytDlpReleaseInfo()` consulta GitHub (cache 6 h, de fondo, `TVLISTER_YTDLP_RELEASES=0`
+  para apagarlo, `TVLISTER_YTDLP_RELEASE_API` para otra URL); `isYtDlpOutdated()` compara sólo los números
+  (`2026.10.26-standalone`). `GET /api/youtube/status` añade `release`, `latest_version` y `update_available`.
+- Pantalla: botón **Actualizar yt-dlp** dentro del aviso (y al actualizar **recomprueba el enlace solo**),
+  «probado con: normal, tv, web_safari, ios», aviso de versión nueva junto al estado del binario.
+
+Pruebas: `test_youtube_live.mjs` **150 OK** (yt-dlp falso que sólo responde con `player_client=tv`, los cuatro
+clientes sin pistas, consulta de versión contra un servidor local) y `test_youtube_live_ui.mjs` **83 OK**.
+
 ### v2.6.57: YouTube deja de contestar «no eres un robot» (cookies desde el panel)
 
 `Sign in to confirm you're not a bot` no es un fallo del panel ni del vídeo: YouTube ha marcado la **IP del

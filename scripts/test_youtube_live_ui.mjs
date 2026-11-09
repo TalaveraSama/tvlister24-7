@@ -69,6 +69,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const calls = [];
 let ytInstalled = false;
 let installJob = null;
+let installs = 0;
 let cookiesPath = '';
 
 const channels = [
@@ -241,6 +242,9 @@ globalThis.fetch = async (url, opts = {}) => {
             version: '2026.11.04',
             bin: '/opt/tvlister24-7/.runtime/bin/yt-dlp',
             ffmpeg: true,
+            update_available: true,
+            latest_version: '2099.01.01',
+            release: { tag: '2099.01.01', error: '' },
             cookies: {
               path: cookiesPath,
               exists: Boolean(cookiesPath),
@@ -274,6 +278,7 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (u === '/api/youtube/install') {
     // Ahora arranca en segundo plano: se responde 202 y la pantalla pregunta.
+    installs += 1;
     installJob = { running: true, step: 'descargando binario autónomo (no necesita Python)', result: null };
     return json({ ok: true, ...installJob }, 202);
   }
@@ -296,6 +301,32 @@ globalThis.fetch = async (url, opts = {}) => {
         needs_ytdlp: true,
         error: 'Falta yt-dlp en el servidor: instálalo para leer el directo de YouTube.',
         yt_dlp: { installed: false }
+      });
+    }
+    if (/watch\?v=nofmt/.test(body?.url || '')) {
+      if (installs < 2) {
+        return json({
+          ok: false,
+          live: false,
+          needs_format_fix: true,
+          clients_tried: 'normal, tv, web_safari, ios',
+          error:
+            'YouTube no ha dado ninguna pista de vídeo utilizable para este enlace («Requested format is not available»). ' +
+            'Suele arreglarse actualizando yt-dlp: pulsa «Actualizar yt-dlp» y vuelve a comprobar.',
+          detail: 'ERROR: [youtube] ioSKlIL4Hs8: Requested format is not available. Use --list-formats.'
+        });
+      }
+      return json({
+        ok: true,
+        ready: true,
+        live: true,
+        mode: 'live',
+        title: 'Noticias 24 Horas (directo)',
+        uploader: 'Canal Demo',
+        copy_kind: 'separate',
+        separated_audio: true,
+        expires_in_min: 320,
+        error: ''
       });
     }
     if (/watch\?v=bot/.test(body?.url || '')) {
@@ -468,6 +499,7 @@ await act(async () => {
 await flush();
 ok(/yt-dlp 2026\.11\.04 instalado/.test(text()), 'tras instalar, confirma la versión y la ruta');
 ok(/binario autónomo, sin depender de Python/.test(text()), 'y avisa de que no depende del Python del servidor');
+ok(/Hay una versión nueva de yt-dlp \(2099\.01\.01\)/.test(text()), 'y avisa cuando YouTube ha roto la versión instalada');
 ok(!/yt-dlp no está instalado/.test(text()), 'y el aviso de «no instalado» desaparece');
 
 await clickText('Comprobar señal');
@@ -556,6 +588,42 @@ ok(
     calls.some((c) => c.url === '/api/youtube/cookies' && c.method === 'DELETE'),
     'las cookies se pueden quitar desde la pantalla'
   );
+
+  // Se vuelve al directo normal para seguir con el resto de la prueba.
+  await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');
+}
+
+// ── 4c. «Requested format is not available» → actualizar yt-dlp ─────────────
+{
+  await setValue(urlInput, 'https://www.youtube.com/watch?v=nofmt123');
+  await clickText('Comprobar señal');
+  ok(/Requested format is not available/.test(text()), 'el fallo de formatos se explica en la caja de la señal');
+  ok(buttons('Actualizar yt-dlp').length > 0, 'y ofrece «Actualizar yt-dlp» en ese mismo aviso');
+  ok(/probado con: normal, tv, web_safari, ios/.test(text()), 'diciendo con qué clientes de YouTube se probó');
+  ok(/Suele arreglarse actualizando yt-dlp/.test(text()), 'y qué hacer para arreglarlo');
+
+  const beforeFix = calls.filter((c) => c.url === '/api/youtube/probe').length;
+  await clickText('Actualizar yt-dlp');
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 2600));
+  });
+  await flush();
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 300));
+  });
+  await flush();
+  await flush();
+  ok(
+    calls.filter((c) => c.url === '/api/youtube/install').length >= 2,
+    'el botón actualiza yt-dlp (segunda instalación)',
+    `${calls.filter((c) => c.url === '/api/youtube/install').length}`
+  );
+  ok(
+    calls.filter((c) => c.url === '/api/youtube/probe').length > beforeFix,
+    'y al terminar vuelve a comprobar el enlace solo'
+  );
+  ok(/EN VIVO — Noticias 24 Horas \(directo\)/.test(text()), 'con el directo ya resuelto', text().slice(-160));
+  ok(!/Requested format is not available/.test(text()), 'sin quedarse el error viejo en pantalla');
 
   // Se vuelve al directo normal para seguir con el resto de la prueba.
   await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');

@@ -273,6 +273,21 @@ export function isBotCheckError(text) {
  */
 export function explainYtDlpError(stderr) {
   const raw = String(stderr || '').replace(/\s+/g, ' ').trim();
+
+  // «Requested format is not available»: YouTube no entrega ninguna pista que
+  // yt-dlp sepa usar. Casi siempre es una versión vieja de yt-dlp (YouTube
+  // cambia cada pocas semanas) o una IP/cuenta que sólo recibe SABR.
+  if (isFormatError(raw)) {
+    return {
+      message:
+        'YouTube no ha dado ninguna pista de vídeo utilizable para este enlace («Requested format is not available»). ' +
+        'Suele arreglarse actualizando yt-dlp: pulsa «Actualizar yt-dlp» y vuelve a comprobar. Si sigue igual, prueba ' +
+        'otro formato de enlace (el directo del canal con /live) o espera unos minutos: YouTube cambia esto a menudo.',
+      needs_format_fix: true,
+      detail: raw.length > 240 ? `${raw.slice(0, 240)}…` : raw
+    };
+  }
+
   if (!isBotCheckError(raw)) return null;
   const ck = cookiesInfo();
   let message = 'YouTube pide iniciar sesión desde este servidor («Sign in to confirm you’re not a bot»).';
@@ -294,6 +309,86 @@ export function explainYtDlpError(stderr) {
       '(caducan en días) o usa otra cuenta.';
   }
   return { message, needs_cookies: true, detail: raw.length > 240 ? `${raw.slice(0, 240)}…` : raw };
+}
+
+// ============================================================================
+// ¿Está yt-dlp al día?
+// ============================================================================
+// YouTube cambia cada pocas semanas y una versión vieja de yt-dlp deja de ver
+// los formatos («Requested format is not available»). Se consulta la última
+// publicada en GitHub cada 6 h (sin bloquear: si no hay red, se calla).
+const RELEASE_API = String(
+  process.env.TVLISTER_YTDLP_RELEASE_API || 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
+);
+const RELEASE_TTL_MS = 6 * 60 * 60 * 1000;
+const RELEASES_ENABLED = String(process.env.TVLISTER_YTDLP_RELEASES || '1') !== '0';
+let releaseCache = { at: 0, tag: '', error: '' };
+let releaseInFlight = null;
+
+async function fetchReleaseTag(timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(RELEASE_API, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'tvlister24-7' },
+      signal: ctrl.signal
+    });
+    if (!r.ok) return '';
+    const body = await r.json();
+    return String(body?.tag_name || '').trim();
+  } catch {
+    return '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Última versión publicada de yt-dlp. `waitMs: 0` devuelve lo que haya en
+ * memoria y lanza la consulta de fondo; con `waitMs` se espera como mucho eso.
+ */
+export async function ytDlpReleaseInfo({ waitMs = 0, force = false } = {}) {
+  if (!RELEASES_ENABLED) return { ...releaseCache, enabled: false };
+  const fresh = Date.now() - releaseCache.at < RELEASE_TTL_MS && Boolean(releaseCache.tag || releaseCache.error);
+  if (force || !fresh) {
+    if (!releaseInFlight) {
+      releaseInFlight = fetchReleaseTag(9000).then((tag) => {
+        releaseCache = { at: Date.now(), tag, error: tag ? '' : 'no se pudo consultar GitHub' };
+        releaseInFlight = null;
+        return releaseCache;
+      });
+    }
+    if (waitMs > 0) {
+      await Promise.race([releaseInFlight, new Promise((r) => setTimeout(r, waitMs))]);
+    }
+  }
+  return { ...releaseCache, enabled: true };
+}
+
+/** Lanza la consulta sin esperar (al arrancar el panel). */
+export function warmYtDlpReleaseInfo() {
+  ytDlpReleaseInfo({ waitMs: 0 }).catch(() => {});
+}
+
+/** Compara la versión instalada con la publicada (2026.10.26 vs 2026.10.26). */
+export function isYtDlpOutdated(installed, latest) {
+  const a = String(installed || '').trim();
+  const b = String(latest || '').trim();
+  if (!a || !b) return false;
+  // Los zipapp dicen «2026.10.26», el autónomo «2026.10.26-standalone»: se
+  // comparan sólo los números y se exige que la publicada sea más nueva.
+  const num = (v) => String(v).split(/[^0-9.]/).filter(Boolean)[0] || '';
+  const ia = num(a);
+  const ib = num(b);
+  if (!ia || !ib || ia === ib) return false;
+  const pa = ia.split('.').map(Number);
+  const pb = ib.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return y > x;
+  }
+  return false;
 }
 
 export async function getYtDlpInfo() {
@@ -831,6 +926,59 @@ export function playlistNeedsTranscode(entries) {
   );
 }
 
+// ============================================================================
+// «Requested format is not available»
+// ============================================================================
+// yt-dlp con -J también elige un formato por su cuenta. Si YouTube no le da
+// ninguno que encaje —los directos que exigen PO token, o cuando la sesión de
+// las cookies no ve las pistas de vídeo— aborta con «Requested format is not
+// available» aunque la ficha del vídeo sea perfectamente válida. El panel no
+// necesita esa elección (elige él sus pistas), así que se le dice a yt-dlp que
+// no se queje y, si aun así no hay ni una pista con URL, se reintenta con otros
+// clientes de YouTube: cambia cada pocas semanas cuál funciona sin PO token.
+export function isFormatError(text) {
+  return /requested format is not available|no video formats found|requested format not (?:available|found)/i.test(
+    String(text || '')
+  );
+}
+
+// Clientes que se prueban, en orden. El primero es el de siempre (sin tocar
+// nada); los demás sólo se usan si el anterior no dio ni una pista con URL.
+export const YT_CLIENT_CHAIN = [
+  { label: 'normal', extractorArgs: '' },
+  { label: 'tv', extractorArgs: 'youtube:player_client=tv' },
+  { label: 'web_safari', extractorArgs: 'youtube:player_client=web_safari' },
+  { label: 'ios', extractorArgs: 'youtube:player_client=ios' }
+];
+
+/** ¿La respuesta de yt-dlp trae alguna pista con URL que se pueda emitir? */
+export function hasUsableMedia(info) {
+  if (!info || typeof info !== 'object') return false;
+  if (Array.isArray(info.entries)) return info.entries.some((e) => e && hasUsableMedia(e));
+  if (/m3u8|hls/i.test(String(info.manifest_url || ''))) return true;
+  if (/^https?:/i.test(String(info.url || ''))) return true;
+  const formats = Array.isArray(info.formats) ? info.formats : [];
+  return formats.some((f) => f && /^https?:/i.test(String(f?.url || '')));
+}
+
+/**
+ * ¿Merece la pena reintentar con otro cliente de YouTube?
+ * Sólo cuando el problema es de formatos: si el vídeo no existe, es privado o
+ * pide iniciar sesión, probar más clientes es perder el tiempo.
+ */
+export function shouldRetryWithOtherClient(info, stderr) {
+  const err = String(stderr || '');
+  if (isFormatError(err)) return true;
+  if (!info || typeof info !== 'object') return false;
+  if (hasUsableMedia(info)) return false;
+  if (Array.isArray(info.entries) && info.entries.length) return true;
+  const formats = Array.isArray(info.formats) ? info.formats : [];
+  // Formatos «vacíos» (sin URL): los que YouTube firma con PO token o SABR.
+  if (formats.length && !hasUsableMedia(info)) return true;
+  // Directo sin formatos: puede ser cosa del cliente que se usó.
+  return formats.length === 0 && (info.is_live === true || String(info.live_status || '') === 'is_live');
+}
+
 /**
  * Pregunta a yt-dlp por el enlace y devuelve lo utilizable para emitir:
  *
@@ -873,35 +1021,70 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   }
 
   const isPlaylist = cls.kind === 'playlist';
-  const args = ['-J', '--no-warnings', '--no-progress', '--no-config'];
-  if (isPlaylist) {
-    // Con --flat-playlist no habría URLs de vídeo: se pide la lista completa
-    // (hasta 30) y cada entrada trae ya sus formatos.
-    args.push('--yes-playlist', '--playlist-end', String(MAX_PLAYLIST_ITEMS), '--ignore-errors');
-  } else {
-    args.push('--no-playlist');
-  }
   // Sólo se le pasa a yt-dlp un archivo que exista y sea de verdad Netscape con
   // cookies de youtube.com: con un archivo inservible el error es más confuso.
   const cookies = String(cookiesFile || getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '').trim();
   const ck = cookies ? (cookiesFile ? { path: cookies, exists: fs.existsSync(cookies), ok: fs.existsSync(cookies) } : cookiesInfo()) : null;
   const usingCookies = Boolean(ck?.exists && fs.existsSync(cookies));
-  if (usingCookies) args.push('--cookies', cookies);
-  args.push(cls.url);
 
-  const res = await runBinary(info.bin, args, { timeoutMs: isPlaylist ? PLAYLIST_TIMEOUT_MS : 45000 });
+  const baseArgs = [
+    '-J',
+    '--no-warnings',
+    '--no-progress',
+    '--no-config',
+    // -J elige formato por su cuenta; si YouTube no le da ninguno que encaje
+    // aborta con «Requested format is not available» aunque la ficha sea buena.
+    // Con esto vuelca la información igual y el panel elige sus propias pistas.
+    '--ignore-no-formats-error'
+  ];
+  if (isPlaylist) {
+    // Con --flat-playlist no habría URLs de vídeo: se pide la lista completa
+    // (hasta 30) y cada entrada trae ya sus formatos.
+    baseArgs.push('--yes-playlist', '--playlist-end', String(MAX_PLAYLIST_ITEMS), '--ignore-errors');
+  } else {
+    baseArgs.push('--no-playlist');
+  }
+  if (usingCookies) baseArgs.push('--cookies', cookies);
+
   let data = null;
-  try {
-    data = JSON.parse(res.stdout);
-  } catch {
-    data = null;
+  let lastErr = '';
+  const attempts = [];
+
+  for (const client of YT_CLIENT_CHAIN) {
+    const args = [...baseArgs];
+    if (client.extractorArgs) args.push('--extractor-args', client.extractorArgs);
+    args.push(cls.url);
+
+    const res = await runBinary(info.bin, args, { timeoutMs: isPlaylist ? PLAYLIST_TIMEOUT_MS : 45000 });
+    let parsed = null;
+    try {
+      parsed = JSON.parse(res.stdout);
+    } catch {
+      parsed = null;
+    }
+    lastErr = String(res.stderr || '').replace(/\s+/g, ' ').trim();
+    attempts.push({
+      client: client.label,
+      ok: Boolean(parsed),
+      error: parsed ? '' : (lastErr.length > 200 ? `${lastErr.slice(0, 200)}…` : lastErr)
+    });
+
+    if (parsed && !shouldRetryWithOtherClient(parsed, lastErr)) {
+      data = parsed;
+      break;
+    }
+    if (!shouldRetryWithOtherClient(parsed, lastErr)) break;
+    // Se sigue con el siguiente cliente; si era el último, se queda lo leído.
+    data = parsed || data;
   }
 
+  const clientsTried = attempts.map((a) => a.client).join(', ');
+
   if (!data) {
-    const err = String(res.stderr || '').replace(/\s+/g, ' ').trim();
+    const err = lastErr;
     const short = err.length > 240 ? `${err.slice(0, 240)}…` : err;
-    // El control anti-robots de YouTube se explica con lo que hay que hacer
-    // (subir cookies), no con el texto en inglés que copia y pega yt-dlp.
+    // Los fallos conocidos se explican con lo que hay que hacer (subir cookies,
+    // actualizar yt-dlp), no con el texto en inglés que copia y pega yt-dlp.
     const explained = explainYtDlpError(err);
     if (explained) {
       return {
@@ -911,8 +1094,10 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         provider: 'youtube',
         error: explained.message,
         raw: explained.detail,
-        needs_cookies: true,
-        using_cookies: usingCookies
+        needs_cookies: Boolean(explained.needs_cookies),
+        needs_format_fix: Boolean(explained.needs_format_fix),
+        using_cookies: usingCookies,
+        clients_tried: clientsTried
       };
     }
     return {
@@ -924,7 +1109,8 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         ? `yt-dlp no pudo leer el enlace: ${short}`
         : 'yt-dlp no devolvió información del enlace (¿el vídeo existe y es público?).',
       raw: short,
-      using_cookies: usingCookies
+      using_cookies: usingCookies,
+      clients_tried: clientsTried
     };
   }
 
@@ -1003,6 +1189,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       expires_at_ms: expires || Date.now() + DEFAULT_TTL_MS,
       live_status: 'playlist',
       using_cookies: usingCookies,
+      clients_tried: clientsTried,
       resolved_at_ms: Date.now()
     };
   }
@@ -1017,6 +1204,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   if (isLive) {
     const hls = pickHls(entry);
     if (!hls) {
+      const noTracks = !hasUsableMedia(entry);
       return {
         ok: false,
         live: true,
@@ -1024,10 +1212,15 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         provider: 'youtube',
         title,
         live_status: liveStatus,
-        error:
-          'El directo está en vivo pero no ofrece manifiesto HLS utilizable con -c copy ' +
-          '(puede requerir inicio de sesión o estar limitado por edad/país).',
-        video_id: String(entry.id || '')
+        error: noTracks
+          ? 'El directo está en vivo, pero YouTube no ha entregado ninguna pista con URL ' +
+            `(probado con: ${clientsTried || 'normal'}). Suele ser una versión vieja de yt-dlp: ` +
+            'pulsa «Actualizar yt-dlp» y vuelve a comprobar.'
+          : 'El directo está en vivo pero no ofrece manifiesto HLS utilizable con -c copy ' +
+            '(puede requerir inicio de sesión o estar limitado por edad/país).',
+        needs_format_fix: noTracks,
+        video_id: String(entry.id || ''),
+        clients_tried: clientsTried
       };
     }
     // La caducidad más próxima entre vídeo y audio manda (las dos van firmadas).
@@ -1057,6 +1250,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       started_at: String(entry.release_timestamp || ''),
       expires_at_ms: expires,
       using_cookies: usingCookies,
+      clients_tried: clientsTried,
       resolved_at_ms: Date.now()
     };
   }
@@ -1130,6 +1324,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     needs_transcode: videoNeedsTranscode(prog) || audioNeedsTranscode(prog),
     expires_at_ms: prog.expires_at_ms || Date.now() + DEFAULT_TTL_MS,
     using_cookies: usingCookies,
+    clients_tried: clientsTried,
     resolved_at_ms: Date.now()
   };
 }
@@ -1280,7 +1475,9 @@ export async function refreshChannelLiveSource(channel) {
     error: res.ok ? '' : res.error || 'sin señal',
     needs_ytdlp: Boolean(res.needs_ytdlp),
     needs_cookies: Boolean(res.needs_cookies),
-    using_cookies: Boolean(res.using_cookies)
+    needs_format_fix: Boolean(res.needs_format_fix),
+    using_cookies: Boolean(res.using_cookies),
+    clients_tried: String(res.clients_tried || '')
   };
   try {
     db.prepare('UPDATE channels_247 SET live_source_state = ? WHERE id = ?').run(JSON.stringify(state), channel.id);

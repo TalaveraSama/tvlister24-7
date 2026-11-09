@@ -175,6 +175,9 @@ export default function Channels247Page({ onPreview }) {
   // La instalación corre en el servidor (el binario autónomo pesa ~39 MB y un
   // proxy cortaría la petición). Aquí sólo se lanza y se pregunta cómo va.
   const handleInstallYtdlp = async () => {
+    // Si se estaba actualizando por «Requested format is not available», al
+    // terminar se vuelve a comprobar el enlace sin que el operador haga nada.
+    const wasFormatFix = Boolean(probe?.needs_format_fix);
     setProbe({ busy: true, installing: true, step: 'empezando…' });
     try {
       await apiFetch('/api/youtube/install', { method: 'POST', body: JSON.stringify({}) });
@@ -208,6 +211,11 @@ export default function Channels247Page({ onPreview }) {
               error: r?.error || 'La instalación no terminó. Vuelve a intentarlo en unos segundos.'
             }
       );
+      if (wasFormatFix && r?.ok && String(form.live_source_url || '').trim()) {
+        setTimeout(() => {
+          handleProbe();
+        }, 50);
+      }
     } catch (err) {
       setProbe({ busy: false, ok: false, live: false, error: err.message });
     }
@@ -961,6 +969,22 @@ export default function Channels247Page({ onPreview }) {
                               <Download className="w-3.5 h-3.5" /> Instalar yt-dlp
                             </button>
                           )}
+                          {probe.needs_format_fix && (
+                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={handleInstallYtdlp}
+                                disabled={probe?.busy}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-600/80 hover:bg-amber-500 text-white font-bold disabled:opacity-50"
+                              >
+                                <Download className="w-3.5 h-3.5" /> Actualizar yt-dlp
+                              </button>
+                              <span className="text-emerald-100/80">
+                                YouTube cambia cada pocas semanas; al terminar se vuelve a comprobar el enlace solo.
+                                {probe.clients_tried ? ` (probado con: ${probe.clients_tried})` : ''}
+                              </span>
+                            </div>
+                          )}
                           {probe.needs_cookies && (
                             <div className="flex flex-wrap items-center gap-2 pt-0.5">
                               <button
@@ -1015,6 +1039,22 @@ export default function Channels247Page({ onPreview }) {
                           className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold disabled:opacity-50"
                         >
                           <Download className="w-3 h-3" /> Instalar yt-dlp
+                        </button>
+                      </>
+                    )}
+                    {ytStatus?.installed && ytStatus.update_available && (
+                      <>
+                        <span className="text-amber-300">
+                          Hay una versión nueva de yt-dlp ({ytStatus.latest_version}): si YouTube falla con algún
+                          enlace, actualízalo.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleInstallYtdlp}
+                          disabled={probe?.busy}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold disabled:opacity-50"
+                        >
+                          <RefreshCw className="w-3 h-3" /> Actualizar yt-dlp
                         </button>
                       </>
                     )}

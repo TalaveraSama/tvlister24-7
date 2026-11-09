@@ -114,7 +114,10 @@ import {
   liveModeFor,
   liveEntriesFor,
   startYtDlpInstall,
-  ytInstallState
+  ytInstallState,
+  ytDlpReleaseInfo,
+  warmYtDlpReleaseInfo,
+  isYtDlpOutdated
 } from './youtubeLive.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
@@ -2654,7 +2657,17 @@ app.get('/api/channels247', requireAuth, (req, res) => {
 // depende de ningún paquete del sistema.
 app.get('/api/youtube/status', requireAuth, async (req, res) => {
   const info = await getYtDlpInfo();
-  res.json({ ...info, ffmpeg: isFfmpegAvailable(), cookies: cookiesInfo() });
+  // Última versión publicada (cache 6 h): una yt-dlp vieja es la causa nº 1 de
+  // «Requested format is not available». Si no hay red, no se dice nada.
+  const release = await ytDlpReleaseInfo({ waitMs: 2000 });
+  res.json({
+    ...info,
+    ffmpeg: isFfmpegAvailable(),
+    cookies: cookiesInfo(),
+    release,
+    latest_version: release.tag || '',
+    update_available: Boolean(info.installed) && isYtDlpOutdated(info.version, release.tag)
+  });
 });
 
 /**
@@ -2773,6 +2786,8 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       detail: r.ok ? '' : String(r.raw || ''),
       needs_ytdlp: Boolean(r.needs_ytdlp),
       needs_cookies: Boolean(r.needs_cookies),
+      needs_format_fix: Boolean(r.needs_format_fix),
+      clients_tried: r.clients_tried || '',
       using_cookies: Boolean(r.using_cookies),
       cookies: cookiesInfo(),
       yt_dlp: await getYtDlpInfo()
@@ -5849,6 +5864,9 @@ async function startServer() {
     if (getIngestConfig().enabled) {
       await startIngestServer(PORT);
     }
+    // Se consulta la última versión de yt-dlp de fondo: para cuando el operador
+    // abra la pantalla, el aviso de «hay una versión nueva» ya está listo.
+    warmYtDlpReleaseInfo();
     resumeEnabledWk2500Channels();
     startVodFolderAutoSyncScheduler();
     startAutoFailoverMonitor({ switchSource: switchStreamSourceRow });
