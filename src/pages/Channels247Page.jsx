@@ -388,6 +388,26 @@ export default function Channels247Page({ onPreview }) {
                             {modeBadge(ch.liveSource)}
                           </span>
                         )}
+                        {ch.source_kind === 'youtube' && ch.liveSource?.ready && (
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              ch.copyExact
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                : ch.copyVideo
+                                  ? 'bg-sky-500/15 text-sky-300 border-sky-500/40'
+                                  : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                            }`}
+                            title={
+                              ch.copyExact
+                                ? 'Se emite copiando el original: ni el vídeo ni el audio se recodifican (0 % de CPU de vídeo).'
+                                : ch.copyVideo
+                                  ? 'El vídeo se copia tal cual; el audio pasa a AAC por el nivelador global.'
+                                  : 'Se recodifica a H.264 2500k porque el original no es H.264/AAC uniforme.'
+                            }
+                          >
+                            {ch.copyExact ? '⧉ COPIA EXACTA' : ch.copyVideo ? '⧉ COPIA · AUDIO AAC' : '↻ RECODIFICA'}
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-slate-400 mt-0.5">
                         {ch.category_name || '24/7'} •{' '}
@@ -459,6 +479,21 @@ export default function Channels247Page({ onPreview }) {
                     {ch.liveSource?.mode === 'video' && (
                       <div className="text-[11px] text-slate-400">
                         Se repite sin fin{ch.liveSource?.needs_transcode ? ' · recodificado a H.264 1080p' : ' · sin recodificar'}.
+                      </div>
+                    )}
+                    {ch.liveSource?.ready && (
+                      <div className="text-[11px] text-slate-400 flex items-center gap-1">
+                        <span className={ch.copyExact ? 'text-emerald-300' : 'text-amber-300'}>⧉</span>
+                        {ch.copyExact ? (
+                          <span>
+                            Copia exacta (copy/copy): el vídeo y el audio salen tal como llegan
+                            {ch.liveSource?.separated_audio ? ', uniendo sus dos pistas' : ''}, sin recodificar.
+                          </span>
+                        ) : ch.copyVideo ? (
+                          <span>El vídeo se copia sin tocar; el audio pasa a AAC por el nivelador global.</span>
+                        ) : (
+                          <span>Recodificando a H.264 2500k + AAC: el original no es H.264/AAC uniforme.</span>
+                        )}
                       </div>
                     )}
                     {ch.liveSource?.error && (
@@ -825,9 +860,13 @@ export default function Channels247Page({ onPreview }) {
                           <div>
                             {probe.uploader ? `${probe.uploader} · ` : ''}
                             HLS listo para copiar
+                            {probe.separated_audio ? ' · vídeo y audio en pistas separadas (se unen al copiar)' : ''}
                             {probe.expires_in_min !== null && probe.expires_in_min !== undefined
                               ? ` · la URL se renovará en ${probe.expires_in_min} min`
                               : ''}
+                          </div>
+                          <div className="text-emerald-100/80">
+                            ⧉ Copy/copy: no se recodifica nada (0 % de CPU de vídeo).
                           </div>
                         </div>
                       ) : probe.installed ? (

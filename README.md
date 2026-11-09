@@ -205,6 +205,10 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
 | `youtube.com/playlist?list=…` | **Lista completa**: sus vídeos en orden y, al terminar el último, vuelve al primero |
 | `…/live/…` · `/@canal/live` · `/channel/UC…/live` | **Directo**, tal cual (se copia el HLS, sin recodificar) |
 
+- **Copia exacta (copy/copy) en los directos**: el vídeo y el audio salen tal como llegan, sin recodificar (0 % de
+  CPU de vídeo). Si YouTube da el audio en una **pista aparte**, el panel abre las dos y las une al copiar. Sólo el
+  audio se recodifica si tienes encendido el **nivelador de audio global** (y aun así el vídeo se sigue copiando).
+  La tarjeta de cada canal lo dice: `⧉ COPIA EXACTA`, `⧉ COPIA · AUDIO AAC` o `↻ RECODIFICA`.
 - Se toman **hasta 30 vídeos** de una lista; los **directos** que haya dentro y los vídeos sin MP4 utilizable se
   omiten (la vista previa avisa de cuántos).
 - **Sin recodificar** si todo es H.264 + AAC y mide lo mismo; si hay VP9/AV1/HEVC, más de 1080p o una lista con

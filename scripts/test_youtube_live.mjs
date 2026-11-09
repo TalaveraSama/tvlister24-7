@@ -126,6 +126,27 @@ if (isPlaylistUrl) {
 
 if (live) {
   const manifest = seg + '/live/index.m3u8?expire=' + exp + '&gen=' + n;
+  // Directo con vídeo y audio en PISTAS SEPARADAS (como DASH/HLS de YouTube):
+  // hay que abrir las dos y mapearlas para no quedarse sin sonido.
+  if (flags.separateAudio) {
+    const videoUrl = seg + '/live/v1080.m3u8?expire=' + exp + '&gen=' + n;
+    const audioUrl = seg + '/live/a128.m3u8?expire=' + exp + '&gen=' + n;
+    console.log(JSON.stringify({
+      id: 'LIVE' + n,
+      title: 'Directo con pistas separadas',
+      uploader: 'Canal Demo',
+      is_live: true,
+      live_status: 'is_live',
+      manifest_url: '',
+      http_headers: headers,
+      formats: [
+        { format_id: '301', protocol: 'm3u8_native', url: videoUrl, vcodec: 'avc1.64001F', acodec: 'none', tbr: 2500, height: 1080, http_headers: headers },
+        { format_id: '302', protocol: 'm3u8_native', url: seg + '/live/v720.m3u8?expire=' + exp + '&gen=' + n, vcodec: 'avc1.4d401f', acodec: 'none', tbr: 900, height: 720, http_headers: headers },
+        { format_id: '251', protocol: 'm3u8_native', url: audioUrl, vcodec: 'none', acodec: 'mp4a.40.2', tbr: 128, http_headers: headers }
+      ]
+    }));
+    process.exit(0);
+  }
   console.log(JSON.stringify({
     id: 'LIVE' + n,
     title: 'Noticias 24 Horas (directo)',
@@ -339,6 +360,67 @@ try {
   const ended = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/@canaldemo/live' })).data;
   ok('un directo terminado lo dice', ended?.ok === false && /ya terminó/i.test(ended?.error || ''), ended?.error);
   fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+
+  // --- 2b. COPY/COPY del directo: sin recodificar nada --------------------
+  {
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, separateAudio: true }));
+    const sep = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=sep1' })).data;
+    ok('directo con pistas separadas: se detecta', sep?.ok === true && sep?.mode === 'live', JSON.stringify(sep?.error || ''));
+    ok('y se avisa de que el audio va aparte', sep?.separated_audio === true);
+    ok('marcado como copiable (copy/copy)', sep?.copy_video === true && sep?.copy_audio === true);
+    ok('elige la mejor pista de vídeo (1080p)', sep?.copy_kind === 'separate' && sep?.height === 1080, `${sep?.copy_kind} · ${sep?.height}p`);
+
+    fs.writeFileSync(FFMPEG_ARGS, '');
+    const chSep = (await api('POST', '/api/channels247', {
+      name: 'Directo pistas separadas',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: 'https://www.youtube.com/watch?v=sep1',
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    })).data;
+    let rowSep = null;
+    for (let i = 0; i < 40; i += 1) {
+      await sleep(400);
+      rowSep = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === chSep?.id);
+      if (rowSep?.workerPid) break;
+    }
+    ok('el canal arranca con una sola entrada de vídeo', Boolean(rowSep?.workerPid));
+    ok('el panel dice «copia exacta»', rowSep?.copyExact === true, JSON.stringify({ copyExact: rowSep?.copyExact, audioLeveled: rowSep?.audioLeveled }));
+    ok('y que son dos pistas', rowSep?.liveSource?.separated_audio === true);
+
+    const logSep = fs.existsSync(FFMPEG_ARGS) ? fs.readFileSync(FFMPEG_ARGS, 'utf8') : '';
+    const lineSep = logSep.split('\n').find((l) => /a128\.m3u8/.test(l)) || '';
+    ok('el motor abre DOS entradas (vídeo y audio)', (lineSep.match(/-i /g) || []).length === 2, `${(lineSep.match(/-i /g) || []).length} entradas`);
+    ok('las mapea (0:v:0 + 1:a:0)', /-map 0:v:0 -map 1:a:0/.test(lineSep));
+    ok('y no recodifica ni vídeo ni audio', /-c:v copy/.test(lineSep) && /-c:a copy/.test(lineSep) && !/libx264/.test(lineSep));
+
+    // El comando que enseña el panel es exactamente el que se ejecuta.
+    ok('el comando del panel también es copy/copy', /-c:v copy/.test(rowSep?.ffmpegCommand || '') && /-map 0:v:0 -map 1:a:0/.test(rowSep?.ffmpegCommand || ''));
+
+    await api('DELETE', `/api/channels247/${chSep?.id}`);
+    // Con el nivelador de audio encendido, el vídeo se sigue copiando.
+    await api('PUT', '/api/settings', { audio_leveling_enabled: true });
+    const chSep2 = (await api('POST', '/api/channels247', {
+      name: 'Directo con nivelador',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: 'https://www.youtube.com/watch?v=sep1',
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    })).data;
+    let rowSep2 = null;
+    for (let i = 0; i < 40; i += 1) {
+      await sleep(400);
+      rowSep2 = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === chSep2?.id);
+      if (rowSep2?.workerPid) break;
+    }
+    ok('con nivelador ya no es copia exacta', rowSep2?.copyExact === false && rowSep2?.audioLeveled === true);
+    ok('pero el vídeo se sigue copiando', rowSep2?.copyVideo === true);
+    await api('PUT', '/api/settings', { audio_leveling_enabled: false });
+    await api('DELETE', `/api/channels247/${chSep2?.id}`);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
 
   // --- 3. Alta del canal 24/7 con señal de YouTube -----------------------
   const created = (await api('POST', '/api/channels247', {

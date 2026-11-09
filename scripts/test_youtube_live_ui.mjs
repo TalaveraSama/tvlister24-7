@@ -80,8 +80,17 @@ const channels = [
     source_kind: 'youtube',
     live_source_url: 'https://www.youtube.com/@canaldemo/live',
     workerPid: 4321,
+    copyExact: true,
+    copyVideo: true,
+    audioLeveled: false,
     liveSource: {
+      mode: 'live',
       live: true,
+      ready: true,
+      copy_kind: 'separate',
+      separated_audio: true,
+      copy_video: true,
+      copy_audio: true,
       title: 'Noticias 24 Horas (directo)',
       uploader: 'Canal Demo',
       expires_at: '2026-11-04T20:00:00.000Z',
@@ -100,7 +109,10 @@ const channels = [
     source_kind: 'youtube',
     live_source_url: 'https://www.youtube.com/watch?v=abc',
     workerPid: null,
-    liveSource: { live: false, error: 'Ese enlace no está en directo ahora (no es un directo).', has_url: false },
+    copyExact: false,
+    copyVideo: false,
+    audioLeveled: false,
+    liveSource: { live: false, ready: false, mode: 'live', error: 'Ese enlace no está en directo ahora (no es un directo).', has_url: false },
     liveState: { isLiveSource: true, live: null, schedule: [] }
   },
   {
@@ -123,6 +135,9 @@ const channels = [
     source_kind: 'youtube',
     live_source_url: 'https://www.youtube.com/watch?v=vid123',
     workerPid: 5555,
+    copyExact: true,
+    copyVideo: true,
+    audioLeveled: false,
     liveSource: {
       mode: 'video',
       live: false,
@@ -137,6 +152,31 @@ const channels = [
     liveState: { isLiveSource: true, sourceMode: 'video', schedule: [] }
   },
   {
+    id: 12,
+    name: 'Directo con nivelador',
+    category_id: 4,
+    status: 'running',
+    engine_mode: 'ffmpeg',
+    source_kind: 'youtube',
+    live_source_url: 'https://www.youtube.com/@canalnivel/live',
+    workerPid: 7777,
+    copyExact: false,
+    copyVideo: true,
+    audioLeveled: true,
+    liveSource: {
+      mode: 'live',
+      live: true,
+      ready: true,
+      copy_video: true,
+      copy_audio: false,
+      title: 'Señal con nivelador',
+      expires_in_min: 200,
+      has_url: true,
+      error: ''
+    },
+    liveState: { isLiveSource: true, sourceMode: 'live', schedule: [] }
+  },
+  {
     id: 11,
     name: 'Lista 24/7',
     category_id: 4,
@@ -145,10 +185,14 @@ const channels = [
     source_kind: 'youtube',
     live_source_url: 'https://www.youtube.com/playlist?list=PLdemo',
     workerPid: 6666,
+    copyExact: false,
+    copyVideo: false,
+    audioLeveled: false,
     liveSource: {
       mode: 'playlist',
       live: false,
       ready: true,
+      needs_transcode: true,
       title: 'Lista Demo',
       entries: 30,
       total_entries: 32,
@@ -303,7 +347,11 @@ ok(/Lista Demo/.test(text()), 'con el título de la lista');
 ok(/Programa 1/.test(text()), 'y los primeros vídeos de la lista');
 ok(/y 27 más, en bucle/.test(text()), 'avisando de cuántos quedan');
 ok(!/● YOUTUBE EN VIVO/.test(text().split('Lista Demo')[1]?.slice(0, 80) || ''), 'la lista NO se anuncia como directo');
-ok(buttons('Renovar señal').length === 4, 'cada canal de YouTube tiene «Renovar señal»', `${buttons('Renovar señal').length} botones`);
+ok(buttons('Renovar señal').length === 5, 'cada canal de YouTube tiene «Renovar señal»', `${buttons('Renovar señal').length} botones`);
+ok(/⧉ COPIA EXACTA/.test(text()), 'los canales que copian sin recodificar lo dicen');
+ok(/⧉ COPIA · AUDIO AAC/.test(text()), 'y se distingue cuando sólo se copia el vídeo');
+ok(/↻ RECODIFICA/.test(text()), 'y cuando hay que recodificar');
+ok(/uniendo sus dos pistas/.test(text()), 'el directo de pistas separadas explica que las une al copiar');
 
 // ── 2. Renovar señal llama al panel ─────────────────────────────────────────
 const beforeRefresh = calls.length;

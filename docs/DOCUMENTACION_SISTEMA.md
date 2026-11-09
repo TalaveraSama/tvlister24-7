@@ -3029,6 +3029,35 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.55: copy/copy de verdad en los directos de YouTube (también con audio en pista aparte)
+
+El directo ya se copiaba con `-c copy`, pero había dos agujeros:
+
+1. **Audio en pista separada.** YouTube suele dar el directo con el vídeo y el audio en pistas distintas (DASH/HLS).
+   `pickHls` elegía la primera pista de vídeo y el motor la copiaba… **sin sonido** (el comentario que decía que
+   «FFmpeg los une desde el maestro» era falso si se pasaba una pista de vídeo suelta).
+2. **No se sabía si se estaba copiando o recodificando.** Ahora el panel lo dice en cada tarjeta.
+
+Cómo queda:
+
+- `pickHls` devuelve un **plan de copia**: `master` (manifiesto maestro con su grupo de audio), `muxed` (pista con
+  audio y vídeo), `separate` (vídeo + audio sueltos) o `video` (sin audio disponible). Elige la mejor pista de vídeo
+  y guarda aparte la URL del audio, con su **caducidad más próxima** (las dos van firmadas).
+- El motor, en modo directo, abre **dos entradas** (`-i vídeo -i audio`) y las mapea con
+  `-map 0:v:0 -map 1:a:0`, todo con `-c:v copy -c:a copy`: **copy/copy puro, 0 % de CPU**. Con audio mezclado o
+  manifiesto maestro no añade nada: la línea de siempre.
+- El estado del canal guarda `audio_url`, `copy_video`, `copy_audio` y `copy_kind`, y la API devuelve `copyExact`,
+  `copyVideo` y `audioLeveled` por canal, más `separated_audio` y `height` en `/api/youtube/probe`.
+- **Cuándo NO es copia exacta**: (a) si el **nivelador de audio global** está encendido, el audio pasa a AAC (el
+  vídeo se sigue copiando); (b) en un vídeo suelto o una lista que no sea H.264+AAC uniforme, se recodifica a
+  H.264 2500k. La pantalla lo muestra con tres chips: `⧉ COPIA EXACTA`, `⧉ COPIA · AUDIO AAC`, `↻ RECODIFICA`.
+- El comando que enseña la tarjeta (`/api/channels247` → `ffmpegCommand`) incluye las dos entradas y los `-map`, así
+  que se ve exactamente lo que corre.
+
+Pruebas: `test_youtube_live.mjs` **95 OK** — entre ellas: directo con pistas separadas detectado, mejor pista (1080p),
+dos `-i`, `-map 0:v:0 -map 1:a:0`, `-c:v copy -c:a copy` sin `libx264`, `copyExact` en el listado y su apagado al
+encender el nivelador (el vídeo sigue en copia). `test_youtube_live_ui.mjs` **57 OK** con los tres chips.
+
 ### v2.6.54: sin yt-dlp se dice «falta», no «está roto»
 
 `findYtDlp()` daba por bueno el candidato `yt-dlp` (nombre suelto) sin comprobar el `PATH`, así que en un servidor

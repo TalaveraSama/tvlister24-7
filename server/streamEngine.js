@@ -1372,6 +1372,10 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
   // recalculan aquí con los datos reales del estado por si viene de una versión
   // anterior, que no guardaba `needs_transcode`.
   const inputArgs = [];
+  // Mapeo explícito cuando vídeo y audio vienen en pistas separadas del directo
+  // (YouTube DASH/HLS). Sin esto, `-c copy` de la pista de vídeo dejaría el
+  // canal sin sonido.
+  const mapArgs = [];
   let transcode =
     mode === 'playlist' && entries.length
       ? playlistNeedsTranscode(entries)
@@ -1412,8 +1416,14 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
     // `-re` lee a velocidad real y `-stream_loop -1` repite sin fin.
     inputArgs.push('-re', '-stream_loop', '-1', '-i', url);
   } else if (url) {
-    // Directo (o HLS pegado a mano): la fuente ya es continua.
+    // Directo (o HLS pegado a mano): la fuente ya es continua y se copia tal
+    // cual. Si el audio viene en su propia pista, se abre también y se mapea.
     inputArgs.push('-i', url);
+    const audioUrl = String(st?.audio_url || '').trim();
+    if (audioUrl && audioUrl !== url) {
+      inputArgs.push('-i', audioUrl);
+      mapArgs.push('-map', '0:v:0', '-map', '1:a:0');
+    }
   } else {
     return null;
   }
@@ -1444,7 +1454,7 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
   if (headers.Origin) extraHeaders.push(`Origin: ${headers.Origin}`);
   if (extraHeaders.length) args.push('-headers', `${extraHeaders.join('\r\n')}\r\n`);
 
-  args.push(...inputArgs, '-dn', '-sn');
+  args.push(...inputArgs, '-dn', '-sn', ...mapArgs);
 
   // ── Vídeo ─────────────────────────────────────────────────────────────────
   if (transcode) {

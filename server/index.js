@@ -2619,8 +2619,18 @@ app.get('/api/channels247', requireAuth, (req, res) => {
     const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
     const live = liveSourceInfo(ch);
     const liveState = computeChannel247LiveState(ch);
+    // ¿Se emite copiando (0 % de CPU de vídeo) o hay que recodificar?
+    //  · directo/HLS: siempre copia, salvo que el nivelador global toque el audio
+    //  · vídeo o lista: copia si el material ya es H.264+AAC y uniforme
+    const audioLeveled = getGlobalAudioLevelingConfig().enabled;
+    // Un vídeo o una lista se recodifican sólo si mezclan códecs o no son H.264.
+    const needsReencode = ['video', 'playlist'].includes(live.mode) && Boolean(live.needs_transcode);
+    const copyVideo = Boolean(live.copy_video) && !needsReencode;
     return {
       ...ch,
+      copyExact: Boolean(live.ready) && copyVideo && !audioLeveled,
+      copyVideo,
+      audioLeveled,
       workerPid: getWorkerPid(`ch247_${ch.id}`),
       playlist: JSON.parse(ch.playlist_json || '[]'),
       source_kind: live.source_kind,
@@ -2675,6 +2685,15 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       video_id: r.video_id || '',
       list_id: r.list_id || '',
       host: r.host || '',
+      // Copia sin recodificar: con estas banderas, el motor abre las pistas tal
+      // cual (si el audio va aparte, lo mapea) y no gasta CPU de vídeo.
+      copy_kind: r.copy_kind || '',
+      // Calidad de la pista que se va a copiar (para que el operador lo vea).
+      height: Number(r.height) || 0,
+      width: Number(r.width) || 0,
+      separated_audio: Boolean(String(r.audio_url || '').trim()),
+      copy_video: r.copy_video !== false,
+      copy_audio: r.copy_audio !== false,
       duration_sec: Number(r.duration_sec) || 0,
       total_duration_sec: Number(r.total_duration_sec) || 0,
       entries: entries.length,

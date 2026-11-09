@@ -299,40 +299,73 @@ function expiryOf(url) {
   return 0;
 }
 
+/**
+ * Elige la fuente del directo pensando en **copiar sin recodificar** (copy/copy).
+ *
+ * YouTube puede dar el directo de tres formas:
+ *   · `manifest_url` → manifiesto MAESTRO: trae la lista de variantes y el grupo
+ *     de audio, así que FFmpeg elige vídeo y audio solo y `-c copy` funciona.
+ *   · una pista ya mezclada (muxed, HLS con audio y vídeo) → `-c copy` también.
+ *   · vídeo y audio en pistas SEPARADAS (habitual en directos DASH/HLS) → hay
+ *     que abrir las dos y mapearlas, o el canal se queda sin sonido.
+ *
+ * Devuelve `{ url, audio_url, kind, from, headers }`; `audio_url` sólo viene
+ * cuando el audio va por su cuenta.
+ */
 function pickHls(info) {
+  const headersOf = (f) => pickHeaders(f?.http_headers || info?.http_headers || {});
+
   const manifest = String(info?.manifest_url || '');
   if (/m3u8|hls/i.test(manifest)) {
-    return { url: manifest, from: 'manifest_url', headers: info?.http_headers || {} };
+    return { url: manifest, audio_url: '', kind: 'master', from: 'manifest_url', headers: headersOf(info) };
   }
 
   const formats = Array.isArray(info?.formats) ? info.formats : [];
+  if (!formats.length) {
+    if (/\.m3u8(\?|$)/i.test(String(info?.url || ''))) {
+      return { url: String(info.url), audio_url: '', kind: 'unknown', from: 'url', headers: headersOf(info) };
+    }
+    return null;
+  }
+
   const isHls = (f) => /^m3u8/i.test(String(f?.protocol || '')) || /\.m3u8(\?|$)/i.test(String(f?.url || ''));
-  const withAudio = (f) => f?.acodec && f.acodec !== 'none' && f?.vcodec && f.vcodec !== 'none';
+  const hasV = (f) => Boolean(f?.vcodec && f.vcodec !== 'none');
+  const hasA = (f) => Boolean(f?.acodec && f.acodec !== 'none');
   const score = (f) => Number(f?.tbr) || Number(f?.height) * 100 || 0;
 
   const candidates = formats.filter((f) => isHls(f) && f.url);
-  const muxed = candidates.filter(withAudio).sort((a, b) => score(b) - score(a));
+  const muxed = candidates.filter((f) => hasV(f) && hasA(f)).sort((a, b) => score(b) - score(a));
   if (muxed.length) {
     return {
       url: muxed[0].url,
+      audio_url: '',
+      kind: 'muxed',
       from: `format ${muxed[0].format_id || ''}`.trim(),
-      headers: muxed[0].http_headers || info?.http_headers || {}
+      height: Number(muxed[0].height) || 0,
+      width: Number(muxed[0].width) || 0,
+      headers: headersOf(muxed[0])
     };
-  }
-  // HLS con audio y vídeo separados: ffmpeg los une desde el maestro igual.
-  const videoOnly = candidates.filter((f) => f?.vcodec && f.vcodec !== 'none').sort((a, b) => score(b) - score(a));
-  if (videoOnly.length) {
-    return {
-      url: videoOnly[0].url,
-      from: `format ${videoOnly[0].format_id || ''}`.trim(),
-      headers: videoOnly[0].http_headers || info?.http_headers || {}
-    };
-  }
-  if (candidates.length) {
-    return { url: candidates[0].url, from: 'hls', headers: candidates[0].http_headers || info?.http_headers || {} };
   }
 
-  if (/\.m3u8(\?|$)/i.test(String(info?.url || ''))) return { url: info.url, from: 'url' };
+  // Pistas separadas: la mejor de vídeo + una de audio (preferiblemente HLS).
+  const videoOnly = candidates.filter((f) => hasV(f) && !hasA(f)).sort((a, b) => score(b) - score(a));
+  const audioOnly = candidates.filter((f) => hasA(f) && !hasV(f)).sort((a, b) => score(b) - score(a));
+  if (videoOnly.length) {
+    const v = videoOnly[0];
+    return {
+      url: v.url,
+      audio_url: audioOnly[0]?.url || '',
+      kind: audioOnly.length ? 'separate' : 'video',
+      from: `format ${v.format_id || ''}`.trim(),
+      height: Number(v.height) || 0,
+      width: Number(v.width) || 0,
+      headers: headersOf(v)
+    };
+  }
+
+  if (candidates.length) {
+    return { url: candidates[0].url, audio_url: '', kind: 'unknown', from: 'hls', headers: headersOf(candidates[0]) };
+  }
   return null;
 }
 
@@ -643,13 +676,23 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         video_id: String(entry.id || '')
       };
     }
-    const expires = expiryOf(hls.url) || Date.now() + DEFAULT_TTL_MS;
+    // La caducidad más próxima entre vídeo y audio manda (las dos van firmadas).
+    const expiries = [hls.url, hls.audio_url].map(expiryOf).filter((t) => t > 0);
+    const expires = expiries.length ? Math.min(...expiries) : Date.now() + DEFAULT_TTL_MS;
     return {
       ok: true,
       live: true,
       mode: 'live',
       provider: 'youtube',
       url: hls.url,
+      // Sólo cuando el audio viene en su propia pista: el motor abrirá dos
+      // entradas y las mapeará, todo con -c copy.
+      audio_url: hls.audio_url || '',
+      copy_video: true,
+      copy_audio: true,
+      copy_kind: hls.kind || '',
+      height: Number(hls.height) || 0,
+      width: Number(hls.width) || 0,
       from: hls.from,
       headers: pickHeaders(hls.headers),
       host: hostOf(hls.url),
@@ -849,6 +892,12 @@ export async function refreshChannelLiveSource(channel) {
     provider: res.provider || 'youtube',
     mode,
     url: res.url || '',
+    audio_url: res.audio_url || '',
+    copy_video: res.copy_video !== false,
+    copy_audio: res.copy_audio !== false,
+    copy_kind: res.copy_kind || '',
+    height: Number(res.height) || 0,
+    width: Number(res.width) || 0,
     title: res.title || '',
     video_id: res.video_id || '',
     uploader: res.uploader || '',
@@ -866,8 +915,6 @@ export async function refreshChannelLiveSource(channel) {
     skipped_no_format: Number(res.skipped_no_format) || 0,
     duration_sec: Number(res.duration_sec) || 0,
     total_duration_sec: Number(res.total_duration_sec) || 0,
-    height: Number(res.height) || 0,
-    width: Number(res.width) || 0,
     vcodec: String(res.vcodec || ''),
     acodec: String(res.acodec || ''),
     needs_transcode: Boolean(res.needs_transcode),
@@ -914,6 +961,13 @@ export function liveSourceInfo(channel) {
     expires_in_min: st?.expires_at_ms ? Math.max(0, Math.round((st.expires_at_ms - Date.now()) / 60000)) : null,
     error: st?.error || '',
     has_url: Boolean(st?.url),
+    // ── Copia sin recodificar (copy/copy) ──
+    // copy_video/copy_audio: la fuente admite copiarla tal cual.
+    // separated_audio: el audio va en su propia pista y se mapea aparte.
+    copy_video: st ? st.copy_video !== false : false,
+    copy_audio: st ? st.copy_audio !== false : false,
+    separated_audio: Boolean(st?.audio_url),
+    copy_kind: st?.copy_kind || '',
     // Vídeo suelto / lista
     duration_sec: Number(st?.duration_sec) || 0,
     total_duration_sec: Number(st?.total_duration_sec) || 0,
