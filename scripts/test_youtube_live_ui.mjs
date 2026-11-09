@@ -113,6 +113,53 @@ const channels = [
     playlist: [],
     workerPid: null,
     liveState: { schedule: [] }
+  },
+  {
+    id: 10,
+    name: 'Documental 24/7',
+    category_id: 4,
+    status: 'running',
+    engine_mode: 'ffmpeg',
+    source_kind: 'youtube',
+    live_source_url: 'https://www.youtube.com/watch?v=vid123',
+    workerPid: 5555,
+    liveSource: {
+      mode: 'video',
+      live: false,
+      ready: true,
+      title: 'Documental grabado',
+      duration_sec: 3720,
+      needs_transcode: false,
+      expires_in_min: 300,
+      has_url: true,
+      error: ''
+    },
+    liveState: { isLiveSource: true, sourceMode: 'video', schedule: [] }
+  },
+  {
+    id: 11,
+    name: 'Lista 24/7',
+    category_id: 4,
+    status: 'running',
+    engine_mode: 'ffmpeg',
+    source_kind: 'youtube',
+    live_source_url: 'https://www.youtube.com/playlist?list=PLdemo',
+    workerPid: 6666,
+    liveSource: {
+      mode: 'playlist',
+      live: false,
+      ready: true,
+      title: 'Lista Demo',
+      entries: 30,
+      total_entries: 32,
+      total_duration_sec: 9000,
+      entry_titles: ['Programa 1', 'Programa 2', 'Programa 3'],
+      skipped_live: 1,
+      skipped_no_format: 1,
+      has_url: false,
+      error: ''
+    },
+    liveState: { isLiveSource: true, sourceMode: 'playlist', schedule: [] }
   }
 ];
 
@@ -169,9 +216,41 @@ globalThis.fetch = async (url, opts = {}) => {
     if (/watch\?v=abc/.test(body?.url || '')) {
       return json({ ok: false, live: false, error: 'Ese enlace no está en directo ahora (no es un directo).' });
     }
+    if (/playlist\?list=/.test(body?.url || '')) {
+      return json({
+        ok: true,
+        ready: true,
+        live: false,
+        mode: 'playlist',
+        title: 'Lista Demo',
+        entries: 3,
+        total_entries: 4,
+        total_duration_sec: 900,
+        entry_titles: ['Programa 1', 'Programa 2', 'Programa 4'],
+        skipped_live: 1,
+        skipped_no_format: 0,
+        needs_transcode: false,
+        yt_dlp: { installed: true, version: '2026.11.04', bin: 'x', ffmpeg: true }
+      });
+    }
+    if (/watch\?v=/.test(body?.url || '')) {
+      return json({
+        ok: true,
+        ready: true,
+        live: false,
+        mode: 'video',
+        title: 'Documental grabado',
+        duration_sec: 125,
+        needs_transcode: false,
+        expires_in_min: 300,
+        yt_dlp: { installed: true, version: '2026.11.04', bin: 'x', ffmpeg: true }
+      });
+    }
     return json({
       ok: true,
+      ready: true,
       live: true,
+      mode: 'live',
       title: 'Noticias 24 Horas (directo)',
       uploader: 'Canal Demo',
       expires_in_min: 320,
@@ -216,7 +295,15 @@ ok(/● YOUTUBE EN VIVO/.test(text()), 'el canal con directo dice «● YOUTUBE 
 ok(/SIN SEÑAL/.test(text()), 'el canal sin directo dice «SIN SEÑAL»');
 ok(/Noticias 24 Horas \(directo\)/.test(text()), 'muestra el título del directo como programación');
 ok(/Ese enlace no está en directo ahora/.test(text()), 'y el motivo cuando no hay directo');
-ok(buttons('Renovar señal').length === 2, 'cada canal en vivo tiene «Renovar señal»', `${buttons('Renovar señal').length} botones`);
+ok(/VÍDEO EN BUCLE/.test(text()), 'el canal de un vídeo suelto dice «VÍDEO EN BUCLE»');
+ok(/Documental grabado/.test(text()), 'con el título del vídeo');
+ok(/Bucle · 62m 0s/.test(text()), 'y su duración en bucle', (text().match(/Bucle · [^ ]+ [^ ]+/) || [''])[0]);
+ok(/LISTA · 30/.test(text()), 'el canal de una lista dice «LISTA · 30»');
+ok(/Lista Demo/.test(text()), 'con el título de la lista');
+ok(/Programa 1/.test(text()), 'y los primeros vídeos de la lista');
+ok(/y 27 más, en bucle/.test(text()), 'avisando de cuántos quedan');
+ok(!/● YOUTUBE EN VIVO/.test(text().split('Lista Demo')[1]?.slice(0, 80) || ''), 'la lista NO se anuncia como directo');
+ok(buttons('Renovar señal').length === 4, 'cada canal de YouTube tiene «Renovar señal»', `${buttons('Renovar señal').length} botones`);
 
 // ── 2. Renovar señal llama al panel ─────────────────────────────────────────
 const beforeRefresh = calls.length;
@@ -235,14 +322,15 @@ await act(async () => {
 });
 await flush();
 ok(/¿De dónde sale la señal de este canal\?/.test(text()), 'el formulario pregunta de dónde sale la señal');
-ok(buttons('Parrilla 24/7').length > 0 && buttons('Señal en vivo de YouTube').length > 0, 'ofrece las dos fuentes');
+ok(buttons('Parrilla 24/7').length > 0 && buttons('Señal de YouTube (directo, vídeo o lista)').length > 0, 'ofrece las dos fuentes');
 
 await act(async () => {
-  buttons('Señal en vivo de YouTube')[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  buttons('Señal de YouTube (directo, vídeo o lista)')[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
 });
 await flush();
-const urlInput = [...document.querySelectorAll('input')].find((i) => (i.placeholder || '').includes('youtube.com'));
-ok(Boolean(urlInput), 'aparece el campo del enlace del directo');
+const urlInput = [...document.querySelectorAll('input')].find((i) => (i.placeholder || '').includes('@canal/live'));
+ok(Boolean(urlInput), 'aparece el campo del enlace de YouTube');
+ok(/directo.*vídeo suelto.*lista completa|lista completa/s.test(text()), 'y explica que vale directo, vídeo o lista');
 ok(/yt-dlp no está instalado/.test(text()), 'avisa si falta yt-dlp');
 ok(buttons('Instalar yt-dlp').length > 0, 'y ofrece «Instalar yt-dlp»');
 
@@ -319,7 +407,7 @@ await act(async () => {
 });
 await flush();
 await act(async () => {
-  buttons('Señal en vivo de YouTube')[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  buttons('Señal de YouTube (directo, vídeo o lista)')[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
 });
 await flush();
 // Con nombre pero sin enlace: el formulario del navegador ya no estorba.
@@ -335,7 +423,24 @@ ok(
   !calls.slice(beforeEmpty).some((c) => c.url === '/api/channels247' && c.method === 'POST'),
   'con el enlace vacío no se manda nada al panel'
 );
-ok(/Pega el enlace del directo de YouTube antes de guardar/.test(text()), 'y lo dice en el formulario');
+ok(/Pega el enlace de YouTube \(directo, vídeo o lista\) antes de guardar/.test(text()), 'y lo dice en el formulario');
+
+// ── 7. Comprobar una LISTA completa y un VÍDEO suelto ───────────────────────
+{
+  const linkInput = [...document.querySelectorAll('input')].find((i) => (i.placeholder || '').includes('@canal/live'));
+  ok(Boolean(linkInput), 'el mismo formulario sirve para la lista');
+  if (linkInput) await setValue(linkInput, 'https://www.youtube.com/playlist?list=PLdemo');
+  await clickText('Comprobar señal');
+  ok(/LISTA · 3 vídeos — Lista Demo/.test(text()), 'comprobar una lista dice cuántos vídeos trae y su título');
+  ok(/se emiten en orden y vuelven a empezar/.test(text()), 'y explica que dan la vuelta');
+  ok(/1\. Programa 1/.test(text()), 'con la lista de programas');
+  ok(/1 directo\(s\) de la lista se omiten/.test(text()), 'y avisa de los directos que se omiten');
+
+  if (linkInput) await setValue(linkInput, 'https://www.youtube.com/watch?v=vid123');
+  await clickText('Comprobar señal');
+  ok(/VÍDEO EN BUCLE — Documental grabado/.test(text()), 'comprobar un vídeo suelto dice «VÍDEO EN BUCLE»');
+  ok(/se repite sin fin/.test(text()), 'y que se repite sin fin');
+}
 
 console.log(fails.length ? `\n${fails.length} fallo(s)` : '\nTODO OK');
 process.exit(fails.length ? 1 : 0);

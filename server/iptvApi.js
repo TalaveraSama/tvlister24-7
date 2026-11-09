@@ -12,7 +12,7 @@ import { getStreamHomeNodeId, isHomeNodeUsable } from './nodeAffinity.js';
 import { resolveDeviceForLine } from './deviceRegistry.js';
 import { signToken } from './auth.js';
 import { extractClientIp, signUpstreamUrl, verifyUpstreamUrl, verifyToken, checkLoginRateLimit, clearLoginRateLimit, checkCredentialGate, noteCredentialFailure, clearCredentialFailures } from './auth.js';
-import { isLiveChannel, ensureLiveState, liveUrlForPlayback } from './youtubeLive.js';
+import { isLiveChannel, ensureLiveState, liveUrlForPlayback, liveModeFor } from './youtubeLive.js';
 import {
   registerDevice,
   verifyDeviceToken,
@@ -1635,18 +1635,29 @@ async function serveLiveForLine(req, res, { line, username, password, streamSpec
           .send('El canal en vivo está arrancando: el motor todavía no tiene segmentos. Reintenta en unos segundos.');
       }
       let liveUrl = liveUrlForPlayback(ch);
+      let liveState = null;
       if (!liveUrl) {
         try {
-          const st = await ensureLiveState(ch);
-          liveUrl = st?.ok && st?.url ? st.url : '';
-          if (!liveUrl) {
-            return res.status(503).send(`Señal en vivo no disponible: ${st?.error || 'sin directo ahora'}`);
-          }
+          liveState = await ensureLiveState(ch);
+          liveUrl = liveState?.ok && liveState?.url ? liveState.url : '';
         } catch {
           liveUrl = '';
         }
       }
-      if (!liveUrl) return res.status(503).send('Señal en vivo no disponible');
+      // Una lista de vídeos no se puede entregar con un 302 (el cliente tendría
+      // que ir encadenando URLs): sólo el motor FFmpeg la une en un HLS.
+      const modeNow = liveState?.mode || liveModeFor(db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(ch.id) || ch);
+      if (modeNow === 'playlist') {
+        return res
+          .status(503)
+          .send(
+            'Este canal emite una LISTA de YouTube: actívalo con motor FFmpeg y el panel la une en un solo HLS. ' +
+              'Sin motor sólo se pueden entregar directos o vídeos sueltos.'
+          );
+      }
+      if (!liveUrl) {
+        return res.status(503).send(`Señal en vivo no disponible: ${liveState?.error || 'sin señal ahora'}`);
+      }
       if (protocol === 'MPEG-TS') {
         return res
           .status(503)

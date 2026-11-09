@@ -106,7 +106,11 @@ import {
   ensureLiveState,
   liveSourceInfo,
   cookiesInfo,
-  needsRefresh
+  needsRefresh,
+  liveReady,
+  liveFingerprint,
+  liveModeFor,
+  liveEntriesFor
 } from './youtubeLive.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
@@ -2508,9 +2512,10 @@ async function launchChannel247WorkerIfConfigured(chId) {
     // La guardia (`startLiveSourceWatchdog`) es la única que renueva la URL y
     // reinicia el motor cuando cambia; aquí sólo se asegura de que haya una.
     return ensureLiveState(ch).then((st) => {
-      if (!st?.ok || !st?.url) return null;
+      if (!st?.ok || !liveReady(st)) return null;
       return startSupervisedWorker(`ch247_${ch.id}`, () => {
-        // En cada reintento se lee la URL VIVA de la base, no la del arranque.
+        // En cada reintento se lee la URL VIVA de la base, no la del arranque
+        // (las URLs firmadas de YouTube caducan y las lista se renuevan enteras).
         const row = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(ch.id);
         let url = '';
         try {
@@ -2563,25 +2568,28 @@ function startLiveSourceWatchdog() {
     for (const ch of rows) {
       try {
         if (!needsRefresh(ch)) {
-          // Al aire y con URL vigente: sólo se comprueba que el motor siga vivo.
+          // Al aire y con señal vigente: sólo se comprueba que el motor siga vivo.
           if (ch.engine_mode === 'ffmpeg' && isFfmpegAvailable() && !getWorkerPid(`ch247_${ch.id}`)) {
             const st = JSON.parse(ch.live_source_state || '{}');
-            if (st?.url) launchChannel247WorkerIfConfigured(ch.id);
+            if (liveReady(st)) launchChannel247WorkerIfConfigured(ch.id);
           }
           continue;
         }
         const before = JSON.parse(ch.live_source_state || '{}');
         const st = await refreshChannelLiveSource(ch);
-        const changed = Boolean(st?.url) && st.url !== before.url;
+        // La huella incluye el modo y (en listas) las entradas: si cambia lo que
+        // se emite —URL nueva, otra lista, otro vídeo— el motor se reinicia.
+        const changed = Boolean(st?.ok) && liveFingerprint(st) !== liveFingerprint(before);
         const hadWorker = Boolean(getWorkerPid(`ch247_${ch.id}`));
-        if (st?.url && ch.engine_mode === 'ffmpeg') {
+        if (liveReady(st) && ch.engine_mode === 'ffmpeg') {
           if (!hadWorker) launchChannel247WorkerIfConfigured(ch.id);
           else if (changed) {
             stopWorker(`ch247_${ch.id}`);
             launchChannel247WorkerIfConfigured(ch.id);
           }
-        } else if (!st?.url && hadWorker) {
-          // El directo terminó: se apaga el motor para no dejar segmentos viejos.
+        } else if (!liveReady(st) && hadWorker) {
+          // El directo terminó (o la lista se quedó vacía): se apaga el motor
+          // para no dejar segmentos viejos al aire.
           stopWorker(`ch247_${ch.id}`);
         }
       } catch {
@@ -2653,15 +2661,28 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
   if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL.' });
   try {
     const r = await resolveLiveSource(url);
+    const entries = Array.isArray(r.entries) ? r.entries : [];
     res.json({
       ok: Boolean(r.ok),
       live: Boolean(r.live),
+      ready: Boolean(r.ok),
+      // live | video | playlist | hls
+      mode: r.mode || '',
       provider: r.provider || '',
       title: r.title || '',
       uploader: r.uploader || '',
       live_status: r.live_status || '',
       video_id: r.video_id || '',
+      list_id: r.list_id || '',
       host: r.host || '',
+      duration_sec: Number(r.duration_sec) || 0,
+      total_duration_sec: Number(r.total_duration_sec) || 0,
+      entries: entries.length,
+      total_entries: Number(r.total_entries) || entries.length,
+      entry_titles: entries.slice(0, 8).map((e) => e.title).filter(Boolean),
+      skipped_live: Number(r.skipped_live) || 0,
+      skipped_no_format: Number(r.skipped_no_format) || 0,
+      needs_transcode: Boolean(r.needs_transcode),
       expires_at: r.expires_at_ms ? new Date(r.expires_at_ms).toISOString() : '',
       expires_in_min: r.expires_at_ms ? Math.max(0, Math.round((r.expires_at_ms - Date.now()) / 60000)) : null,
       error: r.ok ? '' : r.error || 'sin señal',
@@ -2680,12 +2701,14 @@ app.post('/api/channels247/:id/live-source/refresh', requireAuth, requireAdmin, 
   if (!ch) return res.status(404).json({ error: 'Canal 24/7 no encontrado' });
   if (!isLiveChannel(ch)) return res.status(400).json({ error: 'Ese canal no usa una señal en vivo.' });
   const st = await refreshChannelLiveSource(ch);
+  const ready = liveReady(st);
   const fresh = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
-  if (st.ok && fresh.engine_mode === 'ffmpeg') {
+  if (ready && fresh.engine_mode === 'ffmpeg') {
     stopWorker(`ch247_${id}`);
     await launchChannel247WorkerIfConfigured(id);
-  } else if (!st.ok) {
-    // Sin directo: se apaga el motor para no dejar segmentos viejos al aire.
+  } else if (!ready) {
+    // Sin señal (directo terminado o lista vacía): se apaga el motor para no
+    // dejar segmentos viejos al aire.
     stopWorker(`ch247_${id}`);
   }
   const fresh2 = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);

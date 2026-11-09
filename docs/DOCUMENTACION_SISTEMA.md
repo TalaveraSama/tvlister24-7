@@ -3029,6 +3029,50 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.53: un vídeo suelto de YouTube en bucle y una lista completa como canal 24/7
+
+Antes, la fuente de YouTube de un canal 24/7 sólo aceptaba **directos**: un vídeo normal se rechazaba («no está en
+directo»). Ahora el mismo campo accepta las tres cosas y el panel elige solo lo que corresponde:
+
+| Lo que pegas | Lo que hace el panel |
+| --- | --- |
+| `youtube.com/watch?v=…`, `youtu.be/…`, `/shorts/…` | **Vídeo en bucle**: `-re -stream_loop -1`, el mismo vídeo sin fin |
+| `youtube.com/playlist?list=…` | **Lista completa**: sus vídeos en orden y, al acabar el último, vuelve al primero |
+| `…/live/…`, `/@canal/live`, `/channel/UC…/live` | **Directo**, como en la v2.6.48 (`-c copy` del HLS) |
+| `watch?v=…&list=…` | El **vídeo** que has pegado (la lista sólo si el enlace es de la lista) |
+
+Cómo funciona por dentro:
+
+- **yt-dlp** devuelve, además del directo, el archivo **progresivo** (MP4/WebM con audio y vídeo juntos, ≤1080p) que
+  FFmpeg puede leer en bucle sin descargar el vídeo entero. De una lista se toman **hasta 30 vídeos** (`--playlist-end 30
+  --ignore-errors`); cada entrada se resuelve con sus formatos.
+- **Se omiten los directos** que haya dentro de una lista (una URL en vivo no tiene principio ni fin para encadenarla)
+  y los vídeos sin MP4 utilizable. La vista previa lo dice: «N directo(s) de la lista se omiten».
+- **Sin recodificar** cuando el material ya es H.264 + AAC y todas las partes de la lista miden lo mismo
+  (`-c:v copy`, 0 % de CPU). Se recodifica a **H.264 2500k, AAC 128k, 30 fps, techo 1080p** sólo si hace falta:
+  VP9/AV1/HEVC, más de 1080p, audio que no sea AAC/MP3, o una lista con resoluciones/códecs mezclados (si no, el
+  cliente se queda sin imagen a mitad de la lista).
+- La lista se escribe como **manifiesto `ffconcat`** (`source.txt` en la carpeta del motor) y se lee con
+  `-f concat -safe 0 -stream_loop -1`: al terminar la última entrada vuelve a la primera sin cortes. El archivo se
+  reescribe en cada arranque porque las URLs de YouTube van firmadas.
+- La **guardia** sigue renovando antes de que caduque la URL (para una lista, la caducidad más próxima de sus
+  entradas) y reinicia el motor sólo si cambia la **huella** de lo que se emite (`modo|URL` o
+  `playlist|nº|primera URL`). Si el enlace no da nada, reintenta cada 5 min.
+- **Un directo terminado no se convierte en bucle por sorpresa**: se informa («ese directo ya terminó») y el canal
+  queda SIN SEÑAL hasta que le pongas otro enlace, un vídeo o una lista.
+- En modo **virtual** (sin motor) se puede entregar un directo o un vídeo suelto con 302, pero **una lista no**:
+  responde 503 explicando que active el motor FFmpeg, que es el que la une en un solo HLS.
+
+La pantalla de **Canales 24/7** lo muestra claro: el badge dice `● YOUTUBE EN VIVO`, `▶ VÍDEO EN BUCLE` o
+`LISTA · N`; la caja de la señal dice la duración del vídeo («Bucle · 62m») o los minutos totales de la lista y sus
+primeros programas; **Comprobar señal** avisa de si se recodifica, de cuántos vídeos trae la lista y de los que se
+omiten. Endpoints nuevos: `POST /api/youtube/probe` devuelve `mode`, `entries`, `total_duration_sec`,
+`entry_titles`, `needs_transcode`, `skipped_live` y `skipped_no_format`.
+
+Pruebas: `scripts/test_youtube_live.mjs` (78 OK, con vídeo suelto, VP9 que recodifica, lista de 3 con manifiesto
+`ffconcat`, renovación y caída del directo) y `scripts/test_youtube_live_ui.mjs` (53 OK, con los badges de vídeo y
+lista, la comprobación de una lista y de un vídeo). Los canales de parrilla, el UDP/CATV y Flussonic no cambian.
+
 ### v2.6.52: la copia temporal del desinstalador se borra sola
 
 Para poder borrar la carpeta del panel mientras se ejecuta, `uninstall.sh` **se copia a `/tmp`**

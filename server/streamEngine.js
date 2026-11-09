@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, withSqliteBusyRetry } from './db.js';
 import { resolveFlussonicUrlCandidates } from './flussonicImporter.js';
+import { playlistNeedsTranscode, videoNeedsTranscode, audioNeedsTranscode } from './youtubeLive.js';
 
 // ============================================================================
 // SOURCE ÚNICO POR CANAL
@@ -503,46 +504,67 @@ function parseLiveStateJson(channel) {
 }
 
 export function computeChannel247LiveState(channel, nowMs = Date.now()) {
-  // Canal alimentado por una señal en vivo (YouTube / HLS): no hay reloj de
-  // parrilla. Se informa la señal, su título y cuándo hay que renovar la URL.
+  // Canal alimentado por una señal de YouTube / HLS: no hay reloj de parrilla.
+  // Hay tres formas de emitir y cada una se informa como es:
+  //   · directo  → la señal tal cual, sin duración
+  //   · vídeo    → un archivo que se repite sin fin
+  //   · lista    → N vídeos en orden, en bucle
   if (String(channel?.source_kind || 'playlist') === 'youtube') {
     const st = parseLiveStateJson(channel);
-    const live = Boolean(st?.url && st?.live);
+    const mode = String(st?.mode || 'live');
+    const entries = Array.isArray(st?.entries) ? st.entries.filter((e) => e && e.url) : [];
+    const ready = mode === 'playlist' ? entries.length > 0 : Boolean(String(st?.url || '').trim());
+    const isLive = Boolean(ready && st?.live);
     const nowSec = Math.floor(nowMs / 1000);
     const title = st?.title || channel?.name || 'Señal en vivo';
     const slotSec = 2 * 3600;
     const schedule = Array.from({ length: 6 }, (_, i) => ({
       slot: i,
       title,
-      url: st?.url || '',
-      duration_sec: slotSec,
+      url: st?.url || entries[0]?.url || '',
+      duration_sec: mode === 'video' ? Number(st?.duration_sec) || slotSec : slotSec,
       start_epoch: nowSec + i * slotSec,
       end_epoch: nowSec + (i + 1) * slotSec,
       start_iso: new Date((nowSec + i * slotSec) * 1000).toISOString(),
       end_iso: new Date((nowSec + (i + 1) * slotSec) * 1000).toISOString(),
       is_current: i === 0
     }));
+
+    let currentItem = null;
+    if (ready) {
+      if (mode === 'playlist') {
+        currentItem = { id: entries[0].id || 'lista-1', title: entries[0].title || title, url: entries[0].url, duration_sec: Number(entries[0].duration_sec) || 0 };
+      } else {
+        currentItem = { id: mode === 'video' ? 'video' : 'live', title, url: st.url, duration_sec: mode === 'video' ? Number(st?.duration_sec) || 0 : 0 };
+      }
+    }
     return {
-      isPlaying: channel?.status === 'running' && live,
+      isPlaying: channel?.status === 'running' && ready,
       isLiveSource: true,
-      totalDurationSec: 0,
-      playlistCount: 0,
+      sourceMode: mode,
+      totalDurationSec: mode === 'playlist' ? Number(st?.total_duration_sec) || 0 : Number(st?.duration_sec) || 0,
+      playlistCount: entries.length,
       currentIndex: 0,
-      currentItem: live
-        ? { id: 'live', title, url: st.url, duration_sec: 0 }
+      currentItem,
+      nextItem: mode === 'playlist' && entries.length > 1
+        ? { id: entries[1].id || 'lista-2', title: entries[1].title || '', url: entries[1].url, duration_sec: Number(entries[1].duration_sec) || 0 }
         : null,
-      nextItem: null,
       seekOffsetSec: 0,
       remainingSec: 0,
       progressPct: 0,
       live: {
-        live,
+        live: isLive,
+        ready,
+        mode,
         title: st?.title || '',
         uploader: st?.uploader || '',
         status: st?.live_status || '',
         error: st?.error || '',
         resolved_at: st?.checked_at || '',
-        expires_at_ms: Number(st?.expires_at_ms) || 0
+        expires_at_ms: Number(st?.expires_at_ms) || 0,
+        duration_sec: Number(st?.duration_sec) || 0,
+        entry_count: entries.length,
+        total_duration_sec: Number(st?.total_duration_sec) || 0
       },
       schedule
     };
@@ -1305,20 +1327,27 @@ export function buildFfmpegArgsForChannel247(channel, profile) {
 }
 
 /**
- * Motor de un canal 24/7 alimentado por una señal en vivo (YouTube / HLS).
+ * Motor de un canal 24/7 alimentado por YouTube / HLS.
  *
- * Diferencias con la parrilla (`buildFfmpegArgsForChannel247`):
- *  · no hay concat ni `-stream_loop`: la fuente ya es continua;
- *  · **no se transcodifica**: vídeo y audio se copian (0 % de CPU en el VPS),
- *    salvo que el nivelador de audio global esté activo (ahí sólo el audio);
- *  · se pasan las cabeceras que exige la URL firmada de YouTube.
+ * Tres formas de entrada, todas continuas:
+ *   · directo  → se copia el HLS tal cual (`-c copy`, 0 % de CPU).
+ *   · vídeo    → `-re -stream_loop -1`: el mismo vídeo una y otra vez.
+ *   · lista    → `-f concat` con las URLs en orden + `-stream_loop -1`:
+ *                cuando acaba la última vuelve a la primera, sin cortes.
  *
- * La URL caduca: `argsBuilder` del supervisor vuelve a llamar a esta función en
- * cada intento, y `index.js` renueva el manifiesto antes de que expire.
+ * No se recodifica salvo que haga falta: VP9/AV1/HEVC, más de 1080p, audio que
+ * no sea AAC/MP3, o una lista con trozos de distinta resolución o códec (si no,
+ * el cliente se queda sin imagen a mitad de la lista). Cuando se recodifica es
+ * H.264 + AAC a 2500k, que cualquier decodificador aguanta.
+ *
+ * La URL firmada caduca: `argsBuilder` del supervisor vuelve a llamar a esta
+ * función en cada intento, y la guardia de `index.js` renueva antes de que expire.
  */
 export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
-  const url = String(inputUrl || '').trim();
-  if (!url) return null;
+  const st = parseLiveStateJson(channel) || {};
+  const mode = String(st.mode || 'live');
+  const entries = Array.isArray(st.entries) ? st.entries.filter((e) => e && e.url) : [];
+  const url = String(inputUrl || st.url || '').trim();
 
   const outDir = resolveHlsDirForKey(`ch247_${channel.id}`);
   fs.mkdirSync(outDir, { recursive: true });
@@ -1333,10 +1362,60 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
 
   let headers = {};
   try {
-    const st = typeof channel?.live_source_state === 'string' ? JSON.parse(channel.live_source_state || '{}') : null;
     headers = st?.headers && typeof st.headers === 'object' ? st.headers : {};
   } catch {
     headers = {};
+  }
+
+  // ── Entrada ───────────────────────────────────────────────────────────────
+  // Se recodifica sólo cuando hace falta (ver youtubeLive.js). Las reglas se
+  // recalculan aquí con los datos reales del estado por si viene de una versión
+  // anterior, que no guardaba `needs_transcode`.
+  const inputArgs = [];
+  let transcode =
+    mode === 'playlist' && entries.length
+      ? playlistNeedsTranscode(entries)
+      : mode === 'video'
+        ? videoNeedsTranscode(st) || audioNeedsTranscode(st)
+        : Boolean(st.needs_transcode);
+
+  if (mode === 'playlist' && entries.length) {
+    // Manifiesto de concatenación: se reescribe en cada arranque porque las
+    // URLs de YouTube van firmadas y cambian al renovar.
+    const listPath = path.join(outDir, 'source.txt');
+    const lines = ['ffconcat version 1.0'];
+    for (const e of entries) {
+      const safe = String(e.url).replace(/'/g, "'\\''");
+      lines.push(`file '${safe}'`);
+    }
+    try {
+      const content = `${lines.join('\n')}\n`;
+      // Sólo se reescribe si de verdad cambió: esta función también se llama
+      // para enseñar el comando en el panel y no debe tocar el archivo que
+      // FFmpeg está leyendo. La sustitución es atómica (tmp + rename).
+      let prev = '';
+      try {
+        prev = fs.readFileSync(listPath, 'utf8');
+      } catch {
+        prev = '';
+      }
+      if (prev !== content) {
+        const tmpPath = `${listPath}.tmp`;
+        fs.writeFileSync(tmpPath, content);
+        fs.renameSync(tmpPath, listPath);
+      }
+    } catch {
+      return null;
+    }
+    inputArgs.push('-re', '-stream_loop', '-1', '-f', 'concat', '-safe', '0', '-i', listPath);
+  } else if (mode === 'video' && url) {
+    // `-re` lee a velocidad real y `-stream_loop -1` repite sin fin.
+    inputArgs.push('-re', '-stream_loop', '-1', '-i', url);
+  } else if (url) {
+    // Directo (o HLS pegado a mano): la fuente ya es continua.
+    inputArgs.push('-i', url);
+  } else {
+    return null;
   }
 
   const args = [
@@ -1365,10 +1444,49 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
   if (headers.Origin) extraHeaders.push(`Origin: ${headers.Origin}`);
   if (extraHeaders.length) args.push('-headers', `${extraHeaders.join('\r\n')}\r\n`);
 
-  args.push('-i', url, '-dn', '-sn', '-c:v', 'copy');
+  args.push(...inputArgs, '-dn', '-sn');
 
+  // ── Vídeo ─────────────────────────────────────────────────────────────────
+  if (transcode) {
+    args.push(
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-profile:v',
+      'main',
+      '-pix_fmt',
+      'yuv420p',
+      // Nunca más de 1080p: un vídeo 4K del móvil no debe tumbar el VPS.
+      '-vf',
+      "scale=w='min(1920,iw)':h=-2",
+      '-r',
+      '30',
+      '-g',
+      '60',
+      '-b:v',
+      '2500k',
+      '-maxrate',
+      '3000k',
+      '-bufsize',
+      '5000k'
+    );
+  } else {
+    args.push('-c:v', 'copy');
+  }
+
+  // ── Audio ─────────────────────────────────────────────────────────────────
+  // Nivelador global activo → su filtro (como siempre). Si no, sólo se pasa a
+  // AAC 128k cuando hay que recodificar el vídeo o el audio no es compatible
+  // (opu s/vorbis o una lista con códecs mezclados).
+  const audioCodecOk =
+    mode === 'playlist' && entries.length
+      ? entries.every((e) => /^(mp4a|aac|mp3)/i.test(String(e.acodec || '')))
+      : /^(mp4a|aac|mp3)/i.test(String(st.acodec || 'aac'));
   if (globalAudio.enabled) {
     args.push('-af', buildAudioLevelingFilter(globalAudio.preset), '-ac', '2', '-ar', '48000', '-c:a', 'aac', '-b:a', aBitrate);
+  } else if (transcode || !audioCodecOk) {
+    args.push('-ac', '2', '-ar', '48000', '-c:a', 'aac', '-b:a', aBitrate);
   } else {
     args.push('-c:a', 'copy');
   }

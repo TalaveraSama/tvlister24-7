@@ -56,6 +56,12 @@ const origin = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Content-Length': SEGMENT.length });
     return res.end(SEGMENT);
   }
+  // Archivos «mp4» de mentira para los vídeos sueltos y las listas (el FFmpeg
+  // de la prueba no los lee: sólo interesa que la URL sea la correcta).
+  if (/\.mp4$/.test(url.pathname)) {
+    res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': SEGMENT.length });
+    return res.end(SEGMENT);
+  }
   res.writeHead(404).end('no');
 });
 await new Promise((r) => origin.listen(ORIGIN_PORT, '127.0.0.1', r));
@@ -73,26 +79,78 @@ const fs = require('fs');
 const args = process.argv.slice(2);
 if (args.includes('--version')) { console.log('2026.11.04-fake'); process.exit(0); }
 const counter = ${JSON.stringify(YT_COUNTER)};
-const flags = JSON.parse(fs.readFileSync(${JSON.stringify(YT_FLAGS)}, 'utf8') || '{}');
+const flagsFile = ${JSON.stringify(YT_FLAGS)};
+const flags = JSON.parse(fs.readFileSync(flagsFile, 'utf8') || '{}');
 let n = 0;
 try { n = Number(fs.readFileSync(counter, 'utf8')) || 0; } catch {}
 n += 1;
 fs.writeFileSync(counter, String(n));
-const live = flags.live !== false;
+
+const target = String(args[args.length - 1] || '');
+const isPlaylistUrl = /playlist\\?list=|[?&]list=/.test(target) && !args.includes('--no-playlist');
 const ttl = Number(flags.ttl || ${YT_TTL});
 const exp = Math.floor(Date.now() / 1000) + ttl;
-const manifest = 'http://127.0.0.1:${ORIGIN_PORT}/live/index.m3u8?expire=' + exp + '&gen=' + n;
-const out = {
-  id: 'LIVE' + n,
-  title: live ? 'Noticias 24 Horas (directo)' : 'Programa grabado',
+const seg = 'http://127.0.0.1:${ORIGIN_PORT}';
+const live = flags.live !== false;
+const wantVideo = flags.video !== false;
+const codec = flags.codec === 'vp9' ? 'vp09.00.10.08' : 'avc1.64001F';
+const headers = { 'User-Agent': 'Mozilla/5.0 (FakeYT)', Referer: 'https://www.youtube.com/' };
+const mp4 = (name, extra) => Object.assign({
+  format_id: '22', ext: 'mp4', protocol: 'https', url: seg + '/video' + name + '.mp4?expire=' + exp + '&gen=' + n,
+  vcodec: codec, acodec: 'mp4a.40.2', width: 1280, height: 720, tbr: 1500, http_headers: headers
+}, extra || {});
+
+if (isPlaylistUrl) {
+  const count = Number(flags.entries || 3);
+  const entries = [];
+  for (let i = 1; i <= count; i += 1) {
+    if (flags.withLive && i === 2) {
+      entries.push({ id: 'LIVE' + i, title: 'Directo dentro de la lista (se omite)', is_live: true, live_status: 'is_live', formats: [] });
+      continue;
+    }
+    if (flags.withBadEntry && i === 3) {
+      entries.push({ id: 'BAD' + i, title: 'Sin formato utilizable', duration: 60, formats: [] });
+      continue;
+    }
+    entries.push({
+      id: 'VID' + i,
+      title: 'Programa ' + i,
+      duration: Number(flags.duration || 300),
+      live_status: 'not_live',
+      formats: [mp4(String(i))]
+    });
+  }
+  console.log(JSON.stringify({ _type: 'playlist', id: 'PLdemo', title: flags.listTitle || 'Lista Demo', uploader: 'Canal Demo', entries }));
+  process.exit(0);
+}
+
+if (live) {
+  const manifest = seg + '/live/index.m3u8?expire=' + exp + '&gen=' + n;
+  console.log(JSON.stringify({
+    id: 'LIVE' + n,
+    title: 'Noticias 24 Horas (directo)',
+    uploader: 'Canal Demo',
+    is_live: true,
+    live_status: 'is_live',
+    manifest_url: manifest,
+    http_headers: headers,
+    formats: [{ format_id: '95', protocol: 'm3u8_native', url: manifest, vcodec: 'avc1', acodec: 'mp4a', tbr: 1500, height: 720, http_headers: headers }]
+  }));
+  process.exit(0);
+}
+
+// Un directo que ya terminó: si no queda archivo, no hay nada que emitir.
+const looksLive = /\\/live\\/?$|@canal\\/live|\\/live\\?/.test(target);
+console.log(JSON.stringify({
+  id: 'VID' + n,
+  title: flags.title || (looksLive ? 'Directo terminado' : 'Documental grabado'),
   uploader: 'Canal Demo',
-  is_live: live,
-  live_status: live ? 'is_live' : 'not_live',
-  manifest_url: live ? manifest : '',
-  http_headers: { 'User-Agent': 'Mozilla/5.0 (FakeYT)', Referer: 'https://www.youtube.com/' },
-  formats: live ? [{ format_id: '95', protocol: 'm3u8_native', url: manifest, vcodec: 'avc1', acodec: 'mp4a', tbr: 1500, height: 720, http_headers: { 'User-Agent': 'Mozilla/5.0 (FakeYT)' } }] : []
-};
-console.log(JSON.stringify(out));
+  duration: Number(flags.duration || 125),
+  is_live: false,
+  live_status: looksLive ? 'post_live' : 'not_live',
+  http_headers: headers,
+  formats: wantVideo ? [mp4('x')] : []
+}));
 `,
   { mode: 0o755 }
 );
@@ -106,6 +164,7 @@ const ytCalls = () => {
 
 // ==================== FFmpeg de mentira (escribe HLS) ====================
 const FAKE_FFMPEG = path.join(TMP, 'ffmpeg');
+const FFMPEG_ARGS = path.join(TMP, 'ffmpeg-args.log');
 fs.writeFileSync(
   FAKE_FFMPEG,
   `#!/usr/bin/env node
@@ -113,6 +172,7 @@ const fs = require('fs');
 const path = require('path');
 const args = process.argv.slice(2);
 if (args.includes('-version')) { console.log('ffmpeg version 6.0-fake'); process.exit(0); }
+try { fs.appendFileSync(${JSON.stringify(FFMPEG_ARGS)}, args.join(' ') + '\\n'); } catch {}
 const out = args[args.length - 1];
 const dir = path.dirname(out);
 fs.mkdirSync(dir, { recursive: true });
@@ -228,11 +288,36 @@ try {
   ok('trae el título del directo', probe?.title === 'Noticias 24 Horas (directo)', probe?.title);
   ok('y cuándo hay que renovar la URL', probe?.expires_in_min > 0, `${probe?.expires_in_min} min`);
 
-  const notLive = (await api('POST', '/api/youtube/probe', { url: 'https://youtu.be/abc123' })).data;
-  ok('un vídeo normal se rechaza con motivo', notLive?.live === true || notLive?.ok === true); // sigue en vivo por el fake
-  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false }));
-  const offAir = (await api('POST', '/api/youtube/probe', { url: 'https://youtu.be/abc123' })).data;
-  ok('sin directo lo dice claro', offAir?.ok === false && /no está en directo/i.test(offAir?.error || ''), offAir?.error);
+  // Un vídeo normal ya no se rechaza: se emite en bucle como 24/7.
+  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, video: true }));
+  const vid = (await api('POST', '/api/youtube/probe', { url: 'https://youtu.be/abc123' })).data;
+  ok('un vídeo suelto se acepta (en bucle)', vid?.ok === true && vid?.mode === 'video', JSON.stringify({ mode: vid?.mode, error: vid?.error }));
+  ok('con su duración', vid?.duration_sec === 125, `${vid?.duration_sec}s`);
+  ok('y sin recodificar (H.264 + AAC 720p)', vid?.needs_transcode === false);
+  ok('dice que no es un directo', vid?.live === false);
+
+  // Si el vídeo no ofrece MP4 (sólo HLS/DASH), se explica por qué no vale.
+  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, video: false }));
+  const noMp4 = (await api('POST', '/api/youtube/probe', { url: 'https://youtu.be/abc123' })).data;
+  ok('sin MP4 utilizable lo dice claro', noMp4?.ok === false && /MP4\/WebM/.test(noMp4?.error || ''), noMp4?.error);
+
+  // Lista completa: sus vídeos en orden; se omiten los directos y lo inservible.
+  fs.writeFileSync(
+    YT_FLAGS,
+    JSON.stringify({ live: true, entries: 4, withLive: true, withBadEntry: true, duration: 300, listTitle: 'Lista Demo' })
+  );
+  const lista = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/playlist?list=PLdemo' })).data;
+  ok('una lista completa se acepta', lista?.ok === true && lista?.mode === 'playlist', JSON.stringify(lista?.error || ''));
+  ok('con el título de la lista', lista?.title === 'Lista Demo', lista?.title);
+  ok('trae los vídeos utilizables', lista?.entries === 2, `${lista?.entries} de ${lista?.total_entries}`);
+  ok('suma la duración de todos', lista?.total_duration_sec === 600, `${lista?.total_duration_sec}s`);
+  ok('avisa del directo que se omite', lista?.skipped_live === 1);
+  ok('y del vídeo sin formato', lista?.skipped_no_format === 1);
+
+  // Un directo terminado no se emite en bucle por sorpresa: se avisa.
+  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, video: true }));
+  const ended = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/@canaldemo/live' })).data;
+  ok('un directo terminado lo dice', ended?.ok === false && /ya terminó/i.test(ended?.error || ''), ended?.error);
   fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
 
   // --- 3. Alta del canal 24/7 con señal de YouTube -----------------------
@@ -336,6 +421,187 @@ try {
     ]);
   }
 
+  // --- 4c. Canal con un VÍDEO SUELTO: se repite en bucle ------------------
+  let vidChannelId = null;
+  {
+    fs.writeFileSync(
+      YT_FLAGS,
+      JSON.stringify({ live: false, video: true, title: 'Documental grabado', duration: 125 })
+    );
+    fs.writeFileSync(FFMPEG_ARGS, '');
+    const chVideo = (await api('POST', '/api/channels247', {
+      name: 'Documental 24/7 (bucle)',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: 'https://www.youtube.com/watch?v=vid123',
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    })).data;
+    vidChannelId = chVideo?.id || null;
+    ok('se crea un canal con un vídeo suelto', Boolean(vidChannelId), JSON.stringify(chVideo));
+
+    let row = null;
+    for (let i = 0; i < 40; i += 1) {
+      await sleep(400);
+      row = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === chVideo?.id);
+      if (row?.liveSource?.mode === 'video' && row?.workerPid) break;
+    }
+    ok('el canal queda en modo VÍDEO EN BUCLE', row?.liveSource?.mode === 'video', row?.liveSource?.mode);
+    ok('con la duración del vídeo', row?.liveSource?.duration_sec === 125, `${row?.liveSource?.duration_sec}s`);
+    ok('y marcado como listo (no «sin señal»)', row?.liveSource?.ready === true && row?.liveSource?.live === false);
+    ok('la parrilla lo informa como bucle', row?.liveState?.sourceMode === 'video' && row?.liveState?.isPlaying === true);
+    ok('trae el título del vídeo', /Documental grabado/.test(row?.liveSource?.title || ''), row?.liveSource?.title);
+
+    // El motor tiene que repetirlo sin fin y no recodificar (H.264 + AAC 720p).
+    const log = fs.existsSync(FFMPEG_ARGS) ? fs.readFileSync(FFMPEG_ARGS, 'utf8') : '';
+    const line = log.split('\n').find((l) => /\.mp4/.test(l)) || '';
+    ok('el motor usa -stream_loop -1 (bucle sin fin)', /-stream_loop -1/.test(line));
+    ok('y -re (a velocidad real, no acelera)', /-re /.test(line));
+    ok('sin recodificar: -c:v copy', /-c:v copy/.test(line) && !/libx264/.test(line));
+    ok('la URL del vídeo es la que dio yt-dlp', /127 \.0 \.0 \.1|127\.0\.0\.1/.test(line) && /videox\.mp4/.test(line));
+
+    // El canal se entrega por HLS como cualquier 24/7.
+    execFileSync('node', [
+      '-e',
+      `const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(${JSON.stringify(DB)});
+       db.prepare("UPDATE bouquets SET channel247_ids_json = ? WHERE id = 1").run(JSON.stringify([${chId},${vidChannelId}]));`
+    ]);
+    let hlsV = null;
+    for (let i = 0; i < 30; i += 1) {
+      const r = await fetch(`${BASE}/live/prueba/clave/${10000 + vidChannelId}.m3u8`);
+      if (r.status === 200) {
+        hlsV = await r.text();
+        break;
+      }
+      await sleep(400);
+    }
+    ok('el canal de vídeo se entrega por HLS', Boolean(hlsV && hlsV.includes('#EXTM3U')), hlsV ? 'manifiesto ok' : 'sin manifiesto');
+
+    // Un vídeo VP9 sí se recodifica (si no, muchos clientes no lo abren).
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, video: true, codec: 'vp9', title: 'Vídeo VP9' }));
+    fs.writeFileSync(FFMPEG_ARGS, '');
+    const chVp9 = (await api('POST', '/api/channels247', {
+      name: 'Vídeo VP9',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: 'https://www.youtube.com/watch?v=vp9abc',
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    })).data;
+    let rowVp9 = null;
+    for (let i = 0; i < 40; i += 1) {
+      await sleep(400);
+      rowVp9 = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === chVp9?.id);
+      if (rowVp9?.workerPid) break;
+    }
+    ok('VP9 se marca para recodificar', rowVp9?.liveSource?.needs_transcode === true);
+    const logVp9 = fs.existsSync(FFMPEG_ARGS) ? fs.readFileSync(FFMPEG_ARGS, 'utf8') : '';
+    const lineVp9 = logVp9.split('\n').find((l) => /videox\.mp4/.test(l)) || '';
+    ok('y el motor recodifica a H.264', /libx264/.test(lineVp9), lineVp9 ? 'libx264 ok' : 'sin arranque');
+    ok('con techo de 1080p', /min\(1920,iw\)/.test(lineVp9));
+    await api('DELETE', `/api/channels247/${chVp9?.id}`);
+  }
+
+  // --- 4d. Canal con una LISTA COMPLETA: en orden y vuelta a empezar -------
+  {
+    fs.writeFileSync(
+      YT_FLAGS,
+      JSON.stringify({ live: true, entries: 3, duration: 120, listTitle: 'Lista Demo' })
+    );
+    fs.writeFileSync(FFMPEG_ARGS, '');
+    const chLista = (await api('POST', '/api/channels247', {
+      name: 'Lista 24/7',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: 'https://www.youtube.com/playlist?list=PLdemo',
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    })).data;
+    ok('se crea un canal con una lista completa', Boolean(chLista?.id), JSON.stringify(chLista));
+
+    let rowL = null;
+    for (let i = 0; i < 40; i += 1) {
+      await sleep(400);
+      rowL = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === chLista?.id);
+      if (rowL?.liveSource?.mode === 'playlist' && rowL?.workerPid) break;
+    }
+    ok('el canal queda en modo LISTA', rowL?.liveSource?.mode === 'playlist', rowL?.liveSource?.mode);
+    ok('con sus 3 vídeos', rowL?.liveSource?.entries === 3, `${rowL?.liveSource?.entries}`);
+    ok('y la duración total de la lista', rowL?.liveSource?.total_duration_sec === 360, `${rowL?.liveSource?.total_duration_sec}s`);
+    ok('marcado como listo', rowL?.liveSource?.ready === true);
+    ok('el panel muestra los títulos de la lista', (rowL?.liveSource?.entry_titles || []).includes('Programa 1'));
+
+    const logL = fs.existsSync(FFMPEG_ARGS) ? fs.readFileSync(FFMPEG_ARGS, 'utf8') : '';
+    const lineL = logL.split('\n').find((l) => /-f concat/.test(l)) || '';
+    ok('el motor concatena con -f concat', /-f concat -safe 0/.test(lineL), lineL.slice(0, 80));
+    ok('y también da la vuelta (-stream_loop -1)', /-stream_loop -1/.test(lineL));
+    ok('sin recodificar: -c:v copy (todo es H.264 720p)', /-c:v copy/.test(lineL) && !/libx264/.test(lineL));
+    ok('y el audio también se copia', /-c:a copy/.test(lineL));
+
+    // Una lista con códecs mezclados sí se recodifica (si no, se rompe a mitad).
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, entries: 3, duration: 120, codec: 'vp9' }));
+    const listaVp9 = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/playlist?list=PLdemo' })).data;
+    ok('una lista en VP9 se marca para recodificar', listaVp9?.needs_transcode === true);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, entries: 3, duration: 120, listTitle: 'Lista Demo' }));
+    const listPath = (lineL.match(/(\/\S+source\.txt)/) || [])[1] || '';
+    let listed = '';
+    try {
+      listed = fs.readFileSync(listPath, 'utf8');
+    } catch {
+      listed = '';
+    }
+    ok('escribe el manifiesto de la lista', /ffconcat version 1\.0/.test(listed), listPath);
+    ok('con las 3 URLs en orden', (listed.match(/^file '/gm) || []).length === 3, `${(listed.match(/^file '/gm) || []).length} líneas`);
+
+    execFileSync('node', [
+      '-e',
+      `const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(${JSON.stringify(DB)});
+       db.prepare("UPDATE bouquets SET channel247_ids_json = ? WHERE id = 1").run(JSON.stringify([${chId},${vidChannelId},${chLista?.id}]));`
+    ]);
+    let hlsL = null;
+    for (let i = 0; i < 30; i += 1) {
+      const r = await fetch(`${BASE}/live/prueba/clave/${10000 + chLista.id}.m3u8`);
+      if (r.status === 200) {
+        hlsL = await r.text();
+        break;
+      }
+      await sleep(400);
+    }
+    ok('la lista se entrega por HLS', Boolean(hlsL && hlsL.includes('#EXTM3U')));
+
+    // Sin motor, una lista no se puede entregar con un 302: se explica.
+    const chVirt = (await api('POST', '/api/channels247', {
+      name: 'Lista sin motor',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: 'https://www.youtube.com/playlist?list=PLdemo',
+      engine_mode: 'virtual',
+      transcode_profile_id: 2
+    })).data;
+    execFileSync('node', [
+      '-e',
+      `const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(${JSON.stringify(DB)});
+       db.prepare("UPDATE bouquets SET channel247_ids_json = ? WHERE id = 1").run(JSON.stringify([${chLista?.id},${chVirt?.id}]));`
+    ]);
+    let virtBody = '';
+    let virtStatus = 0;
+    for (let i = 0; i < 25; i += 1) {
+      const r = await fetch(`${BASE}/live/prueba/clave/${10000 + chVirt.id}.m3u8`, { redirect: 'manual' });
+      virtStatus = r.status;
+      virtBody = await r.text();
+      if (virtStatus !== 404) break;
+      await sleep(400);
+    }
+    ok('sin motor, la lista avisa que hace falta FFmpeg', virtStatus === 503 && /LISTA de YouTube/.test(virtBody), `HTTP ${virtStatus}`);
+    await api('DELETE', `/api/channels247/${chVirt?.id}`);
+    // Se deja el paquete como estaba para las pruebas que siguen.
+    execFileSync('node', [
+      '-e',
+      `const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(${JSON.stringify(DB)});
+       db.prepare("UPDATE bouquets SET channel247_ids_json = ? WHERE id = 1").run(JSON.stringify([${chId},${vidChannelId},${chLista?.id}]));`
+    ]);
+  }
+
   // --- 5. Renovación antes de que caduque ---------------------------------
   const before = ytCalls();
   const refreshed = (await api('POST', `/api/channels247/${chId}/live-source/refresh`, {})).data;
@@ -379,7 +645,7 @@ try {
   // --- 6. «Sin directo»: el canal lo dice y no deja basura ----------------
   fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false }));
   const gone = (await api('POST', `/api/channels247/${chId}/live-source/refresh`, {})).data;
-  ok('si el directo termina, se informa', gone?.ok === false && /no está en directo/i.test(gone?.state?.error || ''), gone?.state?.error);
+  ok('si el directo termina, se informa', gone?.ok === false && /ya terminó/i.test(gone?.state?.error || ''), gone?.state?.error);
   ok('y el motor se apaga', !gone?.workerPid, `PID ${gone?.workerPid}`);
   const afterOff = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === chId);
   ok('el panel lo muestra como SIN SEÑAL', afterOff?.liveSource?.live === false);

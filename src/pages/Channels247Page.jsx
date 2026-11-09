@@ -123,7 +123,23 @@ export default function Channels247Page({ onPreview }) {
     setModalOpen(true);
   };
 
-  // ── Señal en vivo de YouTube ──────────────────────────────────────────
+  // ── Señal de YouTube: directo, vídeo en bucle o lista completa ─────────
+  // Etiquetas cortas para que se entienda de un vistazo de qué va el canal.
+  const modeBadge = (ls) => {
+    const mode = ls?.mode || 'live';
+    if (mode === 'playlist') return `≡ LISTA · ${ls?.entries || 0}`;
+    if (mode === 'video') return '▶ VÍDEO EN BUCLE';
+    if (mode === 'hls') return '◎ HLS EXTERNO';
+    return ls?.live ? '● YOUTUBE EN VIVO' : 'SIN SEÑAL';
+  };
+  const modeTitle = (ls) => {
+    const mode = ls?.mode || 'live';
+    if (mode === 'playlist') return `${ls?.entries || 0} vídeos · ${Math.round((ls?.total_duration_sec || 0) / 60)} min`;
+    if (mode === 'video') return `Bucle · ${Math.floor((ls?.duration_sec || 0) / 60)}m ${Math.round((ls?.duration_sec || 0) % 60)}s`;
+    if (mode === 'hls') return 'Manifiesto HLS';
+    return ls?.live ? 'EN VIVO' : 'SIN SEÑAL';
+  };
+
   const loadYtStatus = async () => {
     try {
       const st = await apiFetch('/api/youtube/status');
@@ -137,7 +153,7 @@ export default function Channels247Page({ onPreview }) {
   const handleProbe = async () => {
     const url = String(form.live_source_url || '').trim();
     if (!url) {
-      setProbe({ ok: false, live: false, error: 'Pega primero el enlace del directo de YouTube.' });
+      setProbe({ ok: false, live: false, error: 'Pega primero el enlace de YouTube (directo, vídeo o lista).' });
       return;
     }
     setProbe({ busy: true });
@@ -145,7 +161,7 @@ export default function Channels247Page({ onPreview }) {
       const r = await apiFetch('/api/youtube/probe', { method: 'POST', body: JSON.stringify({ url }) });
       setProbe({ ...r, busy: false });
       if (r.yt_dlp) setYtStatus(r.yt_dlp);
-      if (r.live && r.title && !String(form.name || '').trim()) {
+      if (r.ready && r.title && !String(form.name || '').trim()) {
         setForm((prev) => ({ ...prev, name: r.title }));
       }
     } catch (err) {
@@ -254,7 +270,7 @@ export default function Channels247Page({ onPreview }) {
   const handleSave = async (e) => {
     e.preventDefault();
     if (form.source_kind === 'youtube' && !String(form.live_source_url || '').trim()) {
-      setProbe({ ok: false, live: false, error: 'Pega el enlace del directo de YouTube antes de guardar.' });
+      setProbe({ ok: false, live: false, error: 'Pega el enlace de YouTube (directo, vídeo o lista) antes de guardar.' });
       return;
     }
     try {
@@ -362,19 +378,27 @@ export default function Channels247Page({ onPreview }) {
                         {ch.source_kind === 'youtube' && (
                           <span
                             className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                              ch.liveSource?.live
-                                ? 'bg-red-500/20 text-red-300 border-red-500/40'
-                                : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                              ch.liveSource?.mode === 'video' || ch.liveSource?.mode === 'playlist'
+                                ? 'bg-violet-500/20 text-violet-200 border-violet-500/40'
+                                : ch.liveSource?.live
+                                  ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                                  : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
                             }`}
                           >
-                            {ch.liveSource?.live ? '● YOUTUBE EN VIVO' : 'SIN SEÑAL'}
+                            {modeBadge(ch.liveSource)}
                           </span>
                         )}
                       </div>
                       <div className="text-xs text-slate-400 mt-0.5">
                         {ch.category_name || '24/7'} •{' '}
                         {ch.source_kind === 'youtube'
-                          ? ch.liveSource?.title || 'Señal en vivo de YouTube'
+                          ? `${ch.liveSource?.title || 'Señal de YouTube'}${
+                              ch.liveSource?.mode === 'playlist'
+                                ? ` · ${ch.liveSource?.entries || 0} vídeos`
+                                : ch.liveSource?.mode === 'video'
+                                  ? ' · repetido en bucle'
+                                  : ''
+                            }`
                           : `${ch.playlist?.length || 0} programas`}{' '}
                         • EPG: <span className="font-mono text-slate-300">{ch.epg_channel_id}</span>
                       </div>
@@ -387,14 +411,19 @@ export default function Channels247Page({ onPreview }) {
                   <div className="p-3.5 rounded-xl bg-[#090e1a] border border-slate-800/90 space-y-2">
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-slate-400 font-medium flex items-center gap-1.5">
-                        <Youtube className="w-3.5 h-3.5 text-red-400" /> Señal tomada de YouTube:
+                        <Youtube className="w-3.5 h-3.5 text-red-400" />
+                        {ch.liveSource?.mode === 'playlist'
+                          ? 'Lista de YouTube:'
+                          : ch.liveSource?.mode === 'video'
+                            ? 'Vídeo de YouTube en bucle:'
+                            : 'Señal tomada de YouTube:'}
                       </span>
                       <span
                         className={`font-mono text-[11px] ${
-                          ch.liveSource?.live ? 'text-emerald-300' : 'text-amber-300'
+                          ch.liveSource?.ready || ch.liveSource?.live ? 'text-emerald-300' : 'text-amber-300'
                         }`}
                       >
-                        {ch.liveSource?.live ? 'EN VIVO' : 'SIN SEÑAL'}
+                        {modeTitle(ch.liveSource)}
                       </span>
                     </div>
                     <div className="text-xs font-semibold text-white truncate">
@@ -414,6 +443,24 @@ export default function Channels247Page({ onPreview }) {
                         <span>Actualizada {String(ch.liveSource.resolved_at).slice(11, 19)}</span>
                       )}
                     </div>
+                    {ch.liveSource?.mode === 'playlist' && (ch.liveSource?.entry_titles || []).length > 0 && (
+                      <div className="text-[11px] text-slate-400 space-y-0.5">
+                        {(ch.liveSource.entry_titles || []).slice(0, 3).map((t, i) => (
+                          <div key={i} className="truncate flex items-center gap-1">
+                            <span className="text-violet-300 font-mono">{i + 1}.</span>
+                            <span className="truncate">{t}</span>
+                          </div>
+                        ))}
+                        {(ch.liveSource?.entries || 0) > 3 && (
+                          <div className="text-slate-500">… y {ch.liveSource.entries - 3} más, en bucle.</div>
+                        )}
+                      </div>
+                    )}
+                    {ch.liveSource?.mode === 'video' && (
+                      <div className="text-[11px] text-slate-400">
+                        Se repite sin fin{ch.liveSource?.needs_transcode ? ' · recodificado a H.264 1080p' : ' · sin recodificar'}.
+                      </div>
+                    )}
                     {ch.liveSource?.error && (
                       <div className="text-[11px] text-amber-300 flex items-start gap-1">
                         <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
@@ -672,10 +719,10 @@ export default function Channels247Page({ onPreview }) {
                     }`}
                   >
                     <div className="font-semibold flex items-center gap-1.5">
-                      <Youtube className="w-3.5 h-3.5 text-red-400" /> Señal en vivo de YouTube
+                      <Youtube className="w-3.5 h-3.5 text-red-400" /> Señal de YouTube (directo, vídeo o lista)
                     </div>
                     <div className="text-[11px] text-slate-400 mt-0.5">
-                      Toma el directo (YouTube Live) y lo emite como canal 24/7 en HLS.
+                      Directo tal cual, un vídeo repetido en bucle o una lista completa que da la vuelta sola.
                     </div>
                   </button>
                 </div>
@@ -686,14 +733,20 @@ export default function Channels247Page({ onPreview }) {
                 <div className="p-4 rounded-xl bg-[#090e1a] border border-red-500/30 space-y-3">
                   <div className="font-semibold text-red-300 flex items-center gap-2">
                     <Youtube className="w-4 h-4" />
-                    Enlace del directo
+                    Enlace de YouTube
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    Vale cualquiera de estos tres: el <span className="text-slate-200">directo</span> (…/live/… o
+                    /@canal/live), un <span className="text-slate-200">vídeo suelto</span> (watch?v=…, youtu.be/…,
+                    /shorts/…) que se repite sin fin, o una <span className="text-slate-200">lista completa</span>
+                    (playlist?list=…) que emite sus vídeos en orden y vuelve a empezar.
                   </div>
                   <div className="flex flex-col sm:flex-row gap-2">
                     <input
                       type="text"
                       value={form.live_source_url}
                       onChange={(e) => setForm({ ...form, live_source_url: e.target.value })}
-                      placeholder="https://www.youtube.com/watch?v=… o https://www.youtube.com/@canal/live"
+                      placeholder="…/@canal/live · …/watch?v=… · …/playlist?list=…"
                       className="flex-1 px-3 py-2 rounded-xl bg-[#0e1526] border border-slate-700 text-white font-mono"
                     />
                     <button
@@ -710,12 +763,60 @@ export default function Channels247Page({ onPreview }) {
                   {probe && !probe.busy && (
                     <div
                       className={`rounded-xl px-3 py-2 text-[11px] border ${
-                        probe.live
+                        probe.ready || probe.live
                           ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200'
                           : 'bg-amber-500/10 border-amber-500/40 text-amber-200'
                       }`}
                     >
-                      {probe.live ? (
+                      {probe.ready && probe.mode === 'playlist' ? (
+                        <div className="space-y-1">
+                          <div className="font-bold flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5" /> LISTA · {probe.entries} vídeos
+                            {probe.title ? ` — ${probe.title}` : ''}
+                          </div>
+                          <div>
+                            {Math.floor((probe.total_duration_sec || 0) / 3600)}h{' '}
+                            {Math.round(((probe.total_duration_sec || 0) % 3600) / 60)}m en total ·
+                            se emiten en orden y vuelven a empezar
+                            {probe.needs_transcode ? ' · se recodifican a H.264 1080p' : ' · sin recodificar'}
+                          </div>
+                          {(probe.entry_titles || []).length > 0 && (
+                            <div className="text-emerald-100/80 space-y-0.5">
+                              {probe.entry_titles.slice(0, 5).map((t, i) => (
+                                <div key={i} className="truncate">
+                                  {i + 1}. {t}
+                                </div>
+                              ))}
+                              {probe.entries > 5 ? <div>… y {probe.entries - 5} más</div> : null}
+                            </div>
+                          )}
+                          {probe.skipped_live > 0 && (
+                            <div className="text-amber-300">
+                              {probe.skipped_live} directo(s) de la lista se omiten: un directo no se puede encolar.
+                            </div>
+                          )}
+                          {probe.skipped_no_format > 0 && (
+                            <div className="text-amber-300">
+                              {probe.skipped_no_format} vídeo(s) sin MP4 utilizable se omiten.
+                            </div>
+                          )}
+                        </div>
+                      ) : probe.ready && probe.mode === 'video' ? (
+                        <div className="space-y-0.5">
+                          <div className="font-bold flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5" /> VÍDEO EN BUCLE
+                            {probe.title ? ` — ${probe.title}` : ''}
+                          </div>
+                          <div>
+                            {Math.floor((probe.duration_sec || 0) / 60)}m{' '}
+                            {Math.round((probe.duration_sec || 0) % 60)}s · se repite sin fin
+                            {probe.needs_transcode ? ' · se recodifica a H.264 1080p' : ' · sin recodificar'}
+                            {probe.expires_in_min !== null && probe.expires_in_min !== undefined
+                              ? ` · la URL se renovará en ${probe.expires_in_min} min`
+                              : ''}
+                          </div>
+                        </div>
+                      ) : probe.live ? (
                         <div className="space-y-0.5">
                           <div className="font-bold flex items-center gap-1.5">
                             <CheckCircle2 className="w-3.5 h-3.5" /> EN VIVO

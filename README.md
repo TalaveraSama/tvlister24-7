@@ -194,6 +194,31 @@ Comandos principales:
 
 ---
 
+## Canales 24/7 desde YouTube: directo, vídeo en bucle o lista completa
+
+En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7* (películas del catálogo) o
+*Señal de YouTube*. En esta última vale cualquiera de estos enlaces y el panel elige solo cómo emitirlo:
+
+| Enlace | Qué hace |
+| --- | --- |
+| `youtube.com/watch?v=…` · `youtu.be/…` · `/shorts/…` | **Vídeo en bucle**: el mismo vídeo, una y otra vez (`-re -stream_loop -1`) |
+| `youtube.com/playlist?list=…` | **Lista completa**: sus vídeos en orden y, al terminar el último, vuelve al primero |
+| `…/live/…` · `/@canal/live` · `/channel/UC…/live` | **Directo**, tal cual (se copia el HLS, sin recodificar) |
+
+- Se toman **hasta 30 vídeos** de una lista; los **directos** que haya dentro y los vídeos sin MP4 utilizable se
+  omiten (la vista previa avisa de cuántos).
+- **Sin recodificar** si todo es H.264 + AAC y mide lo mismo; si hay VP9/AV1/HEVC, más de 1080p o una lista con
+  formatos mezclados, se pasa a **H.264 2500k + AAC 128k** para que ningún cliente se quede sin imagen.
+- La URL firmada se renueva sola antes de caducar (guardia cada minuto); si el directo termina, el canal queda
+  **SIN SEÑAL** sin borrar nada y se reengancha cuando vuelve.
+- En modo **virtual** (sin motor) se entrega un directo o un vídeo con 302; una lista necesita el motor FFmpeg
+  (responde 503 explicándolo).
+
+Requisito: **yt-dlp** (se instala desde la propia pantalla, sin `apt`) y FFmpeg. Si YouTube pide «confirma que no
+eres un robot», hay un apartado para indicar un archivo de cookies en formato Netscape.
+
+---
+
 ## Desinstalar (sin tocar XUI.one ni el resto del servidor)
 
 ```bash
