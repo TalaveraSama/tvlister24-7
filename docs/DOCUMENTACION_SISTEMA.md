@@ -3029,6 +3029,16 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.54: sin yt-dlp se dice «falta», no «está roto»
+
+`findYtDlp()` daba por bueno el candidato `yt-dlp` (nombre suelto) sin comprobar el `PATH`, así que en un servidor
+sin yt-dlp el panel respondía «yt-dlp está en el sistema pero no arranca». Ahora el nombre suelto sólo vale si está
+en el `PATH`; si no hay ninguno, `installed:false`, binario vacío y el consejo de instalarlo desde la pantalla (el
+mensaje de «no arranca» queda para cuando el binario existe y falla de verdad).
+
+Pruebas nuevas en `test_youtube_live.mjs` (82 OK): sin yt-dlp no se inventa una ruta, el estado dice que falta, el
+probe pide instalarlo y no dice que esté roto.
+
 ### v2.6.53: un vídeo suelto de YouTube en bucle y una lista completa como canal 24/7
 
 Antes, la fuente de YouTube de un canal 24/7 sólo aceptaba **directos**: un vídeo normal se rechazaba («no está en

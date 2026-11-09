@@ -62,8 +62,11 @@ export function findYtDlp() {
     if (candidate.includes(path.sep)) {
       if (fs.existsSync(candidate)) return candidate;
     } else {
-      // Nombre suelto: se resolverá por PATH al ejecutarlo.
-      return candidate;
+      // Nombre suelto: sólo vale si de verdad está en el PATH. Si no, se sigue
+      // buscando para no decir «está en el sistema pero no arranca» cuando lo
+      // que pasa es que no hay yt-dlp.
+      const dirs = String(process.env.PATH || '').split(path.delimiter);
+      if (dirs.some((dir) => dir && fs.existsSync(path.join(dir, candidate)))) return candidate;
     }
   }
   return '';

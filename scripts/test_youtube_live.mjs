@@ -282,6 +282,26 @@ try {
   ok('detecta yt-dlp', yt?.installed === true, `${yt?.bin} · ${yt?.version}`);
   ok('y dice si hay FFmpeg', yt?.ffmpeg === true);
 
+  // --- 1b. Sin yt-dlp no se miente: lo dice claro -------------------------
+  // (Se comprueba en un proceso aparte: el panel de la prueba sí tiene yt-dlp.)
+  {
+    const code = `
+      const m = await import(${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))});
+      const info = await m.getYtDlpInfo();
+      const probe = await m.resolveLiveSource('https://youtu.be/abc123');
+      console.log(JSON.stringify({ bin: m.findYtDlp(), installed: info.installed, hint: info.hint, needs: probe.needs_ytdlp, error: probe.error }));
+    `;
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', code], {
+      env: { ...process.env, PATH: '/usr/bin:/bin', TVLISTER_YTDLP: '', TVLISTER_DB_PATH: path.join(TMP, 'sin-yt.db') },
+      encoding: 'utf8'
+    });
+    const info = JSON.parse(out.trim().split('\n').pop() || '{}');
+    ok('sin yt-dlp no se inventa una ruta', info.bin === '', JSON.stringify(info.bin));
+    ok('y el estado dice que falta', info.installed === false && /Falta yt-dlp/.test(info.hint || ''), (info.hint || '').slice(0, 40));
+    ok('el probe pide instalarlo', info.needs === true, (info.error || '').slice(0, 50));
+    ok('y no dice que está roto', !/no arranca/.test(info.error || ''), (info.error || '').slice(0, 50));
+  }
+
   // --- 2. Vista previa del directo ---------------------------------------
   const probe = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' })).data;
   ok('el enlace está en directo', probe?.ok === true && probe?.live === true, JSON.stringify(probe?.error || ''));
