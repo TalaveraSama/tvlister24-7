@@ -169,15 +169,41 @@ export default function Channels247Page({ onPreview }) {
     }
   };
 
+  // La instalación corre en el servidor (el binario autónomo pesa ~39 MB y un
+  // proxy cortaría la petición). Aquí sólo se lanza y se pregunta cómo va.
   const handleInstallYtdlp = async () => {
-    setProbe({ busy: true, installing: true });
+    setProbe({ busy: true, installing: true, step: 'empezando…' });
     try {
-      const r = await apiFetch('/api/youtube/install', { method: 'POST', body: JSON.stringify({}) });
-      setYtStatus(await apiFetch('/api/youtube/status'));
+      await apiFetch('/api/youtube/install', { method: 'POST', body: JSON.stringify({}) });
+      let state = null;
+      for (let i = 0; i < 180; i += 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+        state = await apiFetch('/api/youtube/install-status');
+        if (state?.running) {
+          setProbe({ busy: true, installing: true, step: state.step || 'instalando…' });
+          continue;
+        }
+        break;
+      }
+      await loadYtStatus();
+      const r = state?.result || null;
       setProbe(
-        r.ok
-          ? { busy: false, ok: true, live: false, error: '', installed: `yt-dlp ${r.version || ''} instalado en ${r.path}` }
-          : { busy: false, ok: false, live: false, error: r.error || 'No se pudo instalar yt-dlp' }
+        r?.ok
+          ? {
+              busy: false,
+              ok: true,
+              live: false,
+              error: '',
+              installed:
+                `yt-dlp ${r.version || ''} instalado en ${r.path}` +
+                (r.variant === 'standalone' ? ' · binario autónomo, sin depender de Python' : '')
+            }
+          : {
+              busy: false,
+              ok: false,
+              live: false,
+              error: r?.error || 'La instalación no terminó. Vuelve a intentarlo en unos segundos.'
+            }
       );
     } catch (err) {
       setProbe({ busy: false, ok: false, live: false, error: err.message });
@@ -791,9 +817,22 @@ export default function Channels247Page({ onPreview }) {
                       className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold disabled:opacity-50"
                     >
                       {probe?.busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                      Comprobar señal
+                      {probe?.installing ? 'Instalando yt-dlp…' : 'Comprobar señal'}
                     </button>
                   </div>
+
+                  {probe?.installing && (
+                    <div className="text-[11px] text-cyan-300 flex items-start gap-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0 mt-0.5" />
+                      <span>
+                        {probe.step || 'instalando…'}
+                        <span className="text-slate-500">
+                          {' '}
+                          — si baja el binario autónomo son ~39 MB; puedes seguir usando el panel.
+                        </span>
+                      </span>
+                    </div>
+                  )}
 
                   {probe && !probe.busy && (
                     <div
@@ -900,7 +939,11 @@ export default function Channels247Page({ onPreview }) {
                       </span>
                     ) : (
                       <>
-                        <span className="text-amber-300">yt-dlp no está instalado.</span>
+                        <span className="text-amber-300">
+                          {ytStatus?.bin && ytStatus?.error
+                            ? 'yt-dlp está descargado pero no arranca.'
+                            : 'yt-dlp no está instalado.'}
+                        </span>
                         <button
                           type="button"
                           onClick={handleInstallYtdlp}
@@ -915,6 +958,13 @@ export default function Channels247Page({ onPreview }) {
                       El panel renueva el enlace antes de que caduque: el canal no se corta.
                     </span>
                   </div>
+
+                  {!ytStatus?.installed && ytStatus?.hint && (
+                    <div className="text-[11px] text-amber-300/90 flex items-start gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{ytStatus.hint}</span>
+                    </div>
+                  )}
 
                   {/* Cookies (opcional): YouTube a veces pide iniciar sesión */}
                   <details className="rounded-xl bg-[#0e1526] border border-slate-800 px-3 py-2">

@@ -114,60 +114,198 @@ export async function getYtDlpInfo() {
         `-o ${path.join(RUNTIME_BIN_DIR, 'yt-dlp')} \u0026\u0026 sudo chmod +x ${path.join(RUNTIME_BIN_DIR, 'yt-dlp')}`
     };
   }
-  const res = await runBinary(bin, ['--version'], { timeoutMs: 15000 });
+  const res = await runBinary(bin, ['--version'], { timeoutMs: 25000 });
+  if (res.ok) {
+    return {
+      installed: true,
+      bin,
+      version: res.stdout.trim().split('\n')[0],
+      error: '',
+      hint: ''
+    };
+  }
+  // Existe pero no arranca: casi siempre es el zipapp con un python3 recortado
+  // (sin _ssl, sin sqlite3…) o una versión de Python anterior a la 3.9.
+  const detail = errorTail(res.stderr, 200);
+  const looksPython = /python|traceback|modulenotfound|importerror|syntaxerror/i.test(
+    `${res.stderr || ''} ${res.stdout || ''}`
+  );
   return {
-    installed: res.ok,
+    installed: false,
     bin,
-    version: res.ok ? res.stdout.trim().split('\n')[0] : '',
-    error: res.ok ? '' : String(res.stderr || 'no se pudo ejecutar yt-dlp').slice(0, 300),
-    hint: res.ok ? '' : 'yt-dlp está en el sistema pero no arranca (revisa python3 o reinstálalo).'
+    version: '',
+    variant: String(getSetting('ytdlp_variant') || ''),
+    error: detail || 'no se pudo ejecutar yt-dlp',
+    hint: looksPython
+      ? 'yt-dlp está descargado pero el Python de este servidor no puede con él ' +
+        '(falta un módulo o es anterior a 3.9). Pulsa «Instalar yt-dlp»: ahora baja el ' +
+        'binario autónomo, que lleva todo dentro y no usa el Python del sistema.'
+      : `yt-dlp está en ${bin} pero no arranca (${detail || 'sin detalle'}). ` +
+        'Pulsa «Instalar yt-dlp» para volver a ponerlo, o revisa los permisos (chmod +x).'
   };
+}
+
+/** Las 2-3 últimas líneas de un error: la causa real está al final del traceback. */
+function errorTail(text, max = 300) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) return '';
+  const tail = lines.slice(-3).join(' · ');
+  return tail.length > max ? `…${tail.slice(-max)}` : tail;
+}
+
+/**
+ * De dónde se baja yt-dlp. Se prueban en orden:
+ *   1. el zipapp `yt-dlp` (~3 MB), que usa el python3 del sistema (≥ 3.9): es el
+ *      rápido y funciona en casi todos los servidores;
+ *   2. el binario AUTÓNOMO (`yt-dlp_linux`, ~39 MB), que lleva Python y OpenSSL
+ *      dentro y no depende de nada del sistema — el que salva los servidores con
+ *      el python3 recortado (sin `_ssl`, sin `sqlite3`…) o roto, que era el caso
+ *      en que antes el panel se quedaba sin yt-dlp con un traceback en la cara.
+ */
+function ytDlpDownloadPlan() {
+  const arch = process.arch;
+  // Sólo hay binarios autónomos para estas arquitecturas (las de los VPS).
+  const standalone =
+    arch === 'arm64' ? 'yt-dlp_linux_aarch64' : arch === 'x64' ? 'yt-dlp_linux' : '';
+  const plan = [{ asset: 'yt-dlp', variant: 'zipapp', label: 'zipapp (usa el python3 del sistema)' }];
+  if (standalone) {
+    plan.push({
+      asset: standalone,
+      variant: 'standalone',
+      label: 'binario autónomo (no necesita Python)'
+    });
+  }
+  return plan;
 }
 
 /**
  * Descarga el binario oficial de yt-dlp en .runtime/bin (sin apt, sin root para
  * el panel: el proceso corre como el servicio). No toca nada del sistema.
+ *
+ * Siempre se deja como `.runtime/bin/yt-dlp`, así que el resto del panel (y
+ * cualquier ruta ya guardada) sigue funcionando igual, sea cual sea la variante.
  */
-export async function installYtDlp() {
+export async function installYtDlp(onStep = null) {
+  const step = (msg) => {
+    try {
+      onStep?.(String(msg));
+    } catch {
+      /* el progreso no debe romper la instalación */
+    }
+  };
   fs.mkdirSync(RUNTIME_BIN_DIR, { recursive: true });
   const target = path.join(RUNTIME_BIN_DIR, 'yt-dlp');
-  const tmp = `${target}.tmp.${Date.now()}`;
-  const url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
-  const dl = await runBinary('curl', ['-fsSL', '--max-time', '120', url, '-o', tmp], { timeoutMs: 130000 });
-  if (!dl.ok || !fs.existsSync(tmp)) {
+  const tmpBase = `${target}.tmp.${Date.now()}`;
+  const attempts = [];
+
+  for (const item of ytDlpDownloadPlan()) {
+    step(`descargando ${item.label}`);
+    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${item.asset}`;
+    const tmp = `${tmpBase}.${item.variant}`;
+    const dl = await runBinary('curl', ['-fsSL', '--max-time', '300', url, '-o', tmp], {
+      timeoutMs: 310000
+    });
+    if (!dl.ok || !fs.existsSync(tmp)) {
+      try {
+        if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+      attempts.push(`${item.variant}: no se pudo descargar (${errorTail(dl.stderr, 160) || 'sin detalle'})`);
+      continue;
+    }
+
+    // Se prueba ANTES de dejarlo en su sitio: así nunca queda un binario roto
+    // ocupando el nombre bueno.
     try {
-      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+      fs.chmodSync(tmp, 0o755);
     } catch {
       /* ignore */
     }
+    step(`comprobando que ${item.label} arranca`);
+    const check = await runBinary(tmp, ['--version'], { timeoutMs: 45000 });
+    if (!check.ok) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+      attempts.push(`${item.variant}: no arranca (${errorTail(check.stderr, 220) || 'sin detalle'})`);
+      continue;
+    }
+
+    try {
+      fs.copyFileSync(tmp, target);
+      fs.chmodSync(target, 0o755);
+      fs.unlinkSync(tmp);
+    } catch (err) {
+      return { ok: false, error: `No se pudo dejar el binario en ${target}: ${err.message}` };
+    }
+    const version = check.stdout.trim().split('\n')[0];
+    setSetting('ytdlp_path', target);
+    setSetting('ytdlp_version', version);
+    setSetting('ytdlp_variant', item.variant);
     return {
-      ok: false,
-      error:
-        'No se pudo descargar yt-dlp desde GitHub (¿sin salida a Internet?). ' +
-        'Descárgalo en tu PC y cópialo a ' + target
-    };
-  }
-  try {
-    fs.copyFileSync(tmp, target);
-    fs.chmodSync(target, 0o755);
-    fs.unlinkSync(tmp);
-  } catch (err) {
-    return { ok: false, error: `No se pudo dejar el binario en ${target}: ${err.message}` };
-  }
-  const check = await runBinary(target, ['--version'], { timeoutMs: 30000 });
-  if (!check.ok) {
-    return {
-      ok: false,
+      ok: true,
       path: target,
-      error:
-        'yt-dlp se descargó pero no arranca (necesita python3 ≥ 3.9). Instala python3 y vuelve a probar: ' +
-        String(check.stderr || '').slice(0, 200)
+      version,
+      variant: item.variant,
+      note:
+        item.variant === 'standalone'
+          ? 'Instalado el binario autónomo: no depende del Python del servidor.'
+          : 'Instalado el zipapp: usa el python3 del sistema.'
     };
   }
-  setSetting('ytdlp_path', target);
-  const version = check.stdout.trim().split('\n')[0];
-  setSetting('ytdlp_version', version);
-  return { ok: true, path: target, version };
+
+  // Nada sirvió: se explica qué se intentó y con qué error, sin prometer apt.
+  return {
+    ok: false,
+    path: target,
+    attempts,
+    error:
+      'No se pudo dejar un yt-dlp que arranque en este servidor. ' +
+      'Se intentó: ' +
+      attempts.join(' | ') +
+      '. Comprueba la salida a Internet (github.com) y vuelve a intentarlo; ' +
+      'si sigue igual, copia a mano un yt-dlp de tu PC en ' +
+      target +
+      ' y dale permisos (chmod +x).'
+  };
+}
+
+// ── Instalación en segundo plano ─────────────────────────────────────────────
+// El binario autónomo pesa ~39 MB: si el panel está detrás de un proxy (Cloudflare
+// corta a los 100 s) una petición HTTP abierta se quedaría a medias. Por eso la
+// instalación corre en el servidor y la pantalla va preguntando cómo va.
+let installJob = { running: false, step: '', startedAt: 0, result: null };
+
+export function ytInstallState() {
+  return { ...installJob };
+}
+
+/** Arranca (o devuelve) la instalación en curso. No bloquea. */
+export function startYtDlpInstall() {
+  if (installJob.running) return ytInstallState();
+  installJob = { running: true, step: 'empezando', startedAt: Date.now(), result: null };
+  (async () => {
+    try {
+      const r = await installYtDlp((s2) => {
+        installJob.step = s2;
+      });
+      installJob = { running: false, step: '', startedAt: installJob.startedAt, result: r };
+    } catch (err) {
+      installJob = {
+        running: false,
+        step: '',
+        startedAt: installJob.startedAt,
+        result: { ok: false, error: err?.message || 'error inesperado instalando yt-dlp' }
+      };
+    }
+  })();
+  return ytInstallState();
 }
 
 // ============================================================================

@@ -323,6 +323,177 @@ try {
     ok('y no dice que está roto', !/no arranca/.test(info.error || ''), (info.error || '').slice(0, 50));
   }
 
+  // --- 1c. Instalar yt-dlp: si el zipapp no arranca, cae al autónomo ------
+  // Se pone un `curl` de mentira en el PATH: el autónomo (yt-dlp_linux) es un
+  // script que imprime su versión; el zipapp imita el traceback real de un
+  // Python recortado, que es justo el fallo que se vio en producción.
+  {
+    const binDir = path.join(TMP, 'fakebin');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(binDir, 'curl'),
+      `#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const out = args[args.indexOf('-o') + 1];
+const url = args.find((a) => a.startsWith('http'));
+const mode = process.env.FAKE_DL_MODE || 'standalone-ok';
+const zipapp = ${JSON.stringify(`#!/usr/bin/env python3
+import sys
+import runpy
+raise ModuleNotFoundError("No module named '_ssl'")
+`)};
+const standalone = ${JSON.stringify(`#!/bin/sh
+echo "2026.11.04-standalone"
+`)};
+const isStandalone = /yt-dlp_linux/.test(url);
+const isZipapp = /\\/yt-dlp$/.test(url);
+let body = '';
+if (mode === 'standalone-ok') body = isStandalone ? standalone : '';
+else if (mode === 'zipapp-ok') body = isZipapp ? standalone : '';
+else body = zipapp; // both-broken: los dos fallan al arrancar
+if (!body) { console.error('curl: (22) 404'); process.exit(22); }
+fs.writeFileSync(out, body, { mode: 0o755 });
+`,
+      { mode: 0o755 }
+    );
+
+    const runInstall = (mode) => {
+      const code = `
+        import { initDb } from ${JSON.stringify(path.join(ROOT, 'server/db.js'))};
+        import { installYtDlp, getYtDlpInfo } from ${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))};
+        initDb();
+        const r = await installYtDlp();
+        const st = await getYtDlpInfo();
+        console.log(JSON.stringify({ r, st }));
+      `;
+      const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+          FAKE_DL_MODE: mode,
+          APP_DIR: path.join(TMP, 'appdl'),
+          TVLISTER_DB_PATH: path.join(TMP, `dl-${mode}.db`),
+          TVLISTER_YTDLP: ''
+        },
+        encoding: 'utf8'
+      });
+      return JSON.parse(out.trim().split('\n').pop() || '{}');
+    };
+
+    const okInstall = runInstall('standalone-ok');
+    ok('instala el binario autónomo (sin Python)', okInstall?.r?.ok === true && okInstall?.r?.variant === 'standalone', JSON.stringify(okInstall?.r?.variant));
+    ok('lo deja como .runtime/bin/yt-dlp', /\.runtime\/bin\/yt-dlp$/.test(okInstall?.r?.path || ''), okInstall?.r?.path);
+    ok('y el panel lo ve listo', okInstall?.st?.installed === true && /2026\.11\.04/.test(okInstall?.st?.version || ''), okInstall?.st?.version);
+    ok(
+      'el binario autónomo se prueba antes de ocupar el nombre bueno',
+      fs.existsSync(path.join(TMP, 'appdl', '.runtime', 'bin', 'yt-dlp')) &&
+        !fs.readdirSync(path.join(TMP, 'appdl', '.runtime', 'bin')).some((f) => f.includes('.tmp.')),
+      fs.readdirSync(path.join(TMP, 'appdl', '.runtime', 'bin')).join(',')
+    );
+
+    // Si el autónomo no se puede bajar (404) pero el zipapp sí y funciona.
+    const zipOnly = runInstall('zipapp-ok');
+    ok('si el autónomo falla, usa el zipapp', zipOnly?.r?.ok === true && zipOnly?.r?.variant === 'zipapp', JSON.stringify(zipOnly?.r?.variant));
+
+    // Ninguno arranca: el error dice la causa real y qué se intentó.
+    const broken = runInstall('both-broken');
+    ok('si no arranca ninguno, no se deja un binario roto', broken?.r?.ok === false, JSON.stringify(broken?.r?.ok));
+    ok('el error trae la causa del traceback (la última línea)', /ModuleNotFoundError/.test(broken?.r?.error || ''), (broken?.r?.error || '').slice(0, 120));
+    ok('y dice qué se intentó', /Se intentó/.test(broken?.r?.error || '') && /standalone/.test(broken?.r?.error || ''), '');
+    ok('no promete instalar python3 por apt', !/Instala python3/.test(broken?.r?.error || ''));
+
+    // El panel no espera a la descarga: lanza un trabajo y consulta el paso.
+    const job = (() => {
+      const code = `
+        import { initDb } from ${JSON.stringify(path.join(ROOT, 'server/db.js'))};
+        import { startYtDlpInstall, ytInstallState } from ${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))};
+        initDb();
+        const first = startYtDlpInstall();
+        const whileRunning = ytInstallState();
+        const steps = new Set();
+        for (let i = 0; i < 500; i += 1) {
+          const st = ytInstallState();
+          if (st.step) steps.add(st.step.replace(/\d+(\.\d+)? MB/g, 'N MB'));
+          if (!st.running) break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        const done = ytInstallState();
+        const again = startYtDlpInstall(); // ya terminó: se puede repetir
+        console.log(JSON.stringify({ first, whileRunning, steps: [...steps], done, againRunning: again.running }));
+      `;
+      const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+          FAKE_DL_MODE: 'standalone-ok',
+          APP_DIR: path.join(TMP, 'appjob'),
+          TVLISTER_DB_PATH: path.join(TMP, 'dl-job.db'),
+          TVLISTER_YTDLP: ''
+        },
+        encoding: 'utf8'
+      });
+      return JSON.parse(out.trim().split('\n').pop() || '{}');
+    })();
+    ok('el panel arranca la instalación sin esperarla', job?.first?.running === true, JSON.stringify(job?.first?.running));
+    ok('y dice en qué paso va', job?.whileRunning?.running === true && /descargando|comprobando/.test(job?.whileRunning?.step || ''), job?.whileRunning?.step);
+    ok('al terminar deja de correr y guarda el resultado', job?.done?.running === false && job?.done?.result?.ok === true, JSON.stringify(job?.done?.result?.variant));
+    ok('se puede volver a instalar después', job?.againRunning === true);
+
+    // Y por HTTP, como lo hace la pantalla: 202 al instante y el paso a la vista.
+    // (Panel aparte con el curl falso: la descarga falla al momento, sin red.)
+    const PORT2 = 4691;
+    const BASE2 = `http://127.0.0.1:${PORT2}`;
+    const child2 = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        PORT: String(PORT2),
+        HOST: '127.0.0.1',
+        NODE_ENV: 'test',
+        PATH: `${binDir}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+        FAKE_DL_MODE: 'both-broken',
+        TVLISTER_DB_PATH: path.join(TMP, 'http-install.db'),
+        TVLISTER_STREAMS_RUNTIME: path.join(TMP, 'http_streams'),
+        TVLISTER_YTDLP: '',
+        APP_DIR: path.join(TMP, 'apphttp')
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    try {
+      let up2 = false;
+      const dl2 = Date.now() + 30000;
+      while (Date.now() < dl2 && !up2) {
+        try {
+          up2 = (await fetch(`${BASE2}/api/health`)).ok;
+        } catch {
+          await sleep(200);
+        }
+      }
+      const h = { 'Content-Type': 'application/json' };
+      const lg = await fetch(`${BASE2}/api/auth/login`, {
+        method: 'POST',
+        headers: h,
+        body: JSON.stringify({ username: 'admin', password: 'admin123' })
+      }).then((r) => r.json());
+      const tk = lg?.token || '';
+      const r1 = await fetch(`${BASE2}/api/youtube/install`, { method: 'POST', headers: { ...h, Authorization: `Bearer ${tk}` }, body: '{}' });
+      const b1 = await r1.json();
+      ok('POST install responde 202 al instante (no espera la descarga)', r1.status === 202 && b1?.running === true, `${r1.status} · ${b1?.step || ''}`);
+      let st2 = null;
+      const t2 = Date.now() + 25000;
+      while (Date.now() < t2) {
+        st2 = await fetch(`${BASE2}/api/youtube/install-status`, { headers: { Authorization: `Bearer ${tk}` } }).then((r) => r.json());
+        if (!st2?.running) break;
+        await sleep(300);
+      }
+      ok('install-status informa del fallo con la causa', st2?.running === false && st2?.result?.ok === false && /ModuleNotFoundError/.test(st2?.result?.error || ''), (st2?.result?.error || '').slice(0, 80));
+      ok('y deja el panel sin yt-dlp (no finge tenerlo)', st2?.status?.installed === false);
+    } finally {
+      child2.kill('SIGTERM');
+    }
+  }
+
   // --- 2. Vista previa del directo ---------------------------------------
   const probe = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' })).data;
   ok('el enlace está en directo', probe?.ok === true && probe?.live === true, JSON.stringify(probe?.error || ''));

@@ -3029,6 +3029,35 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.56: el yt-dlp del panel arranca siempre (también sin Python del sistema)
+
+`yt-dlp se descargó pero no arranca (necesita python3 ≥ 3.9)` venía de que el enlace `yt-dlp` de GitHub
+**no es un binario**: es un zipapp que necesita el python3 del sistema con `_ssl` y `sqlite3`. En un
+servidor recortado se descarga bien y revienta al arrancar, dejando el panel sin yt-dlp.
+
+Cómo queda la instalación:
+
+- **Plan de descarga con variantes** (`ytDlpDownloadPlan()`): primero `yt-dlp_linux` / `yt-dlp_linux_aarch64`
+  (binario autónomo, ~39 MB, según `process.arch`) y, si no está, el zipapp `yt-dlp` como plan B.
+- **Se prueba antes de instalar** (`installYtDlp`): descarga a `yt-dlp.tmp.<hora>.<variante>`, `chmod 755`,
+  ejecuta `--version` y **sólo entonces** lo mueve a `.runtime/bin/yt-dlp`. Si falla, el binario que hubiera
+  se queda como estaba y los temporales se borran.
+- **Fallo explicado**: `{ok:false, attempts:[…], error}` con las **últimas 3 líneas** del stderr
+  (`errorTail()`) y las variantes intentadas; nunca promete `apt install python3`.
+- **En segundo plano**: `POST /api/youtube/install` llama a `startYtDlpInstall()` y responde `202` al
+  instante (los ~39 MB no caben en una petición que un proxy corta a los 100 s). El estado vive en
+  memoria (`ytInstallState()` → `{running, step, startedAt, result}`) con pasos «descargando …» y
+  «comprobando que … arranca», y `GET /api/youtube/install-status` lo devuelve (más el estado real del
+  binario al terminar). Un segundo `POST` mientras corre no lanza otra descarga.
+- **Ajustes nuevos**: `ytdlp_path`, `ytdlp_version`, `ytdlp_variant` (`standalone` | `zipapp`).
+  `getYtDlpInfo()` devuelve `variant` y un `hint` que, si el error parece de Python, manda a reinstalar.
+- Pantalla (`Channels247Page.jsx`): el botón pasa a «Instalando yt-dlp…» con el paso actual debajo
+  («…si baja el binario autónomo son ~39 MB; puedes seguir usando el panel»); el éxito añade
+  «· binario autónomo, sin depender de Python»; si el binario está pero no arranca, lo dice con la pista.
+
+Pruebas: `test_youtube_live.mjs` **111 OK** (sección 1c: `curl` falso por variante —autónomo, zipapp y
+ambos roto— y el trabajo en segundo plano) y `test_youtube_live_ui.mjs` **59 OK**.
+
 ### v2.6.55: copy/copy de verdad en los directos de YouTube (también con audio en pista aparte)
 
 El directo ya se copiaba con `-c copy`, pero había dos agujeros:

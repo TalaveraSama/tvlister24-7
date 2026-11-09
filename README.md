@@ -218,8 +218,12 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
 - En modo **virtual** (sin motor) se entrega un directo o un vídeo con 302; una lista necesita el motor FFmpeg
   (responde 503 explicándolo).
 
-Requisito: **yt-dlp** (se instala desde la propia pantalla, sin `apt`) y FFmpeg. Si YouTube pide «confirma que no
-eres un robot», hay un apartado para indicar un archivo de cookies en formato Netscape.
+Requisito: **yt-dlp** (se instala desde la propia pantalla, sin `apt`) y FFmpeg. El botón **Instalar yt-dlp**
+baja el **binario autónomo** (`yt-dlp_linux`, ~39 MB), que lleva su propio Python y **no depende del python3
+del servidor**; el zipapp normal necesita un python3 completo (`_ssl`, `sqlite3`) y en servidores recortados
+fallaba al arrancar. El binario se prueba (`--version`) **antes** de instalarlo y la descarga va en segundo
+plano con su paso a la vista. Si YouTube pide «confirma que no eres un robot», hay un apartado para indicar un
+archivo de cookies en formato Netscape.
 
 ---
 

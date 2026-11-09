@@ -68,6 +68,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 // ── API simulada ────────────────────────────────────────────────────────────
 const calls = [];
 let ytInstalled = false;
+let installJob = null;
 let cookiesPath = '';
 
 const channels = [
@@ -244,8 +245,20 @@ globalThis.fetch = async (url, opts = {}) => {
     );
   }
   if (u === '/api/youtube/install') {
-    ytInstalled = true;
-    return json({ ok: true, version: '2026.11.04', path: '/opt/tvlister24-7/.runtime/bin/yt-dlp' });
+    // Ahora arranca en segundo plano: se responde 202 y la pantalla pregunta.
+    installJob = { running: true, step: 'descargando binario autónomo (no necesita Python)', result: null };
+    return json({ ok: true, ...installJob }, 202);
+  }
+  if (u === '/api/youtube/install-status') {
+    if (installJob?.running) {
+      installJob = {
+        running: false,
+        step: '',
+        result: { ok: true, version: '2026.11.04', path: '/opt/tvlister24-7/.runtime/bin/yt-dlp', variant: 'standalone' }
+      };
+      ytInstalled = true;
+    }
+    return json(installJob || { running: false, result: null });
   }
   if (u === '/api/youtube/probe') {
     if (!ytInstalled) {
@@ -408,7 +421,14 @@ ok(/Falta yt-dlp en el servidor/.test(text()), 'sin yt-dlp explica qué falta y 
 
 // El botón de dentro del aviso es el primero «Instalar yt-dlp».
 await clickText('Instalar yt-dlp');
+// La instalación va en segundo plano: la pantalla pregunta cada 2 s.
+ok(/descargando|Instalando yt-dlp|empezando/.test(text()), 'mientras instala, dice en qué paso va');
+await act(async () => {
+  await new Promise((r) => setTimeout(r, 2600));
+});
+await flush();
 ok(/yt-dlp 2026\.11\.04 instalado/.test(text()), 'tras instalar, confirma la versión y la ruta');
+ok(/binario autónomo, sin depender de Python/.test(text()), 'y avisa de que no depende del Python del servidor');
 ok(!/yt-dlp no está instalado/.test(text()), 'y el aviso de «no instalado» desaparece');
 
 await clickText('Comprobar señal');

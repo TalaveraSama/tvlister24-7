@@ -100,7 +100,6 @@ import {
   parseYouTubeUrl,
   classifySourceUrl,
   getYtDlpInfo,
-  installYtDlp,
   resolveLiveSource,
   refreshChannelLiveSource,
   ensureLiveState,
@@ -110,7 +109,9 @@ import {
   liveReady,
   liveFingerprint,
   liveModeFor,
-  liveEntriesFor
+  liveEntriesFor,
+  startYtDlpInstall,
+  ytInstallState
 } from './youtubeLive.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
@@ -2653,13 +2654,27 @@ app.get('/api/youtube/status', requireAuth, async (req, res) => {
   res.json({ ...info, ffmpeg: isFfmpegAvailable(), cookies: cookiesInfo() });
 });
 
-app.post('/api/youtube/install', requireAuth, requireAdmin, async (req, res) => {
+/**
+ * Instala yt-dlp EN SEGUNDO PLANO y responde al instante.
+ * El binario autónomo pesa ~39 MB y una petición abierta se corta en los proxies
+ * (Cloudflare, 100 s): la pantalla pregunta por `GET /api/youtube/install-status`
+ * hasta que termina. Si ya hay una instalación en curso, no se lanza otra.
+ */
+app.post('/api/youtube/install', requireAuth, requireAdmin, (req, res) => {
   try {
-    const out = await installYtDlp();
-    res.status(out.ok ? 200 : 500).json(out);
+    const state = startYtDlpInstall();
+    res.status(202).json({ ok: true, ...state });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+app.get('/api/youtube/install-status', requireAuth, async (req, res) => {
+  const state = ytInstallState();
+  // Al terminar se devuelve también el estado real del binario (versión y ruta),
+  // haya ido bien o mal: la pantalla necesita saber si quedó algo que arranque.
+  const status = state.running ? null : await getYtDlpInfo();
+  res.json({ ...state, status });
 });
 
 /**
