@@ -3029,6 +3029,41 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.65: la lista de YouTube no llena el disco
+
+Con la lista emitiendo desde el disco (v2.6.64) llegó la pregunta lógica: 10 capítulos son ~3 GB y el panel
+descargaba sin mirar. Ahora el disco se mira **antes**.
+
+- **Estimación por duración y calidad**: `BYTES_PER_SEC` = 1080p 0,30 · 720p 0,15 · 480p 0,08 MB/s
+  (`estimateVideoBytes`, `estimatePlaylistBytes`). Si la duración no se conoce se supone un capítulo de 22 min.
+  La altura se guarda en `youtube_video_height` (`TVLISTER_YT_HEIGHT`) y `videoDownloadFormat()` la mete en el
+  selector `-f` de yt-dlp, así que la descarga real baja a esa altura.
+- **Disco real**: `diskSpace()` con `statfsSync` subiendo por los padres si `.runtime/videos` aún no existe
+  (primer arranque). Devuelve `{ known, free_bytes, total_bytes }`.
+- **Política** (`videoDiskPolicy()`): `budget_bytes` (`youtube_videos_max_gb`, vacío/0 = sin tope) y
+  `keep_free_bytes` (`youtube_videos_keep_free_gb`, def. **5 GB**; `settingNumber` distingue vacío de 0).
+- **`planPlaylistForDisk(items, { limit })`**: cuenta cuántos caben respetando tope y margen; siempre deja entrar
+  al menos uno y devuelve `reason` (`no cabe más en el espacio reservado para vídeos` / `el disco se quedaría sin
+  el margen libre`). `startPlaylistDownload` usa el plan: `skipped_for_space`, `estimate_bytes`, `disk_limited`
+  y un mensaje que dice cuántos no se prepararon y cuánto queda libre.
+- **Antes de cada descarga**, `downloadVideoFile` (con `durationSec`) llama a `ensureSpaceForDownload`: si no cabe,
+  devuelve `needs_space: true` con el aviso y **no se llama a yt-dlp**. Al terminar, `pruneVideoCache()` aplica
+  el tope (`pruned_bytes`).
+- **`pruneVideoCache({ needBytes, force })`**: borra del más antiguo al más nuevo sólo archivos que **no** usa
+  ningún canal (`videosInUse()` lee el `live_source_state` de todos los canales 24/7: listas y vídeos en bucle).
+  Devuelve `removed[]`, `freed_bytes`, `enough`.
+- **`videosCacheStats()` / `videosSummary()`**: lo que ocupa cada archivo, quién lo usa (`used_by`), total, libre,
+  tope y altura. `GET /api/youtube/videos` da el inventario completo; `/api/youtube/status` y el sondeo
+  (`probe.yt_dlp.videos`) dan el resumen.
+- **Pantalla**: la tarjeta dice `Quedan N ≈ X · disco libre Y` y `Vídeos en el disco: X (N)`, con selector
+  **1080p / 720p (ocupa la mitad) / 480p (ocupa un tercio)** y botón **«Liberar espacio»**
+  (`POST /api/youtube/videos/cleanup { all_unused: true }`). El estado de disco se refresca solo cada 30 s.
+  La vista previa del enlace avisa de lo que ocuparía antes de preparar la lista.
+- `DELETE /api/channels247/:id?videos=1` borra también los vídeos de ese canal que no use otro
+  (`videos_removed`, `bytes_freed`).
+
+Pruebas: `test_youtube_live.mjs` **270 OK** y `test_youtube_live_ui.mjs` **165 OK**.
+
 ### v2.6.64: la lista se descarga sola y emite desde el primer capítulo
 
 La tarjeta de Los Simpson se quedaba en «LISTA · 0 · 23 SIN DESCARGAR»: el botón para preparar el disco sólo

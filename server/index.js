@@ -129,6 +129,9 @@ import {
   parseLiveState,
   diskPlaylistState,
   applyDiskPlaylistState,
+  videosCacheStats,
+  videosSummary,
+  pruneVideoCache,
   autoPrepareDisabled,
   autoPrepareLimit
 } from './youtubeLive.js';
@@ -2681,8 +2684,35 @@ app.get('/api/youtube/status', requireAuth, async (req, res) => {
     latest_version: release.tag || '',
     update_available: Boolean(info.installed) && isYtDlpOutdated(info.version, release.tag),
     // Una lista que sólo da DASH/HLS se descarga sola (canal al aire).
-    auto_prepare: { enabled: !autoPrepareDisabled(), limit: autoPrepareLimit() }
+    auto_prepare: { enabled: !autoPrepareDisabled(), limit: autoPrepareLimit() },
+    // Disco: lo que ocupan los vídeos descargados, lo que queda libre y el
+    // tope configurado. La pantalla lo enseña antes de descargar nada.
+    videos: videosSummary()
   });
+});
+
+/** Qué hay descargado, cuánto ocupa y qué canales lo usan. */
+app.get('/api/youtube/videos', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...videosCacheStats() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * «Liberar espacio»: borra los vídeos que no está emitiendo ningún canal.
+ * Con `{ all_unused: true }` los borra todos (no sólo hasta cumplir el tope).
+ * Nunca toca un archivo que esté usando un canal: dejaría el canal sin señal.
+ */
+app.post('/api/youtube/videos/cleanup', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const all = req.body?.all_unused === true;
+    const r = pruneVideoCache({ force: all });
+    res.json({ ok: true, ...r, stats: videosCacheStats() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 /**
@@ -2780,7 +2810,9 @@ app.post('/api/youtube/download', requireAuth, requireAdmin, (req, res) => {
   const url = String(req.body?.url || '').trim();
   if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL del vídeo.' });
   try {
-    const state = startVideoDownload(url);
+    // La duración la manda la pantalla (ya la conoce del sondeo): sirve para
+    // saber cuánto va a ocupar ANTES de descargar y no llenar el disco.
+    const state = startVideoDownload(url, { durationSec: Number(req.body?.duration_sec) || 0 });
     res.status(state.running ? 202 : 400).json({ ok: Boolean(!state.result || state.result.ok), ...state });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -2892,13 +2924,19 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       // Lista que sólo da DASH/HLS: se puede preparar entera en el disco.
       can_prepare_playlist: Boolean(r.can_prepare_playlist),
       pending_count: Number(r.pending_count) || 0,
+      // Cuánto ocuparía prepararla en el disco (estimación por duración) y
+      // cuánto queda libre: se avisa antes de descargar, no después.
+      pending_bytes: Number(r.pending_bytes) || 0,
+      disk: r.disk || null,
       skip_summary: r.skip_summary || '',
       local: Boolean(r.local),
       bytes: Number(r.bytes) || 0,
       clients_tried: r.clients_tried || '',
       using_cookies: Boolean(r.using_cookies),
       cookies: cookiesInfo(),
-      yt_dlp: await getYtDlpInfo()
+      // El disco va con el estado de yt-dlp: así la tarjeta sigue diciendo lo
+      // que ocupa y lo que queda libre después de probar un enlace.
+      yt_dlp: { ...(await getYtDlpInfo()), videos: videosSummary() }
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -3088,9 +3126,37 @@ app.post('/api/channels247/:id/action', requireAuth, requireAdmin, (req, res) =>
 
 app.delete('/api/channels247/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
+  const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
   stopWorker(`ch247_${id}`);
+  // Antes de borrar el canal se anotan sus vídeos descargados: si el operador
+  // pide liberar espacio (`?videos=1`), se borran los que no use otro canal.
+  const mine = new Set();
+  if (ch) {
+    const st = parseLiveState(ch);
+    if (Array.isArray(st?.entries)) for (const e of st.entries) if (e?.local && e?.id) mine.add(String(e.id));
+    if (st?.local && st?.video_id) mine.add(String(st.video_id));
+  }
   db.prepare('DELETE FROM channels_247 WHERE id = ?').run(id);
-  res.json({ ok: true });
+  let freed = 0;
+  const removed = [];
+  if (String(req.query.videos || '') === '1' && mine.size) {
+    const stillUsed = new Set();
+    for (const row of db.prepare('SELECT * FROM channels_247').all()) {
+      const st = parseLiveState(row);
+      if (Array.isArray(st?.entries)) for (const e of st.entries) if (e?.local && e?.id) stillUsed.add(String(e.id));
+      if (st?.local && st?.video_id) stillUsed.add(String(st.video_id));
+    }
+    for (const vid of mine) {
+      if (stillUsed.has(vid)) continue;
+      const info = cachedVideoInfo(vid);
+      if (!info) continue;
+      if (removeCachedVideo(vid)) {
+        freed += info.bytes;
+        removed.push(vid);
+      }
+    }
+  }
+  res.json({ ok: true, videos_removed: removed.length, bytes_freed: freed });
 });
 
 // ==================== VOD (MOVIES & SERIES) ====================

@@ -937,8 +937,274 @@ function pickHls(info) {
 // el motor lo repite desde el disco: sin caducidades, sin volver a YouTube.
 export const VIDEO_CACHE_DIR = path.join(RUNTIME_DIR, 'videos');
 // Selector: lo mejor que se pueda copiar sin recodificar y, si no, lo que haya.
-const VIDEO_DOWNLOAD_FORMAT =
-  'bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<=1080][vcodec^=avc1]/bv*[height<=1080]+ba/b[height<=1080]/b';
+// La altura se puede bajar (720p ocupa la mitad) desde el panel: en un VPS el
+// disco es lo primero que se llena con una lista de capítulos.
+const VIDEO_HEIGHTS = [1080, 720, 480];
+function downloadHeight() {
+  const raw = Number(getSetting('youtube_video_height') || process.env.TVLISTER_YT_HEIGHT || 0);
+  return VIDEO_HEIGHTS.includes(raw) ? raw : 1080;
+}
+function videoDownloadFormat() {
+  const h = downloadHeight();
+  return (
+    `bv*[height<=${h}][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<=${h}][vcodec^=avc1]/` +
+    `bv*[height<=${h}]+ba/b[height<=${h}]/b`
+  );
+}
+
+// ── Espacio en disco ───────────────────────────────────────────────────────
+// Una lista de 10 capítulos de 22 min ocupa ~3 GB. Antes se descargaba sin
+// mirar: con 30 capítulos y el disco de un VPS se llenaba y tumbaba el panel.
+// Ahora se mira el disco ANTES de bajar, se avisa de lo que va a ocupar y se
+// respeta un tope y un margen libre.
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
+// Lo que ocupa un segundo de vídeo H.264 a cada altura (con su audio).
+const BYTES_PER_SEC = { 1080: 0.30 * MB, 720: 0.15 * MB, 480: 0.08 * MB };
+
+/** Lo que ocupará un vídeo de `durationSec` a la altura configurada. */
+export function estimateVideoBytes(durationSec, height = downloadHeight()) {
+  const sec = Math.max(0, Number(durationSec) || 0);
+  // Sin duración conocida se supone un capítulo de 22 min (lo normal en listas).
+  const used = sec || 22 * 60;
+  const per = BYTES_PER_SEC[height] || BYTES_PER_SEC[1080];
+  return Math.round(used * per);
+}
+
+/** Espacio libre y total del disco donde viven los vídeos. */
+export function diskSpace(dir = VIDEO_CACHE_DIR) {
+  // El directorio puede no existir todavía (primer arranque): se sube por los
+  // padres hasta encontrar uno que sí, que está en el mismo sistema de archivos.
+  let p = dir;
+  for (let i = 0; i < 8 && p; i += 1) {
+    try {
+      const st = fs.statfsSync(p);
+      return {
+        known: true,
+        free_bytes: Number(st.bavail) * Number(st.bsize),
+        total_bytes: Number(st.blocks) * Number(st.bsize)
+      };
+    } catch {
+      const up = path.dirname(p);
+      if (up === p) break;
+      p = up;
+    }
+  }
+  return { known: false, free_bytes: 0, total_bytes: 0 };
+}
+
+// Ajuste numérico opcional: '' (sin guardar) devuelve `null`, no 0.
+function settingNumber(key) {
+  const raw = String(getSetting(key) ?? '').trim();
+  if (!raw) return null;
+  const n = Number(raw.replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Tope de la caché de vídeos y margen libre que no se toca (en bytes). */
+export function videoDiskPolicy() {
+  const maxGb = settingNumber('youtube_videos_max_gb');
+  const keepGb = settingNumber('youtube_videos_keep_free_gb');
+  return {
+    // Sin tope (por defecto): sólo se respeta el margen libre.
+    budget_bytes: maxGb && maxGb > 0 ? Math.round(maxGb * GB) : 0,
+    // Por defecto se dejan 5 GB libres: el panel vive en el mismo disco.
+    keep_free_bytes: Math.round((keepGb !== null && keepGb >= 0 ? keepGb : 5) * GB),
+    height: downloadHeight()
+  };
+}
+
+/** Archivos descargados, con su ficha. */
+export function videosCacheFiles() {
+  let names = [];
+  try {
+    names = fs.readdirSync(VIDEO_CACHE_DIR);
+  } catch {
+    return [];
+  }
+  const ids = [
+    ...new Set(
+      names
+        .filter((f) => !f.endsWith('.json') && !f.includes('.tmp.') && !f.endsWith('.part'))
+        .map((f) => f.replace(/\.(mp4|mkv|webm|mov|m4v)$/i, ''))
+    )
+  ];
+  return ids.map((id) => cachedVideoInfo(id)).filter(Boolean);
+}
+
+/**
+ * Qué archivos están usando los canales (listas y vídeos en bucle). Un archivo
+ * que el motor está leyendo NO se borra nunca: dejaría el canal sin señal.
+ */
+export function videosInUse() {
+  const map = new Map(); // basename -> [nombres de canal]
+  try {
+    const rows = db.prepare('SELECT id, name, live_source_state FROM channels_247').all();
+    for (const row of rows) {
+      let st = null;
+      try {
+        st = JSON.parse(row.live_source_state || 'null');
+      } catch {
+        st = null;
+      }
+      if (!st || typeof st !== 'object') continue;
+      const urls = [];
+      if (Array.isArray(st.entries)) {
+        for (const e of st.entries) if (e && e.local && e.url) urls.push(String(e.url));
+      }
+      if (st.local && st.url) urls.push(String(st.url));
+      for (const u of urls) {
+        const base = path.basename(u);
+        if (!map.has(base)) map.set(base, []);
+        map.get(base).push(String(row.name || `Canal ${row.id}`));
+      }
+    }
+  } catch {
+    /* sin base no se puede saber: se protege nada y no se borra a ciegas */
+  }
+  return map;
+}
+
+/** Lo que ocuparían estos vídeos (suma de duraciones × altura actual). */
+export function estimatePlaylistBytes(items, height = downloadHeight()) {
+  return (Array.isArray(items) ? items : []).reduce(
+    (acc, it) => acc + estimateVideoBytes(it?.duration_sec, height),
+    0
+  );
+}
+
+/** Resumen del disco y de la caché (para el panel). */
+export function videosCacheStats() {
+  const inUse = videosInUse();
+  const files = videosCacheFiles().map((f) => {
+    const base = path.basename(f.path);
+    const used = inUse.get(base) || [];
+    return {
+      video_id: f.video_id,
+      title: f.title,
+      path: f.path,
+      bytes: f.bytes,
+      duration_sec: f.duration_sec,
+      downloaded_at_ms: f.downloaded_at_ms,
+      used_by: used,
+      in_use: used.length > 0
+    };
+  });
+  const bytes = files.reduce((acc, f) => acc + f.bytes, 0);
+  const space = diskSpace();
+  const policy = videoDiskPolicy();
+  return {
+    dir: VIDEO_CACHE_DIR,
+    count: files.length,
+    bytes,
+    used_bytes: files.filter((f) => f.in_use).reduce((acc, f) => acc + f.bytes, 0),
+    unused_bytes: files.filter((f) => !f.in_use).reduce((acc, f) => acc + f.bytes, 0),
+    free_bytes: space.free_bytes,
+    total_bytes: space.total_bytes,
+    disk_known: space.known,
+    budget_bytes: policy.budget_bytes,
+    keep_free_bytes: policy.keep_free_bytes,
+    height: policy.height,
+    files: files.sort((a, b) => b.bytes - a.bytes)
+  };
+}
+
+/**
+ * Lo mismo pero sin la lista de archivos: es lo que necesita el panel para
+ * decir «ocupa X, quedan Y libres» sin traerse el inventario entero.
+ */
+export function videosSummary() {
+  const st = videosCacheStats();
+  return {
+    dir: st.dir,
+    count: st.count,
+    bytes: st.bytes,
+    used_bytes: st.used_bytes,
+    unused_bytes: st.unused_bytes,
+    free_bytes: st.free_bytes,
+    total_bytes: st.total_bytes,
+    disk_known: st.disk_known,
+    budget_bytes: st.budget_bytes,
+    keep_free_bytes: st.keep_free_bytes,
+    height: st.height
+  };
+}
+
+/**
+ * Borra vídeos para no llenar el disco: primero los que no usa ningún canal,
+ * del más antiguo al más nuevo, hasta cumplir el tope y dejar libre el margen.
+ * Nunca borra un archivo que esté emitiendo un canal.
+ *
+ * `needBytes` = lo que hace falta además (antes de una descarga).
+ */
+export function pruneVideoCache({ needBytes = 0, force = false } = {}) {
+  const policy = videoDiskPolicy();
+  const files = videosCacheStats().files;
+  const removed = [];
+  let freed = 0;
+  let totalBytes = files.reduce((acc, f) => acc + f.bytes, 0);
+  let space = diskSpace();
+  const freeNow = () => space.free_bytes + freed;
+  const overBudget = () => (policy.budget_bytes > 0 && totalBytes > policy.budget_bytes);
+  const shortOfSpace = () => freeNow() - Number(needBytes || 0) < policy.keep_free_bytes;
+  if (!force && !overBudget() && !shortOfSpace()) {
+    return { removed: [], freed_bytes: 0, bytes: totalBytes, free_bytes: freeNow(), budget_bytes: policy.budget_bytes };
+  }
+  // Candidatos: lo que NO está emitiendo nadie, lo más antiguo primero.
+  const candidates = files
+    .filter((f) => !f.in_use)
+    .sort((a, b) => (a.downloaded_at_ms || 0) - (b.downloaded_at_ms || 0));
+  for (const f of candidates) {
+    if (!overBudget() && !shortOfSpace()) break;
+    if (removeCachedVideo(f.video_id)) {
+      removed.push({ video_id: f.video_id, title: f.title, bytes: f.bytes });
+      freed += f.bytes;
+      totalBytes -= f.bytes;
+    }
+  }
+  space = diskSpace();
+  const left = space.free_bytes - Number(needBytes || 0);
+  return {
+    removed,
+    freed_bytes: freed,
+    bytes: totalBytes,
+    free_bytes: space.free_bytes,
+    budget_bytes: policy.budget_bytes,
+    in_use_bytes: files.filter((f) => f.in_use).reduce((acc, f) => acc + f.bytes, 0),
+    // ¿Queda sitio para lo que se iba a bajar y para el margen libre?
+    enough: !space.known || left >= policy.keep_free_bytes
+  };
+}
+
+/**
+ * ¿Cabe una descarga de `bytes`? Si no, se libera lo que no se está emitiendo.
+ * Devuelve `{ ok, error, free_bytes, pruned }`.
+ */
+export function ensureSpaceForDownload(bytes, { label = 'este vídeo' } = {}) {
+  const need = Math.max(0, Number(bytes) || 0);
+  const policy = videoDiskPolicy();
+  let space = diskSpace();
+  let pruned = { removed: [], freed_bytes: 0 };
+  if (space.known && space.free_bytes - need < policy.keep_free_bytes) {
+    pruned = pruneVideoCache({ needBytes: need });
+    space = diskSpace();
+  }
+  if (!space.known) return { ok: true, free_bytes: 0, pruned };
+  const left = space.free_bytes - need;
+  if (left < policy.keep_free_bytes || left < 0) {
+    const gb = (n) => `${(n / GB).toFixed(1)} GB`;
+    return {
+      ok: false,
+      free_bytes: space.free_bytes,
+      pruned,
+      error:
+        `No hay espacio para ${label}: necesita ~${gb(need)} y al disco le quedan ${gb(space.free_bytes)} ` +
+        `(se reservan ${gb(policy.keep_free_bytes)}). No se ha borrado nada que esté emitiendo un canal. ` +
+        'Baja la calidad a 720p, prepara menos capítulos o pulsa «Liberar espacio» en Canales 24/7.'
+    };
+  }
+  return { ok: true, free_bytes: space.free_bytes, pruned };
+}
 
 function safeVideoId(id) {
   return String(id || '')
@@ -1041,12 +1307,25 @@ function isRetryableDownloadError(text) {
  * vídeo suelto y la preparación de una lista completa.
  * Devuelve `{ ok, path, video_id, title, duration_sec, bytes, error }`.
  */
-function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
+function downloadVideoFile({ bin, url, videoId, durationSec = 0, onStep = () => {} }) {
   return (async () => {
     const id = safeVideoId(videoId);
     if (!bin || !id) return { ok: false, error: 'Falta yt-dlp o el identificador del vídeo.' };
 
     fs.mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
+    // Antes de bajar nada: ¿cabe? Si no, se libera lo que no esté emitiendo y,
+    // si aun así no cabe, se dice en vez de llenar el disco y tumbar el panel.
+    const needed = estimateVideoBytes(durationSec);
+    const space = ensureSpaceForDownload(needed, { label: 'este vídeo' });
+    if (!space.ok) {
+      return {
+        ok: false,
+        error: space.error,
+        needs_space: true,
+        free_bytes: space.free_bytes,
+        estimate_bytes: needed
+      };
+    }
     const tmpBase = path.join(VIDEO_CACHE_DIR, `${id}.tmp`);
     const baseArgs = [
       '--no-warnings',
@@ -1054,7 +1333,7 @@ function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
       '--no-playlist',
       '--newline',
       '-f',
-      VIDEO_DOWNLOAD_FORMAT,
+      videoDownloadFormat(),
       '--merge-output-format',
       'mp4',
       '--write-info-json',
@@ -1182,7 +1461,17 @@ function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
       /* la ficha es un extra */
     }
     cleanTmp();
-    return { ok: true, ...sidecar, path: finalPath, clients_tried: tried.join(', ') };
+    // Se respeta el tope de la caché: si se pasa, se borran los vídeos viejos
+    // que ya no emite ningún canal (nunca el que se acaba de bajar).
+    const pruned = pruneVideoCache();
+    return {
+      ok: true,
+      ...sidecar,
+      path: finalPath,
+      clients_tried: tried.join(', '),
+      height: downloadHeight(),
+      pruned_bytes: pruned.freed_bytes || 0
+    };
   })();
 }
 
@@ -1190,7 +1479,7 @@ function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
  * Descarga un vídeo de YouTube al disco del panel (en segundo plano).
  * Devuelve el estado del trabajo; la pantalla lo sigue con `videoDownloadState`.
  */
-export function startVideoDownload(rawUrl) {
+export function startVideoDownload(rawUrl, { durationSec = 0 } = {}) {
   if (videoJob.running) return { ...videoJob, already: true };
 
   const cls = classifySourceUrl(rawUrl);
@@ -1230,6 +1519,7 @@ export function startVideoDownload(rawUrl) {
     bin,
     url: cls.url || rawUrl,
     videoId: id,
+    durationSec: Number(durationSec) || 0,
     onStep: (step) => {
       videoJob = { ...videoJob, step };
     }
@@ -1248,6 +1538,54 @@ let playlistJob = { running: false, step: '', startedAt: 0, result: null, url: '
 
 export function playlistDownloadState() {
   return { ...playlistJob, failures: [...playlistJob.failures] };
+}
+
+/**
+ * Cuántos vídeos de una lista caben de verdad en el disco.
+ *
+ * El operador pide 10; si sólo caben 6 (o el tope de la caché está cerca), se
+ * preparan 6 y se dice por qué. Siempre se deja entrar al menos uno. Devuelve
+ * `{ count, estimate_bytes, free_bytes, keep_free_bytes, budget_bytes, reason }`.
+ */
+export function planPlaylistForDisk(items, { limit = 10 } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const height = downloadHeight();
+  const policy = videoDiskPolicy();
+  const space = diskSpace();
+  const max = Math.max(1, Math.min(MAX_PLAYLIST_ITEMS, Number(limit) || 10));
+  const cache = videosCacheStats();
+  const budgetLeft = policy.budget_bytes > 0 ? Math.max(0, policy.budget_bytes - cache.bytes) : Infinity;
+  let count = 0;
+  let bytes = 0;
+  let reason = '';
+  for (const it of list) {
+    if (count >= max) break;
+    const need = estimateVideoBytes(it?.duration_sec, height);
+    // Hueco real: lo que queda del tope de la caché y lo que sobra del disco
+    // después de reservar el margen libre.
+    const diskLeft = space.known ? space.free_bytes - policy.keep_free_bytes : Infinity;
+    if (count > 0 && bytes + need > budgetLeft) {
+      reason = 'no cabe más en el espacio reservado para vídeos';
+      break;
+    }
+    if (count > 0 && bytes + need > diskLeft) {
+      reason = 'el disco se quedaría sin el margen libre';
+      break;
+    }
+    bytes += need;
+    count += 1;
+  }
+  return {
+    count: Math.max(1, Math.min(count || 1, max)),
+    estimate_bytes: bytes,
+    free_bytes: space.free_bytes,
+    total_bytes: space.total_bytes,
+    disk_known: space.known,
+    keep_free_bytes: policy.keep_free_bytes,
+    budget_bytes: policy.budget_bytes,
+    height,
+    reason
+  };
 }
 
 /**
@@ -1319,9 +1657,21 @@ export function startPlaylistDownload(rawUrl, { limit = 10, pending: knownPendin
       };
       return;
     }
-    const pending = Array.isArray(list.pending) ? list.pending.slice(0, count) : [];
+    const all = Array.isArray(list.pending) ? list.pending : [];
+    // Cuántos caben de verdad: no se empieza una descarga que llene el disco.
+    const plan = planPlaylistForDisk(all, { limit: count });
+    const pending = all.slice(0, plan.count);
     const total = pending.length;
-    playlistJob = { ...playlistJob, total, step: total ? `preparando ${total} vídeos…` : '' };
+    const skippedForSpace = Math.max(0, Math.min(all.length, count) - total);
+    const gbOf = (n) => `${(Number(n || 0) / GB).toFixed(1)} GB`;
+    playlistJob = {
+      ...playlistJob,
+      total,
+      estimate_bytes: plan.estimate_bytes,
+      free_bytes: plan.free_bytes,
+      skipped_for_space: skippedForSpace,
+      step: total ? `preparando ${total} vídeos (~${gbOf(plan.estimate_bytes)})…` : ''
+    };
 
     let downloaded = 0;
     let already = 0;
@@ -1340,6 +1690,7 @@ export function startPlaylistDownload(rawUrl, { limit = 10, pending: knownPendin
         bin,
         url: item.url || `https://www.youtube.com/watch?v=${item.id}`,
         videoId: item.id,
+        durationSec: Number(item.duration_sec) || 0,
         onStep: (step) => {
           playlistJob = { ...playlistJob, step: `${i + 1}/${total} · ${step}` };
         }
@@ -1363,11 +1714,18 @@ export function startPlaylistDownload(rawUrl, { limit = 10, pending: knownPendin
         total,
         failed: failures.length,
         failures: failures.slice(0, 5),
+        estimate_bytes: Number(playlistJob.estimate_bytes) || 0,
+        free_bytes: diskSpace().free_bytes,
+        skipped_for_space: skippedForSpace,
+        disk_limited: skippedForSpace > 0,
+        bytes: videosCacheStats().bytes,
         error:
           total === 0
             ? 'La lista no tiene vídeos que se puedan descargar (todos son directos o privados).'
             : downloaded + already === 0
-              ? `No se pudo descargar ninguno de los ${total} vídeos.`
+              ? failures.length && failures[0].error
+                ? `No se pudo descargar ninguno de los ${total} vídeos: ${failures[0].error}`
+                : `No se pudo descargar ninguno de los ${total} vídeos.`
               : ''
       }
     };
@@ -2209,6 +2567,23 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         pending,
         pending_count: pending.length,
         can_prepare_playlist: pending.length > 0,
+        // Cuánto ocupará prepararla y cuánto queda libre: la pantalla lo dice
+        // ANTES de descargar (una lista de 10 capítulos son ~3 GB).
+        pending_bytes: estimatePlaylistBytes(pending),
+        disk: (() => {
+          const space = diskSpace();
+          const policy = videoDiskPolicy();
+          const cache = videosCacheStats();
+          return {
+            free_bytes: space.free_bytes,
+            total_bytes: space.total_bytes,
+            known: space.known,
+            keep_free_bytes: policy.keep_free_bytes,
+            budget_bytes: policy.budget_bytes,
+            cache_bytes: cache.bytes,
+            height: policy.height
+          };
+        })(),
         skip_summary: skipSummary,
         // Motivos concretos para que la pantalla no hable de un cajón de sastre.
         reasons: [...skipReasons.keys()].slice(0, 5),
@@ -2240,6 +2615,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       pending,
       pending_count: pending.length,
       can_prepare_playlist: pending.length > 0,
+      pending_bytes: estimatePlaylistBytes(pending),
       skip_summary: skipSummary,
       provider: 'youtube',
       title: String(data.title || entries[0].title || 'Lista de YouTube'),
@@ -2600,6 +2976,7 @@ export function diskPlaylistState(prev, url = '') {
     // y no se pierden capítulos por el camino. Sólo cambia la cuenta.
     pending,
     pending_count: remaining.length,
+    pending_bytes: estimatePlaylistBytes(remaining),
     can_prepare_playlist: remaining.length > 0,
     needs_transcode: playlistNeedsTranscode(entries),
     expires_at_ms: 0,
@@ -2685,6 +3062,8 @@ export async function refreshChannelLiveSource(channel, { force = false } = {}) 
     if (disk) return disk;
   }
   const res = await resolveLiveSource(url);
+  // Estimación de lo que falta por descargar (para la tarjeta y el aviso).
+  res.pending_bytes = estimatePlaylistBytes(Array.isArray(res.pending) ? res.pending : []);
   const entries = Array.isArray(res.entries) ? res.entries : [];
   const mode = String(res.mode || (res.live ? 'live' : 'video'));
   const state = {
@@ -2735,6 +3114,7 @@ export async function refreshChannelLiveSource(channel, { force = false } = {}) 
     needs_download: Boolean(res.needs_download),
     can_prepare_playlist: Boolean(res.can_prepare_playlist),
     pending_count: Number(res.pending_count) || 0,
+    pending_bytes: Number(res.pending_bytes) || 0,
     skip_summary: String(res.skip_summary || ''),
     // Qué vídeos se pueden descargar (id, título y duración). Con esto la lista
     // se puede emitir desde el disco sin volver a preguntar a YouTube.
@@ -2821,6 +3201,9 @@ export function liveSourceInfo(channel) {
     needs_download: Boolean(st?.needs_download),
     can_prepare_playlist: Boolean(st?.can_prepare_playlist),
     pending_count: Number(st?.pending_count) || 0,
+    // Lo que ocuparían los capítulos que faltan (la tarjeta lo enseña antes
+    // de descargar: «≈ 3,0 GB»).
+    pending_bytes: estimatePlaylistBytes(Array.isArray(st?.pending) ? st.pending : []),
     skip_summary: String(st?.skip_summary || ''),
     // YouTube pide verificación anti-robots a la IP del servidor: se puede
     // enseñar en la tarjeta sin volver a comprobar.

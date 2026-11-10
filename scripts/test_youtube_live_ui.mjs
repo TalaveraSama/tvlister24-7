@@ -74,6 +74,7 @@ let downloadJob = null;
 let downloads = 0;
 let prepareJob = null;
 let prepares = 0;
+let cleanups = 0;
 let simpsonsPrepared = false; // la lista «PLsimpsons» ya se preparó desde la tarjeta
 let cookiesPath = '';
 let cookiesExpired = false;
@@ -241,6 +242,7 @@ const channels = [
       total_entries: 30,
       total_duration_sec: 0,
       pending_count: 23,
+      pending_bytes: 9 * 1024 ** 3,
       can_prepare_playlist: true,
       skip_summary: '23 no ofrece MP4 progresivo (sólo DASH/HLS) · 7 es un directo',
       has_url: false,
@@ -251,6 +253,20 @@ const channels = [
     liveState: { isLiveSource: true, sourceMode: 'playlist', schedule: [] }
   }
 ];
+
+const videosMock = (over = {}) => ({
+  count: 3,
+  bytes: 3 * 1024 ** 3,
+  used_bytes: 2 * 1024 ** 3,
+  unused_bytes: 1024 ** 3,
+  free_bytes: 48 * 1024 ** 3,
+  total_bytes: 100 * 1024 ** 3,
+  disk_known: true,
+  budget_bytes: 0,
+  keep_free_bytes: 5 * 1024 ** 3,
+  height: 1080,
+  ...over
+});
 
 const json = (body, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -288,6 +304,7 @@ globalThis.fetch = async (url, opts = {}) => {
             update_available: true,
             latest_version: '2099.01.01',
             release: { tag: '2099.01.01', error: '' },
+            videos: videosMock(),
             cookies: {
               path: cookiesPath,
               exists: Boolean(cookiesPath),
@@ -302,7 +319,14 @@ globalThis.fetch = async (url, opts = {}) => {
               error: ''
             }
           }
-        : { installed: false, bin: '', version: '', ffmpeg: true, hint: 'Se instala solo con un clic, sin apt.' }
+        : {
+            installed: false,
+            bin: '',
+            version: '',
+            ffmpeg: true,
+            hint: 'Se instala solo con un clic, sin apt.',
+            videos: videosMock()
+          }
     );
   }
   if (u === '/api/youtube/cookies/test') {
@@ -342,6 +366,26 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u === '/api/youtube/cookies' && method === 'DELETE') {
     cookiesPath = '';
     return json({ ok: true, cookies: { path: '', exists: false, usable: false } });
+  }
+  if (u === '/api/youtube/videos' && method === 'GET') {
+    return json({
+      ok: true,
+      dir: '/opt/tvlister24-7/.runtime/videos',
+      count: 3,
+      bytes: 3 * 1024 ** 3,
+      free_bytes: 48 * 1024 ** 3,
+      disk_known: true,
+      files: []
+    });
+  }
+  if (u === '/api/youtube/videos/cleanup' && method === 'POST') {
+    cleanups += 1;
+    return json({
+      ok: true,
+      removed: [{ video_id: 'VID1', title: 'Programa 1', bytes: 2 * 1024 ** 3 }],
+      freed_bytes: 2 * 1024 ** 3,
+      stats: { count: 1, bytes: 1024 ** 3, free_bytes: 50 * 1024 ** 3, disk_known: true }
+    });
   }
   if (u === '/api/youtube/prepare-playlist' && method === 'POST') {
     prepares += 1;
@@ -403,7 +447,7 @@ globalThis.fetch = async (url, opts = {}) => {
         live: false,
         needs_ytdlp: true,
         error: 'Falta yt-dlp en el servidor: instálalo para leer el directo de YouTube.',
-        yt_dlp: { installed: false }
+        yt_dlp: { installed: false, videos: videosMock() }
       });
     }
     if (/watch\?v=dashonly/.test(body?.url || '')) {
@@ -514,6 +558,16 @@ globalThis.fetch = async (url, opts = {}) => {
           title: 'Los Simpson Capítulos Completos [Español Latino]',
           can_prepare_playlist: true,
           pending_count: 10,
+          pending_bytes: Math.round(10 * 1320 * 0.3 * 1024 * 1024),
+          disk: {
+            free_bytes: 48 * 1024 ** 3,
+            total_bytes: 100 * 1024 ** 3,
+            known: true,
+            keep_free_bytes: 5 * 1024 ** 3,
+            budget_bytes: 0,
+            cache_bytes: 0,
+            height: 1080
+          },
           skip_summary: '10 no ofrece MP4 progresivo (sólo DASH/HLS)',
           error:
             'Los 10 vídeos de la lista no ofrecen un MP4 progresivo (sólo DASH/HLS). Se pueden descargar una vez ' +
@@ -548,7 +602,7 @@ globalThis.fetch = async (url, opts = {}) => {
         skipped_live: 1,
         skipped_no_format: 0,
         needs_transcode: false,
-        yt_dlp: { installed: true, version: '2026.11.04', bin: 'x', ffmpeg: true }
+        yt_dlp: { installed: true, version: '2026.11.04', bin: 'x', ffmpeg: true, videos: videosMock() }
       });
     }
     if (/watch\?v=/.test(body?.url || '')) {
@@ -561,7 +615,7 @@ globalThis.fetch = async (url, opts = {}) => {
         duration_sec: 125,
         needs_transcode: false,
         expires_in_min: 300,
-        yt_dlp: { installed: true, version: '2026.11.04', bin: 'x', ffmpeg: true }
+        yt_dlp: { installed: true, version: '2026.11.04', bin: 'x', ffmpeg: true, videos: videosMock() }
       });
     }
     return json({
@@ -572,7 +626,13 @@ globalThis.fetch = async (url, opts = {}) => {
       title: 'Noticias 24 Horas (directo)',
       uploader: 'Canal Demo',
       expires_in_min: 320,
-      yt_dlp: { installed: true, version: '2026.11.04', bin: '/opt/tvlister24-7/.runtime/bin/yt-dlp', ffmpeg: true }
+      yt_dlp: {
+        installed: true,
+        version: '2026.11.04',
+        bin: '/opt/tvlister24-7/.runtime/bin/yt-dlp',
+        ffmpeg: true,
+        videos: videosMock()
+      }
     });
   }
   if (/^\/api\/channels247\/13\/live-source\/refresh$/.test(u) && method === 'POST') {
@@ -660,6 +720,48 @@ ok(/repetido en bucle \(descargado\)/.test(text()), 'y la línea del canal lo di
     'explicando que el canal emite mientras descarga'
   );
 
+  // El estado de yt-dlp (y con él el disco) llega en su propia petición.
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 150));
+  });
+  await flush();
+  ok(/Quedan 23 ≈ 9,0 GB/.test(text()), 'la tarjeta dice cuánto ocuparían los que faltan', (text().match(/Quedan 23[^.\n]{0,80}/) || [''])[0]);
+  ok(/disco libre 48,0 GB/.test(text()), 'y cuánto queda libre en el servidor', (text().match(/Quedan 23[^.]{0,120}/) || [''])[0]);
+  ok(buttons('Liberar espacio').length > 0, 'y ofrece liberar espacio');
+  ok(/Vídeos en el disco: 3,0 GB/.test(text()), 'diciendo lo que ya ocupan los vídeos descargados', (text().match(/Vídeos en el disco[^.]{0,40}/) || [''])[0]);
+
+  // Calidad: bajar a 720p ocupa la mitad.
+  const quality = [...document.querySelectorAll('select')].find((sel) =>
+    [...sel.options].some((o) => /720p/.test(o.textContent))
+  );
+  ok(Boolean(quality), 'se puede elegir la calidad de descarga (720p ocupa la mitad)');
+  if (quality) {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLSelectElement.prototype, 'value').set;
+    await act(async () => {
+      setter.call(quality, '720');
+      quality.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    });
+    await flush();
+    const putCalidad = calls.filter((c) => c.url === '/api/settings' && c.method === 'PUT').pop();
+    ok(putCalidad?.body?.youtube_video_height === '720', 'y se guarda en el panel', JSON.stringify(putCalidad?.body));
+    // Se deja como estaba para el resto de la prueba.
+    await act(async () => {
+      setter.call(quality, '1080');
+      quality.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    });
+    await flush();
+  }
+
+  // Liberar espacio: borra lo que ya no emite ningún canal.
+  await act(async () => {
+    buttons('Liberar espacio')[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  });
+  await flush();
+  await flush();
+  ok(cleanups === 1, '«Liberar espacio» pide limpiar al panel', `${cleanups}`);
+  ok(/Liberados 2,0 GB \(1 vídeo\)/.test(text()), 'y dice cuánto se ha recuperado', text().slice(-140));
+  ok(/Disco libre: 50,0 GB/.test(text()), 'con el disco libre que queda');
+
   const antesTarjeta = calls.length;
   await act(async () => {
     buttons('Preparar la lista en el disco')[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
@@ -677,6 +779,8 @@ ok(/repetido en bucle \(descargado\)/.test(text()), 'y la línea del canal lo di
   );
   ok(postTarjeta?.body?.limit === 10, 'y cuántos vídeos descargar', String(postTarjeta?.body?.limit));
   ok(/Preparando la lista en el disco/.test(text()), 'mientras descarga lo cuenta en la tarjeta', text().slice(-160));
+
+  // ¿Y el disco? Se avisa de lo que va a ocupar y de lo que queda libre.
 
   await act(async () => {
     await new Promise((r) => setTimeout(r, 2600));

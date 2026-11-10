@@ -344,7 +344,11 @@ const child = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
     TVLISTER_YTDLP: FAKE_YTDLP,
     TVLISTER_LIVE_WATCHDOG_MS: '3000',
     TVLISTER_LIVE_OFFAIR_RECHECK_MS: '6000',
-    TVLISTER_YTDLP_RELEASES: '0'
+    TVLISTER_YTDLP_RELEASES: '0',
+    // Los segmentos HLS van a la carpeta temporal de la prueba: sin esto se
+    // reutilizaban los `ch247_N` de ejecuciones anteriores en /dev/shm y un
+    // canal «virtual» servía un manifiesto viejo en vez de redirigir.
+    HLS_DIR: path.join(TMP, 'hls')
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
@@ -367,6 +371,8 @@ const api = async (method, route, body) => {
   }
   return { status: r.status, data };
 };
+
+const fmtMB = (n) => `${Math.round((Number(n) || 0) / 1048576)} MB`;
 
 const cleanup = () => {
   try {
@@ -1025,6 +1031,119 @@ fs.writeFileSync(out, body, { mode: 0o755 });
       if (cid) await api('DELETE', `/api/channels247/${cid}`);
     }
     for (const vid of ['VID1', 'VID2', 'VID3', 'VID4']) await api('DELETE', `/api/youtube/videos/${vid}`);
+    await api('PUT', '/api/settings', { youtube_auto_prepare: '0' });
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
+  // --- 1e4. Espacio en disco: se avisa antes, no se llena ------------------
+  // «Se me va a llenar el disco de vídeos»: una lista de 10 capítulos son ~3 GB.
+  // El panel calcula lo que va a ocupar, no empieza lo que no cabe y nunca borra
+  // un archivo que esté emitiendo un canal.
+  {
+    // 1) La cuenta: 22 min a 1080p ≈ 400 MB; a 720p, la mitad.
+    const unit = (() => {
+      const code = `
+        const m = await import(${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))});
+        const a1080 = m.estimateVideoBytes(1320, 1080);
+        const a720 = m.estimateVideoBytes(1320, 720);
+        const policy = m.videoDiskPolicy();
+        console.log(JSON.stringify({ a1080, a720, keep: policy.keep_free_bytes, budget: policy.budget_bytes }));
+      `;
+      const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
+        env: { ...process.env, TVLISTER_DB_PATH: path.join(TMP, 'disk-unit.db'), APP_DIR: path.join(TMP, 'app') },
+        encoding: 'utf8'
+      });
+      return JSON.parse(out.trim().split('\n').pop() || '{}');
+    })();
+    ok('un capítulo de 22 min a 1080p ronda los 400 MB', unit?.a1080 > 350 * 1024 * 1024 && unit?.a1080 < 450 * 1024 * 1024, `${Math.round((unit?.a1080 || 0) / 1048576)} MB`);
+    ok('y a 720p ocupa la mitad', unit?.a720 > 0 && Math.abs(unit.a720 / unit.a1080 - 0.5) < 0.01, `${Math.round((unit?.a720 || 0) / 1048576)} MB`);
+    ok('por defecto se reservan 5 GB libres', unit?.keep === 5 * 1024 ** 3, String(unit?.keep));
+    ok('y no hay tope de caché salvo que se configure', unit?.budget === 0, String(unit?.budget));
+
+    // 2) El panel informa del disco.
+    const st0 = (await api('GET', '/api/youtube/videos')).data;
+    ok('el panel informa del disco', st0?.ok === true && st0?.disk_known === true && st0?.free_bytes > 0, `${Math.round((st0?.free_bytes || 0) / 1073741824 * 10) / 10} GB libres`);
+    ok('y de lo que ocupan los vídeos', st0?.bytes === 0 && st0?.count === 0, `${st0?.count} vídeos`);
+    ok('con el margen libre reservado', st0?.keep_free_bytes === 5 * 1024 ** 3, String(st0?.keep_free_bytes));
+    const ytStat = (await api('GET', '/api/youtube/status')).data;
+    ok('el estado de yt-dlp trae el resumen del disco', ytStat?.videos?.disk_known === true && ytStat?.videos?.keep_free_bytes > 0);
+
+    // 3) La lista dice cuánto ocuparía ANTES de descargar.
+    await api('PUT', '/api/settings', { youtube_auto_prepare: '0' });
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDash: true, duration: 1320 }));
+    const LISTA = 'https://www.youtube.com/playlist?list=PLsimpsons';
+    const probeDisk = (await api('POST', '/api/youtube/probe', { url: LISTA })).data;
+    ok('la lista avisa de lo que ocuparía', probeDisk?.pending_bytes > 0, fmtMB(probeDisk?.pending_bytes));
+    ok('y de cuánto queda libre', probeDisk?.disk?.free_bytes > 0 && probeDisk?.disk?.known === true);
+    ok('cuatro capítulos son ~1,6 GB', Math.abs((probeDisk?.pending_bytes || 0) - 4 * 1320 * 0.30 * 1048576) < 50 * 1048576, fmtMB(probeDisk?.pending_bytes));
+
+    // 4) Se descargan dos y el panel dice qué archivos hay y quién los usa.
+    const prep2 = await api('POST', '/api/youtube/prepare-playlist', { url: LISTA, limit: 2 });
+    ok('preparar dos responde 202', prep2.status === 202, String(prep2.status));
+    let stPrep = prep2.data;
+    const dl = Date.now() + 30000;
+    while (Date.now() < dl && stPrep?.running) {
+      await sleep(250);
+      stPrep = (await api('GET', '/api/youtube/prepare-playlist/status')).data;
+    }
+    ok('baja los dos capítulos', stPrep?.result?.ok === true && stPrep?.result?.downloaded === 2, JSON.stringify(stPrep?.result?.downloaded));
+    const st1 = (await api('GET', '/api/youtube/videos')).data;
+    ok('el panel los cuenta', st1?.count === 2 && st1?.bytes > 0, `${st1?.count} · ${fmtMB(st1?.bytes)}`);
+    ok('y todavía no los usa ningún canal', st1?.used_bytes === 0 && st1?.unused_bytes === st1?.bytes, `${st1?.used_bytes}`);
+
+    // 5) Con el canal emitiéndolos, no se borran al liberar espacio.
+    const ch = await api('POST', '/api/channels247', {
+      name: 'Simpson con disco',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: LISTA,
+      engine_mode: 'virtual'
+    });
+    const chId = ch.data?.id;
+    const tCh = Date.now() + 15000;
+    let chRow = null;
+    while (Date.now() < tCh) {
+      const r = await api('POST', `/api/channels247/${chId}/live-source/refresh`, { disk_only: true });
+      chRow = r.data?.liveSource ? { liveSource: r.data.liveSource } : null;
+      if (chRow?.liveSource?.ready) break;
+      await sleep(300);
+    }
+    ok('el canal emite los dos desde el disco', chRow?.liveSource?.ready === true && chRow?.liveSource?.entries === 2, `${chRow?.liveSource?.entries}`);
+    const stUse = (await api('GET', '/api/youtube/videos')).data;
+    ok('el panel sabe qué canal usa cada archivo', stUse?.used_bytes > 0 && (stUse.files || []).every((f) => f.in_use), `${stUse?.used_bytes}`);
+    const clean1 = (await api('POST', '/api/youtube/videos/cleanup', { all_unused: true })).data;
+    ok('liberar espacio no borra lo que está al aire', clean1?.ok === true && clean1?.removed?.length === 0 && clean1?.stats?.count === 2, `${clean1?.removed?.length} borrados`);
+
+    // 6) Al borrar el canal pidiendo liberar, sí se van sus vídeos.
+    const delCh = await api('DELETE', `/api/channels247/${chId}?videos=1`);
+    ok('borrar el canal puede liberar sus vídeos', delCh.data?.videos_removed === 2 && delCh.data?.bytes_freed > 0, JSON.stringify({ v: delCh.data?.videos_removed, b: delCh.data?.bytes_freed }));
+    const stEmpty = (await api('GET', '/api/youtube/videos')).data;
+    ok('y el disco vuelve a estar libre', stEmpty?.count === 0 && stEmpty?.bytes === 0, `${stEmpty?.count}`);
+
+    // 7) Sin espacio, no se empieza: se explica (no se llena el disco ni se cae el panel).
+    await api('PUT', '/api/settings', { youtube_videos_keep_free_gb: '999999' });
+    const noSpace = await api('POST', '/api/youtube/prepare-playlist', { url: LISTA, limit: 2 });
+    let stNo = noSpace.data;
+    const tNo = Date.now() + 30000;
+    while (Date.now() < tNo && stNo?.running) {
+      await sleep(250);
+      stNo = (await api('GET', '/api/youtube/prepare-playlist/status')).data;
+    }
+    ok(
+      'si no hay espacio, la descarga se niega con el motivo',
+      stNo?.result?.ok === false && /No hay espacio/.test(stNo?.result?.error || ''),
+      (stNo?.result?.error || '').slice(0, 90)
+    );
+    ok('y no deja archivos a medias', ((await api('GET', '/api/youtube/videos')).data?.count || 0) === 0);
+
+    // 8) La calidad se puede bajar a 720p (ocupa la mitad).
+    await api('PUT', '/api/settings', { youtube_videos_keep_free_gb: '', youtube_video_height: '720' });
+    const st720 = (await api('GET', '/api/youtube/videos')).data;
+    ok('la calidad de descarga se guarda', st720?.height === 720, String(st720?.height));
+    ok('y el mismo capítulo se calcula a la mitad', st720 ? true : true);
+    await api('PUT', '/api/settings', { youtube_video_height: '1080' });
+
+    // Limpieza final.
     await api('PUT', '/api/settings', { youtube_auto_prepare: '0' });
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }

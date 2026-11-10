@@ -24,6 +24,15 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
+// Tamaños legibles: «3,4 GB», «250 MB». Se usa en los avisos de disco.
+const fmtBytes = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(1).replace('.', ',')} GB`;
+  if (v >= 1024 ** 2) return `${Math.round(v / 1024 ** 2)} MB`;
+  if (v > 0) return `${Math.round(v / 1024)} KB`;
+  return '0';
+};
+
 export default function Channels247Page({ onPreview }) {
   const [channels, setChannels] = useState([]);
   const [vodList, setVodList] = useState([]);
@@ -59,6 +68,8 @@ export default function Channels247Page({ onPreview }) {
   const [cardLimit, setCardLimit] = useState(10);
   const [cardPrep, setCardPrep] = useState(null); // { id, busy, msg, error }
   const [prepJob, setPrepJob] = useState(null); // estado del trabajo en el servidor
+  const [diskBusy, setDiskBusy] = useState(false);
+  const [diskMsg, setDiskMsg] = useState(null); // { ok, text }
   const cookiesFileRef = useRef(null);
 
   const [customTitle, setCustomTitle] = useState('');
@@ -91,6 +102,15 @@ export default function Channels247Page({ onPreview }) {
   useEffect(() => {
     loadAll();
     const t = setInterval(loadAll, 10000);
+    return () => clearInterval(t);
+  }, []);
+
+  // El disco también se refresca solo: la tarjeta de un canal de YouTube avisa
+  // de lo que ocuparían los vídeos que faltan y de lo que queda libre sin
+  // tener que abrir Editar. Cada 30 s basta (y no machaca a yt-dlp).
+  useEffect(() => {
+    loadYtStatus();
+    const t = setInterval(loadYtStatus, 30000);
     return () => clearInterval(t);
   }, []);
 
@@ -167,6 +187,43 @@ export default function Channels247Page({ onPreview }) {
     }
   };
 
+  // Calidad de descarga: 720p ocupa la mitad que 1080p (en un VPS el disco es
+  // lo primero que se llena). Se guarda en el panel y vale para las próximas.
+  const handleSetHeight = async (h) => {
+    try {
+      await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ youtube_video_height: String(h) }) });
+      await loadYtStatus();
+    } catch (err) {
+      window.alert(err.message || 'No se pudo guardar la calidad.');
+    }
+  };
+
+  // «Liberar espacio»: borra los vídeos que ya no emite ningún canal. Nunca
+  // toca los que un canal está usando (dejaría ese canal sin señal).
+  const handleFreeSpace = async (allUnused = true) => {
+    setDiskBusy(true);
+    setDiskMsg(null);
+    try {
+      const r = await apiFetch('/api/youtube/videos/cleanup', {
+        method: 'POST',
+        body: JSON.stringify({ all_unused: allUnused })
+      });
+      const removed = Array.isArray(r.removed) ? r.removed.length : 0;
+      setDiskMsg({
+        ok: true,
+        text: removed
+          ? `Liberados ${fmtBytes(r.freed_bytes)} (${removed} vídeo${removed === 1 ? '' : 's'}). Disco libre: ${fmtBytes(r.stats?.free_bytes)}.`
+          : `No había nada que borrar: los archivos están emitiendo en algún canal. Disco libre: ${fmtBytes(r.stats?.free_bytes)}.`
+      });
+      await loadYtStatus();
+      loadAll();
+    } catch (err) {
+      setDiskMsg({ ok: false, text: err.message || 'No se pudo liberar espacio.' });
+    } finally {
+      setDiskBusy(false);
+    }
+  };
+
   const handleProbe = async () => {
     const url = String(form.live_source_url || '').trim();
     if (!url) {
@@ -177,7 +234,8 @@ export default function Channels247Page({ onPreview }) {
     try {
       const r = await apiFetch('/api/youtube/probe', { method: 'POST', body: JSON.stringify({ url }) });
       setProbe({ ...r, busy: false });
-      if (r.yt_dlp) setYtStatus(r.yt_dlp);
+      // Se fusiona (no se reemplaza): el probe no tiene por qué traer todo.
+      if (r.yt_dlp) setYtStatus((prev) => ({ ...(prev || {}), ...r.yt_dlp }));
       if (r.ready && r.title && !String(form.name || '').trim()) {
         setForm((prev) => ({ ...prev, name: r.title }));
       }
@@ -344,7 +402,8 @@ export default function Channels247Page({ onPreview }) {
           preparing: false,
           prepared:
             `Lista preparada: ${r.downloaded + (r.already || 0)} de ${r.total} vídeos en el disco` +
-            `${r.failed ? ` (${r.failed} no se pudieron bajar)` : ''}. Se emiten en orden desde el disco: no caducan.`
+            `${r.failed ? ` (${r.failed} no se pudieron bajar)` : ''}. Se emiten en orden desde el disco: no caducan.` +
+            `${r.skipped_for_space ? ` No se prepararon ${r.skipped_for_space} más: no caben en el disco (libre ${fmtBytes(r.free_bytes)}).` : ''}`
         }));
       } else {
         setProbe({
@@ -447,7 +506,10 @@ export default function Channels247Page({ onPreview }) {
           busy: false,
           msg:
             `⛁ ${r.downloaded + (r.already || 0)} de ${r.total} en el disco. ` +
-            'El canal se emite desde ahí, en orden y sin caducar.'
+            'El canal se emite desde ahí, en orden y sin caducar.' +
+            (r.skipped_for_space
+              ? ` Faltan ${r.skipped_for_space} que no caben: quedan ${fmtBytes(r.free_bytes)} libres.`
+              : '')
         });
       } else {
         setCardPrep({
@@ -851,12 +913,29 @@ export default function Channels247Page({ onPreview }) {
                                 className="w-14 px-1.5 py-0.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
                               />
                             </label>
-                            <span className="text-[11px] text-slate-400">
-                              Se descargan una vez (H.264 + AAC) y se emiten en orden desde el disco, sin caducar.
-                              Empieza a emitir en cuanto baja el primero.
-                            </span>
+                            <select
+                              value={String(ytStatus?.videos?.height || 1080)}
+                              onChange={(e) => handleSetHeight(Number(e.target.value))}
+                              className="px-1.5 py-0.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white text-[11px]"
+                              title="Cuanto más baja la calidad, menos disco: 720p ocupa la mitad que 1080p."
+                            >
+                              <option value="1080">1080p</option>
+                              <option value="720">720p (ocupa la mitad)</option>
+                              <option value="480">480p (ocupa un tercio)</option>
+                            </select>
                           </div>
                         )}
+                        <div className="text-[11px] text-slate-400">
+                          Se descargan una vez (H.264 + AAC) y se emiten en orden desde el disco, sin caducar. Empieza a
+                          emitir en cuanto baja el primero.
+                          {Number(ch.liveSource?.pending_count) > 0 && (
+                            <span className="text-slate-300">
+                              {' '}
+                              Quedan {ch.liveSource.pending_count} ≈ {fmtBytes(ch.liveSource.pending_bytes)} · disco libre{' '}
+                              <b>{fmtBytes(ytStatus?.videos?.free_bytes)}</b>.
+                            </span>
+                          )}
+                        </div>
                         {cardPrep?.id === ch.id && cardPrep?.msg && (
                           <div className="text-[11px] text-emerald-300">{cardPrep.msg}</div>
                         )}
@@ -864,6 +943,27 @@ export default function Channels247Page({ onPreview }) {
                           <div className="text-[11px] text-rose-300 flex items-start gap-1">
                             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                             <span>{cardPrep.error}</span>
+                          </div>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => handleFreeSpace(true)}
+                            disabled={diskBusy}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 font-semibold disabled:opacity-50"
+                            title="Borra los vídeos descargados que ya no emite ningún canal. Nunca toca los que están al aire."
+                          >
+                            {diskBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                            Liberar espacio
+                          </button>
+                          <span className="text-slate-400">
+                            Vídeos en el disco: {fmtBytes(ytStatus?.videos?.bytes)}
+                            {ytStatus?.videos?.count ? ` (${ytStatus.videos.count})` : ''}
+                          </span>
+                        </div>
+                        {diskMsg && (
+                          <div className={`text-[11px] ${diskMsg.ok ? 'text-emerald-300' : 'text-rose-300'}`}>
+                            {diskMsg.text}
                           </div>
                         )}
                       </div>
@@ -1375,6 +1475,13 @@ export default function Channels247Page({ onPreview }) {
                                 Se descargan una vez (H.264 + AAC) y se emiten en orden desde el disco.
                                 {probe.pending_count ? ` Hay ${probe.pending_count} disponibles.` : ''}
                               </span>
+                              {probe.pending_count ? (
+                                <span className="text-[11px] text-slate-300">
+                                  Ocuparían ≈ <b>{fmtBytes(probe.pending_bytes || 0)}</b> · disco libre{' '}
+                                  <b>{fmtBytes(probe.disk?.free_bytes || ytStatus?.videos?.free_bytes)}</b>. Si no caben,
+                                  se preparan sólo los que quepan.
+                                </span>
+                              ) : null}
                             </div>
                           )}
                           {probe.needs_download && (

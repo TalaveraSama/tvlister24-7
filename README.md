@@ -216,6 +216,11 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
   **«Preparar la lista en el disco»**: descarga N vídeos una vez y los emite en orden y en bucle desde el disco,
   sin caducidades (`⛁ DESDE EL DISCO`). El canal **empieza a emitir con el primer capítulo** que baja y el resto
   se añade solo (la guardia mira el disco cada 15 s, sin volver a preguntar a YouTube).
+- **El disco no se llena**: antes de bajar, la tarjeta dice lo que ocuparán los capítulos que faltan y cuánto
+  queda libre (`Quedan 23 ≈ 9,0 GB · disco libre 48,0 GB`). Sólo se preparan los que caben (se reservan 5 GB
+  para el panel; `youtube_videos_max_gb` pone un tope opcional) y, si no cabe ni uno, no se llama a yt-dlp. La
+  calidad se baja a **720p (ocupa la mitad)** o **480p (ocupa un tercio)** desde la propia tarjeta, y **«Liberar
+  espacio»** borra los vídeos que ya no emite ningún canal: **nunca** uno que esté al aire.
 - **Sin recodificar** si todo es H.264 + AAC y mide lo mismo; si hay VP9/AV1/HEVC, más de 1080p o una lista con
   formatos mezclados, se pasa a **H.264 2500k + AAC 128k** para que ningún cliente se quede sin imagen.
 - La URL firmada se renueva sola antes de caducar (guardia cada minuto); si el directo termina, el canal queda
