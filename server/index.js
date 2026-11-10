@@ -105,6 +105,7 @@ import {
   ensureLiveState,
   liveSourceInfo,
   cookiesInfo,
+  dataApiInfo,
   inspectCookiesText,
   inspectCookiesFile,
   COOKIES_DEFAULT_PATH,
@@ -2687,7 +2688,10 @@ app.get('/api/youtube/status', requireAuth, async (req, res) => {
     auto_prepare: { enabled: !autoPrepareDisabled(), limit: autoPrepareLimit() },
     // Disco: lo que ocupan los vídeos descargados, lo que queda libre y el
     // tope configurado. La pantalla lo enseña antes de descargar nada.
-    videos: videosSummary()
+    videos: videosSummary(),
+    // Clave de la Data API v3: la otra forma de leer una lista, sin anti-robots
+    // (no se devuelve la clave, sólo si está puesta y los últimos 4).
+    data_api: dataApiInfo()
   });
 });
 
@@ -2888,6 +2892,9 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       video_id: r.video_id || '',
       list_id: r.list_id || '',
       host: r.host || '',
+      // De dónde salió la señal: 'api' (Data API), 'html' (página pública) o
+      // vacío (yt-dlp). Sirve para decirlo en la tarjeta.
+      via: String(r.via || ''),
       // Copia sin recodificar: con estas banderas, el motor abre las pistas tal
       // cual (si el audio va aparte, lo mapea) y no gasta CPU de vídeo.
       copy_kind: r.copy_kind || '',
@@ -2910,6 +2917,8 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       error: r.ok ? '' : r.error || 'sin señal',
       // Texto original de yt-dlp (recortado): para soporte, no para el operador.
       detail: r.ok ? '' : String(r.raw || ''),
+      // Si la señal salió por la web porque yt-dlp no pudo, se guarda su queja.
+      ytdlp_error: String(r.ytdlp_error || ''),
       needs_ytdlp: Boolean(r.needs_ytdlp),
       needs_cookies: Boolean(r.needs_cookies),
       needs_format_fix: Boolean(r.needs_format_fix),

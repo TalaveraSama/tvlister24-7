@@ -240,6 +240,8 @@ const channels = [
       can_stream: true,
       streaming: 7,
       separated_audio: true,
+      // Sin yt-dlp: la lista salió de la página pública de YouTube.
+      via: 'html',
       title: 'Los Simpson Capítulos Completos [Español Latino]',
       entries: 7,
       total_entries: 30,
@@ -338,6 +340,7 @@ globalThis.fetch = async (url, opts = {}) => {
             latest_version: '2099.01.01',
             release: { tag: '2099.01.01', error: '' },
             videos: videosMock(),
+            data_api: { set: false, source: 'none', tail: '', hint: 'Sin clave: las listas se leen por la página pública (o con yt-dlp).' },
             cookies: {
               path: cookiesPath,
               exists: Boolean(cookiesPath),
@@ -358,7 +361,8 @@ globalThis.fetch = async (url, opts = {}) => {
             version: '',
             ffmpeg: true,
             hint: 'Se instala solo con un clic, sin apt.',
-            videos: videosMock()
+            videos: videosMock(),
+            data_api: { set: false, source: 'none', tail: '', hint: 'Sin clave: las listas se leen por la página pública (o con yt-dlp).' }
           }
     );
   }
@@ -746,6 +750,7 @@ ok(/repetido en bucle \(descargado\)/.test(text()), 'y la línea del canal lo di
 {
   ok(/▶ LISTA · 7/.test(text()), 'la lista que sale de YouTube se marca con ▶', (text().match(/▶ LISTA · \d+/) || [''])[0]);
   ok(/Se emite desde YouTube, capítulo a capítulo y en bucle/.test(text()), 'y dice que se emite desde YouTube');
+  ok(/LEÍDA POR LA WEB/.test(text()), 'y de dónde se leyó (la página pública, sin yt-dlp)');
   ok(/no ocupa disco/.test(text()), 'dejando claro que no ocupa disco');
   ok(
     /uniendo al vuelo|con sus dos pistas unidas al vuelo/.test(text()),
@@ -1015,6 +1020,28 @@ ok(
   ok(
     calls.some((c) => c.url === '/api/youtube/cookies' && c.method === 'DELETE'),
     'las cookies se pueden quitar desde la pantalla'
+  );
+
+  // ── La otra puerta: la clave de la Data API ──────────────────────────────
+  // Con clave, la lista se lee por la API oficial: ni anti-robots ni cookies.
+  ok(/Leer las listas por la Data API/.test(text()), 'junto a las cookies se ofrece la clave de la Data API');
+  ok(/sin clave/.test(text()), 'diciendo si está puesta');
+  ok(
+    /YouTube Data API v3/.test(text()) && /10\.000 unidades al día/.test(text()),
+    'explicando de dónde sale la clave y cuánto cuesta (nada)'
+  );
+  const apiInput = [...document.querySelectorAll('input[type="password"]')].find((i) =>
+    /AIza|Clave guardada/.test(String(i.placeholder || ''))
+  );
+  ok(Boolean(apiInput), 'con un campo para pegarla (no se guarda en el navegador)');
+  if (apiInput) await setValue(apiInput, 'AIzaSyClaveDePrueba123');
+  await clickText('Guardar clave');
+  const putApi = calls.filter((c) => c.url === '/api/settings' && c.method === 'PUT').pop();
+  ok(putApi?.body?.youtube_api_key === 'AIzaSyClaveDePrueba123', 'guardar la clave llama al panel', JSON.stringify(putApi?.body));
+  ok(alerts.some((a) => /Clave guardada/.test(a)), 'y confirma que las listas se leerán por la API');
+  ok(
+    ![...document.querySelectorAll('input[type="text"]')].some((i) => /AIzaSyClaveDePrueba123/.test(i.value)),
+    'la clave no se queda escrita en la pantalla'
   );
 
   // Se vuelve al directo normal para seguir con el resto de la prueba.

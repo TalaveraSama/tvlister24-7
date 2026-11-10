@@ -3029,6 +3029,34 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.67: leer YouTube sin depender sólo de yt-dlp
+
+yt-dlp deja de ser la única puerta, pero sigue siendo la primera: es la única que devuelve la URL del medio
+con todas las calidades.
+
+- **`server/youtubeWeb.js`** (nuevo): `cookieHeaderFromFile` (sólo `.youtube.com`/`.google.com`, salta
+  caducadas), `jsonAt` (saca el JSON contando llaves, sin `eval`), `parseInitialData`/`parsePlayerResponse`,
+  `parsePlaylistData` (id, título, duración y `isLive` por `thumbnailOverlayTimeStatus` `LIVE`), `parsePlayerMedia`
+  (`hlsManifestUrl` o `formats`/`adaptiveFormats`), `apiPlaylist` (`playlistItems` 50/pág + `videos` 50/llamada +
+  `playlists` para el título), `webPlaylist`, `webPlayer`. Bases por entorno: `TVLISTER_YT_WEB_BASE`,
+  `TVLISTER_YT_API_BASE` (las usa la suite para servir YouTube desde un origen propio).
+- **`resolveLiveSourceWeb(cls, { cookiesFile, limit, budgetMs })`** (youtubeLive.js): mismo contrato que la rama
+  de yt-dlp (`entries`, `can_stream`, `needs_transcode`, `using_cookies`) más `via: 'api' | 'html'`. La lista pide
+  las pistas de cada capítulo con 3 workers y presupuesto (`budgetMs`, 120 s por defecto; **45 s y 12 capítulos**
+  cuando se usa como respaldo).
+- **Dónde entra** (`resolveLiveSource`): (a) si `getYtDlpInfo()` no está instalado, antes de pedir instalarlo;
+  (b) si yt-dlp no devuelve ficha; (c) si la lista se leyó pero quedó sin entradas. En (b) y (c) el texto de
+  yt-dlp se conserva en `ytdlp_error` para soporte.
+- **Ajuste `youtube_api_key`** (`TVLISTER_YT_API_KEY` como alternativa por entorno). `dataApiInfo()` devuelve
+  `{ set, source, tail, hint }` —nunca la clave— y `GET /api/youtube/status` lo publica en `data_api`.
+- **UI**: bloque «Leer las listas por la Data API (opcional)» dentro de la sección de cookies del modal, y chip
+  **↯ LEÍDA POR LA WEB** / **↯ LEÍDA POR LA API** en la tarjeta, con `liveSource.via`.
+- **Lo que no hace**: la Data API no da la URL del medio (sólo el índice) y la página pública no esquiva un
+  bloqueo de IP; en ese caso se sigue usando cookies o el motivo real del fallo.
+
+Pruebas: `test_youtube_live.mjs` **313 OK** (sección 1g con yt-dlp «muerto») y `test_youtube_live_ui.mjs`
+**179 OK**.
+
 ### v2.6.66: la lista de YouTube se emite como canal 24/7, sin descargarla
 
 El canal no necesita una copia en el VPS para emitir: se emite **la lista tal como YouTube la da**.

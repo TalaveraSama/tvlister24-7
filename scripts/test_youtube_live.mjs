@@ -56,6 +56,154 @@ const origin = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Content-Length': SEGMENT.length });
     return res.end(SEGMENT);
   }
+  // ── La web pública de YouTube (para el camino SIN yt-dlp) ───────────────
+  // Sólo existe cuando la prueba lo pide (`web: true`): en el resto de los
+  // casos la petición falla como fallaría YouTube desde una IP sin salida.
+  const webFlags = (() => {
+    try {
+      return JSON.parse(fs.readFileSync(YT_FLAGS, 'utf8') || '{}');
+    } catch {
+      return {};
+    }
+  })();
+  if (webFlags.web !== true && (url.pathname === '/playlist' || url.pathname === '/watch')) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    return res.end('not found');
+  }
+  // Página de una lista: `ytInitialData` como el que devuelve YouTube.
+  if (url.pathname === '/playlist') {
+    const data = {
+      metadata: { playlistMetadataRenderer: { title: 'Los Simpson (web)' } },
+      sidebar: {
+        playlistSidebarRenderer: {
+          items: [
+            {
+              playlistSidebarPrimaryInfoRenderer: {
+                stats: [{ simpleText: '3 videos' }, { simpleText: '1,234 views' }]
+              }
+            }
+          ]
+        }
+      },
+      contents: {
+        twoColumnBrowseResultsRenderer: {
+          tabs: [
+            {
+              tabRenderer: {
+                content: {
+                  sectionListRenderer: {
+                    contents: [
+                      {
+                        itemSectionRenderer: {
+                          contents: [
+                            {
+                              playlistVideoRenderer: {
+                                videoId: 'WEBLIVE0001',
+                                title: { runs: [{ text: 'Programa A' }] },
+                                lengthText: { simpleText: '2:00' },
+                                // El primero es un DIRECTO: la lista lo marca así.
+                                thumbnailOverlays: [
+                                  { thumbnailOverlayTimeStatusRenderer: { style: 'LIVE', text: { simpleText: 'EN VIVO' } } }
+                                ]
+                              }
+                            },
+                            {
+                              playlistVideoRenderer: {
+                                videoId: 'WEBVID00002',
+                                title: { runs: [{ text: 'Programa B' }] },
+                                lengthText: { simpleText: '1:30' }
+                              }
+                            },
+                            {
+                              playlistVideoRenderer: {
+                                videoId: 'WEBVID00003',
+                                title: { runs: [{ text: 'Programa {con} llaves' }] },
+                                lengthText: { simpleText: '0:45' }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    };
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html><html><head><title>Lista</title></head><body><script>var ytInitialData = ${JSON.stringify(data)};</script></body></html>`);
+  }
+  // Página de un vídeo/directo: `ytInitialPlayerResponse`.
+  if (url.pathname === '/watch') {
+    const id = String(url.searchParams.get('v') || '');
+    const base = {
+      playabilityStatus: { status: 'OK' },
+      videoDetails: { title: 'Programa ' + id, author: 'Canal Demo', lengthSeconds: '300', isLive: false },
+      streamingData: {
+        formats: [],
+        adaptiveFormats: [
+          {
+            url: `http://127.0.0.1:${ORIGIN_PORT}/web-v-${id}.mp4`,
+            mimeType: 'video/mp4; codecs="avc1.64001F"',
+            width: 1280,
+            height: 720,
+            bitrate: 1500000
+          },
+          {
+            url: `http://127.0.0.1:${ORIGIN_PORT}/web-a-${id}.m4a`,
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128000
+          }
+        ]
+      }
+    };
+    // WEB1 es un DIRECTO: sólo trae el manifiesto HLS.
+    const pr =
+      id === 'WEBLIVE0001'
+        ? {
+            playabilityStatus: { status: 'OK' },
+            videoDetails: { title: 'Directo web', author: 'Canal Demo', isLive: true },
+            microformat: { playerMicroformatRenderer: { liveBroadcastDetails: { isLiveNow: true } } },
+            streamingData: { hlsManifestUrl: `http://127.0.0.1:${ORIGIN_PORT}/live/index.m3u8` }
+          }
+        : base;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html><html><body><script>var ytInitialPlayerResponse = ${JSON.stringify(pr)};</script></body></html>`);
+  }
+  // Data API v3 (sólo las llamadas que usa el panel).
+  if (url.pathname === '/youtube/v3/playlistItems' && webFlags.api !== false) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        items: [
+          { contentDetails: { videoId: 'API1' } },
+          { contentDetails: { videoId: 'API2' } }
+        ]
+      })
+    );
+  }
+  if (url.pathname === '/youtube/v3/playlists' && webFlags.api !== false) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        items: [{ id: 'PLapi', snippet: { title: 'Lista por la API', channelTitle: 'Rosigod' } }]
+      })
+    );
+  }
+  if (url.pathname === '/youtube/v3/videos' && webFlags.api !== false) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        items: [
+          { id: 'API1', snippet: { title: 'Capítulo API 1', channelTitle: 'Api' }, contentDetails: { duration: 'PT1M30S' } },
+          { id: 'API2', snippet: { title: 'Capítulo API 2', channelTitle: 'Api' }, contentDetails: { duration: 'PT0M45S' } }
+        ]
+      })
+    );
+  }
   // Archivos «mp4» de mentira para los vídeos sueltos y las listas (el FFmpeg
   // de la prueba no los lee: sólo interesa que la URL sea la correcta).
   if (/\.mp4$/.test(url.pathname)) {
@@ -154,6 +302,12 @@ n += 1;
 fs.writeFileSync(counter, String(n));
 
 const target = String(args[args.length - 1] || '');
+// yt-dlp no consigue NADA (anti-robots a todos los clientes, YouTube cambió
+// algo…): sólo stderr y código 1. Es el caso en que el panel tira de la web.
+if (flags.dead === true) {
+  console.error("ERROR: [youtube] Sign in to confirm you" + String.fromCharCode(39) + "re not a bot.");
+  process.exit(1);
+}
 // Restricciones reales de YouTube: la ficha llega, pero sin ninguna pista.
 if (flags.blocked === 'private' || flags.blocked === 'age' || flags.blocked === 'region' || flags.blocked === 'members') {
   const map = {
@@ -357,6 +511,10 @@ const child = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
     TVLISTER_LIVE_WATCHDOG_MS: '3000',
     TVLISTER_LIVE_OFFAIR_RECHECK_MS: '6000',
     TVLISTER_YTDLP_RELEASES: '0',
+    // La web pública de YouTube y la Data API se sirven desde el servidor de
+    // origen de la prueba: ni red externa ni depender de YouTube.
+    TVLISTER_YT_WEB_BASE: `http://127.0.0.1:${ORIGIN_PORT}`,
+    TVLISTER_YT_API_BASE: `http://127.0.0.1:${ORIGIN_PORT}/youtube/v3`,
     // Los segmentos HLS van a la carpeta temporal de la prueba: sin esto se
     // reutilizaban los `ch247_N` de ejecuciones anteriores en /dev/shm y un
     // canal «virtual» servía un manifiesto viejo en vez de redirigir.
@@ -991,6 +1149,74 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     }
     ok('y el de audio también', readLines('source-audio.txt').length === 5, String(readLines('source-audio.txt').length));
     if (id) await api('DELETE', `/api/channels247/${id}?videos=1`);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
+  // --- 1g. Sin yt-dlp: leer YouTube por la web pública y la Data API -------
+  // El caso real: el anti-robots deja a yt-dlp sin nada. Antes el panel decía
+  // «no se puede» y el canal se quedaba sin señal. Ahora se pide la misma
+  // página que abriría el navegador (ytInitialData / ytInitialPlayerResponse) y,
+  // si hay clave, la lista por la Data API v3.
+  {
+    const videosDir = path.join(TMP, 'app', '.runtime', 'videos');
+    const countVideos = () => (fs.existsSync(videosDir) ? fs.readdirSync(videosDir).length : 0);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ dead: true, web: true, api: false }));
+    const before = ytCalls();
+    const diskBefore = countVideos();
+
+    // 1) La lista, desde la página pública (sin clave de API).
+    const web = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/playlist?list=PLweb' })).data;
+    ok('sin yt-dlp la lista se lee igual por la web', web?.ok === true && web?.mode === 'playlist', JSON.stringify({ ok: web?.ok, error: (web?.error || '').slice(0, 90) }));
+    ok('con sus 3 capítulos (2 de ellos utilizables)', web?.total_entries === 3 && web?.entries === 2, `${web?.total_entries}/${web?.entries}`);
+    ok('diciendo que salió de la página', web?.via === 'html', web?.via);
+    ok('con el título de la lista', /Los Simpson \(web\)/.test(web?.title || ''), web?.title);
+    ok('y el total de la lista', web?.total_entries === 3, String(web?.total_entries));
+    ok('el directo dentro de la lista se omite', Number(web?.skipped_live) === 1, String(web?.skipped_live));
+    ok('no se descarga nada al disco', countVideos() === diskBefore);
+    ok('y se sigue llamando a yt-dlp (que falla) sin romper', ytCalls() > before);
+    ok('el error de yt-dlp queda anotado para soporte', /not a bot/.test(web?.ytdlp_error || ''), (web?.ytdlp_error || '').slice(0, 60));
+
+    // 2) Un capítulo DASH de esa lista: vídeo y audio en pistas separadas.
+    ok('con las pistas de cada capítulo leídas de su página', web?.streaming === 2, String(web?.streaming));
+
+    // 3) Un directo: el manifiesto HLS sale de la página del vídeo.
+    const live = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=WEBLIVE0001' })).data;
+    ok('sin yt-dlp un directo se resuelve por la web', live?.ok === true && live?.mode === 'live', JSON.stringify({ ok: live?.ok, error: (live?.error || '').slice(0, 90) }));
+    ok('con su manifiesto HLS', /\/live\/index\.m3u8/.test(live?.url || '') || live?.copy_kind === 'master', live?.copy_kind);
+    ok('marcado para copiar sin recodificar', live?.copy_video === true && live?.copy_audio === true);
+    ok('y diciendo que es un directo', live?.live === true);
+
+    // 4) Canal con la lista leída por la web: emite de verdad.
+    const chWeb = (await api('POST', '/api/channels247', {
+      name: 'Lista leída por la web',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: 'https://www.youtube.com/playlist?list=PLweb',
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    })).data;
+    let rowWeb = null;
+    const until = Date.now() + 12000;
+    while (Date.now() < until) {
+      rowWeb = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === chWeb?.id);
+      if (rowWeb?.workerPid) break;
+      await sleep(300);
+    }
+    ok('el canal arranca con la señal leída por la web', Boolean(rowWeb?.workerPid), JSON.stringify(rowWeb?.liveSource?.error || ''));
+    ok('la tarjeta dice de dónde salió (web)', rowWeb?.liveSource?.via === 'html', rowWeb?.liveSource?.via);
+    if (chWeb?.id) await api('DELETE', `/api/channels247/${chWeb.id}?videos=1`);
+
+    // 5) Con clave de la Data API: la lista se lee por la API (más estable).
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ dead: true, web: true, api: true }));
+    await api('PUT', '/api/settings', { youtube_api_key: 'AIza-de-prueba' });
+    const apiList = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/playlist?list=PLapi' })).data;
+    ok('con clave, la lista se lee por la Data API', apiList?.ok === true && apiList?.via === 'api', JSON.stringify({ ok: apiList?.ok, via: apiList?.via }));
+    ok('con sus capítulos y duración', apiList?.entries === 2 && apiList?.total_duration_sec === 135, `${apiList?.entries} · ${apiList?.total_duration_sec}s`);
+    ok('con sus títulos', /Capítulo API 1/.test(JSON.stringify(apiList?.entry_titles || [])), JSON.stringify(apiList?.entry_titles));
+    ok('y el título de la lista, no el del primer vídeo', /Lista por la API/.test(apiList?.title || ''), apiList?.title);
+    await api('PUT', '/api/settings', { youtube_api_key: '' });
+
+    // 6) Vuelta a la normalidad para el resto de la prueba.
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 

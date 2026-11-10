@@ -20,7 +20,8 @@ import {
   Download,
   RefreshCw,
   Loader2,
-  ShieldAlert
+  ShieldAlert,
+  KeyRound
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -61,6 +62,11 @@ export default function Channels247Page({ onPreview }) {
   const [liveBusy, setLiveBusy] = useState('');
   const [cookiesPath, setCookiesPath] = useState('');
   const [cookiesBusy, setCookiesBusy] = useState(false);
+  // Clave de la Data API v3 (opcional): la otra forma de leer una lista, sin
+  // anti-robots y sin cookies. No se guarda en el navegador: se envía y se lee
+  // del servidor sólo si está puesta.
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
   const [cookiesMsg, setCookiesMsg] = useState(null);
   const [fmtDiag, setFmtDiag] = useState(null); // { busy, ok, text, error }
   const [prepareLimit, setPrepareLimit] = useState(10); // vídeos a descargar de una lista
@@ -455,6 +461,25 @@ export default function Channels247Page({ onPreview }) {
     }
   };
 
+  const handleSaveApiKey = async (value) => {
+    const key = String(value ?? apiKey ?? '').trim();
+    setApiKeyBusy(true);
+    try {
+      await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ youtube_api_key: key }) });
+      setApiKey('');
+      await loadYtStatus();
+      window.alert(
+        key
+          ? 'Clave guardada: las listas se leerán por la Data API de YouTube (no hace falta yt-dlp ni cookies para la lista).'
+          : 'Clave borrada: las listas se leerán por la página pública o con yt-dlp.'
+      );
+    } catch (err) {
+      window.alert(err.message || 'No se pudo guardar la clave.');
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
   const handleSaveCookies = async () => {
     try {
       const r = await apiFetch('/api/settings', {
@@ -739,6 +764,22 @@ export default function Channels247Page({ onPreview }) {
                             }`}
                           >
                             {modeBadge(ch.liveSource)}
+                          </span>
+                        )}
+                        {ch.source_kind === 'youtube' && ch.liveSource?.via === 'html' && (
+                          <span
+                            className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-slate-700/40 text-slate-200 border-slate-600"
+                            title="La señal se leyó de la página pública de YouTube, no con yt-dlp: sirve cuando el anti-robots deja a yt-dlp sin nada o no está instalado. Se sigue emitiendo en directo, sin descargar."
+                          >
+                            ↯ LEÍDA POR LA WEB
+                          </span>
+                        )}
+                        {ch.source_kind === 'youtube' && ch.liveSource?.via === 'api' && (
+                          <span
+                            className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-indigo-500/15 text-indigo-200 border-indigo-500/40"
+                            title="La lista se leyó con la YouTube Data API v3 (la de la clave): oficial, sin anti-robots y sin cookies."
+                          >
+                            ↯ LEÍDA POR LA API
                           </span>
                         )}
                         {ch.source_kind === 'youtube' && Number(ch.liveSource?.pending_count) > 0 && (
@@ -1818,6 +1859,63 @@ export default function Channels247Page({ onPreview }) {
                           </div>
                         )}
                       </details>
+
+                      {/* La otra puerta: la Data API oficial. Lee la lista (títulos,
+                          duraciones, cuáles son directos) sin anti-robots y sin
+                          cookies. No da la URL del medio: eso lo sigue poniendo
+                          yt-dlp o la página del vídeo. */}
+                      <div className="mt-3 pt-3 border-t border-slate-800 space-y-2">
+                        <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                          <KeyRound className="w-3.5 h-3.5 text-indigo-300" />
+                          Leer las listas por la Data API (opcional)
+                          {ytStatus?.data_api?.set ? (
+                            <span className="text-emerald-400 font-semibold">· puesta</span>
+                          ) : (
+                            <span className="text-slate-500 font-normal">· sin clave</span>
+                          )}
+                        </div>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="password"
+                            autoComplete="off"
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value)}
+                            placeholder={ytStatus?.data_api?.set ? `Clave guardada (…${ytStatus.data_api.tail || ''})` : 'Clave de la API (empieza por AIza…)'}
+                            className="flex-1 px-3 py-2 rounded-xl bg-[#090e1a] border border-slate-700 text-white font-mono text-[11px]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleSaveApiKey()}
+                            disabled={apiKeyBusy || !String(apiKey || '').trim()}
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold disabled:opacity-50"
+                          >
+                            {apiKeyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <KeyRound className="w-3 h-3" />}
+                            Guardar clave
+                          </button>
+                          {ytStatus?.data_api?.set && (
+                            <button
+                              type="button"
+                              onClick={() => handleSaveApiKey('')}
+                              disabled={apiKeyBusy}
+                              className="inline-flex items-center justify-center gap-1 px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-semibold disabled:opacity-50"
+                            >
+                              <Trash2 className="w-3 h-3" /> Quitar
+                            </button>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-slate-500 space-y-1">
+                          <div>
+                            <b className="text-slate-300">Para qué:</b> leer una lista completa aunque YouTube
+                            tenga marcada la IP del servidor. Devuelve los títulos y las duraciones; la señal se
+                            sigue tomando con yt-dlp o de la página del vídeo.
+                          </div>
+                          <div>
+                            <b className="text-slate-300">De dónde sale:</b> Google Cloud → habilitar{' '}
+                            <b>YouTube Data API v3</b> → <b>Credenciales</b> → <b>Clave de API</b>. Es gratis:
+                            10.000 unidades al día y una lista de 843 vídeos gasta unas 35.
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </details>
                 </div>

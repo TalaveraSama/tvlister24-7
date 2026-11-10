@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import { db } from './db.js';
+import { apiPlaylist, webPlaylist, webPlayer, cookieHeaderFromFile } from './youtubeWeb.js';
 
 const RUNTIME_BIN_DIR = path.join(process.env.APP_DIR || '/opt/tvlister24-7', '.runtime', 'bin');
 
@@ -287,6 +288,26 @@ export function cookiesInfo() {
     // «usable» = el panel se lo pasará a yt-dlp en la próxima lectura.
     usable: Boolean(exists && info.ok),
     source: fromEnv ? 'env' : 'setting'
+  };
+}
+
+/**
+ * Clave de la Data API v3 de YouTube (opcional). No se devuelve la clave: sólo
+ * si está puesta, de dónde sale y los últimos 4 caracteres para reconocerla.
+ */
+export function dataApiInfo() {
+  const key = youtubeApiKey();
+  const fromEnv = !getSetting('youtube_api_key') && Boolean(process.env.TVLISTER_YT_API_KEY);
+  const tail = key.length > 4 ? key.slice(-4) : '';
+  return {
+    set: Boolean(key),
+    source: key ? (fromEnv ? 'env' : 'setting') : 'none',
+    tail,
+    // Con clave se lee la lista por la Data API (oficial, 1 unidad por página
+    // de 50); sin ella, por la página pública.
+    hint: key
+      ? `Clave puesta (…${tail}): las listas se leen por la Data API v3.`
+      : 'Sin clave: las listas se leen por la página pública (o con yt-dlp).'
   };
 }
 
@@ -2374,6 +2395,282 @@ export async function testCookies({ timeoutMs = 45000 } = {}) {
  *
  * No escribe nada: es lo que usan la vista previa y el motor.
  */
+/** Clave de la YouTube Data API v3 (ajuste `youtube_api_key` o entorno). */
+export function youtubeApiKey() {
+  return String(getSetting('youtube_api_key') || process.env.TVLISTER_YT_API_KEY || '').trim();
+}
+
+/** Cabecera Cookie: la sesión de YouTube, sacada del cookies.txt del panel. */
+function webCookies(cookiesFile = '') {
+  const file = String(cookiesFile || getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '').trim();
+  return cookieHeaderFromFile(file);
+}
+
+/**
+ * Lee la señal por la web pública de YouTube (sin yt-dlp).
+ *
+ * Es la salida cuando yt-dlp no puede: el anti-robots bloquea a sus clientes,
+ * el binario no está, o la lista viene sin pistas. Aquí se piden las mismas
+ * páginas que abriría el navegador —con el User-Agent de uno y, si hay, con la
+ * sesión del operador— y se leen `ytInitialData` (la lista) y
+ * `ytInitialPlayerResponse` (el manifiesto HLS del directo o las pistas del
+ * vídeo). Si hay clave de la Data API, la lista se lee por ahí (más estable).
+ */
+export async function resolveLiveSourceWeb(cls, { cookiesFile = '', limit = MAX_PLAYLIST_ITEMS, budgetMs = 120000 } = {}) {
+  const cookies = webCookies(cookiesFile);
+  const key = youtubeApiKey();
+  const opts = { limit, cookies };
+  try {
+    // ── Una lista: primero los capítulos, después sus pistas ──────────────
+    if (cls.kind === 'playlist') {
+      const list = key ? await apiPlaylist(cls.list_id, { key, ...opts }) : await webPlaylist(cls.list_id, opts);
+      const via = list.via || (key ? 'api' : 'html');
+      if (!list.ok) {
+        return {
+          ok: false,
+          live: false,
+          mode: 'playlist',
+          provider: 'youtube',
+          via,
+          error: `YouTube no entregó la lista por la vía web (${list.error || 'sin datos'}).`,
+          using_cookies: Boolean(cookies)
+        };
+      }
+      const entries = [];
+      const skipped = [];
+      let skippedLive = 0;
+      // Las pistas de cada capítulo se piden a su página: de 3 en 3 y con un
+      // tope de tiempo, para no tardar una eternidad con una lista de 30.
+      const budgetUntil = Date.now() + (Number(budgetMs) || 120000);
+      const queue = list.entries.slice();
+      const worker = async () => {
+        for (;;) {
+          const item = queue.shift();
+          if (!item || Date.now() > budgetUntil) return;
+          if (item.isLive) {
+            skippedLive += 1;
+            continue;
+          }
+          // eslint-disable-next-line no-await-in-loop
+          const media = await webPlayer(item.id, { cookies });
+          if (!media.ok) {
+            skipped.push(media.error || 'sin pistas');
+            continue;
+          }
+          if (media.hls_url) {
+            // Directo con manifiesto: se emite tal cual (copy/copy).
+            entries.push({
+              id: item.id,
+              title: item.title,
+              url: media.hls_url,
+              audio_url: '',
+              local: false,
+              duration_sec: 0,
+              live: true,
+              vcodec: 'avc1',
+              acodec: 'aac',
+              ext: '',
+              headers: {}
+            });
+            continue;
+          }
+          const video = media.formats.filter((f) => f.vcodec && !f.acodec).sort((a, b) => b.height - a.height)[0];
+          const audio = media.formats.filter((f) => f.acodec && !f.vcodec).sort((a, b) => b.bitrate - a.bitrate)[0];
+          const muxed = media.formats.filter((f) => f.vcodec && f.acodec).sort((a, b) => b.height - a.height)[0];
+          if (muxed) {
+            entries.push({
+              id: item.id,
+              title: item.title,
+              url: muxed.url,
+              audio_url: '',
+              local: false,
+              duration_sec: item.duration_sec || media.duration_sec,
+              vcodec: muxed.vcodec,
+              acodec: muxed.acodec,
+              width: muxed.width,
+              height: muxed.height,
+              fps: 0,
+              ext: muxed.ext,
+              headers: {}
+            });
+            continue;
+          }
+          if (video) {
+            entries.push({
+              id: item.id,
+              title: item.title,
+              url: video.url,
+              // Pista de audio aparte: el motor las une al emitir.
+              audio_url: audio ? audio.url : '',
+              local: false,
+              duration_sec: item.duration_sec || media.duration_sec,
+              vcodec: video.vcodec,
+              acodec: audio ? audio.acodec : '',
+              width: video.width,
+              height: video.height,
+              fps: 0,
+              ext: video.ext,
+              headers: {}
+            });
+            continue;
+          }
+          skipped.push('sin pista de vídeo');
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      entries.sort((a, b) => {
+        const ia = list.entries.findIndex((e) => e.id === a.id);
+        const ib = list.entries.findIndex((e) => e.id === b.id);
+        return ia - ib;
+      });
+      if (!entries.length) {
+        return {
+          ok: false,
+          live: false,
+          mode: 'playlist',
+          provider: 'youtube',
+          via,
+          title: list.title,
+          entry_count: 0,
+          skipped_live: skippedLive,
+          error: `La lista se leyó (${list.entries.length} capítulos) pero YouTube no dio ni una pista por la vía web${
+            skipped.length ? `: ${skipped[0]}` : ''
+          }.`,
+          using_cookies: Boolean(cookies)
+        };
+      }
+      const total = entries.reduce((acc, e) => acc + (Number(e.duration_sec) || 0), 0);
+      return {
+        ok: true,
+        live: false,
+        mode: 'playlist',
+        provider: 'youtube',
+        // `via` dice de dónde salió: la Data API, la página o yt-dlp.
+        via,
+        title: list.title || `Lista de ${entries.length} vídeos`,
+        uploader: list.uploader || '',
+        list_id: cls.list_id,
+        entries,
+        entry_count: entries.length,
+        total_entries: list.total || list.entries.length,
+        total_duration_sec: total,
+        // Lo que se emite sale de YouTube (HLS o DASH), no del disco.
+        can_stream: true,
+        streaming: entries.length,
+        pending: [],
+        pending_count: 0,
+        can_prepare_playlist: false,
+        skipped_live: skippedLive,
+        needs_transcode: playlistNeedsTranscode(entries),
+        expires_at_ms: 0,
+        live_status: 'playlist',
+        using_cookies: Boolean(cookies),
+        clients_tried: 'web',
+        resolved_at_ms: Date.now()
+      };
+    }
+
+    // ── Un vídeo o un directo ─────────────────────────────────────────────
+    const target = cls.video_id || cls.url;
+    const media = await webPlayer(target, { cookies });
+    if (!media.ok) {
+      return {
+        ok: false,
+        live: false,
+        mode: cls.kind === 'video' ? 'video' : 'live',
+        provider: 'youtube',
+        via: 'html',
+        title: media.title || '',
+        error: media.error || 'YouTube no dio nada por la vía web.',
+        using_cookies: Boolean(cookies)
+      };
+    }
+    if (media.hls_url) {
+      return {
+        ok: true,
+        live: true,
+        mode: 'live',
+        provider: 'youtube',
+        via: 'html',
+        url: media.hls_url,
+        audio_url: '',
+        copy_video: true,
+        copy_audio: true,
+        copy_kind: 'master',
+        title: media.title,
+        uploader: media.uploader,
+        video_id: cls.video_id || '',
+        live_status: 'is_live',
+        headers: {},
+        host: hostOf(media.hls_url),
+        // El manifiesto de la web pública dura lo que dure el directo: se
+        // renueva por la guardia como cualquier otro.
+        expires_at_ms: expiryOf(media.hls_url) || Date.now() + DEFAULT_TTL_MS,
+        using_cookies: Boolean(cookies),
+        clients_tried: 'web',
+        resolved_at_ms: Date.now()
+      };
+    }
+    const muxed = media.formats.filter((f) => f.vcodec && f.acodec).sort((a, b) => b.height - a.height)[0];
+    const video = media.formats.filter((f) => f.vcodec && !f.acodec).sort((a, b) => b.height - a.height)[0];
+    const audio = media.formats.filter((f) => f.acodec && !f.vcodec).sort((a, b) => b.bitrate - a.bitrate)[0];
+    const chosen = muxed || video;
+    if (!chosen) {
+      return {
+        ok: false,
+        live: false,
+        mode: 'video',
+        provider: 'youtube',
+        via: 'html',
+        title: media.title,
+        error: media.error || 'YouTube no dio ninguna pista de vídeo por la vía web.',
+        using_cookies: Boolean(cookies)
+      };
+    }
+    return {
+      ok: true,
+      live: false,
+      mode: 'video',
+      provider: 'youtube',
+      via: 'html',
+      url: chosen.url,
+      audio_url: muxed ? '' : audio?.url || '',
+      copy_video: true,
+      copy_audio: true,
+      copy_kind: muxed ? 'progressive' : 'separate',
+      title: media.title,
+      uploader: media.uploader,
+      video_id: cls.video_id || '',
+      duration_sec: media.duration_sec,
+      width: chosen.width,
+      height: chosen.height,
+      vcodec: chosen.vcodec,
+      acodec: muxed ? chosen.acodec : audio?.acodec || '',
+      headers: {},
+      host: hostOf(chosen.url),
+      live_status: 'not_live',
+      local: false,
+      needs_transcode: playlistNeedsTranscode([
+        { vcodec: chosen.vcodec, acodec: muxed ? chosen.acodec : audio?.acodec, height: chosen.height, width: chosen.width }
+      ]),
+      expires_at_ms: expiryOf(chosen.url) || Date.now() + DEFAULT_TTL_MS,
+      using_cookies: Boolean(cookies),
+      clients_tried: 'web',
+      resolved_at_ms: Date.now()
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      live: false,
+      mode: cls.kind === 'playlist' ? 'playlist' : 'live',
+      provider: 'youtube',
+      via: 'web',
+      error: `La vía web de YouTube falló: ${err.message}`,
+      using_cookies: Boolean(cookies)
+    };
+  }
+}
+
 export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   const cls = classifySourceUrl(rawUrl);
   if (!cls.ok) return { ok: false, live: false, mode: 'live', error: cls.error, provider: 'youtube' };
@@ -2395,13 +2692,19 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
 
   const info = await getYtDlpInfo();
   if (!info.installed) {
+    // Sin yt-dlp también se puede leer YouTube (ver youtubeWeb.js): primero la
+    // página pública —o la Data API, si hay clave— y sólo si eso falla se pide
+    // instalar el binario.
+    const web = await resolveLiveSourceWeb(cls, { cookiesFile, limit: 12, budgetMs: 45000 });
+    if (web.ok) return web;
     return {
       ok: false,
       live: false,
       mode: cls.kind === 'playlist' ? 'playlist' : 'live',
       provider: 'youtube',
       error: info.hint || info.error,
-      needs_ytdlp: true
+      needs_ytdlp: true,
+      web_error: web.error || ''
     };
   }
 
@@ -2527,6 +2830,10 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     : '';
 
   if (!data) {
+    // yt-dlp no pudo (anti-robots para sus clientes, cambios de YouTube…). La
+    // página pública de YouTube es otra puerta: mismas URLs, otra petición.
+    const web = await resolveLiveSourceWeb(cls, { cookiesFile, limit: 12, budgetMs: 45000 });
+    if (web.ok) return { ...web, ytdlp_error: String(stderrAll || lastErr || '').slice(0, 400) };
     const err = stderrAll || lastErr;
     const short = err.length > 240 ? `${err.slice(0, 240)}…` : err;
     // Los fallos conocidos se explican con lo que hay que hacer (subir cookies,
@@ -2656,6 +2963,10 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
 
     const blockedBot = Boolean(stderrAll && isBotCheckError(stderrAll));
     if (!entries.length) {
+      // La lista se leyó, pero ninguna de sus entradas dio pistas utilizables.
+      // Por la vía web puede que sí (otra petición, otro cliente por dentro).
+      const web = await resolveLiveSourceWeb(cls, { cookiesFile, limit: 12, budgetMs: 45000 });
+      if (web.ok) return { ...web, ytdlp_error: String(stderrAll || lastErr || '').slice(0, 400) };
       return {
         ok: false,
         live: false,
@@ -3203,6 +3514,8 @@ export async function refreshChannelLiveSource(channel, { force = false } = {}) 
   const state = {
     source_url: url,
     provider: res.provider || 'youtube',
+    // De dónde se leyó: 'api' / 'html' (sin yt-dlp) o vacío (yt-dlp).
+    via: String(res.via || ''),
     mode,
     url: res.url || '',
     audio_url: res.audio_url || '',
@@ -3343,6 +3656,8 @@ export function liveSourceInfo(channel) {
     can_download: Boolean(st?.can_download),
     needs_download: Boolean(st?.needs_download),
     can_prepare_playlist: Boolean(st?.can_prepare_playlist),
+    // Cómo se leyó la señal: '' = yt-dlp · 'html' = página pública · 'api' = Data API.
+    via: String(st?.via || ''),
     // Se emite en directo desde YouTube (MP4 o pistas DASH/HLS unidas).
     can_stream: Boolean(st?.can_stream),
     streaming: Number(st?.streaming) || 0,
