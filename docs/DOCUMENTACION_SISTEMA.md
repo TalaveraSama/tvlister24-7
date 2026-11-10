@@ -3029,6 +3029,36 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.64: la lista se descarga sola y emite desde el primer capítulo
+
+La tarjeta de Los Simpson se quedaba en «LISTA · 0 · 23 SIN DESCARGAR»: el botón para preparar el disco sólo
+existía dentro de Editar y, aunque se pulsara, el canal no emitía hasta terminar la descarga completa.
+
+- **`diskPlaylistState(prev, url)`**: con los vídeos ya conocidos (`pending[]`, que ahora se guarda en
+  `live_source_state`), compone la emisión **sólo con los archivos que existan** en `.runtime/videos`, en el
+  orden de la lista. Devuelve `local: true`, `expires_at_ms: 0` y `pending_count` = los que faltan. `pending`
+  se conserva **completo** para que cada refresco vuelva a encontrar todos los archivos.
+- **`applyDiskPlaylistState(channel)`** la guarda y devuelve; `refreshChannelLiveSource(channel, { force })` la
+  usa salvo con `force: true` («Renovar señal»). El refresco normal de una lista en preparación **no llama a
+  YouTube**.
+- **`needsRefresh`** devuelve `true` cada `DISK_POLL_MS` (15 s, `TVLISTER_YT_DISK_POLL_MS`) mientras queden
+  capítulos y la lista se emita desde el disco o no esté lista: la guardia ve el archivo nuevo y reinicia el
+  motor para añadirlo. La huella (`liveFingerprint`) cambia al cambiar el número de entradas.
+- **Auto-preparación** (`maybeAutoPrepareList`): canal con `status = 'running'`, lista con `pending[]` y sin
+  descarga en curso ⇒ `startPlaylistDownload(url, { limit, pending })`. Se llama desde
+  `refreshChannelLiveSource`, `applyDiskPlaylistState` y `ensureLiveState`. Un intento cada
+  `AUTO_PREPARE_COOLDOWN_MS` (30 min) por URL. Se apaga con `youtube_auto_prepare = 0`
+  (`TVLISTER_YT_AUTO_PREPARE=0`) y el tope es `youtube_auto_prepare_limit` (def. 10, `TVLISTER_YT_AUTO_PREPARE_LIMIT`).
+- `startPlaylistDownload(url, { limit, pending })`: con `pending` no vuelve a leer la lista.
+- `POST /api/youtube/prepare-playlist` acepta `channel_id` (usa el `pending` del canal);
+  `POST /api/channels247/:id/live-source/refresh` acepta `disk_only: true` (recompone sin red).
+  `GET /api/youtube/status` informa `auto_prepare: { enabled, limit }`.
+- Pantalla: botón **«Preparar la lista en el disco»** y selector de vídeos **en la tarjeta** (no sólo en
+  Editar), avance (`prepJob`), mensaje final y chip `⛁ N SIN DESCARGAR` también con la lista a medias; al
+  terminar, `POST …/refresh { disk_only: true }` y la tarjeta pasa a `⛁ DESDE EL DISCO`.
+
+Pruebas: `test_youtube_live.mjs` **246 OK** y `test_youtube_live_ui.mjs` **156 OK**.
+
 ### v2.6.63: anti-robots de YouTube por cliente, sin culpar a las cookies buenas
 
 Canal sin señal con las cookies válidas (sesión hasta 2027): el fallo no era la sesión ni la lista, era que el

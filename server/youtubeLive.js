@@ -9,6 +9,14 @@ const RUNTIME_BIN_DIR = path.join(process.env.APP_DIR || '/opt/tvlister24-7', '.
 const REFRESH_MARGIN_MS = 10 * 60 * 1000;
 // Si el servidor no dice cuándo caduca, se renueva cada 30 minutos.
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
+// Una lista que se emite desde el disco y aún tiene vídeos por descargar: cada
+// cuánto se mira el disco (barato, sin red) para sumar los que ya están.
+const DISK_POLL_MS = Math.max(1000, Number(process.env.TVLISTER_YT_DISK_POLL_MS || 15000) || 15000);
+// Auto-preparación: si el canal está al aire y su lista sólo se puede emitir
+// desde el disco, se descarga sola. Un intento cada media hora como mucho.
+const AUTO_PREPARE_COOLDOWN_MS = Math.max(60000, Number(process.env.TVLISTER_YT_AUTO_PREPARE_MS || 30 * 60 * 1000) || 1800000);
+// Tope de vídeos que se descargan solos (el operador puede pedir más a mano).
+const AUTO_PREPARE_DEFAULT_LIMIT = 10;
 // Una señal que no está en directo se vuelve a mirar cada 5 minutos (puede empezar).
 // Sin señal se reintenta cada 5 min (configurable para pruebas).
 const OFF_AIR_RECHECK_MS = Math.max(3000, Number(process.env.TVLISTER_LIVE_OFFAIR_RECHECK_MS || 5 * 60 * 1000) || 300000);
@@ -1245,8 +1253,13 @@ export function playlistDownloadState() {
 /**
  * Descarga hasta `limit` vídeos de una lista al disco (en segundo plano).
  * Los que ya estén descargados se saltan. Devuelve el estado del trabajo.
+ *
+ * `pending` (opcional): la lista de vídeos que YA se leyó al comprobar la señal
+ * (`[{id,title,url}]`). Cuando se pasa, no se vuelve a preguntar a YouTube: el
+ * trabajo arranca al instante, que es lo que hace falta cuando la preparación se
+ * lanza sola desde la guardia o desde la tarjeta del canal.
  */
-export function startPlaylistDownload(rawUrl, { limit = 10 } = {}) {
+export function startPlaylistDownload(rawUrl, { limit = 10, pending: knownPending = null } = {}) {
   if (playlistJob.running) return { ...playlistDownloadState(), already: true };
 
   const cls = classifySourceUrl(rawUrl);
@@ -1292,8 +1305,11 @@ export function startPlaylistDownload(rawUrl, { limit = 10 } = {}) {
   };
 
   (async () => {
-    // Se lee la lista completa (con formatos) para saber qué vídeos hay.
-    const list = await resolveLiveSource(cls.url || rawUrl);
+    // Con la lista ya leída (auto-preparación) se empieza a descargar directo.
+    // Si no, se lee completa (con formatos) para saber qué vídeos hay.
+    const list = Array.isArray(knownPending) && knownPending.length
+      ? { ok: true, pending: knownPending }
+      : await resolveLiveSource(cls.url || rawUrl);
     if (!list?.ok && !Array.isArray(list?.pending)) {
       playlistJob = {
         ...playlistJob,
@@ -2497,6 +2513,18 @@ export function needsRefresh(channel, nowMs = Date.now()) {
   const url = String(channel?.live_source_url || '').trim();
   if (!url) return false;
   if (!st || !st.resolved_at_ms) return true;
+  // Lista que se emite desde el disco y todavía tiene vídeos por descargar: se
+  // mira qué archivos hay cada pocos segundos (es sólo `fs.existsSync`, no se
+  // pregunta a YouTube) para empezar a emitir en cuanto baja el primero y para
+  // ir añadiendo el resto sin que nadie toque nada.
+  if (
+    Array.isArray(st.pending) &&
+    st.pending.length &&
+    Number(st.pending_count || 0) > 0 &&
+    (st.local || !liveReady(st))
+  ) {
+    return nowMs - Number(st.resolved_at_ms || 0) > DISK_POLL_MS;
+  }
   // Vídeo descargado: se repite desde el disco, no caduca ni hay que renovar.
   // Sólo se vuelve a mirar si alguien borró el archivo.
   if (st.local) {
@@ -2516,11 +2544,145 @@ export function needsRefresh(channel, nowMs = Date.now()) {
   return false;
 }
 
+/**
+ * Estado de una lista que se emite DESDE EL DISCO, sin preguntar a YouTube.
+ *
+ * Una lista que sólo da DASH/HLS se prepara vídeo a vídeo («Preparar lista en
+ * el disco»). Los identificadores ya se conocen (`pending[]`), así que basta
+ * con mirar qué archivos hay: el canal emite con los que estén, en el orden de
+ * la lista, y va sumando los que lleguen después. Ni anti-robots, ni URLs
+ * firmadas, ni caducidades.
+ *
+ * Devuelve `null` si la lista no tiene `pending[]` (no aplica).
+ */
+export function diskPlaylistState(prev, url = '') {
+  if (!prev || String(prev.mode || '') !== 'playlist') return null;
+  const pending = Array.isArray(prev.pending) ? prev.pending.filter((p) => p && p.id) : [];
+  if (!pending.length) return null;
+  const entries = [];
+  const remaining = [];
+  for (const item of pending) {
+    const cached = cachedVideoInfo(item.id);
+    if (!cached) {
+      remaining.push(item);
+      continue;
+    }
+    entries.push({
+      id: item.id,
+      title: String(item.title || cached.title || 'Vídeo'),
+      // Ruta local: el ffconcat del motor la repite en bucle.
+      url: cached.path,
+      local: true,
+      duration_sec: Number(cached.duration_sec) || Number(item.duration_sec) || 0,
+      vcodec: cached.vcodec || '',
+      acodec: cached.acodec || '',
+      ext: 'mp4',
+      headers: {}
+    });
+  }
+  const total = entries.reduce((acc, e) => acc + (Number(e.duration_sec) || 0), 0);
+  return {
+    ...prev,
+    source_url: url || prev.source_url || '',
+    mode: 'playlist',
+    provider: 'youtube',
+    // Todas las entradas son archivos del disco: nada que renovar.
+    local: entries.length > 0,
+    ready: entries.length > 0,
+    url: '',
+    audio_url: '',
+    entries,
+    entry_count: entries.length,
+    total_entries: pending.length,
+    total_duration_sec: total,
+    // `pending` se queda con la lista COMPLETA (los que ya están descargados
+    // también): así el siguiente refresco vuelve a encontrar todos los archivos
+    // y no se pierden capítulos por el camino. Sólo cambia la cuenta.
+    pending,
+    pending_count: remaining.length,
+    can_prepare_playlist: remaining.length > 0,
+    needs_transcode: playlistNeedsTranscode(entries),
+    expires_at_ms: 0,
+    resolved_at_ms: Date.now(),
+    checked_at: new Date().toISOString(),
+    // Con archivos en el disco no hay nada que reclamar a YouTube.
+    error: entries.length ? '' : String(prev.error || ''),
+    needs_ytdlp: false,
+    needs_cookies: false,
+    needs_format_fix: false,
+    blocked_bot: false,
+    clients_tried: ''
+  };
+}
+
+/**
+ * Aplica el estado del disco al canal (lo guarda) y lo devuelve.
+ * `null` si la lista no tiene vídeos descargados/apuntados (`pending[]`).
+ */
+export function applyDiskPlaylistState(channel) {
+  const url = String(channel?.live_source_url || '').trim();
+  const disk = diskPlaylistState(parseLiveState(channel), url);
+  if (!disk) return null;
+  try {
+    db.prepare('UPDATE channels_247 SET live_source_state = ? WHERE id = ?').run(JSON.stringify(disk), channel.id);
+  } catch {
+    /* el estado no es crítico para emitir */
+  }
+  // Si aún faltan capítulos y el canal está al aire, se sigue descargando.
+  maybeAutoPrepareList(channel, disk, url);
+  return { ok: Boolean(disk.entries.length), ...disk };
+}
+
+// ── Preparación automática ─────────────────────────────────────────────────
+// El operador no debería tener que buscar un botón: si el canal está al aire y
+// su lista no da ni un MP4 progresivo, se descarga sola (una vez cada media
+// hora como mucho, y se puede apagar con el ajuste `youtube_auto_prepare`).
+const autoPrepareAt = new Map();
+
+export function autoPrepareDisabled() {
+  const v = String(getSetting('youtube_auto_prepare') || '').trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'no') return true;
+  return String(process.env.TVLISTER_YT_AUTO_PREPARE || '').trim() === '0';
+}
+
+export function autoPrepareLimit() {
+  const n = Number(getSetting('youtube_auto_prepare_limit') || process.env.TVLISTER_YT_AUTO_PREPARE_LIMIT || 0);
+  return Math.max(1, Math.min(MAX_PLAYLIST_ITEMS, Number.isFinite(n) && n > 0 ? n : AUTO_PREPARE_DEFAULT_LIMIT));
+}
+
+/**
+ * Si la señal recién leída es una lista que sólo se puede emitir desde el disco
+ * y el canal está al aire, arranca la descarga. Devuelve `true` si la lanzó.
+ */
+export function maybeAutoPrepareList(channel, res, url = '') {
+  try {
+    if (!res || !res.can_prepare_playlist) return false;
+    if (!Array.isArray(res.pending) || !res.pending.length) return false;
+    if (String(channel?.status || '') !== 'running') return false;
+    if (autoPrepareDisabled()) return false;
+    if (playlistJob.running) return false;
+    const key = String(url || channel?.live_source_url || '');
+    const last = autoPrepareAt.get(key) || 0;
+    if (Date.now() - last < AUTO_PREPARE_COOLDOWN_MS) return false;
+    autoPrepareAt.set(key, Date.now());
+    startPlaylistDownload(key, { limit: autoPrepareLimit(), pending: res.pending });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Resuelve y guarda el estado del canal. Devuelve el estado (siempre con `ok`). */
-export async function refreshChannelLiveSource(channel) {
+export async function refreshChannelLiveSource(channel, { force = false } = {}) {
   const url = String(channel?.live_source_url || '').trim();
   if (!isLiveChannel(channel) || !url) {
     return { ok: false, live: false, error: 'El canal no tiene una señal en vivo configurada.' };
+  }
+  // Lista que se emite desde el disco: si ya se conocen sus vídeos, se resuelve
+  // sólo con los archivos que haya. Sin red y sin anti-robots de por medio.
+  if (!force) {
+    const disk = applyDiskPlaylistState(channel);
+    if (disk) return disk;
   }
   const res = await resolveLiveSource(url);
   const entries = Array.isArray(res.entries) ? res.entries : [];
@@ -2574,6 +2736,16 @@ export async function refreshChannelLiveSource(channel) {
     can_prepare_playlist: Boolean(res.can_prepare_playlist),
     pending_count: Number(res.pending_count) || 0,
     skip_summary: String(res.skip_summary || ''),
+    // Qué vídeos se pueden descargar (id, título y duración). Con esto la lista
+    // se puede emitir desde el disco sin volver a preguntar a YouTube.
+    pending: Array.isArray(res.pending)
+      ? res.pending.slice(0, MAX_PLAYLIST_ITEMS).map((p) => ({
+          id: String(p.id || ''),
+          title: String(p.title || ''),
+          duration_sec: Number(p.duration_sec) || 0,
+          url: String(p.url || '')
+        }))
+      : [],
     using_cookies: Boolean(res.using_cookies),
     clients_tried: String(res.clients_tried || '')
   };
@@ -2582,13 +2754,23 @@ export async function refreshChannelLiveSource(channel) {
   } catch {
     /* el estado no es crítico para emitir */
   }
+  // Canal al aire con una lista que sólo se puede emitir desde el disco: se
+  // empieza a preparar sola para que emita sin que nadie pulse nada.
+  maybeAutoPrepareList(channel, res, url);
   return { ok: Boolean(res.ok), ...state };
 }
 
 /** Estado utilizable para emitir AHORA: renueva si hace falta. */
 export async function ensureLiveState(channel) {
   const st = parseLiveState(channel);
-  if (st && liveReady(st) && !needsRefresh(channel)) return { ...st, ok: true, ready: true, cached: true };
+  if (st && liveReady(st) && !needsRefresh(channel)) {
+    // Lista emitiendo desde el disco con capítulos pendientes: si nadie los está
+    // bajando, se empiezan (una vez cada media hora como mucho).
+    if (Array.isArray(st.pending) && st.pending.length) {
+      maybeAutoPrepareList(channel, st, String(channel?.live_source_url || ''));
+    }
+    return { ...st, ok: true, ready: true, cached: true };
+  }
   return refreshChannelLiveSource(channel);
 }
 

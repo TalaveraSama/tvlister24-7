@@ -891,6 +891,144 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 
+  // --- 1e3. La lista se emite desde el disco MIENTRAS se descarga ----------
+  // Lo que faltaba en producción: la tarjeta decía «23 sin descargar» y el
+  // canal seguía a 0 vídeos hasta que alguien descargara. Ahora, con el primer
+  // capítulo en el disco, el canal emite; el resto se suma solo, sin volver a
+  // preguntar a YouTube (ni anti-robots, ni URLs firmadas).
+  {
+    const LISTA = 'https://www.youtube.com/playlist?list=PLprogresiva';
+    // Se apaga la auto-preparación para controlar cuántos se descargan (se
+    // vuelve a encender más abajo, en su propia prueba).
+    await api('PUT', '/api/settings', { youtube_auto_prepare: '0' });
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDash: true }));
+    const created = await api('POST', '/api/channels247', {
+      name: 'Los Simpson progresivo',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: LISTA,
+      engine_mode: 'virtual'
+    });
+    const id = created.data?.id;
+    let mine = null;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000) {
+      mine = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === id);
+      if (Number(mine?.liveSource?.pending_count) > 0) break;
+      await sleep(200);
+    }
+    ok('la tarjeta guarda qué vídeos faltan', mine?.liveSource?.pending_count === 4, String(mine?.liveSource?.pending_count));
+    ok('y que se pueden preparar', mine?.liveSource?.can_prepare_playlist === true);
+    ok('sin nada que emitir todavía', mine?.liveSource?.ready === false);
+
+    // Se descarga SÓLO el primero: lo que hace «Preparar la lista en el disco»
+    // con «Vídeos: 1» (o lo que ya haya bajado la auto-preparación).
+    const one = await api('POST', '/api/youtube/prepare-playlist', { url: LISTA, limit: 1, channel_id: id });
+    ok('preparar desde la tarjeta arranca al instante', one.status === 202 && one.data?.running === true, `${one.status} · ${one.data?.step || ''}`);
+    let st1 = one.data;
+    const d1 = Date.now() + 30000;
+    while (Date.now() < d1 && st1?.running) {
+      await sleep(250);
+      st1 = (await api('GET', '/api/youtube/prepare-playlist/status')).data;
+    }
+    ok('baja el primero', st1?.result?.downloaded === 1, JSON.stringify(st1?.result?.downloaded));
+
+    // Recomponer con el disco, sin red.
+    const ytBeforeDisk = ytCalls();
+    const disk1 = await api('POST', `/api/channels247/${id}/live-source/refresh`, { disk_only: true });
+    const ls1 = disk1.data?.liveSource;
+    ok('con un solo capítulo el canal ya emite', ls1?.ready === true && ls1?.entries === 1, `${ls1?.entries} · ${JSON.stringify(ls1?.error || '')}`);
+    ok('marcado como emitido desde el disco', ls1?.local === true);
+    ok('sin caducidad (no hay URL firmada)', !ls1?.expires_at || ls1?.expires_in_min === null);
+    ok('quedan los otros tres por descargar', ls1?.pending_count === 3, String(ls1?.pending_count));
+    ok('y no se pregunta a YouTube para esto', ytCalls() === ytBeforeDisk, `${ytBeforeDisk} → ${ytCalls()}`);
+
+    // Llega otro capítulo: el siguiente refresco (el de la guardia) lo suma.
+    const dl2 = await api('POST', '/api/youtube/download', { url: 'https://www.youtube.com/watch?v=VID2' });
+    ok('se puede bajar otro capítulo suelto', dl2.status === 202);
+    let dstate = { running: true };
+    const d2 = Date.now() + 20000;
+    while (Date.now() < d2 && dstate?.running) {
+      await sleep(200);
+      dstate = (await api('GET', '/api/youtube/download-status')).data;
+    }
+    ok('el segundo capítulo queda en el disco', dstate?.result?.ok === true, dstate?.result?.error);
+    const ytBefore2 = ytCalls();
+    const disk2 = await api('POST', `/api/channels247/${id}/live-source/refresh`, { disk_only: true });
+    ok('el canal suma el nuevo capítulo solo', disk2.data?.liveSource?.entries === 2, `${disk2.data?.liveSource?.entries}`);
+    ok('quedan dos', disk2.data?.liveSource?.pending_count === 2);
+    ok('tampoco aquí se llama a yt-dlp', ytCalls() === ytBefore2, `${ytBefore2} → ${ytCalls()}`);
+
+    // La guardia lo mira sola cuando hay algo pendiente (sin preguntar a YouTube).
+    const unit = (() => {
+      const code = `
+        import fs from 'node:fs';
+        import path from 'node:path';
+        const m = await import(${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))});
+        const ch = { id: 1, source_kind: 'youtube', live_source_url: 'https://www.youtube.com/playlist?list=PLx',
+          live_source_state: JSON.stringify({ mode: 'playlist', ready: true, local: true, resolved_at_ms: Date.now(),
+            entries: [{ url: ${JSON.stringify(path.join(TMP, 'app', '.runtime', 'videos', 'VID1.mp4'))}, local: true }],
+            pending: [{ id: 'VID3' }, { id: 'VID4' }], pending_count: 2 }) };
+        console.log(JSON.stringify({ now: m.needsRefresh(ch, Date.now()), later: m.needsRefresh(ch, Date.now() + 60000) }));
+      `;
+      const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
+        env: { ...process.env, TVLISTER_DB_PATH: path.join(TMP, 'disk.db'), APP_DIR: path.join(TMP, 'app') },
+        encoding: 'utf8'
+      });
+      return JSON.parse(out.trim().split('\n').pop() || '{}');
+    })();
+    ok('la guardia no repregunta nada al instante', unit?.now === false);
+    ok('pero sí mira el disco un minuto después', unit?.later === true);
+
+    // Auto-preparación: canal al aire con lista DASH → se descarga sola.
+    await api('PUT', '/api/settings', { youtube_auto_prepare: '1' });
+    // Disco limpio: lo que baje la auto-preparación tiene que ser de verdad.
+    for (const vid of ['VID1', 'VID2', 'VID3', 'VID4']) await api('DELETE', `/api/youtube/videos/${vid}`);
+    const LISTA2 = 'https://www.youtube.com/playlist?list=PLautomatica';
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 3, entriesDash: true }));
+    const auto = await api('POST', '/api/channels247', {
+      name: 'Los Simpson automático',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: LISTA2,
+      engine_mode: 'virtual'
+    });
+    const autoId = auto.data?.id;
+    let autoSt = null;
+    const tAuto = Date.now();
+    while (Date.now() - tAuto < 60000) {
+      autoSt = (await api('GET', '/api/youtube/prepare-playlist/status')).data;
+      const esSuya = /PLautomatica/.test(String(autoSt?.url || ''));
+      const hechos = Number(autoSt?.result?.downloaded || 0) + Number(autoSt?.result?.already || 0);
+      if (esSuya && !autoSt?.running && autoSt?.result?.ok && hechos >= 3) break;
+      await sleep(250);
+    }
+    ok(
+      'sin pulsar nada, la lista se prepara sola',
+      autoSt?.result?.ok === true &&
+        Number(autoSt?.result?.downloaded || 0) + Number(autoSt?.result?.already || 0) === 3,
+      `${autoSt?.result?.downloaded} bajados · ${autoSt?.result?.already} ya estaban`
+    );
+    let autoCh = null;
+    const tAutoCh = Date.now();
+    while (Date.now() - tAutoCh < 10000) {
+      autoCh = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === autoId);
+      if (autoCh?.liveSource?.ready) break;
+      const r = await api('POST', `/api/channels247/${autoId}/live-source/refresh`, { disk_only: true });
+      if (r.data?.liveSource?.ready) { autoCh = { liveSource: r.data.liveSource }; break; }
+      await sleep(300);
+    }
+    ok('y el canal emite desde el disco sin tocar nada', autoCh?.liveSource?.ready === true && autoCh?.liveSource?.local === true, `${autoCh?.liveSource?.entries}`);
+
+    // Limpieza.
+    for (const cid of [id, autoId]) {
+      if (cid) await api('DELETE', `/api/channels247/${cid}`);
+    }
+    for (const vid of ['VID1', 'VID2', 'VID3', 'VID4']) await api('DELETE', `/api/youtube/videos/${vid}`);
+    await api('PUT', '/api/settings', { youtube_auto_prepare: '0' });
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
   // --- 1f. «no hay nada que emitir»: el motivo REAL y el diagnóstico -------
   // Antes se decía «es privado, o tiene restricción…» sin mirar lo que había
   // respondido yt-dlp. Con cookies subidas eso dejaba al operador sin saber si

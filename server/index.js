@@ -125,7 +125,12 @@ import {
   startPlaylistDownload,
   playlistDownloadState,
   cachedVideoInfo,
-  removeCachedVideo
+  removeCachedVideo,
+  parseLiveState,
+  diskPlaylistState,
+  applyDiskPlaylistState,
+  autoPrepareDisabled,
+  autoPrepareLimit
 } from './youtubeLive.js';
 import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
 import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
@@ -2674,7 +2679,9 @@ app.get('/api/youtube/status', requireAuth, async (req, res) => {
     cookies: cookiesInfo(),
     release,
     latest_version: release.tag || '',
-    update_available: Boolean(info.installed) && isYtDlpOutdated(info.version, release.tag)
+    update_available: Boolean(info.installed) && isYtDlpOutdated(info.version, release.tag),
+    // Una lista que sólo da DASH/HLS se descarga sola (canal al aire).
+    auto_prepare: { enabled: !autoPrepareDisabled(), limit: autoPrepareLimit() }
   });
 });
 
@@ -2789,7 +2796,16 @@ app.post('/api/youtube/prepare-playlist', requireAuth, requireAdmin, (req, res) 
   const url = String(req.body?.url || '').trim();
   if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL de la lista.' });
   try {
-    const state = startPlaylistDownload(url, { limit: Number(req.body?.limit) || 10 });
+    // Si viene el canal, se reutiliza la lista que ya se leyó al comprobar la
+    // señal: la descarga arranca al instante, sin otra lectura de YouTube.
+    let pending = null;
+    const channelId = Number(req.body?.channel_id) || 0;
+    if (channelId) {
+      const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(channelId);
+      const st = parseLiveState(ch);
+      if (Array.isArray(st?.pending) && st.pending.length) pending = st.pending;
+    }
+    const state = startPlaylistDownload(url, { limit: Number(req.body?.limit) || 10, pending });
     res.status(state.running ? 202 : 400).json({ ok: Boolean(state.running), ...state });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -2895,7 +2911,13 @@ app.post('/api/channels247/:id/live-source/refresh', requireAuth, requireAdmin, 
   const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
   if (!ch) return res.status(404).json({ error: 'Canal 24/7 no encontrado' });
   if (!isLiveChannel(ch)) return res.status(400).json({ error: 'Ese canal no usa una señal en vivo.' });
-  const st = await refreshChannelLiveSource(ch);
+  // «Renovar señal» es la orden de preguntar a YouTube de verdad: no vale
+  // quedarse con lo que ya hay en el disco (para eso está la guardia). Con
+  // `disk_only` se pide lo contrario: recomponer la lista con los archivos que
+  // ya están en el disco, sin red (lo usa la pantalla al terminar de descargar).
+  const st = req.body?.disk_only
+    ? applyDiskPlaylistState(ch) || (await refreshChannelLiveSource(ch, { force: true }))
+    : await refreshChannelLiveSource(ch, { force: true });
   const ready = liveReady(st);
   const fresh = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
   if (ready && fresh.engine_mode === 'ffmpeg') {

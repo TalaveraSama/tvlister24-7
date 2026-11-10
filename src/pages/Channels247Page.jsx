@@ -55,6 +55,10 @@ export default function Channels247Page({ onPreview }) {
   const [cookiesMsg, setCookiesMsg] = useState(null);
   const [fmtDiag, setFmtDiag] = useState(null); // { busy, ok, text, error }
   const [prepareLimit, setPrepareLimit] = useState(10); // vídeos a descargar de una lista
+  // Preparación de una lista desde la propia tarjeta del canal (sin abrir Editar).
+  const [cardLimit, setCardLimit] = useState(10);
+  const [cardPrep, setCardPrep] = useState(null); // { id, busy, msg, error }
+  const [prepJob, setPrepJob] = useState(null); // estado del trabajo en el servidor
   const cookiesFileRef = useRef(null);
 
   const [customTitle, setCustomTitle] = useState('');
@@ -411,6 +415,82 @@ export default function Channels247Page({ onPreview }) {
     }
   };
 
+  // Preparar la lista DIRECTAMENTE desde la tarjeta: es lo que la propia
+  // tarjeta pide («botón Preparar lista en el disco») y antes sólo existía
+  // dentro de Editar, así que el canal se quedaba a 0 vídeos sin salida visible.
+  const handleCardPrepare = async (ch) => {
+    const url = String(ch.liveSource?.live_source_url || ch.live_source_url || '').trim();
+    if (!url) return;
+    setCardPrep({ id: ch.id, busy: true });
+    try {
+      let state = await apiFetch('/api/youtube/prepare-playlist', {
+        method: 'POST',
+        body: JSON.stringify({ url, limit: Number(cardLimit) || 10, channel_id: ch.id })
+      });
+      setPrepJob(state);
+      for (let i = 0; i < 9000; i += 1) {
+        if (!state?.running) break;
+        await new Promise((r) => setTimeout(r, 2000));
+        state = await apiFetch('/api/youtube/prepare-playlist/status');
+        if (state?.running) setPrepJob(state);
+      }
+      setPrepJob(state);
+      const r = state?.result || null;
+      if (r?.ok) {
+        // La lista ya se puede emitir desde el disco: se recompone sin red.
+        await apiFetch(`/api/channels247/${ch.id}/live-source/refresh`, {
+          method: 'POST',
+          body: JSON.stringify({ disk_only: true })
+        });
+        setCardPrep({
+          id: ch.id,
+          busy: false,
+          msg:
+            `⛁ ${r.downloaded + (r.already || 0)} de ${r.total} en el disco. ` +
+            'El canal se emite desde ahí, en orden y sin caducar.'
+        });
+      } else {
+        setCardPrep({
+          id: ch.id,
+          busy: false,
+          error: r?.error || 'No se pudo preparar la lista. Vuelve a intentarlo.'
+        });
+      }
+      loadAll();
+    } catch (err) {
+      setCardPrep({ id: ch.id, busy: false, error: err.message || 'No se pudo preparar la lista.' });
+    }
+  };
+
+  // Con vídeos por descargar (los pida la tarjeta o los arranque la
+  // auto-preparación del servidor) se sigue el avance y se refresca la tarjeta
+  // al terminar. La descarga vive en el servidor: cerrar el navegador no la para.
+  const prepWasRunning = useRef(false);
+  useEffect(() => {
+    const anyPending = channels.some((c) => Number(c.liveSource?.pending_count) > 0);
+    if (!anyPending) return undefined;
+    let alive = true;
+    const tick = async () => {
+      let st = null;
+      try {
+        st = await apiFetch('/api/youtube/prepare-playlist/status');
+      } catch {
+        return;
+      }
+      if (!alive || !st) return;
+      setPrepJob(st);
+      const running = Boolean(st.running);
+      if (prepWasRunning.current && !running) loadAll();
+      prepWasRunning.current = running;
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [channels]);
+
   const handleRefreshLive = async (id) => {
     setLiveBusy(`refresh:${id}`);
     try {
@@ -598,10 +678,10 @@ export default function Channels247Page({ onPreview }) {
                             {modeBadge(ch.liveSource)}
                           </span>
                         )}
-                        {ch.source_kind === 'youtube' && ch.liveSource?.can_prepare_playlist && !ch.liveSource?.ready && (
+                        {ch.source_kind === 'youtube' && Number(ch.liveSource?.pending_count) > 0 && (
                           <span
                             className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-teal-500/15 text-teal-200 border-teal-500/40"
-                            title="Los vídeos de esta lista se pueden descargar una vez y emitir desde el disco (Editar → Preparar lista en el disco)."
+                            title="Todavía faltan vídeos por descargar: el canal emite con los que ya están en el disco y suma el resto solo (botón «Preparar la lista en el disco» en la tarjeta)."
                           >
                             ⛁ {ch.liveSource.pending_count || 0} SIN DESCARGAR
                           </span>
@@ -726,6 +806,66 @@ export default function Channels247Page({ onPreview }) {
                       <div className="text-[11px] text-amber-300 flex items-start gap-1">
                         <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                         <span>{ch.liveSource.error}</span>
+                      </div>
+                    )}
+                    {/* La lista sólo da DASH/HLS: se descarga desde aquí mismo. */}
+                    {(Number(ch.liveSource?.pending_count) > 0 ||
+                      ch.liveSource?.can_prepare_playlist ||
+                      (cardPrep?.id === ch.id && Boolean(cardPrep?.msg || cardPrep?.error))) && (
+                      <div className="space-y-1.5 pt-0.5">
+                        {prepJob?.running && String(prepJob.url || '') === String(ch.liveSource?.live_source_url || '') ? (
+                          <div className="text-[11px] text-teal-200 flex items-start gap-1.5">
+                            <Loader2 className="w-3.5 h-3.5 shrink-0 mt-0.5 animate-spin" />
+                            <span>
+                              Preparando la lista en el disco
+                              {prepJob.total ? ` (${prepJob.done}/${prepJob.total})` : ''}: {prepJob.step || 'descargando…'}
+                              <span className="text-slate-400">
+                                {' '}
+                                — el canal ya emite con los que hay; el resto se añade solo.
+                              </span>
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleCardPrepare(ch)}
+                              disabled={Boolean(prepJob?.running) || cardPrep?.busy}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold disabled:opacity-50"
+                            >
+                              {cardPrep?.busy ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Download className="w-3.5 h-3.5" />
+                              )}
+                              {cardPrep?.busy ? 'Preparando…' : 'Preparar la lista en el disco'}
+                            </button>
+                            <label className="inline-flex items-center gap-1 text-slate-300 text-[11px]">
+                              Vídeos:
+                              <input
+                                type="number"
+                                min={1}
+                                max={30}
+                                value={cardLimit}
+                                onChange={(e) => setCardLimit(Math.max(1, Math.min(30, Number(e.target.value) || 10)))}
+                                className="w-14 px-1.5 py-0.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                              />
+                            </label>
+                            <span className="text-[11px] text-slate-400">
+                              Se descargan una vez (H.264 + AAC) y se emiten en orden desde el disco, sin caducar.
+                              Empieza a emitir en cuanto baja el primero.
+                            </span>
+                          </div>
+                        )}
+                        {cardPrep?.id === ch.id && cardPrep?.msg && (
+                          <div className="text-[11px] text-emerald-300">{cardPrep.msg}</div>
+                        )}
+                        {cardPrep?.id === ch.id && cardPrep?.error && (
+                          <div className="text-[11px] text-rose-300 flex items-start gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span>{cardPrep.error}</span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

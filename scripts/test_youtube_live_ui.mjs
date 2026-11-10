@@ -74,6 +74,7 @@ let downloadJob = null;
 let downloads = 0;
 let prepareJob = null;
 let prepares = 0;
+let simpsonsPrepared = false; // la lista «PLsimpsons» ya se preparó desde la tarjeta
 let cookiesPath = '';
 let cookiesExpired = false;
 let cookieTests = 0;
@@ -215,6 +216,39 @@ const channels = [
       error: ''
     },
     liveState: { isLiveSource: true, sourceMode: 'playlist', schedule: [] }
+  },
+  {
+    // La tarjeta real del operador: «Los Simpson Capítulos Completos» con 30
+    // vídeos, ninguno con MP4 progresivo y 23 todavía por descargar.
+    id: 13,
+    name: 'Los Simpson 24/7',
+    category_id: 4,
+    status: 'running',
+    engine_mode: 'ffmpeg',
+    source_kind: 'youtube',
+    live_source_url: 'https://www.youtube.com/playlist?list=PLsimpsons',
+    workerPid: null,
+    copyExact: false,
+    copyVideo: false,
+    audioLeveled: false,
+    liveSource: {
+      mode: 'playlist',
+      live: false,
+      ready: false,
+      local: false,
+      title: 'Los Simpson Capítulos Completos [Español Latino]',
+      entries: 0,
+      total_entries: 30,
+      total_duration_sec: 0,
+      pending_count: 23,
+      can_prepare_playlist: true,
+      skip_summary: '23 no ofrece MP4 progresivo (sólo DASH/HLS) · 7 es un directo',
+      has_url: false,
+      error:
+        'Los 30 vídeos de la lista no ofrecen un MP4 progresivo (sólo DASH/HLS). Se pueden descargar una vez ' +
+        '(los primeros 23) y emitir desde el disco: botón «Preparar lista en el disco».'
+    },
+    liveState: { isLiveSource: true, sourceMode: 'playlist', schedule: [] }
   }
 ];
 
@@ -311,6 +345,8 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (u === '/api/youtube/prepare-playlist' && method === 'POST') {
     prepares += 1;
+    // Desde el modal (sin channel_id) la lista queda preparada para esa prueba.
+    if (!body?.channel_id) simpsonsPrepared = true;
     prepareJob = { running: true, step: '1/10 · Programa 1', done: 1, total: 10, result: null };
     return json({ ok: true, ...prepareJob }, 202);
   }
@@ -470,7 +506,7 @@ globalThis.fetch = async (url, opts = {}) => {
       return json({ ok: false, live: false, error: 'Ese enlace no está en directo ahora (no es un directo).' });
     }
     if (/list=PLsimpsons/.test(body?.url || '')) {
-      if (!prepares) {
+      if (!simpsonsPrepared) {
         return json({
           ok: false,
           live: false,
@@ -539,6 +575,25 @@ globalThis.fetch = async (url, opts = {}) => {
       yt_dlp: { installed: true, version: '2026.11.04', bin: '/opt/tvlister24-7/.runtime/bin/yt-dlp', ffmpeg: true }
     });
   }
+  if (/^\/api\/channels247\/13\/live-source\/refresh$/.test(u) && method === 'POST') {
+    // Con `disk_only` el panel recompone la lista con los archivos que ya hay.
+    if (body?.disk_only) {
+      const ch13 = channels.find((c) => c.id === 13);
+      if (ch13) {
+        ch13.liveSource = {
+          ...ch13.liveSource,
+          ready: true,
+          local: true,
+          entries: 10,
+          pending_count: 0,
+          can_prepare_playlist: false,
+          total_duration_sec: 13200,
+          error: ''
+        };
+      }
+    }
+    return json({ ok: true, liveSource: channels.find((c) => c.id === 13)?.liveSource || {} });
+  }
   if (/^\/api\/channels247\/\d+\/live-source\/refresh$/.test(u)) {
     return json({ ok: true, state: { ok: true, url: 'x' }, liveSource: { live: true }, workerPid: 111 });
   }
@@ -585,13 +640,63 @@ ok(/Lista Demo/.test(text()), 'con el título de la lista');
 ok(/Programa 1/.test(text()), 'y los primeros vídeos de la lista');
 ok(/y 27 más, en bucle/.test(text()), 'avisando de cuántos quedan');
 ok(!/● YOUTUBE EN VIVO/.test(text().split('Lista Demo')[1]?.slice(0, 80) || ''), 'la lista NO se anuncia como directo');
-ok(buttons('Renovar señal').length === 5, 'cada canal de YouTube tiene «Renovar señal»', `${buttons('Renovar señal').length} botones`);
+ok(buttons('Renovar señal').length === 6, 'cada canal de YouTube tiene «Renovar señal»', `${buttons('Renovar señal').length} botones`);
 ok(/⧉ COPIA EXACTA/.test(text()), 'los canales que copian sin recodificar lo dicen');
 ok(/⧉ COPIA · AUDIO AAC/.test(text()), 'y se distingue cuando sólo se copia el vídeo');
 ok(/↻ RECODIFICA/.test(text()), 'y cuando hay que recodificar');
 ok(/uniendo sus dos pistas/.test(text()), 'el directo de pistas separadas explica que las une al copiar');
 ok(/⛁ DESDE EL DISCO/.test(text()), 'el vídeo descargado se marca como emitido desde el disco');
 ok(/repetido en bucle \(descargado\)/.test(text()), 'y la línea del canal lo dice');
+
+// ── 1b. La tarjeta de una lista DASH prepara el disco sin abrir Editar ─────
+// El operador veía «LISTA · 0» y «23 SIN DESCARGAR», y el único botón para
+// descargar estaba dentro de Editar. Aquí se prueba la salida directa.
+{
+  ok(/23 SIN DESCARGAR/.test(text()), 'la tarjeta avisa de los vídeos que faltan por descargar');
+  ok(/Los Simpson Capítulos Completos/.test(text()), 'con el título de la lista');
+  ok(buttons('Preparar la lista en el disco').length > 0, 'y ofrece prepararla desde la propia tarjeta');
+  ok(
+    /Empieza a emitir en cuanto baja el primero/.test(text()),
+    'explicando que el canal emite mientras descarga'
+  );
+
+  const antesTarjeta = calls.length;
+  await act(async () => {
+    buttons('Preparar la lista en el disco')[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  });
+  await flush();
+  const postTarjeta = calls
+    .slice(antesTarjeta)
+    .find((c) => c.url === '/api/youtube/prepare-playlist' && c.method === 'POST');
+  ok(Boolean(postTarjeta), 'el botón lanza la descarga');
+  ok(postTarjeta?.body?.channel_id === 13, 'diciendo de qué canal es', String(postTarjeta?.body?.channel_id));
+  ok(
+    postTarjeta?.body?.url === 'https://www.youtube.com/playlist?list=PLsimpsons',
+    'con el enlace de la lista',
+    postTarjeta?.body?.url
+  );
+  ok(postTarjeta?.body?.limit === 10, 'y cuántos vídeos descargar', String(postTarjeta?.body?.limit));
+  ok(/Preparando la lista en el disco/.test(text()), 'mientras descarga lo cuenta en la tarjeta', text().slice(-160));
+
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 2600));
+  });
+  await flush();
+  await flush();
+  ok(/⛁ 10 de 10 en el disco/.test(text()), 'al terminar dice cuántos hay en el disco', text().slice(-200));
+  ok(
+    calls.some(
+      (c) => c.url === '/api/channels247/13/live-source/refresh' && c.method === 'POST' && c.body?.disk_only === true
+    ),
+    'y recompone la lista con los archivos, sin volver a preguntar a YouTube'
+  );
+  ok(/⛁ DESDE EL DISCO/.test(text()), 'la tarjeta pasa a decir que se emite desde el disco');
+  {
+    const t = text();
+    const i = t.indexOf('23 SIN DESCARGAR');
+    ok(!/23 SIN DESCARGAR/.test(t), 'y ya no quedan vídeos por descargar', i >= 0 ? t.slice(Math.max(0, i - 120), i + 40) : '');
+  }
+}
 
 // ── 2. Renovar señal llama al panel ─────────────────────────────────────────
 const beforeRefresh = calls.length;
@@ -889,6 +994,7 @@ ok(
   ok(Boolean(limitInput), 'con un selector de cuántos vídeos');
   await setValue(limitInput, '10');
 
+  const preparesAntes = prepares;
   await clickText('Preparar lista en el disco');
   const prepCall = calls.filter((c) => c.url === '/api/youtube/prepare-playlist' && c.method === 'POST').pop();
   ok(Boolean(prepCall), 'preparar la lista llama al panel');
@@ -905,7 +1011,7 @@ ok(
   });
   await flush();
   await flush();
-  ok(prepares === 1, 'la preparación se lanza una sola vez', `${prepares}`);
+  ok(prepares === preparesAntes + 1, 'la preparación se lanza una sola vez', `${prepares - preparesAntes}`);
   ok(/Lista preparada: 10 de 10 vídeos en el disco/.test(text()), 'al terminar dice cuántos hay en el disco');
   ok(/se emiten en orden desde el disco/i.test(text()), 'y que ya no dependen de YouTube');
   ok(/LISTA · 10/.test(text()) || /10 vídeos/.test(text()), 'el enlace queda resuelto con sus vídeos', text().slice(-160));
