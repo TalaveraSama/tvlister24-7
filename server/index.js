@@ -2921,7 +2921,11 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       // Vídeo sin MP4 progresivo: se puede descargar una vez y emitir del disco.
       needs_download: Boolean(r.needs_download),
       can_download: Boolean(r.can_download),
-      // Lista que sólo da DASH/HLS: se puede preparar entera en el disco.
+      // La lista se emite EN DIRECTO desde YouTube (también si sólo da
+      // DASH/HLS: el motor une sus dos pistas). Sin descargar nada.
+      can_stream: Boolean(r.can_stream),
+      streaming: Number(r.streaming) || 0,
+      // Último recurso: lista de la que YouTube no da ni una pista.
       can_prepare_playlist: Boolean(r.can_prepare_playlist),
       pending_count: Number(r.pending_count) || 0,
       // Cuánto ocuparía prepararla en el disco (estimación por duración) y

@@ -1376,6 +1376,31 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
   // (YouTube DASH/HLS). Sin esto, `-c copy` de la pista de vídeo dejaría el
   // canal sin sonido.
   const mapArgs = [];
+  // Opciones que sólo entienden las entradas de red (http/https). Antes iban
+  // sueltas antes de TODAS las entradas: el demuxer de concatenación no conoce
+  // `-reconnect` y FFmpeg se negaba a arrancar («Option reconnect not found»),
+  // que es justo lo que dejaba una lista sin bajar sin poder emitirse.
+  const netInputArgs = (target) => {
+    if (!/^https?:/i.test(String(target || ''))) return [];
+    const out = [
+      '-reconnect',
+      '1',
+      '-reconnect_streamed',
+      '1',
+      '-reconnect_on_network_error',
+      '1',
+      '-reconnect_delay_max',
+      '6',
+      '-rw_timeout',
+      '20000000'
+    ];
+    if (headers['User-Agent']) out.push('-user_agent', String(headers['User-Agent']));
+    const extra = [];
+    if (headers.Referer) extra.push(`Referer: ${headers.Referer}`);
+    if (headers.Origin) extra.push(`Origin: ${headers.Origin}`);
+    if (extra.length) out.push('-headers', `${extra.join('\r\n')}\r\n`);
+    return out;
+  };
   let transcode =
     mode === 'playlist' && entries.length
       ? playlistNeedsTranscode(entries)
@@ -1386,42 +1411,71 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
   if (mode === 'playlist' && entries.length) {
     // Manifiesto de concatenación: se reescribe en cada arranque porque las
     // URLs de YouTube van firmadas y cambian al renovar.
+    //
+    // Un vídeo de YouTube que sólo ofrece DASH/HLS trae el vídeo y el audio en
+    // pistas separadas. Se emiten las dos a la vez: un manifiesto con las
+    // pistas de vídeo y otro (paralelo, mismo orden) con las de audio, mapeados
+    // juntos. Así la lista se VE sin descargarla al disco.
+    const withAudio = entries.some((e) => e && e.audio_url);
     const listPath = path.join(outDir, 'source.txt');
-    const lines = ['ffconcat version 1.0'];
-    for (const e of entries) {
-      const safe = String(e.url).replace(/'/g, "'\\''");
-      lines.push(`file '${safe}'`);
-    }
-    try {
+    const audioPath = path.join(outDir, 'source-audio.txt');
+    const writeConcat = (file, urls) => {
+      const lines = ['ffconcat version 1.0'];
+      for (const u of urls) {
+        const safe = String(u).replace(/'/g, "'\\''");
+        lines.push(`file '${safe}'`);
+      }
       const content = `${lines.join('\n')}\n`;
       // Sólo se reescribe si de verdad cambió: esta función también se llama
       // para enseñar el comando en el panel y no debe tocar el archivo que
       // FFmpeg está leyendo. La sustitución es atómica (tmp + rename).
       let prev = '';
       try {
-        prev = fs.readFileSync(listPath, 'utf8');
+        prev = fs.readFileSync(file, 'utf8');
       } catch {
         prev = '';
       }
       if (prev !== content) {
-        const tmpPath = `${listPath}.tmp`;
+        const tmpPath = `${file}.tmp`;
         fs.writeFileSync(tmpPath, content);
-        fs.renameSync(tmpPath, listPath);
+        fs.renameSync(tmpPath, file);
+      }
+    };
+    try {
+      writeConcat(listPath, entries.map((e) => e.url));
+      // `http` va en la lista blanca: sin ella FFmpeg no abre las URLs
+      // firmadas de YouTube desde el manifiesto de concatenación.
+      inputArgs.push(
+        '-re', '-stream_loop', '-1', '-f', 'concat', '-safe', '0',
+        '-protocol_whitelist', 'file,http,https,tcp,tls,crypto', '-i', listPath
+      );
+      if (withAudio) {
+        writeConcat(audioPath, entries.map((e) => e.audio_url || e.url));
+        inputArgs.push(
+          '-re', '-stream_loop', '-1', '-f', 'concat', '-safe', '0',
+          '-protocol_whitelist', 'file,http,https,tcp,tls,crypto', '-i', audioPath
+        );
+        mapArgs.push('-map', '0:v:0', '-map', '1:a:0');
       }
     } catch {
       return null;
     }
-    inputArgs.push('-re', '-stream_loop', '-1', '-f', 'concat', '-safe', '0', '-i', listPath);
   } else if (mode === 'video' && url) {
     // `-re` lee a velocidad real y `-stream_loop -1` repite sin fin.
-    inputArgs.push('-re', '-stream_loop', '-1', '-i', url);
+    inputArgs.push(...netInputArgs(url), '-re', '-stream_loop', '-1', '-i', url);
+    // Vídeo y audio en pistas separadas (YouTube DASH/HLS): se abren las dos.
+    const audioUrl = String(st.audio_url || '').trim();
+    if (audioUrl && audioUrl !== url) {
+      inputArgs.push(...netInputArgs(audioUrl), '-re', '-stream_loop', '-1', '-i', audioUrl);
+      mapArgs.push('-map', '0:v:0', '-map', '1:a:0');
+    }
   } else if (url) {
     // Directo (o HLS pegado a mano): la fuente ya es continua y se copia tal
     // cual. Si el audio viene en su propia pista, se abre también y se mapea.
-    inputArgs.push('-i', url);
+    inputArgs.push(...netInputArgs(url), '-i', url);
     const audioUrl = String(st?.audio_url || '').trim();
     if (audioUrl && audioUrl !== url) {
-      inputArgs.push('-i', audioUrl);
+      inputArgs.push(...netInputArgs(audioUrl), '-i', audioUrl);
       mapArgs.push('-map', '0:v:0', '-map', '1:a:0');
     }
   } else {
@@ -1435,24 +1489,10 @@ export function buildFfmpegArgsForChannel247Live(channel, profile, inputUrl) {
     'error',
     '-y',
     '-threads',
-    '2',
-    // Red inestable: no cerrar el canal por un segmento perdido.
-    '-reconnect',
-    '1',
-    '-reconnect_streamed',
-    '1',
-    '-reconnect_on_network_error',
-    '1',
-    '-reconnect_delay_max',
-    '6',
-    '-rw_timeout',
-    '20000000'
+    '2'
+    // Las opciones de red (-reconnect, cabeceras…) van con cada entrada:
+    // ver `netInputArgs`, más arriba.
   ];
-  if (headers['User-Agent']) args.push('-user_agent', String(headers['User-Agent']));
-  const extraHeaders = [];
-  if (headers.Referer) extraHeaders.push(`Referer: ${headers.Referer}`);
-  if (headers.Origin) extraHeaders.push(`Origin: ${headers.Origin}`);
-  if (extraHeaders.length) args.push('-headers', `${extraHeaders.join('\r\n')}\r\n`);
 
   args.push(...inputArgs, '-dn', '-sn', ...mapArgs);
 

@@ -164,7 +164,8 @@ export default function Channels247Page({ onPreview }) {
   // Etiquetas cortas para que se entienda de un vistazo de qué va el canal.
   const modeBadge = (ls) => {
     const mode = ls?.mode || 'live';
-    if (mode === 'playlist') return `≡ LISTA · ${ls?.entries || 0}`;
+    // ▶ = se está emitiendo desde YouTube ahora mismo (sin copia en el disco).
+    if (mode === 'playlist') return `${ls?.entries ? '▶' : '≡'} LISTA · ${ls?.entries || 0}`;
     if (mode === 'video') return '▶ VÍDEO EN BUCLE';
     if (mode === 'hls') return '◎ HLS EXTERNO';
     return ls?.live ? '● YOUTUBE EN VIVO' : 'SIN SEÑAL';
@@ -849,6 +850,13 @@ export default function Channels247Page({ onPreview }) {
                         Se repite sin fin{ch.liveSource?.needs_transcode ? ' · recodificado a H.264 1080p' : ' · sin recodificar'}.
                       </div>
                     )}
+                    {ch.liveSource?.mode === 'playlist' && ch.liveSource?.ready && !Number(ch.liveSource?.pending_count) && (
+                      <div className="text-[11px] text-slate-400">
+                        Se emite desde YouTube, capítulo a capítulo y en bucle
+                        {ch.liveSource?.separated_audio ? ' (con sus dos pistas unidas al vuelo)' : ''}:{' '}
+                        <b className="text-slate-300">no ocupa disco</b>.
+                      </div>
+                    )}
                     {ch.liveSource?.ready && (
                       <div className="text-[11px] text-slate-400 flex items-center gap-1">
                         <span className={ch.copyExact ? 'text-emerald-300' : 'text-amber-300'}>⧉</span>
@@ -879,7 +887,7 @@ export default function Channels247Page({ onPreview }) {
                           <div className="text-[11px] text-teal-200 flex items-start gap-1.5">
                             <Loader2 className="w-3.5 h-3.5 shrink-0 mt-0.5 animate-spin" />
                             <span>
-                              Preparando la lista en el disco
+                              Guardando la lista en el disco
                               {prepJob.total ? ` (${prepJob.done}/${prepJob.total})` : ''}: {prepJob.step || 'descargando…'}
                               <span className="text-slate-400">
                                 {' '}
@@ -900,7 +908,7 @@ export default function Channels247Page({ onPreview }) {
                               ) : (
                                 <Download className="w-3.5 h-3.5" />
                               )}
-                              {cardPrep?.busy ? 'Preparando…' : 'Preparar la lista en el disco'}
+                              {cardPrep?.busy ? 'Guardando…' : 'Guardar copia en el disco'}
                             </button>
                             <label className="inline-flex items-center gap-1 text-slate-300 text-[11px]">
                               Vídeos:
@@ -926,8 +934,8 @@ export default function Channels247Page({ onPreview }) {
                           </div>
                         )}
                         <div className="text-[11px] text-slate-400">
-                          Se descargan una vez (H.264 + AAC) y se emiten en orden desde el disco, sin caducar. Empieza a
-                          emitir en cuanto baja el primero.
+                          Opcional: guardar los capítulos en el disco (H.264 + AAC) para que no dependan de YouTube. El
+                          canal emite igual sin esto; sólo hace falta si YouTube no da ni una pista.
                           {Number(ch.liveSource?.pending_count) > 0 && (
                             <span className="text-slate-300">
                               {' '}
@@ -1356,6 +1364,10 @@ export default function Channels247Page({ onPreview }) {
                             se emiten en orden y vuelven a empezar
                             {probe.needs_transcode ? ' · se recodifican a H.264 1080p' : ' · sin recodificar'}
                           </div>
+                          <div className="text-emerald-100/80">
+                            ▶ Se emite tal cual desde YouTube{probe.separated_audio ? ' (uniendo vídeo y audio)' : ''}:{' '}
+                            <b>no ocupa disco</b>.
+                          </div>
                           {(probe.entry_titles || []).length > 0 && (
                             <div className="text-emerald-100/80 space-y-0.5">
                               {probe.entry_titles.slice(0, 5).map((t, i) => (
@@ -1385,7 +1397,7 @@ export default function Channels247Page({ onPreview }) {
                           </div>
                           <div>
                             {Math.floor((probe.duration_sec || 0) / 60)}m{' '}
-                            {Math.round((probe.duration_sec || 0) % 60)}s · se repite sin fin
+                            {Math.round((probe.duration_sec || 0) % 60)}s · se repite sin fin desde YouTube
                             {probe.needs_transcode ? ' · se recodifica a H.264 1080p' : ' · sin recodificar'}
                             {probe.expires_in_min !== null && probe.expires_in_min !== undefined
                               ? ` · la URL se renovará en ${probe.expires_in_min} min`
@@ -1458,7 +1470,7 @@ export default function Channels247Page({ onPreview }) {
                                 ) : (
                                   <Download className="w-3.5 h-3.5" />
                                 )}
-                                {probe.preparing ? 'Preparando…' : 'Preparar lista en el disco'}
+                                {probe.preparing ? 'Guardando…' : 'Guardar copia en el disco'}
                               </button>
                               <label className="inline-flex items-center gap-1 text-slate-300">
                                 Vídeos:
@@ -1472,7 +1484,7 @@ export default function Channels247Page({ onPreview }) {
                                 />
                               </label>
                               <span className="text-emerald-100/80">
-                                Se descargan una vez (H.264 + AAC) y se emiten en orden desde el disco.
+                                Opcional: guarda los capítulos en el disco. La lista se emite igual sin descargar.
                                 {probe.pending_count ? ` Hay ${probe.pending_count} disponibles.` : ''}
                               </span>
                               {probe.pending_count ? (

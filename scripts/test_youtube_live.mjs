@@ -205,13 +205,25 @@ if (isPlaylistUrl) {
       entries.push({ id: 'BAD' + i, title: 'Sin formato utilizable', duration: 60, formats: [] });
       continue;
     }
+    if (flags.entriesDead) {
+      // YouTube sin dar ni una pista (sólo miniaturas): no hay nada que emitir
+      // en directo y el disco es el último recurso.
+      entries.push({
+        id: 'VID' + i,
+        title: 'Programa ' + i,
+        duration: Number(flags.duration || 300),
+        live_status: 'not_live',
+        formats: [{ format_id: 'sb0', protocol: 'https', url: seg + '/sb' + i + '.jpg?expire=' + exp, vcodec: 'none', acodec: 'none', http_headers: headers }]
+      });
+      continue;
+    }
     entries.push({
       id: 'VID' + i,
       title: 'Programa ' + i,
       duration: Number(flags.duration || 300),
       live_status: 'not_live',
       // Sólo pistas DASH sueltas (sin MP4 progresivo): lo que ya pasa en muchas
-      // listas. Se pueden descargar una vez y emitir desde el disco.
+      // listas. Ahora se EMITEN en directo (vídeo + audio unidos al vuelo).
       formats: flags.entriesDash
         ? [
             { format_id: '137', protocol: 'https', url: seg + '/v' + i + '.mp4?expire=' + exp, vcodec: 'avc1.640028', acodec: 'none', height: 1080, tbr: 4000, http_headers: headers },
@@ -842,11 +854,11 @@ fs.writeFileSync(out, body, { mode: 0o755 });
   // Ahora: se descargan una vez y se emiten en orden desde el disco.
   {
     const LISTA = 'https://www.youtube.com/playlist?list=PLsimpsons';
-    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDash: true }));
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDead: true }));
     const none = (await api('POST', '/api/youtube/probe', { url: LISTA })).data;
     ok('la lista sin MP4 progresivo no se queda en «ningún vídeo»', none?.ok === false && none?.can_prepare_playlist === true, (none?.error || '').slice(0, 80));
     ok('dice cuántos se pueden preparar', none?.pending_count === 4, String(none?.pending_count));
-    ok('y explica que se emiten desde el disco', /desde el disco/.test(none?.error || ''));
+    ok('y explica que se guardan en el disco como último recurso', /guardar en el disco/.test(none?.error || ''), (none?.error || '').slice(0, 120));
     ok('con el resumen de motivos', /no ofrece MP4 progresivo/.test(none?.skip_summary || ''), none?.skip_summary);
 
     // Preparar la lista: se descargan uno a uno en segundo plano.
@@ -897,6 +909,91 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 
+  // --- 1e5. Una lista DASH/HLS se emite EN DIRECTO, sin bajar nada ---------
+  // El operador quería VER la lista como canal 24/7, no llenar el disco. Cuando
+  // YouTube da las pistas sueltas (DASH/HLS), el motor abre vídeo y audio a la
+  // vez y emite la lista entera: ni descarga, ni copia, ni caducidad de archivo.
+  {
+    const LISTA = 'https://www.youtube.com/playlist?list=PLdirecto';
+    const videosDir = path.join(TMP, 'app', '.runtime', 'videos');
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 5, entriesDash: true, duration: 1320 }));
+    const diskBefore = fs.existsSync(videosDir) ? fs.readdirSync(videosDir).length : 0;
+    const r = (await api('POST', '/api/youtube/probe', { url: LISTA })).data;
+    ok('la lista que sólo da DASH/HLS se emite igual', r?.ok === true && r?.mode === 'playlist', JSON.stringify({ ok: r?.ok, error: (r?.error || '').slice(0, 90) }));
+    ok('con sus capítulos en orden', r?.entries === 5, String(r?.entries));
+    ok('marcada como emitible en directo', r?.can_stream === true);
+    ok('sin nada pendiente de descargar', Number(r?.pending_count) === 0, String(r?.pending_count));
+    ok('y sin ofrecer descarga', !r?.can_prepare_playlist);
+    ok('el disco no se toca', (fs.existsSync(videosDir) ? fs.readdirSync(videosDir).length : 0) === diskBefore);
+    ok('avisa de que no ocupa disco', /no ocupa disco/.test(r?.error || '') || r?.ok === true);
+
+    // Canal con esa lista: el motor abre las dos pistas de cada capítulo.
+    const ch = await api('POST', '/api/channels247', {
+      name: 'Los Simpson en directo',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: LISTA,
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    });
+    const id = ch.data?.id;
+    let row = null;
+    const until = Date.now() + 12000;
+    while (Date.now() < until) {
+      row = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === id);
+      if (row?.liveSource?.ready) break;
+      await sleep(200);
+    }
+    ok('el canal de la lista queda listo', row?.liveSource?.ready === true, JSON.stringify(row?.liveSource?.error || ''));
+    ok('sin sacar nada del disco', row?.liveSource?.local !== true && row?.liveSource?.entries === 5, `${row?.liveSource?.entries}`);
+    ok('dice que las pistas van unidas al vuelo', row?.liveSource?.separated_audio === true);
+    const cmd = String(row?.ffmpegCommand || '');
+    ok('el motor lee el manifiesto de vídeo y el de audio', (cmd.match(/-f concat -safe 0 -protocol_whitelist file,http,https,tcp,tls,crypto -i /g) || []).length === 2, cmd.slice(0, 260));
+    ok('y los une con -map 0:v:0 -map 1:a:0', /-map 0:v:0 -map 1:a:0/.test(cmd));
+    ok('con http permitido en el manifiesto', /-protocol_whitelist file,http,https,tcp,tls,crypto/.test(cmd));
+    // Los dos manifiestos tienen los 5 capítulos en el mismo orden.
+    const hlsDir = path.join(TMP, 'hls', 'ch247_' + id);
+    const readLines = (f) => {
+      try {
+        return fs.readFileSync(path.join(hlsDir, f), 'utf8').split('\n').filter((l) => l.startsWith('file '));
+      } catch {
+        return [];
+      }
+    };
+    ok('el manifiesto de vídeo tiene los 5 capítulos', readLines('source.txt').length === 5, String(readLines('source.txt').length));
+    // Un estado viejo (sin `can_stream`) se vuelve a leer de YouTube en vez de
+    // quedarse preso del disco; y una lista que no se puede emitir reintenta
+    // cada 6 h.
+    {
+      const code = `
+        import path from 'node:path';
+        const m = await import(${JSON.stringify(path.join(ROOT, 'server/youtubeLive.js'))});
+        const base = { mode: 'playlist', ready: true, local: true, resolved_at_ms: Date.now(),
+          entries: [{ url: '/x/VID1.mp4', local: true, duration_sec: 60 }],
+          pending: [{ id: 'VID2', duration_sec: 60 }], pending_count: 1 };
+        const viejo = m.applyDiskPlaylistState({ id: 999, live_source_url: 'https://y/playlist?list=x', live_source_state: JSON.stringify(base) });
+        const reciente = m.applyDiskPlaylistState({ id: 999, live_source_url: 'https://y/playlist?list=x',
+          live_source_state: JSON.stringify({ ...base, can_stream: false, stream_checked_at_ms: Date.now() }) });
+        const tarde = m.applyDiskPlaylistState({ id: 999, live_source_url: 'https://y/playlist?list=x',
+          live_source_state: JSON.stringify({ ...base, can_stream: false, stream_checked_at_ms: Date.now() - 7 * 3600 * 1000 }) });
+        console.log(JSON.stringify({
+          viejo: viejo === null, reciente: reciente?.can_stream === false, tarde: tarde === null
+        }));
+      `;
+      const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
+        env: { ...process.env, TVLISTER_DB_PATH: path.join(TMP, 'disk2.db'), APP_DIR: path.join(TMP, 'app') },
+        encoding: 'utf8'
+      });
+      const r = JSON.parse(out.trim().split('\n').pop() || '{}');
+      ok('un canal «sólo disco» de una versión vieja vuelve a preguntar a YouTube', r?.viejo === true, JSON.stringify(r));
+      ok('el que de verdad no puede emitir sigue saliendo del disco', r?.reciente === true);
+      ok('y lo reintenta solo cada 6 h', r?.tarde === true);
+    }
+    ok('y el de audio también', readLines('source-audio.txt').length === 5, String(readLines('source-audio.txt').length));
+    if (id) await api('DELETE', `/api/channels247/${id}?videos=1`);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
   // --- 1e3. La lista se emite desde el disco MIENTRAS se descarga ----------
   // Lo que faltaba en producción: la tarjeta decía «23 sin descargar» y el
   // canal seguía a 0 vídeos hasta que alguien descargara. Ahora, con el primer
@@ -907,7 +1004,7 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     // Se apaga la auto-preparación para controlar cuántos se descargan (se
     // vuelve a encender más abajo, en su propia prueba).
     await api('PUT', '/api/settings', { youtube_auto_prepare: '0' });
-    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDash: true }));
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDead: true }));
     const created = await api('POST', '/api/channels247', {
       name: 'Los Simpson progresivo',
       category_id: 4,
@@ -991,7 +1088,7 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     // Disco limpio: lo que baje la auto-preparación tiene que ser de verdad.
     for (const vid of ['VID1', 'VID2', 'VID3', 'VID4']) await api('DELETE', `/api/youtube/videos/${vid}`);
     const LISTA2 = 'https://www.youtube.com/playlist?list=PLautomatica';
-    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 3, entriesDash: true }));
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 3, entriesDead: true }));
     const auto = await api('POST', '/api/channels247', {
       name: 'Los Simpson automático',
       category_id: 4,
@@ -1070,7 +1167,7 @@ fs.writeFileSync(out, body, { mode: 0o755 });
 
     // 3) La lista dice cuánto ocuparía ANTES de descargar.
     await api('PUT', '/api/settings', { youtube_auto_prepare: '0' });
-    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDash: true, duration: 1320 }));
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDead: true, duration: 1320 }));
     const LISTA = 'https://www.youtube.com/playlist?list=PLsimpsons';
     const probeDisk = (await api('POST', '/api/youtube/probe', { url: LISTA })).data;
     ok('la lista avisa de lo que ocuparía', probeDisk?.pending_bytes > 0, fmtMB(probeDisk?.pending_bytes));
@@ -1305,16 +1402,44 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     (noMp4?.error || '').slice(0, 80)
   );
 
-  // ── Vídeo que sólo ofrece DASH/HLS: se descarga una vez y se repite del disco ──
-  // Es lo que ya hace YouTube con muchos vídeos: sin MP4 progresivo no hay bucle.
+  // ── Vídeo que sólo ofrece DASH/HLS: se EMITE en bucle, sin descargarlo ────
+  // Es lo que ya hace YouTube con muchos vídeos. Antes se bajaba al disco; ahora
+  // el motor abre su pista de vídeo y su pista de audio y las emite unidas.
   const VIDEO_URL = 'https://www.youtube.com/watch?v=ioSKlIL4Hs8';
   fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, onlyDash: true }));
   const dashOnly = (await api('POST', '/api/youtube/probe', { url: VIDEO_URL })).data;
-  ok('un vídeo DASH-only se explica y ofrece descargarlo', dashOnly?.ok === false && dashOnly?.can_download === true, (dashOnly?.error || '').slice(0, 70));
-  ok('dice que se repite desde el disco y no caduca', /descargarlo una vez/.test(dashOnly?.error || '') && /disco/.test(dashOnly?.error || ''));
+  ok('un vídeo DASH-only se emite en bucle sin descargarlo', dashOnly?.ok === true && dashOnly?.mode === 'video', JSON.stringify({ mode: dashOnly?.mode, error: (dashOnly?.error || '').slice(0, 70) }));
+  ok('con el vídeo y el audio en pistas separadas que se unen al emitir', dashOnly?.separated_audio === true);
+  ok('y no hace falta bajar nada al disco', !dashOnly?.needs_download && !dashOnly?.can_download);
+  ok('sin recodificar (H.264 + AAC)', dashOnly?.needs_transcode === false);
+  {
+    // El motor abre las DOS entradas y las mapea: sin eso el canal sale mudo.
+    const ch = await api('POST', '/api/channels247', {
+      name: 'Canal DASH en directo',
+      category_id: 4,
+      source_kind: 'youtube',
+      live_source_url: VIDEO_URL,
+      engine_mode: 'ffmpeg',
+      transcode_profile_id: 2
+    });
+    const id = ch.data?.id;
+    let row = null;
+    const until = Date.now() + 10000;
+    while (Date.now() < until) {
+      row = ((await api('GET', '/api/channels247')).data || []).find((c) => c.id === id);
+      if (row?.liveSource?.ready) break;
+      await sleep(200);
+    }
+    ok('el canal queda listo emitiendo desde YouTube', row?.liveSource?.ready === true && row?.liveSource?.local !== true, JSON.stringify(row?.liveSource?.error || ''));
+    const cmd = String(row?.ffmpegCommand || '');
+    ok('el motor abre la pista de vídeo y la de audio', (cmd.match(/-re -stream_loop -1 -i /g) || []).length === 2, cmd.slice(0, 220));
+    ok('y las une con -map 0:v:0 -map 1:a:0', /-map 0:v:0 -map 1:a:0/.test(cmd));
+    if (id) await api('DELETE', `/api/channels247/${id}`);
+  }
 
-  // La descarga va en segundo plano (un vídeo puede tardar minutos).
-  const dl1 = await api('POST', '/api/youtube/download', { url: VIDEO_URL });
+  // La copia en el disco sigue disponible A MANO (no es la forma de emitir):
+  // va en segundo plano porque un vídeo puede tardar minutos.
+  const dl1 = await api('POST', '/api/youtube/download', { url: VIDEO_URL, duration_sec: 125 });
   ok('lanzar la descarga responde 202 al instante', dl1.status === 202 && dl1.data?.running === true, `${dl1.status} · ${dl1.data?.step || ''}`);
   let dlState = null;
   const dlDeadline = Date.now() + 30000;
@@ -1375,7 +1500,7 @@ fs.writeFileSync(out, body, { mode: 0o755 });
   const delVid = await api('DELETE', '/api/youtube/videos/ioSKlIL4Hs8');
   ok('se puede borrar el vídeo descargado', delVid.data?.ok === true && delVid.data?.cached === null);
   const again = (await api('POST', '/api/youtube/probe', { url: VIDEO_URL })).data;
-  ok('sin el archivo vuelve a ofrecer la descarga', again?.ok === false && again?.can_download === true);
+  ok('sin el archivo vuelve a emitirlo en directo desde YouTube', again?.ok === true && again?.local === false, JSON.stringify({ ok: again?.ok, local: again?.local }));
 
   // Descargar con el cliente por defecto bloqueado: se reintenta con `tv`.
   // Sin esto, «Descargar vídeo»/«Preparar lista en el disco» fallaban aunque la
@@ -1461,9 +1586,11 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     ok('el panel dice «copia exacta»', rowSep?.copyExact === true, JSON.stringify({ copyExact: rowSep?.copyExact, audioLeveled: rowSep?.audioLeveled }));
     ok('y que son dos pistas', rowSep?.liveSource?.separated_audio === true);
 
-    const logSep = fs.existsSync(FFMPEG_ARGS) ? fs.readFileSync(FFMPEG_ARGS, 'utf8') : '';
-    const lineSep = logSep.split('\n').find((l) => /a128\.m3u8/.test(l)) || '';
-    ok('el motor abre DOS entradas (vídeo y audio)', (lineSep.match(/-i /g) || []).length === 2, `${(lineSep.match(/-i /g) || []).length} entradas`);
+    // El comando real (el mismo que ejecuta el motor) se lee del panel: las
+    // cabeceras llevan saltos de línea dentro de un argumento y partir el log
+    // por líneas daría una lectura falsa.
+    const lineSep = String(rowSep?.ffmpegCommand || '');
+    ok('el motor abre DOS entradas (vídeo y audio)', (lineSep.match(/-i /g) || []).length === 2, `${(lineSep.match(/-i /g) || []).length} entradas · ${lineSep.slice(0, 160)}`);
     ok('las mapea (0:v:0 + 1:a:0)', /-map 0:v:0 -map 1:a:0/.test(lineSep));
     ok('y no recodifica ni vídeo ni audio', /-c:v copy/.test(lineSep) && /-c:a copy/.test(lineSep) && !/libx264/.test(lineSep));
 

@@ -3029,6 +3029,34 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.66: la lista de YouTube se emite como canal 24/7, sin descargarla
+
+El canal no necesita una copia en el VPS para emitir: se emite **la lista tal como YouTube la da**.
+
+- **`pickPlayable(info)`** (youtubeLive.js): elige cómo emitir un vídeo sin bajarlo. Primero el MP4 progresivo
+  (una entrada); si no lo hay, las pistas de DASH/HLS: muxed si existe una sola con imagen y sonido, y si no
+  **vídeo ≤1080p (H.264 preferido) + audio (AAC preferido)** en `url` y `audio_url`. Devuelve códec, tamaño,
+  caducidad y cabeceras. Sustituye a `pickProgressive` en el bucle de listas y en el vídeo suelto.
+- **Señal de la lista**: cada entrada guarda `url` (vídeo) y `audio_url` (audio, o la misma si viene junto).
+  `can_stream`/`streaming` viajan en el sondeo y en `GET /api/channels247`.
+- **Motor** (`buildFfmpegArgsForChannel247Live`): con pistas separadas escribe **dos manifiestos de
+  concatenación** (`source.txt` y `source-audio.txt`, mismo orden) y los abre con
+  `-map 0:v:0 -map 1:a:0`, ambos con `-stream_loop -1`. El de vídeo lleva
+  `-protocol_whitelist file,http,https,tcp,tls,crypto` (sin `http` FFmpeg no abre las URLs firmadas).
+- **Opciones de red por entrada** (`netInputArgs`): `-reconnect*`, `-rw_timeout`, `-user_agent` y `-headers` se
+  ponen delante de **cada** entrada http, no antes de todas. Antes el demuxer de concatenación recibía
+  `-reconnect` y FFmpeg abortaba con `Option reconnect not found`; además las cabeceras sólo llegaban a la
+  primera pista.
+- **Descargar es opcional**: `youtube_auto_prepare` pasa a estar **apagado** por defecto (antes, apagado sólo
+  con `0`). El botón de la tarjeta se llama **«Guardar copia en el disco»** y sólo se dibuja cuando YouTube no
+  da ni una pista (`can_prepare_playlist`). Toda la protección de disco de v2.6.65 sigue vigente para esa copia.
+- **Migración**: `diskPlaylistState` sólo se usa si `can_stream === false`. Un estado de v2.6.64 (sin la marca)
+  vuelve a resolverse contra YouTube y, si la lista se puede emitir, el canal emite todos los capítulos. Las
+  listas con `can_stream: false` se reintentan cada 6 h (`stream_checked_at_ms`).
+
+Pruebas: `test_youtube_live.mjs` **293 OK** (sección 1e5) y `test_youtube_live_ui.mjs` **170 OK**, más una
+prueba real con FFmpeg sobre dos pistas HTTP (HLS de 13,5 s con imagen y sonido).
+
 ### v2.6.65: la lista de YouTube no llena el disco
 
 Con la lista emitiendo desde el disco (v2.6.64) llegó la pregunta lógica: 10 capítulos son ~3 GB y el panel

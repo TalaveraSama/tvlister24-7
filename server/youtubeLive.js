@@ -1864,6 +1864,101 @@ export function pickProgressive(info) {
   };
 }
 
+/**
+ * Elige cómo EMITIR un vídeo sin descargarlo: primero el MP4 progresivo (una
+ * sola entrada, lo más barato) y, si YouTube no lo da, las pistas de DASH/HLS
+ * que sí entrega —vídeo por un lado y audio por otro—, que el motor abre a la
+ * vez y une al emitir. Esto es lo que hace que una lista «sólo DASH/HLS» se
+ * pueda ver como canal 24/7 sin bajar 3 GB al disco.
+ *
+ * Devuelve `{ url, audio_url, kind, vcodec, acodec, width, height, fps, ext,
+ * headers, expires_at_ms, duration_sec }` o `null` si YouTube no da ni una
+ * pista utilizable.
+ */
+export function pickPlayable(info) {
+  const prog = pickProgressive(info);
+  if (prog) {
+    return {
+      url: prog.url,
+      audio_url: '',
+      kind: 'progressive',
+      format_id: prog.format_id,
+      vcodec: prog.vcodec,
+      acodec: prog.acodec,
+      width: prog.width,
+      height: prog.height,
+      fps: prog.fps,
+      ext: prog.ext,
+      headers: prog.headers,
+      expires_at_ms: prog.expires_at_ms,
+      duration_sec: prog.duration_sec
+    };
+  }
+
+  const formats = (Array.isArray(info?.formats) ? info.formats : []).filter((f) => /^https?:/i.test(String(f?.url || '')));
+  if (!formats.length) return null;
+  const isHls = (f) => /^m3u8/i.test(String(f?.protocol || '')) || /\.m3u8(\?|$)/i.test(String(f?.url || ''));
+  const isMp4 = (f) => String(f?.ext || '').toLowerCase() === 'mp4' || /^(137|136|135|134|140|139|251|299|298)/.test(String(f?.format_id || ''));
+  const aacOk = (f) => /^(mp4a|aac|mp3)/i.test(String(f?.acodec || ''));
+  const hdOk = (f) => !(Number(f?.height) > MAX_VIDEO_HEIGHT);
+  const best = (list, pref) => {
+    const pool = list.slice().sort(
+      (a, b) =>
+        (pref(b) ? 1 : 0) - (pref(a) ? 1 : 0) ||
+        (Number(b.tbr) || 0) - (Number(a.tbr) || 0) ||
+        (Number(b.height) || 0) - (Number(a.height) || 0)
+    );
+    return pool[0];
+  };
+
+  // 1) Una sola pista con imagen y sonido (HLS muxed o un MP4 con las dos).
+  const muxed = formats.filter((f) => hasVideo(f) && hasAudio(f));
+  const muxedHd = muxed.filter(hdOk);
+  const one = best(muxedHd.length ? muxedHd : muxed, (f) => isHls(f) || isMp4(f));
+  if (one) {
+    return {
+      url: String(one.url),
+      audio_url: '',
+      kind: isHls(one) ? 'hls' : 'progressive',
+      format_id: String(one.format_id || ''),
+      vcodec: String(one.vcodec || ''),
+      acodec: String(one.acodec || ''),
+      width: Number(one.width) || 0,
+      height: Number(one.height) || 0,
+      fps: Number(one.fps) || 0,
+      ext: String(one.ext || ''),
+      headers: pickHeaders(one.http_headers || info?.http_headers || {}),
+      expires_at_ms: expiryOf(one.url) || 0,
+      duration_sec: Math.max(0, Math.round(Number(info?.duration) || Number(one.duration) || 0))
+    };
+  }
+
+  // 2) Pistas separadas: vídeo (H.264 y ≤1080p si se puede) + audio AAC.
+  const vids = formats.filter((f) => hasVideo(f) && !hasAudio(f));
+  const vidsHd = vids.filter(hdOk);
+  const vid = best(vidsHd.length ? vidsHd : vids, (f) => H264.test(String(f.vcodec || '')) || isMp4(f));
+  if (!vid) return null;
+  const auds = formats.filter((f) => hasAudio(f) && !hasVideo(f));
+  const aud = best(auds, (f) => aacOk(f) || isMp4(f));
+  return {
+    url: String(vid.url),
+    audio_url: aud ? String(aud.url) : '',
+    kind: aud ? 'separate' : 'video',
+    format_id: String(vid.format_id || ''),
+    vcodec: String(vid.vcodec || ''),
+    acodec: String(aud?.acodec || ''),
+    width: Number(vid.width) || 0,
+    height: Number(vid.height) || 0,
+    fps: Number(vid.fps) || 0,
+    ext: String(vid.ext || ''),
+    headers: pickHeaders(vid.http_headers || info?.http_headers || {}),
+    expires_at_ms: Math.min(
+      ...[vid.url, aud?.url].filter(Boolean).map((u) => expiryOf(u)).filter((t) => t > 0)
+    ) || 0,
+    duration_sec: Math.max(0, Math.round(Number(info?.duration) || Number(vid.duration) || 0))
+  };
+}
+
 const H264 = /^(avc1|h264|avc)/i;
 
 /** ¿Hay que recodificar el vídeo? VP9/AV1/HEVC, más de 1080p o sin dato. */
@@ -2506,14 +2601,19 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         });
         continue;
       }
-      const p = pickProgressive(e);
+      // Se emite EN DIRECTO desde YouTube: MP4 progresivo si lo hay y, si sólo
+      // hay DASH/HLS, sus pistas (vídeo + audio) unidas al emitir. Nada de bajar
+      // 3 GB al disco para reproducir una lista.
+      const p = pickPlayable(e);
       if (p && p.url) {
         entries.push({
-          id: p.id,
-          title: p.title || `Vídeo ${entries.length + 1}`,
+          id: eId || safeVideoId(p.id || ''),
+          title: String(e.title || `Vídeo ${entries.length + 1}`),
           url: p.url,
+          // Pista de audio aparte (DASH/HLS): el motor abre las dos.
+          audio_url: p.audio_url || '',
           local: false,
-          duration_sec: p.duration_sec,
+          duration_sec: Number(e.duration) ? Math.round(Number(e.duration)) : p.duration_sec,
           expires_at_ms: p.expires_at_ms,
           vcodec: p.vcodec,
           acodec: p.acodec,
@@ -2525,7 +2625,8 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         });
         continue;
       }
-      // Sin MP4 progresivo: si hay pistas con URL, se puede descargar.
+      // Ni MP4 progresivo ni pistas con URL: sólo entonces se ofrece guardar
+      // una copia en el disco (y sólo si YouTube dio alguna pista).
       // En una lista, `stderrAll` mezcla los errores de todos los vídeos: para el
       // motivo de cada entrada se usa la salida de la lectura que trajo la lista.
       const dx = diagnoseNoMedia(e, lastErr, { usingCookies, cookies: ck, clientsTried });
@@ -2567,7 +2668,10 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         pending,
         pending_count: pending.length,
         can_prepare_playlist: pending.length > 0,
-        // Cuánto ocupará prepararla y cuánto queda libre: la pantalla lo dice
+        // Ni un vídeo se puede emitir en directo: si hay archivos en el disco,
+        // el canal sigue saliendo de ahí (nunca se queda en negro).
+        can_stream: false,
+        // Cuánto ocuparía prepararla y cuánto queda libre: la pantalla lo dice
         // ANTES de descargar (una lista de 10 capítulos son ~3 GB).
         pending_bytes: estimatePlaylistBytes(pending),
         disk: (() => {
@@ -2592,9 +2696,9 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
           rawEntries.length === 0
             ? 'La lista está vacía o es privada: no hay vídeos que emitir.'
             : pending.length
-              ? `Los ${rawEntries.length} vídeos de la lista no ofrecen un MP4 progresivo (sólo DASH/HLS). ` +
-                `Se pueden descargar una vez (los primeros ${Math.min(pending.length, MAX_PLAYLIST_ITEMS)}) y emitir ` +
-                'desde el disco: botón «Preparar lista en el disco». Después no caducan ni dependen de YouTube.'
+              ? `YouTube no entrega ni una pista para los ${rawEntries.length} vídeos de la lista. ` +
+                'Como último recurso se pueden guardar en el disco ' +
+                `(los primeros ${Math.min(pending.length, MAX_PLAYLIST_ITEMS)}): botón «Guardar copia en el disco».`
               : blockedBot
                 ? explainBotCheck({ cookies: ck, usingCookies, clientsTried })
                 : `Ningún vídeo de la lista se puede emitir${skipSummary ? ` (${skipSummary})` : ''}.`,
@@ -2612,6 +2716,10 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       mode: 'playlist',
       // Toda la lista está en el disco: no caduca y no hay que renovar nada.
       local: localOnly,
+      // La lista se emite EN DIRECTO desde YouTube (con las pistas DASH/HLS
+      // unidas si hace falta): no hay que descargar nada al disco.
+      can_stream: true,
+      streaming: entries.filter((e) => !e.local).length,
       pending,
       pending_count: pending.length,
       can_prepare_playlist: pending.length > 0,
@@ -2731,7 +2839,10 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   }
 
   // ── Vídeo normal: se emite en bucle (24/7) ───────────────────────────────
-  const prog = pickProgressive(entry);
+  // Se emite EN DIRECTO: MP4 progresivo o, si sólo hay DASH/HLS, sus pistas
+  // (vídeo por un lado, audio por otro) que el motor une al emitir. Sin bajarlo
+  // al disco: el canal debe reproducir, no llenar el disco.
+  const prog = pickPlayable(entry);
   if (!prog || !prog.url) {
     const dx = diagnoseNoMedia(entry, lastErr, { usingCookies, cookies: ck, clientsTried, stderrAll });
     // Sólo se ofrece descargar si YouTube SÍ da pistas con URL (DASH/HLS): en un
@@ -2776,6 +2887,9 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     mode: 'video',
     provider: 'youtube',
     url: prog.url,
+    // Vídeo y audio en pistas separadas (DASH/HLS): el motor abre las dos.
+    audio_url: prog.audio_url || '',
+    copy_kind: prog.audio_url ? 'separate' : prog.kind || '',
     from: `format ${prog.format_id || prog.ext || ''}`.trim(),
     headers: prog.headers,
     host: hostOf(prog.url),
@@ -2933,6 +3047,11 @@ export function needsRefresh(channel, nowMs = Date.now()) {
  */
 export function diskPlaylistState(prev, url = '') {
   if (!prev || String(prev.mode || '') !== 'playlist') return null;
+  // Lo normal es EMITIR DESDE YOUTUBE, no desde el disco. El disco se usa sólo
+  // cuando la lista no se puede emitir en directo (`can_stream === false`). Un
+  // estado viejo (sin la marca) se vuelve a leer de YouTube una vez: así un
+  // canal que estaba «sólo en el disco» pasa a emitir la lista entera.
+  if (prev.can_stream !== false) return null;
   const pending = Array.isArray(prev.pending) ? prev.pending.filter((p) => p && p.id) : [];
   if (!pending.length) return null;
   const entries = [];
@@ -2979,6 +3098,10 @@ export function diskPlaylistState(prev, url = '') {
     pending_bytes: estimatePlaylistBytes(remaining),
     can_prepare_playlist: remaining.length > 0,
     needs_transcode: playlistNeedsTranscode(entries),
+    // Esta lista no se puede emitir en directo: mientras haya archivos, el
+    // canal sale del disco. Se conserva cuándo se preguntó a YouTube de verdad.
+    can_stream: false,
+    stream_checked_at_ms: Number(prev.stream_checked_at_ms) || 0,
     expires_at_ms: 0,
     resolved_at_ms: Date.now(),
     checked_at: new Date().toISOString(),
@@ -2998,7 +3121,16 @@ export function diskPlaylistState(prev, url = '') {
  */
 export function applyDiskPlaylistState(channel) {
   const url = String(channel?.live_source_url || '').trim();
-  const disk = diskPlaylistState(parseLiveState(channel), url);
+  const prev = parseLiveState(channel);
+  // Cada 6 h se vuelve a preguntar a YouTube, por si la lista ya se puede
+  // emitir en directo (un fallo pasajero no deja el canal preso del disco).
+  if (
+    prev?.can_stream === false &&
+    Date.now() - Number(prev.stream_checked_at_ms || 0) > 6 * 60 * 60 * 1000
+  ) {
+    return null;
+  }
+  const disk = diskPlaylistState(prev, url);
   if (!disk) return null;
   try {
     db.prepare('UPDATE channels_247 SET live_source_state = ? WHERE id = ?').run(JSON.stringify(disk), channel.id);
@@ -3017,9 +3149,11 @@ export function applyDiskPlaylistState(channel) {
 const autoPrepareAt = new Map();
 
 export function autoPrepareDisabled() {
-  const v = String(getSetting('youtube_auto_prepare') || '').trim().toLowerCase();
-  if (v === '0' || v === 'false' || v === 'no') return true;
-  return String(process.env.TVLISTER_YT_AUTO_PREPARE || '').trim() === '0';
+  // Apagada por defecto: el canal EMITE desde YouTube (v2.6.66). Descargar sólo
+  // tiene sentido como copia de respaldo y eso lo pide el operador a mano
+  // (`youtube_auto_prepare = 1`).
+  const on = (v) => ['1', 'true', 'si', 'sí', 'yes'].includes(String(v || '').trim().toLowerCase());
+  return !(on(getSetting('youtube_auto_prepare')) || on(process.env.TVLISTER_YT_AUTO_PREPARE));
 }
 
 export function autoPrepareLimit() {
@@ -3109,6 +3243,11 @@ export async function refreshChannelLiveSource(channel, { force = false } = {}) 
     cookies_note: String(res.cookies_note || ''),
     // Vídeo/listas descargados al disco, o que se pueden descargar/preparar.
     local: Boolean(res.local),
+    // La lista se emite en directo desde YouTube (lo normal desde v2.6.66).
+    can_stream: Boolean(res.can_stream),
+    streaming: Number(res.streaming) || 0,
+    // Cuándo se preguntó a YouTube de verdad (aunque después mande el disco).
+    stream_checked_at_ms: Date.now(),
     bytes: Number(res.bytes) || 0,
     can_download: Boolean(res.can_download),
     needs_download: Boolean(res.needs_download),
@@ -3181,7 +3320,11 @@ export function liveSourceInfo(channel) {
     // separated_audio: el audio va en su propia pista y se mapea aparte.
     copy_video: st ? st.copy_video !== false : false,
     copy_audio: st ? st.copy_audio !== false : false,
-    separated_audio: Boolean(st?.audio_url),
+    // Audio en pista aparte: en un vídeo (st.audio_url) o en una lista cuyas
+    // entradas vienen de DASH/HLS (cada una trae su audio_url).
+    separated_audio:
+      Boolean(st?.audio_url) ||
+      (Array.isArray(st?.entries) && st.entries.some((e) => e && e.audio_url)),
     copy_kind: st?.copy_kind || '',
     // Vídeo suelto / lista
     duration_sec: Number(st?.duration_sec) || 0,
@@ -3200,6 +3343,9 @@ export function liveSourceInfo(channel) {
     can_download: Boolean(st?.can_download),
     needs_download: Boolean(st?.needs_download),
     can_prepare_playlist: Boolean(st?.can_prepare_playlist),
+    // Se emite en directo desde YouTube (MP4 o pistas DASH/HLS unidas).
+    can_stream: Boolean(st?.can_stream),
+    streaming: Number(st?.streaming) || 0,
     pending_count: Number(st?.pending_count) || 0,
     // Lo que ocuparían los capítulos que faltan (la tarjeta lo enseña antes
     // de descargar: «≈ 3,0 GB»).

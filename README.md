@@ -211,23 +211,23 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
   audio se recodifica si tienes encendido el **nivelador de audio global** (y aun así el vídeo se sigue copiando).
   La tarjeta de cada canal lo dice: `⧉ COPIA EXACTA`, `⧉ COPIA · AUDIO AAC` o `↻ RECODIFICA`.
 - Se toman **hasta 30 vídeos** de una lista; los **directos** que haya dentro se omiten y la vista previa dice
-  cuántos y por qué. Si la lista **sólo da DASH/HLS** (sin MP4 progresivo, cada vez más común), el panel
-  **la prepara solo** si el canal está al aire (10 vídeos, `youtube_auto_prepare`) y la tarjeta tiene el botón
-  **«Preparar la lista en el disco»**: descarga N vídeos una vez y los emite en orden y en bucle desde el disco,
-  sin caducidades (`⛁ DESDE EL DISCO`). El canal **empieza a emitir con el primer capítulo** que baja y el resto
-  se añade solo (la guardia mira el disco cada 15 s, sin volver a preguntar a YouTube).
-- **El disco no se llena**: antes de bajar, la tarjeta dice lo que ocuparán los capítulos que faltan y cuánto
-  queda libre (`Quedan 23 ≈ 9,0 GB · disco libre 48,0 GB`). Sólo se preparan los que caben (se reservan 5 GB
-  para el panel; `youtube_videos_max_gb` pone un tope opcional) y, si no cabe ni uno, no se llama a yt-dlp. La
-  calidad se baja a **720p (ocupa la mitad)** o **480p (ocupa un tercio)** desde la propia tarjeta, y **«Liberar
+  cuántos y por qué. La lista **se emite tal cual desde YouTube**: si un capítulo **sólo da DASH/HLS** (sin MP4
+  progresivo, cada vez más común), el motor abre su pista de vídeo y su pista de audio a la vez y las une al
+  emitir, capítulo a capítulo y en bucle. La tarjeta lo marca **▶ LISTA · N** y lo dice: *no ocupa disco*.
+- **El disco no se llena**: para emitir no se descarga nada. Guardar una copia es **opcional** (sólo se ofrece
+  cuando YouTube no da ni una pista: botón **«Guardar copia en el disco»**, sin auto-preparación) y, cuando se
+  usa, la tarjeta dice lo que ocuparán los capítulos que faltan y cuánto queda libre (`Quedan 23 ≈ 9,0 GB ·
+  disco libre 48,0 GB`), sólo se guardan los que caben (se reservan 5 GB para el panel; `youtube_videos_max_gb`
+  pone un tope) y la calidad se baja a **720p (ocupa la mitad)** o **480p (ocupa un tercio)**. **«Liberar
   espacio»** borra los vídeos que ya no emite ningún canal: **nunca** uno que esté al aire.
 - **Sin recodificar** si todo es H.264 + AAC y mide lo mismo; si hay VP9/AV1/HEVC, más de 1080p o una lista con
   formatos mezclados, se pasa a **H.264 2500k + AAC 128k** para que ningún cliente se quede sin imagen.
 - La URL firmada se renueva sola antes de caducar (guardia cada minuto); si el directo termina, el canal queda
   **SIN SEÑAL** sin borrar nada y se reengancha cuando vuelve.
-- Si un vídeo **sólo ofrece DASH/HLS** (sin MP4 progresivo, cada vez más común), el panel lo **descarga una vez**
-  (H.264 + AAC, hasta 1080p) y lo repite **desde el disco**: sin caducidad, sin renovar y sin volver a YouTube.
-  Se marca con `⛁ DESDE EL DISCO` y vive en `.runtime/videos` (se conserva al actualizar).
+- Si un vídeo **sólo ofrece DASH/HLS** (sin MP4 progresivo, cada vez más común), se emite igual: el motor abre
+  su pista de vídeo y su pista de audio y las une al emitir, en bucle. Si algún día se quiere una copia de
+  respaldo en el disco, se puede guardar a mano (`⛁ DESDE EL DISCO`, en `.runtime/videos`, se conserva al
+  actualizar), pero el canal no la necesita para reproducir.
 - En modo **virtual** (sin motor) se entrega un directo o un vídeo con 302; una lista necesita el motor FFmpeg
   (responde 503 explicándolo).
 
