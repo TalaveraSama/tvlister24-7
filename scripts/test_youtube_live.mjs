@@ -192,7 +192,14 @@ if (isPlaylistUrl) {
       title: 'Programa ' + i,
       duration: Number(flags.duration || 300),
       live_status: 'not_live',
-      formats: [mp4(String(i))]
+      // Sólo pistas DASH sueltas (sin MP4 progresivo): lo que ya pasa en muchas
+      // listas. Se pueden descargar una vez y emitir desde el disco.
+      formats: flags.entriesDash
+        ? [
+            { format_id: '137', protocol: 'https', url: seg + '/v' + i + '.mp4?expire=' + exp, vcodec: 'avc1.640028', acodec: 'none', height: 1080, tbr: 4000, http_headers: headers },
+            { format_id: '140', protocol: 'https', url: seg + '/a' + i + '.m4a?expire=' + exp, vcodec: 'none', acodec: 'mp4a.40.2', tbr: 128, http_headers: headers }
+          ]
+        : [mp4(String(i))]
     });
   }
   console.log(JSON.stringify({ _type: 'playlist', id: 'PLdemo', title: flags.listTitle || 'Lista Demo', uploader: 'Canal Demo', entries }));
@@ -782,6 +789,67 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     ok('sin avisar cuando es la misma', rel?.same === false);
     ok('ni cuando la instalada es más nueva', rel?.newer === false);
     ok('el binario autónomo también se compara bien', rel?.standalone === true);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
+  // --- 1e2. Lista que sólo da DASH/HLS: se prepara entera en el disco ------
+  // «Los Simpson Capítulos Completos»: 30 vídeos, ninguno con MP4 progresivo.
+  // Antes: «Ningún vídeo de la lista se puede emitir» y el canal a 0 vídeos.
+  // Ahora: se descargan una vez y se emiten en orden desde el disco.
+  {
+    const LISTA = 'https://www.youtube.com/playlist?list=PLsimpsons';
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, entries: 4, entriesDash: true }));
+    const none = (await api('POST', '/api/youtube/probe', { url: LISTA })).data;
+    ok('la lista sin MP4 progresivo no se queda en «ningún vídeo»', none?.ok === false && none?.can_prepare_playlist === true, (none?.error || '').slice(0, 80));
+    ok('dice cuántos se pueden preparar', none?.pending_count === 4, String(none?.pending_count));
+    ok('y explica que se emiten desde el disco', /desde el disco/.test(none?.error || ''));
+    ok('con el resumen de motivos', /no ofrece MP4 progresivo/.test(none?.skip_summary || ''), none?.skip_summary);
+
+    // Preparar la lista: se descargan uno a uno en segundo plano.
+    const prep = await api('POST', '/api/youtube/prepare-playlist', { url: LISTA, limit: 4 });
+    ok('preparar la lista responde 202 al instante', prep.status === 202 && prep.data?.running === true, `${prep.status} · ${prep.data?.step || ''}`);
+    let st = null;
+    const deadline = Date.now() + 40000;
+    while (Date.now() < deadline) {
+      st = (await api('GET', '/api/youtube/prepare-playlist/status')).data;
+      if (!st?.running) break;
+      await sleep(250);
+    }
+    ok('descarga los vídeos de la lista', st?.result?.ok === true && st?.result?.downloaded === 4, JSON.stringify({ d: st?.result?.downloaded, t: st?.result?.total, f: st?.result?.failed }));
+    ok('y dice cuántos van sin fallos', st?.result?.failed === 0, String(st?.result?.failed));
+    ok('deja los archivos en el disco', ['VID1', 'VID2', 'VID3', 'VID4'].every((id) => fs.existsSync(path.join(TMP, 'app', '.runtime', 'videos', `${id}.mp4`))));
+
+    // El mismo enlace ya se emite: los cuatro vídeos, desde el disco.
+    const ready = (await api('POST', '/api/youtube/probe', { url: LISTA })).data;
+    ok('la lista ya se emite sin tocar YouTube', ready?.ok === true && ready?.entries === 4, `${ready?.entries} vídeos · ${JSON.stringify(ready?.error || '')}`);
+    ok('marcada como emitida desde el disco', ready?.local === true);
+    ok('y sin caducidad (no hay URL firmada)', !ready?.expires_at || ready?.expires_in_min === null, JSON.stringify(ready?.expires_in_min));
+
+    // El canal queda listo de verdad.
+    const ch = await api('POST', '/api/channels247', { name: 'Los Simpson', category_id: 4, source_kind: 'youtube', live_source_url: LISTA, engine_mode: 'virtual' });
+    let mine = null;
+    const waitCh = Date.now() + 10000;
+    while (Date.now() < waitCh) {
+      const list = (await api('GET', '/api/channels247')).data || [];
+      mine = list.find((c) => c.id === ch.data?.id);
+      if (mine?.liveSource?.ready) break;
+      await sleep(200);
+    }
+    ok('el canal de la lista queda listo con sus vídeos', mine?.liveSource?.ready === true && mine?.liveSource?.entries === 4, `${mine?.liveSource?.entries}`);
+    ok('y dice que sale del disco', mine?.liveSource?.local === true);
+    if (ch.data?.id) await api('DELETE', `/api/channels247/${ch.data.id}`);
+
+    // Borrar un archivo de la lista: la próxima vez se vuelve a ofrecer preparar.
+    fs.rmSync(path.join(TMP, 'app', '.runtime', 'videos', 'VID2.mp4'), { force: true });
+    fs.rmSync(path.join(TMP, 'app', '.runtime', 'videos', 'VID2.mp4.json'), { force: true });
+    const partial = (await api('POST', '/api/youtube/probe', { url: LISTA })).data;
+    ok('si falta un archivo, la lista sigue emitiendo con el resto', partial?.ok === true, `${partial?.entries} vídeos`);
+    ok('y cuenta los que ya están en el disco', partial?.entries === 3, `${partial?.entries}`);
+
+    // Se limpia el disco de la prueba y se sigue.
+    for (const id of ['VID1', 'VID3', 'VID4']) {
+      await api('DELETE', `/api/youtube/videos/${id}`);
+    }
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 

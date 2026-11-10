@@ -947,6 +947,131 @@ const lastLines = (text, n = 3) =>
     .join(' ');
 
 /**
+ * Descarga UN vídeo al disco (promesa). Reutilizable: la usa la descarga de un
+ * vídeo suelto y la preparación de una lista completa.
+ * Devuelve `{ ok, path, video_id, title, duration_sec, bytes, error }`.
+ */
+function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
+  return new Promise((resolve) => {
+    const id = safeVideoId(videoId);
+    if (!bin || !id) {
+      resolve({ ok: false, error: 'Falta yt-dlp o el identificador del vídeo.' });
+      return;
+    }
+    fs.mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
+    const tmpBase = path.join(VIDEO_CACHE_DIR, `${id}.tmp`);
+    const args = [
+      '--no-warnings',
+      '--no-config',
+      '--no-playlist',
+      '--newline',
+      '-f',
+      VIDEO_DOWNLOAD_FORMAT,
+      '--merge-output-format',
+      'mp4',
+      '--write-info-json',
+      '-o',
+      `${tmpBase}.%(ext)s`
+    ];
+    const cookies = String(getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '').trim();
+    if (cookies && fs.existsSync(cookies)) args.push('--cookies', cookies);
+    args.push(url);
+
+    const cleanTmp = () => {
+      try {
+        for (const f of fs.readdirSync(VIDEO_CACHE_DIR)) {
+          if (f.startsWith(`${id}.tmp`)) fs.rmSync(path.join(VIDEO_CACHE_DIR, f), { force: true });
+        }
+      } catch {
+        /* nada que limpiar */
+      }
+    };
+
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    const onChunk = (buf) => {
+      const text = String(buf || '');
+      const progress = [...text.matchAll(/(\d{1,3}(?:\.\d+)?)%\s+of\s+~?\s*([\d.]+)([KMG]iB)/g)].pop();
+      if (progress) {
+        onStep(`descargando ${progress[1]} % (${progress[2]} ${progress[3]})`);
+        return;
+      }
+      if (/\[Merger\]|\[ffmpeg\]/i.test(text)) onStep('uniendo vídeo y audio…');
+    };
+    child.stdout.on('data', onChunk);
+    child.stderr.on('data', (buf) => {
+      stderr += String(buf || '');
+      onChunk(buf);
+    });
+    child.on('error', (err) => {
+      cleanTmp();
+      resolve({ ok: false, error: `No se pudo ejecutar yt-dlp: ${err.message}` });
+    });
+    child.on('close', (code) => {
+      if (code !== 0) {
+        const detail = lastLines(stderr, 3);
+        cleanTmp();
+        resolve({
+          ok: false,
+          error: `yt-dlp no pudo descargar el vídeo${code ? ` (código ${code})` : ''}.${detail ? ` ${detail}` : ''}`,
+          raw: detail
+        });
+        return;
+      }
+      // El archivo bueno es el que dejó yt-dlp; se le quita el «.tmp.» del nombre.
+      let produced = '';
+      try {
+        produced = fs
+          .readdirSync(VIDEO_CACHE_DIR)
+          .find((f) => f.startsWith(`${id}.tmp.`) && !f.endsWith('.json') && !f.endsWith('.part'));
+      } catch {
+        produced = '';
+      }
+      if (!produced) {
+        cleanTmp();
+        resolve({ ok: false, error: 'yt-dlp terminó pero no dejó ningún archivo de vídeo.' });
+        return;
+      }
+      const ext = path.extname(produced).replace(/^\./, '') || 'mp4';
+      const finalPath = path.join(VIDEO_CACHE_DIR, `${id}.${ext}`);
+      try {
+        fs.renameSync(path.join(VIDEO_CACHE_DIR, produced), finalPath);
+      } catch (err) {
+        cleanTmp();
+        resolve({ ok: false, error: `No se pudo mover el vídeo descargado: ${err.message}` });
+        return;
+      }
+      let meta = {};
+      try {
+        meta = JSON.parse(fs.readFileSync(path.join(VIDEO_CACHE_DIR, `${produced}.info.json`), 'utf8'));
+      } catch {
+        meta = {};
+      }
+      const acodec = String(meta.acodec || '');
+      const sidecar = {
+        video_id: id,
+        title: String(meta.title || ''),
+        duration_sec: Math.round(Number(meta.duration) || 0),
+        vcodec: String(meta.vcodec || ''),
+        acodec: acodec === 'none' && meta.requested_downloads ? '' : acodec,
+        bytes: realFile(finalPath) ? fs.statSync(finalPath).size : 0,
+        downloaded_at_ms: Date.now(),
+        format_id: String(meta.format_id || ''),
+        merge: true
+      };
+      try {
+        fs.writeFileSync(`${finalPath}.json`, JSON.stringify(sidecar, null, 2));
+        fs.rmSync(path.join(VIDEO_CACHE_DIR, `${produced}.info.json`), { force: true });
+      } catch {
+        /* la ficha es un extra */
+      }
+      cleanTmp();
+      resolve({ ok: true, ...sidecar, path: finalPath });
+    });
+  });
+}
+
+/**
  * Descarga un vídeo de YouTube al disco del panel (en segundo plano).
  * Devuelve el estado del trabajo; la pantalla lo sigue con `videoDownloadState`.
  */
@@ -954,7 +1079,7 @@ export function startVideoDownload(rawUrl) {
   if (videoJob.running) return { ...videoJob, already: true };
 
   const cls = classifySourceUrl(rawUrl);
-  const info = findYtDlp();
+  const bin = findYtDlp();
   const id = safeVideoId(cls.video_id || '');
   if (!cls.ok || cls.kind !== 'video' || !id) {
     return {
@@ -966,7 +1091,7 @@ export function startVideoDownload(rawUrl) {
       result: { ok: false, error: 'Sólo se puede descargar el enlace de un vídeo suelto (watch?v=… o youtu.be/…).' }
     };
   }
-  if (!info) {
+  if (!bin) {
     return {
       running: false,
       step: '',
@@ -977,7 +1102,6 @@ export function startVideoDownload(rawUrl) {
     };
   }
 
-  fs.mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
   videoJob = {
     running: true,
     step: 'preparando la descarga…',
@@ -987,122 +1111,148 @@ export function startVideoDownload(rawUrl) {
     result: null
   };
 
-  const tmpBase = path.join(VIDEO_CACHE_DIR, `${id}.tmp`);
-  const args = [
-    '--no-warnings',
-    '--no-config',
-    '--no-playlist',
-    '--newline',
-    '-f',
-    VIDEO_DOWNLOAD_FORMAT,
-    '--merge-output-format',
-    'mp4',
-    '--write-info-json',
-    '-o',
-    `${tmpBase}.%(ext)s`
-  ];
-  const cookies = String(getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '').trim();
-  if (cookies && fs.existsSync(cookies)) args.push('--cookies', cookies);
-  args.push(cls.url || rawUrl);
-
-  const child = spawn(info, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stderr = '';
-  let lastStep = 'descargando…';
-  const onChunk = (buf) => {
-    const text = String(buf || '');
-    const progress = [...text.matchAll(/(\d{1,3}(?:\.\d+)?)%\s+of\s+~?\s*([\d.]+)([KMG]iB)/g)].pop();
-    if (progress) {
-      lastStep = `descargando ${progress[1]} % (${progress[2]} ${progress[3]})`;
-      videoJob = { ...videoJob, step: lastStep };
-      return;
+  downloadVideoFile({
+    bin,
+    url: cls.url || rawUrl,
+    videoId: id,
+    onStep: (step) => {
+      videoJob = { ...videoJob, step };
     }
-    const merge = /\[Merger\]|\[ffmpeg\]/i.test(text);
-    if (merge) {
-      lastStep = 'uniendo vídeo y audio…';
-      videoJob = { ...videoJob, step: lastStep };
-    }
-  };
-  child.stdout.on('data', onChunk);
-  child.stderr.on('data', (buf) => {
-    stderr += String(buf || '');
-    onChunk(buf);
-  });
-
-  const finish = (result) => {
-    // Se limpian los temporales, pase lo que pase.
-    try {
-      for (const f of fs.readdirSync(VIDEO_CACHE_DIR)) {
-        if (f.startsWith(`${id}.tmp`)) fs.rmSync(path.join(VIDEO_CACHE_DIR, f), { force: true });
-      }
-    } catch {
-      /* nada que limpiar */
-    }
+  }).then((result) => {
     videoJob = { ...videoJob, running: false, step: '', result, finishedAt: Date.now() };
-  };
-
-  child.on('error', (err) => finish({ ok: false, error: `No se pudo ejecutar yt-dlp: ${err.message}` }));
-  child.on('close', (code) => {
-    if (code !== 0) {
-      const detail = lastLines(stderr, 3);
-      finish({
-        ok: false,
-        error:
-          `yt-dlp no pudo descargar el vídeo${code ? ` (código ${code})` : ''}.` +
-          (detail ? ` ${detail}` : ''),
-        raw: detail
-      });
-      return;
-    }
-    // El archivo bueno es el que dejó yt-dlp; se le quita el «.tmp.» del nombre.
-    let produced = '';
-    try {
-      produced = fs
-        .readdirSync(VIDEO_CACHE_DIR)
-        .find((f) => f.startsWith(`${id}.tmp.`) && !f.endsWith('.json') && !f.endsWith('.part'));
-    } catch {
-      produced = '';
-    }
-    if (!produced) {
-      finish({ ok: false, error: 'yt-dlp terminó pero no dejó ningún archivo de vídeo.' });
-      return;
-    }
-    const ext = path.extname(produced).replace(/^\./, '') || 'mp4';
-    const finalPath = path.join(VIDEO_CACHE_DIR, `${id}.${ext}`);
-    try {
-      fs.renameSync(path.join(VIDEO_CACHE_DIR, produced), finalPath);
-    } catch (err) {
-      finish({ ok: false, error: `No se pudo mover el vídeo descargado: ${err.message}` });
-      return;
-    }
-    // Ficha: título, duración y códecs (para no volver a preguntar a yt-dlp).
-    let meta = {};
-    try {
-      meta = JSON.parse(fs.readFileSync(path.join(VIDEO_CACHE_DIR, `${produced}.info.json`), 'utf8'));
-    } catch {
-      meta = {};
-    }
-    const acodec = String(meta.acodec || '');
-    const vcodec = String(meta.vcodec || '');
-    const sidecar = {
-      video_id: id,
-      title: String(meta.title || ''),
-      duration_sec: Math.round(Number(meta.duration) || 0),
-      vcodec,
-      acodec: acodec === 'none' && meta.requested_downloads ? '' : acodec,
-      bytes: realFile(finalPath) ? fs.statSync(finalPath).size : 0,
-      downloaded_at_ms: Date.now(),
-      format_id: String(meta.format_id || ''),
-      merge: true
-    };
-    try {
-      fs.writeFileSync(`${finalPath}.json`, JSON.stringify(sidecar, null, 2));
-    } catch {
-      /* la ficha es un extra */
-    }
-    finish({ ok: true, ...sidecar, path: finalPath });
   });
 
   return { ...videoJob };
+}
+
+// ── Preparar una LISTA completa en el disco ─────────────────────────────────
+// Muchas listas sólo dan DASH/HLS (sin MP4 progresivo) y entonces no hay nada
+// que encolar: se descargan sus vídeos una vez y se emiten desde el disco, en
+// orden y en bucle, sin caducidades. Uno a uno (no se satura el VPS).
+let playlistJob = { running: false, step: '', startedAt: 0, result: null, url: '', done: 0, total: 0, current: '', failures: [] };
+
+export function playlistDownloadState() {
+  return { ...playlistJob, failures: [...playlistJob.failures] };
+}
+
+/**
+ * Descarga hasta `limit` vídeos de una lista al disco (en segundo plano).
+ * Los que ya estén descargados se saltan. Devuelve el estado del trabajo.
+ */
+export function startPlaylistDownload(rawUrl, { limit = 10 } = {}) {
+  if (playlistJob.running) return { ...playlistDownloadState(), already: true };
+
+  const cls = classifySourceUrl(rawUrl);
+  const bin = findYtDlp();
+  if (!cls.ok || cls.kind !== 'playlist') {
+    return {
+      running: false,
+      step: '',
+      startedAt: 0,
+      url: String(rawUrl || ''),
+      done: 0,
+      total: 0,
+      current: '',
+      failures: [],
+      result: { ok: false, error: 'Sólo se puede preparar una lista (playlist?list=…).' }
+    };
+  }
+  if (!bin) {
+    return {
+      running: false,
+      step: '',
+      startedAt: 0,
+      url: String(rawUrl || ''),
+      done: 0,
+      total: 0,
+      current: '',
+      failures: [],
+      result: { ok: false, error: 'Falta yt-dlp: instálalo primero con «Instalar yt-dlp».' }
+    };
+  }
+
+  const count = Math.max(1, Math.min(MAX_PLAYLIST_ITEMS, Number(limit) || 10));
+  playlistJob = {
+    running: true,
+    step: 'leyendo la lista…',
+    startedAt: Date.now(),
+    url: cls.url || String(rawUrl || ''),
+    done: 0,
+    total: 0,
+    current: '',
+    failures: [],
+    result: null
+  };
+
+  (async () => {
+    // Se lee la lista completa (con formatos) para saber qué vídeos hay.
+    const list = await resolveLiveSource(cls.url || rawUrl);
+    if (!list?.ok && !Array.isArray(list?.pending)) {
+      playlistJob = {
+        ...playlistJob,
+        running: false,
+        step: '',
+        result: { ok: false, error: list?.error || 'No se pudo leer la lista.' }
+      };
+      return;
+    }
+    const pending = Array.isArray(list.pending) ? list.pending.slice(0, count) : [];
+    const total = pending.length;
+    playlistJob = { ...playlistJob, total, step: total ? `preparando ${total} vídeos…` : '' };
+
+    let downloaded = 0;
+    let already = 0;
+    const failures = [];
+    for (let i = 0; i < pending.length; i += 1) {
+      const item = pending[i];
+      const title = String(item.title || item.id || '');
+      if (cachedVideoInfo(item.id)) {
+        already += 1;
+        playlistJob = { ...playlistJob, done: i + 1, current: title, step: `${i + 1}/${total} · ya estaba descargado` };
+        continue;
+      }
+      playlistJob = { ...playlistJob, current: title, step: `${i + 1}/${total} · ${title}` };
+      // eslint-disable-next-line no-await-in-loop
+      const r = await downloadVideoFile({
+        bin,
+        url: item.url || `https://www.youtube.com/watch?v=${item.id}`,
+        videoId: item.id,
+        onStep: (step) => {
+          playlistJob = { ...playlistJob, step: `${i + 1}/${total} · ${step}` };
+        }
+      });
+      if (r.ok) downloaded += 1;
+      else failures.push({ id: item.id, title, error: r.error || 'falló' });
+      playlistJob = { ...playlistJob, done: i + 1, failures };
+    }
+
+    playlistJob = {
+      ...playlistJob,
+      running: false,
+      step: '',
+      current: '',
+      failures,
+      finishedAt: Date.now(),
+      result: {
+        ok: total > 0 && downloaded + already > 0,
+        downloaded,
+        already,
+        total,
+        failed: failures.length,
+        failures: failures.slice(0, 5),
+        error:
+          total === 0
+            ? 'La lista no tiene vídeos que se puedan descargar (todos son directos o privados).'
+            : downloaded + already === 0
+              ? `No se pudo descargar ninguno de los ${total} vídeos.`
+              : ''
+      }
+    };
+  })().catch((err) => {
+    playlistJob = { ...playlistJob, running: false, step: '', result: { ok: false, error: err.message } };
+  });
+
+  return { ...playlistDownloadState() };
 }
 
 /**
@@ -1673,8 +1823,13 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   if (isList) {
     const rawEntries = (data.entries || []).filter(Boolean);
     const entries = [];
+    // Vídeos que YouTube sí da (con pistas) pero no como MP4 progresivo: se
+    // pueden DESCARGAR una vez y emitir desde el disco (startPlaylistDownload).
+    const pending = [];
+    const skipReasons = new Map();
     let skippedLive = 0;
     let skippedNoFormat = 0;
+    const bump = (reason) => skipReasons.set(reason, (skipReasons.get(reason) || 0) + 1);
     for (const e of rawEntries) {
       if (entries.length >= MAX_PLAYLIST_ITEMS) break;
       const status = String(e.live_status || '');
@@ -1682,28 +1837,71 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       // tiene principio ni fin): se omite y se avisa en la vista previa.
       if (e.is_live === true || e.live_status === 'is_live' || status === 'is_upcoming') {
         skippedLive += 1;
+        bump('es un directo');
+        continue;
+      }
+      const eId = safeVideoId(e.id || '');
+      // Ya descargado antes: se emite desde el disco (no caduca).
+      const cached = eId ? cachedVideoInfo(eId) : null;
+      if (cached) {
+        entries.push({
+          id: eId,
+          title: String(e.title || cached.title || `Vídeo ${entries.length + 1}`),
+          // Ruta local: el ffconcat del motor la repite en bucle.
+          url: cached.path,
+          local: true,
+          duration_sec: Number(cached.duration_sec) || Number(e.duration) || 0,
+          vcodec: cached.vcodec,
+          acodec: cached.acodec,
+          ext: 'mp4',
+          headers: {}
+        });
         continue;
       }
       const p = pickProgressive(e);
-      if (!p || !p.url) {
-        skippedNoFormat += 1;
+      if (p && p.url) {
+        entries.push({
+          id: p.id,
+          title: p.title || `Vídeo ${entries.length + 1}`,
+          url: p.url,
+          local: false,
+          duration_sec: p.duration_sec,
+          expires_at_ms: p.expires_at_ms,
+          vcodec: p.vcodec,
+          acodec: p.acodec,
+          width: p.width,
+          height: p.height,
+          fps: Number(p.fps) || 0,
+          ext: p.ext,
+          headers: p.headers
+        });
         continue;
       }
-      entries.push({
-        id: p.id,
-        title: p.title || `Vídeo ${entries.length + 1}`,
-        url: p.url,
-        duration_sec: p.duration_sec,
-        expires_at_ms: p.expires_at_ms,
-        vcodec: p.vcodec,
-        acodec: p.acodec,
-        width: p.width,
-        height: p.height,
-        fps: Number(p.fps) || 0,
-        ext: p.ext,
-        headers: p.headers
-      });
+      // Sin MP4 progresivo: si hay pistas con URL, se puede descargar.
+      const dx = diagnoseNoMedia(e, lastErr, { usingCookies, cookies: ck });
+      const formats = Array.isArray(e.formats) ? e.formats : [];
+      const canDownload = formats.length > 0 && (dx.formats_with_url > 0 || dx.po_token === true);
+      if (canDownload && eId) {
+        pending.push({
+          id: eId,
+          title: String(e.title || `Vídeo ${pending.length + 1}`),
+          duration_sec: Math.round(Number(e.duration) || 0),
+          url: `https://www.youtube.com/watch?v=${eId}`,
+          reason: dx.reasons[0] || 'no ofrece MP4 progresivo'
+        });
+        bump(dx.reasons[0] || 'no ofrece MP4 progresivo (sólo DASH/HLS)');
+        continue;
+      }
+      skippedNoFormat += 1;
+      bump(dx.reasons[0] || 'no ofrece ningún formato utilizable');
     }
+
+    // Resumen de motivos («12 con restricción de edad · 8 con no ofrece…»).
+    const skipSummary = [...skipReasons.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([reason, n]) => `${n} ${reason}`)
+      .join(' · ');
 
     if (!entries.length) {
       return {
@@ -1714,10 +1912,21 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         title: String(data.title || ''),
         list_id: String(data.id || cls.list_id || ''),
         entry_count: rawEntries.length,
+        // Se pueden descargar N vídeos y emitirlos desde el disco.
+        pending,
+        pending_count: pending.length,
+        can_prepare_playlist: pending.length > 0,
+        skip_summary: skipSummary,
+        // Motivos concretos para que la pantalla no hable de un cajón de sastre.
+        reasons: [...skipReasons.keys()].slice(0, 5),
         error:
           rawEntries.length === 0
             ? 'La lista está vacía o es privada: no hay vídeos que emitir.'
-            : 'Ningún vídeo de la lista se puede emitir en bucle (todos son directos, privados o no ofrecen MP4).',
+            : pending.length
+              ? `Los ${rawEntries.length} vídeos de la lista no ofrecen un MP4 progresivo (sólo DASH/HLS). ` +
+                `Se pueden descargar una vez (los primeros ${Math.min(pending.length, MAX_PLAYLIST_ITEMS)}) y emitir ` +
+                'desde el disco: botón «Preparar lista en el disco». Después no caducan ni dependen de YouTube.'
+              : `Ningún vídeo de la lista se puede emitir${skipSummary ? ` (${skipSummary})` : ''}.`,
         skipped_live: skippedLive,
         skipped_no_format: skippedNoFormat
       };
@@ -1725,10 +1934,17 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
 
     const total = entries.reduce((acc, e) => acc + (Number(e.duration_sec) || 0), 0);
     const expires = earliestExpiry(entries);
+    const localOnly = entries.length > 0 && entries.every((e) => e.local);
     return {
       ok: true,
       live: false,
       mode: 'playlist',
+      // Toda la lista está en el disco: no caduca y no hay que renovar nada.
+      local: localOnly,
+      pending,
+      pending_count: pending.length,
+      can_prepare_playlist: pending.length > 0,
+      skip_summary: skipSummary,
       provider: 'youtube',
       title: String(data.title || entries[0].title || 'Lista de YouTube'),
       list_id: String(data.id || cls.list_id || ''),
@@ -1740,7 +1956,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       needs_transcode: playlistNeedsTranscode(entries),
       skipped_live: skippedLive,
       skipped_no_format: skippedNoFormat,
-      expires_at_ms: expires || Date.now() + DEFAULT_TTL_MS,
+      expires_at_ms: localOnly ? 0 : expires || Date.now() + DEFAULT_TTL_MS,
       live_status: 'playlist',
       using_cookies: usingCookies,
       clients_tried: clientsTried,
@@ -2001,7 +2217,14 @@ export function needsRefresh(channel, nowMs = Date.now()) {
   if (!st || !st.resolved_at_ms) return true;
   // Vídeo descargado: se repite desde el disco, no caduca ni hay que renovar.
   // Sólo se vuelve a mirar si alguien borró el archivo.
-  if (st.local && st.url) return !fs.existsSync(String(st.url));
+  if (st.local) {
+    const ents = Array.isArray(st.entries) ? st.entries.filter((e) => e && e.url) : [];
+    if (liveModeFor(st) === 'playlist' || ents.length) {
+      // Lista en el disco: sólo se vuelve a mirar si falta algún archivo.
+      return ents.some((e) => e.local && !fs.existsSync(String(e.url)));
+    }
+    return !fs.existsSync(String(st.url || ''));
+  }
   // Sin nada que emitir: se vuelve a mirar cada 5 min (el directo puede empezar
   // o la lista puede volver a estar disponible).
   if (!liveReady(st)) return nowMs - Number(st.resolved_at_ms || 0) > OFF_AIR_RECHECK_MS;
@@ -2060,11 +2283,14 @@ export async function refreshChannelLiveSource(channel) {
     needs_format_fix: Boolean(res.needs_format_fix),
     reasons: Array.isArray(res.reasons) ? res.reasons : [],
     cookies_note: String(res.cookies_note || ''),
-    // Vídeo descargado al disco (se repite desde ahí) o que se puede descargar.
+    // Vídeo/listas descargados al disco, o que se pueden descargar/preparar.
     local: Boolean(res.local),
     bytes: Number(res.bytes) || 0,
     can_download: Boolean(res.can_download),
     needs_download: Boolean(res.needs_download),
+    can_prepare_playlist: Boolean(res.can_prepare_playlist),
+    pending_count: Number(res.pending_count) || 0,
+    skip_summary: String(res.skip_summary || ''),
     using_cookies: Boolean(res.using_cookies),
     clients_tried: String(res.clients_tried || '')
   };
@@ -2125,9 +2351,12 @@ export function liveSourceInfo(channel) {
     local: Boolean(st?.local),
     local_path: st?.local ? String(st.url || '') : '',
     bytes: Number(st?.bytes) || 0,
-    // Se puede descargar (sólo si es un vídeo suelto sin MP4 progresivo).
+    // Se puede descargar (vídeo suelto) o preparar en el disco (lista completa).
     can_download: Boolean(st?.can_download),
     needs_download: Boolean(st?.needs_download),
+    can_prepare_playlist: Boolean(st?.can_prepare_playlist),
+    pending_count: Number(st?.pending_count) || 0,
+    skip_summary: String(st?.skip_summary || ''),
     clients_tried: String(st?.clients_tried || '')
   };
 }

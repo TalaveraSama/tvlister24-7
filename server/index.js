@@ -122,6 +122,8 @@ import {
   testCookies,
   startVideoDownload,
   videoDownloadState,
+  startPlaylistDownload,
+  playlistDownloadState,
   cachedVideoInfo,
   removeCachedVideo
 } from './youtubeLive.js';
@@ -2778,6 +2780,26 @@ app.post('/api/youtube/download', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
+/**
+ * Prepara una LISTA completa en el disco: descarga sus vídeos (uno a uno) para
+ * emitirlos desde ahí, en orden y en bucle. Es la salida cuando la lista sólo
+ * da DASH/HLS y no hay nada que encolar. En segundo plano, como el resto.
+ */
+app.post('/api/youtube/prepare-playlist', requireAuth, requireAdmin, (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL de la lista.' });
+  try {
+    const state = startPlaylistDownload(url, { limit: Number(req.body?.limit) || 10 });
+    res.status(state.running ? 202 : 400).json({ ok: Boolean(state.running), ...state });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/youtube/prepare-playlist/status', requireAuth, (req, res) => {
+  res.json(playlistDownloadState());
+});
+
 app.get('/api/youtube/download-status', requireAuth, (req, res) => {
   res.json(videoDownloadState());
 });
@@ -2849,6 +2871,10 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       // Vídeo sin MP4 progresivo: se puede descargar una vez y emitir del disco.
       needs_download: Boolean(r.needs_download),
       can_download: Boolean(r.can_download),
+      // Lista que sólo da DASH/HLS: se puede preparar entera en el disco.
+      can_prepare_playlist: Boolean(r.can_prepare_playlist),
+      pending_count: Number(r.pending_count) || 0,
+      skip_summary: r.skip_summary || '',
       local: Boolean(r.local),
       bytes: Number(r.bytes) || 0,
       clients_tried: r.clients_tried || '',

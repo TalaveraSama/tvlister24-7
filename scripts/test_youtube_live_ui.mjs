@@ -72,6 +72,8 @@ let installJob = null;
 let installs = 0;
 let downloadJob = null;
 let downloads = 0;
+let prepareJob = null;
+let prepares = 0;
 let cookiesPath = '';
 let cookiesExpired = false;
 let cookieTests = 0;
@@ -306,6 +308,17 @@ globalThis.fetch = async (url, opts = {}) => {
     cookiesPath = '';
     return json({ ok: true, cookies: { path: '', exists: false, usable: false } });
   }
+  if (u === '/api/youtube/prepare-playlist' && method === 'POST') {
+    prepares += 1;
+    prepareJob = { running: true, step: '1/10 · Programa 1', done: 1, total: 10, result: null };
+    return json({ ok: true, ...prepareJob }, 202);
+  }
+  if (u === '/api/youtube/prepare-playlist/status') {
+    if (prepareJob?.running) {
+      prepareJob = { running: false, step: '', done: 10, total: 10, result: { ok: true, downloaded: 10, already: 0, total: 10, failed: 0 } };
+    }
+    return json(prepareJob || { running: false, result: null });
+  }
   if (u === '/api/youtube/download' && method === 'POST') {
     if (!/watch\?v=/.test(raw)) return json({ ok: false, error: 'Sólo se puede descargar el enlace de un vídeo suelto.' }, 400);
     downloads += 1;
@@ -434,6 +447,35 @@ globalThis.fetch = async (url, opts = {}) => {
     }
     if (/watch\?v=abc/.test(body?.url || '')) {
       return json({ ok: false, live: false, error: 'Ese enlace no está en directo ahora (no es un directo).' });
+    }
+    if (/list=PLsimpsons/.test(body?.url || '')) {
+      if (!prepares) {
+        return json({
+          ok: false,
+          live: false,
+          mode: 'playlist',
+          title: 'Los Simpson Capítulos Completos [Español Latino]',
+          can_prepare_playlist: true,
+          pending_count: 10,
+          skip_summary: '10 no ofrece MP4 progresivo (sólo DASH/HLS)',
+          error:
+            'Los 10 vídeos de la lista no ofrecen un MP4 progresivo (sólo DASH/HLS). Se pueden descargar una vez ' +
+            'y emitir desde el disco: botón «Preparar lista en el disco».'
+        });
+      }
+      return json({
+        ok: true,
+        ready: true,
+        live: false,
+        mode: 'playlist',
+        local: true,
+        title: 'Los Simpson Capítulos Completos [Español Latino]',
+        entries: 10,
+        total_entries: 10,
+        entry_titles: ['Programa 1', 'Programa 2'],
+        total_duration_sec: 13200,
+        error: ''
+      });
     }
     if (/playlist\?list=/.test(body?.url || '') || /[?&]list=/.test(body?.url || '')) {
       return json({
@@ -810,6 +852,42 @@ ok(
   ok(/Las cookies están caducadas/.test(text()), 'si han caducado, la prueba lo dice claro');
   ok(/caducadas/.test(text()), 'y el bloque de cookies lo marca');
   cookiesExpired = false;
+
+  // Se vuelve al directo normal para seguir con el resto de la prueba.
+  await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');
+}
+
+// ── 4f. Lista que sólo da DASH/HLS: prepararla en el disco ─────────────────
+{
+  await setValue(urlInput, 'https://www.youtube.com/playlist?list=PLsimpsons');
+  await clickText('Comprobar señal');
+  ok(/no ofrecen un MP4 progresivo/.test(text()), 'la lista sin MP4 progresivo se explica');
+  ok(/10 no ofrece MP4 progresivo/.test(text()), 'con el resumen de motivos', text().slice(-200));
+  ok(buttons('Preparar lista en el disco').length > 0, 'y ofrece prepararla en el disco');
+  const limitInput = [...document.querySelectorAll('input[type="number"]')][0];
+  ok(Boolean(limitInput), 'con un selector de cuántos vídeos');
+  await setValue(limitInput, '10');
+
+  await clickText('Preparar lista en el disco');
+  const prepCall = calls.filter((c) => c.url === '/api/youtube/prepare-playlist' && c.method === 'POST').pop();
+  ok(Boolean(prepCall), 'preparar la lista llama al panel');
+  ok(prepCall?.body?.limit === 10, 'con el límite elegido', String(prepCall?.body?.limit));
+  ok(/Preparando|1\/10/.test(text()), 'mientras descarga, dice por dónde va', text().slice(-120));
+
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 2600));
+  });
+  await flush();
+  await flush();
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 300));
+  });
+  await flush();
+  await flush();
+  ok(prepares === 1, 'la preparación se lanza una sola vez', `${prepares}`);
+  ok(/Lista preparada: 10 de 10 vídeos en el disco/.test(text()), 'al terminar dice cuántos hay en el disco');
+  ok(/se emiten en orden desde el disco/i.test(text()), 'y que ya no dependen de YouTube');
+  ok(/LISTA · 10/.test(text()) || /10 vídeos/.test(text()), 'el enlace queda resuelto con sus vídeos', text().slice(-160));
 
   // Se vuelve al directo normal para seguir con el resto de la prueba.
   await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');

@@ -53,6 +53,7 @@ export default function Channels247Page({ onPreview }) {
   const [cookiesBusy, setCookiesBusy] = useState(false);
   const [cookiesMsg, setCookiesMsg] = useState(null);
   const [fmtDiag, setFmtDiag] = useState(null); // { busy, ok, text, error }
+  const [prepareLimit, setPrepareLimit] = useState(10); // vídeos a descargar de una lista
   const cookiesFileRef = useRef(null);
 
   const [customTitle, setCustomTitle] = useState('');
@@ -303,6 +304,56 @@ export default function Channels247Page({ onPreview }) {
     }
   };
 
+  // Prepara una LISTA completa en el disco: descarga sus vídeos (uno a uno) y
+  // después se emiten desde ahí, en orden y en bucle, sin caducidades.
+  const handlePreparePlaylist = async () => {
+    const url = String(form.live_source_url || '').trim();
+    if (!url) return;
+    setProbe({ ...(probe || {}), busy: true, preparing: true, step: 'leyendo la lista…' });
+    try {
+      const first = await apiFetch('/api/youtube/prepare-playlist', {
+        method: 'POST',
+        body: JSON.stringify({ url, limit: Number(prepareLimit) || 10 })
+      });
+      let state = first;
+      for (let i = 0; i < 9000; i += 1) {
+        if (!state?.running) break;
+        await new Promise((r) => setTimeout(r, 2000));
+        state = await apiFetch('/api/youtube/prepare-playlist/status');
+        if (state?.running) {
+          const pct = state.total ? ` (${state.done}/${state.total})` : '';
+          setProbe({
+            ...(probe || {}),
+            busy: true,
+            preparing: true,
+            step: `${state.step || 'descargando…'}${state.total ? '' : pct}`
+          });
+        }
+      }
+      const r = state?.result || null;
+      if (r?.ok) {
+        await handleProbe();
+        setProbe((prev) => ({
+          ...(prev || {}),
+          busy: false,
+          preparing: false,
+          prepared:
+            `Lista preparada: ${r.downloaded + (r.already || 0)} de ${r.total} vídeos en el disco` +
+            `${r.failed ? ` (${r.failed} no se pudieron bajar)` : ''}. Se emiten en orden desde el disco: no caducan.`
+        }));
+      } else {
+        setProbe({
+          ...(probe || {}),
+          busy: false,
+          preparing: false,
+          error: r?.error || 'No se pudo preparar la lista.'
+        });
+      }
+    } catch (err) {
+      setProbe({ ...(probe || {}), busy: false, preparing: false, error: err.message });
+    }
+  };
+
   // Prueba REAL de las cookies: se le pasan a yt-dlp contra un vídeo público.
   // Una sesión caducada sigue teniendo SID, pero no abre nada.
   const handleTestCookies = async () => {
@@ -537,6 +588,14 @@ export default function Channels247Page({ onPreview }) {
                             }`}
                           >
                             {modeBadge(ch.liveSource)}
+                          </span>
+                        )}
+                        {ch.source_kind === 'youtube' && ch.liveSource?.can_prepare_playlist && !ch.liveSource?.ready && (
+                          <span
+                            className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-teal-500/15 text-teal-200 border-teal-500/40"
+                            title="Los vídeos de esta lista se pueden descargar una vez y emitir desde el disco (Editar → Preparar lista en el disco)."
+                          >
+                            ⛁ {ch.liveSource.pending_count || 0} SIN DESCARGAR
                           </span>
                         )}
                         {ch.source_kind === 'youtube' && ch.liveSource?.local && (
@@ -955,9 +1014,11 @@ export default function Channels247Page({ onPreview }) {
                       {probe?.busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                       {probe?.installing
                         ? 'Instalando yt-dlp…'
-                        : probe?.downloading
-                          ? 'Descargando…'
-                          : 'Comprobar señal'}
+                        : probe?.preparing
+                          ? 'Preparando lista…'
+                          : probe?.downloading
+                            ? 'Descargando…'
+                            : 'Comprobar señal'}
                     </button>
                   </div>
 
@@ -984,6 +1045,26 @@ export default function Channels247Page({ onPreview }) {
                       >
                         <X className="w-3 h-3" /> Sólo ese vídeo
                       </button>
+                    </div>
+                  )}
+
+                  {probe?.preparing && (
+                    <div className="text-[11px] text-teal-300 flex items-start gap-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0 mt-0.5" />
+                      <span>
+                        {probe.step || 'preparando la lista…'}
+                        <span className="text-slate-500">
+                          {' '}
+                          — se descargan una vez y luego se emiten desde el disco; puedes seguir usando el panel.
+                        </span>
+                      </span>
+                    </div>
+                  )}
+
+                  {probe?.prepared && (
+                    <div className="text-[11px] text-teal-300 flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{probe.prepared}</span>
                     </div>
                   )}
 
@@ -1096,6 +1177,11 @@ export default function Channels247Page({ onPreview }) {
                               Motivo: {probe.reasons.join(' · ')}
                             </div>
                           )}
+                          {probe.skip_summary && (
+                            <div className="text-slate-400">
+                              En esta lista: {probe.skip_summary}
+                            </div>
+                          )}
                           {probe.needs_ytdlp && (
                             <button
                               type="button"
@@ -1104,6 +1190,38 @@ export default function Channels247Page({ onPreview }) {
                             >
                               <Download className="w-3.5 h-3.5" /> Instalar yt-dlp
                             </button>
+                          )}
+                          {probe.can_prepare_playlist && (
+                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={handlePreparePlaylist}
+                                disabled={probe?.busy}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold disabled:opacity-50"
+                              >
+                                {probe.preparing ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                                {probe.preparing ? 'Preparando…' : 'Preparar lista en el disco'}
+                              </button>
+                              <label className="inline-flex items-center gap-1 text-slate-300">
+                                Vídeos:
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={30}
+                                  value={prepareLimit}
+                                  onChange={(e) => setPrepareLimit(Math.max(1, Math.min(30, Number(e.target.value) || 10)))}
+                                  className="w-14 px-1.5 py-0.5 rounded-lg bg-[#0e1526] border border-slate-700 text-white"
+                                />
+                              </label>
+                              <span className="text-emerald-100/80">
+                                Se descargan una vez (H.264 + AAC) y se emiten en orden desde el disco.
+                                {probe.pending_count ? ` Hay ${probe.pending_count} disponibles.` : ''}
+                              </span>
+                            </div>
                           )}
                           {probe.needs_download && (
                             <div className="flex flex-wrap items-center gap-2 pt-0.5">

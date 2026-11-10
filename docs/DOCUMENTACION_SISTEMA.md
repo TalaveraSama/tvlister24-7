@@ -3029,6 +3029,25 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.62: listas de YouTube sin MP4 progresivo → se preparan en el disco
+
+Una lista cuyos vídeos sólo dan DASH/HLS dejaba el canal a 0 vídeos («Ningún vídeo de la lista se puede emitir»).
+
+- **Motivos por vídeo**: al recorrer la lista se cuenta por qué se omite cada uno (`skipReasons`) y se devuelve
+  `skip_summary` («22 no ofrece MP4 progresivo · 6 es un directo · 2 es privado»), `pending[]` (descargables) y
+  `can_prepare_playlist`.
+- **`startPlaylistDownload(url, {limit})`** (`POST /api/youtube/prepare-playlist`, estado en
+  `GET /api/youtube/prepare-playlist/status`): descarga uno a uno con `downloadVideoFile()` (extraído de la
+  descarga de un vídeo suelto) a `.runtime/videos`, se salta los ya descargados, informa `done/total/current` y
+  recoge los fallos.
+- **Lista desde el disco**: al leer la lista, cada entrada con archivo en caché entra como `local: true` con la
+  ruta del archivo (el ffconcat del motor la repite). Si todas son locales, `local: true` y
+  `expires_at_ms: 0`; `needsRefresh()` sólo vuelve a mirar si falta algún archivo.
+- Pantalla: selector de vídeos (1–30, por defecto 10), botón **«Preparar lista en el disco»**, paso a la vista,
+  chip **`⛁ N SIN DESCARGAR`** cuando la lista tiene pendientes.
+
+Pruebas: `test_youtube_live.mjs` **207 OK** y `test_youtube_live_ui.mjs` **134 OK**.
+
 ### v2.6.61: por qué no se inicia sesión con usuario/contraseña (y hasta cuándo vale la sesión)
 
 YouTube no admite login automático: Google bloquea el acceso con contraseña desde programas y yt-dlp lo rechaza

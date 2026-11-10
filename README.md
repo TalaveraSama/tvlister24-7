@@ -210,8 +210,10 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
   CPU de vídeo). Si YouTube da el audio en una **pista aparte**, el panel abre las dos y las une al copiar. Sólo el
   audio se recodifica si tienes encendido el **nivelador de audio global** (y aun así el vídeo se sigue copiando).
   La tarjeta de cada canal lo dice: `⧉ COPIA EXACTA`, `⧉ COPIA · AUDIO AAC` o `↻ RECODIFICA`.
-- Se toman **hasta 30 vídeos** de una lista; los **directos** que haya dentro y los vídeos sin MP4 utilizable se
-  omiten (la vista previa avisa de cuántos).
+- Se toman **hasta 30 vídeos** de una lista; los **directos** que haya dentro se omiten y la vista previa dice
+  cuántos y por qué. Si la lista **sólo da DASH/HLS** (sin MP4 progresivo, cada vez más común), el panel ofrece
+  **«Preparar lista en el disco»**: descarga N vídeos una vez y los emite en orden y en bucle desde el disco,
+  sin caducidades (`⛁ DESDE EL DISCO`).
 - **Sin recodificar** si todo es H.264 + AAC y mide lo mismo; si hay VP9/AV1/HEVC, más de 1080p o una lista con
   formatos mezclados, se pasa a **H.264 2500k + AAC 128k** para que ningún cliente se quede sin imagen.
 - La URL firmada se renueva sola antes de caducar (guardia cada minuto); si el directo termina, el canal queda
