@@ -1,0 +1,288 @@
+# Tus dominios: `tvadmin` (panel) y `live-stream` (video)
+
+Configuración exacta para el caso real:
+
+| Nombre | Papel | DNS (verificado) | Cloudflare |
+| --- | --- | --- | --- |
+| `tvadmin.alphadigitalnic.xyz` | Panel, API, login, WebTV | `104.21.66.70`, `172.67.168.15` → **IPs de Cloudflare** | **Naranja (proxied)** — correcto |
+| `live-stream.alphadigitalnic.xyz` | Playlist, `.m3u8`, `.ts`, VOD, EPG | `173.208.183.66` → **tu servidor** | **Gris (DNS only)** — correcto |
+
+Ese reparto es el bueno: el panel va por Cloudflare (peticiones pequeñas, caché, protección) y el
+video sale directo a tu servidor, porque el proxy de Cloudflare no sirve para HLS continuo y en
+planes self-serve puede acabar en suspensión.
+
+**Lo único que falta es que el 443 de tu servidor atienda `live-stream` con un certificado válido y
+que el panel sepa que ese es su dominio de video.** Es lo que hacen los pasos 3 y 4.
+
+---
+
+## Paso 1. DNS en Cloudflare (ya está, solo para confirmar)
+
+| Tipo | Nombre | Contenido | Proxy |
+| --- | --- | --- | --- |
+| `A` | `tvadmin` | IP del servidor | **Proxied** (naranja) |
+| `A` | `live-stream` | **la misma IP** | **DNS only** (gris) |
+
+- Si `live-stream` está en naranja, cámbialo a gris: el video se corta solo y Cloudflare puede
+  suspender el dominio. Compruébalo con `tvlister-admin dominios`.
+- Sin registro `AAAA` en `live-stream` es lo correcto (solo IPv4, apunta al origen).
+
+> **Si usas el Origin Certificate de Cloudflare para el panel**, salta al documento
+> [`CERTIFICADO_ORIGEN_CLOUDFLARE.md`](CERTIFICADO_ORIGEN_CLOUDFLARE.md): se pega por consola con
+> `tvlister-admin tls origin` y el video se queda con Let's Encrypt, los dos en el mismo 443 (SNI).
+> El paso 2 de abajo es para el caso de **un solo certificado para todo**.
+
+## Paso 2. Certificado que cubra **los dos** nombres
+
+El mismo 443 va a atender `tvadmin` (cuando conecta Cloudflare) y `live-stream` (cuando conecta el
+reproductor), así que el certificado del origen tiene que cubrir ambos. Lo más simple es **un solo
+certificado con los dos nombres**:
+
+```bash
+sudo tvlister-admin acme tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz correo@tudominio.com
+```
+
+Ese comando (v2.6.12+) emite **un solo certificado con los dos nombres** y lo instala por SNI para
+cada uno. Usa `--webroot`, así que **no necesita el puerto 80 libre**: funciona aunque el panel o el
+nginx de XUI.one lo estén ocupando (`certbot --standalone` falla justo por eso: *Could not bind TCP
+port 80*).
+
+Queda en `/etc/letsencrypt/live/tvadmin.alphadigitalnic.xyz/{fullchain,privkey}.pem` y el panel lo
+detecta solo (también vale acme.sh o el Origin Certificate si algún día separas los nombres).
+
+- Con Cloudflare en **SSL/TLS → Full (strict)**, el certificado del origen debe ser de una CA
+  pública y cubrir `tvadmin`. Let's Encrypt sirve; un Origin Certificate también, pero **solo**
+  valdría para el panel: el video va directo y un reproductor rechazaría una CA privada.
+- Renovación: `certbot renew --deploy-hook "systemctl restart tvlister24-7"`. Si el panel sirve el
+  443, también vale **Reabrir puertos TLS** en la UI tras renovar.
+
+## Tercer dominio: las apps de siempre (Xtream Codes / XUI.one)
+
+Ya hay aplicaciones en producción que piden la lista y el video a
+**`livex-stream.alphadigitalnic.xyz`**. No hace falta tocar ninguna: el panel las reconoce por el
+dominio por el que entran y **les responde con enlaces de ese mismo dominio**.
+
+| Nombre | Papel | DNS | Cloudflare |
+| --- | --- | --- | --- |
+| `tvadmin…` | Panel, API, login, WebTV | IPs de Cloudflare | **Naranja** |
+| `live-stream…` | Video (WebTV, app propia) | tu servidor | **Gris** |
+| `livex-stream…` | **Apps de terceros** (Xtream Codes / XUI.one) | tu servidor | **Gris** |
+
+```bash
+sudo tvlister-admin dominios tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz livex-stream.alphadigitalnic.xyz
+```
+
+Qué cambia exactamente:
+
+| Petición entra por | `get.php` / `player_api.php` devuelven |
+| --- | --- |
+| `livex-stream…` | `https://livex-stream.alphadigitalnic.xyz/live/…` y `server_info.url` = ese dominio |
+| `live-stream…` o `tvadmin…` | `https://live-stream.alphadigitalnic.xyz/live/…` (lo de siempre) |
+
+Es decir: **el dominio de compatibilidad es una vista**, no un panel distinto. Misma base de datos,
+mismas líneas, mismos canales, mismos límites. Lo único que cambia es el host de los enlaces que se
+le devuelven.
+
+- La API es la misma que ya usan: `get.php`, `player_api.php`, `xmltv.php`, `panel_api.php`, Stalker.
+- Los códigos de acceso del panel **no** bloquean esas rutas (solo la web del panel).
+- El video va **sin cifrar** (DRM retirado en v2.6.15): lo que protege la cuenta es el
+  registro de aparatos por MAC y el límite de conexiones, y eso se resuelve en el panel.
+- El certificado de ese nombre va en el mismo 443: `tvlister-admin acme tvadmin… live-stream… livex-stream… correo`
+  emite **un solo certificado** que cubre los tres.
+- Si el 443 lo atiende el nginx de XUI.one, `tvlister-admin cloudflare` añade ese nombre al
+  `server_name` del bloque de streams automáticamente (lee el ajuste guardado).
+
+### Por qué no vale ponerlo detrás de Cloudflare
+
+Porque por ese dominio también sale el **video** que piden esas apps. Naranja = proxy = cortes y
+riesgo de suspensión. `tvlister-admin dominios` lo marca como fallo si lo detecta.
+
+### Cómo se comprueba que las apps seguirán funcionando
+
+```bash
+sudo tvlister-admin dominios        # mira los tres: cert, HTTP, si hay proxy, y si /player_api.php responde como Xtream
+```
+
+La última línea del dominio de compatibilidad dice
+`Xtream: /player_api.php responde (auth:0 con usuario de prueba) — las apps encontrarán la API`.
+Si no lo dice, esas apps verían HTML en vez de JSON y hay que revisar el server block/puerto.
+
+## La pregunta del millón: ¿pongo el video en naranja? ¿Y el puerto 8443?
+
+**No.** Y el puerto no cambia nada: el problema no es el puerto, es el **proxy**.
+
+| Lo que se oye | Qué pasa de verdad |
+| --- | --- |
+| «Cloudflare acepta el 8443, así que el video puede ir por ahí» | Cierto que el 8443 está en la lista de puertos TLS de Cloudflare, pero **el proxy no está pensado para video continuo**: el plan self-serve lo prohíbe (ToS 2.8) y en la práctica añade buffering, cortes y riesgo de suspensión del dominio |
+| «Con naranja protejo la IP del servidor» | Para el video no: el reproductor abre conexiones largas y Cloudflare las corta o las limita. La IP se ve igual en los logs del cliente |
+| «Con naranja el video va más rápido» | Al contrario: el HLS se pide cada 2–6 s y el edge no lo cachea con sentido; se gana latencia y se pierde estabilidad |
+| «Entonces el video no tiene protección» | La tiene a nivel de aplicación: enlaces firmados, token por línea, límite de conexiones, bloqueo por IP/país y registro de aparatos por MAC. El video no va cifrado ni hay CDN de video |
+
+Si algún día **necesitas** Cloudflare delante del video, los productos que sí lo permiten son
+**Cloudflare Stream** (transcodifica y aloja el video, es de pago y cambia el reparto: tú subes el
+archivo, no sirves HLS desde tu servidor) o **Spectrum** (TCP/UDP a nivel 4, también de pago). El
+proxy normal (naranja) nunca es la respuesta para `.m3u8`/`.ts`.
+
+### Y si aun así quieres otro puerto para el video
+
+Se puede, siempre con la nube **gris**:
+
+```bash
+sudo tvlister-admin streams-port 8443 live-stream.alphadigitalnic.xyz   # deja https://...:8443
+sudo tvlister-admin add-port 8443 https                                  # el panel lo atiende
+sudo ufw allow 8443/tcp
+```
+
+- Los enlaces que reciben los clientes pasan a ser `https://live-stream.alphadigitalnic.xyz:8443/live/...`.
+- **En gris, el puerto da igual para Cloudflare**: no interviene. El 8443 solo importa si el registro
+  estuviera en naranja, y ahí ya no queremos estar.
+- Aviso real: algunas redes de operador y televisores bloquean puertos altos. Si puedes, quédate en
+  **443**, que es el que menos falla.
+
+> En la v2.6.11 y anteriores `streams-port 8443` guardaba `http://…:8443` (sin TLS) por un error al
+> elegir el esquema. Corregido en la v2.6.12: los puertos 443, 8443, 2053, 2083, 2087 y 2096 se
+> tratan como HTTPS.
+
+## Paso 3. Quién atiende el 443 del servidor (elige **una** opción)
+
+Solo un proceso puede escuchar en el 443. Mira quién lo tiene:
+
+```bash
+sudo ss -ltnp | grep ':443 '
+```
+
+### Opción A — ya tienes el nginx de XUI.one en el 443 (lo más probable)
+
+```bash
+sudo tvlister-admin cloudflare tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz
+```
+
+Esto hace, de una vez:
+
+1. Crea **dos** server blocks (`tvlister-panel.conf`, `tvlister-streams.conf`) en
+   `/home/xui/bin/nginx/conf/servers/`.
+2. Usa el certificado que ya tenga el nginx de XUI o el de Let's Encrypt.
+3. Declara los rangos de Cloudflare como proxies de confianza (IP real del cliente).
+4. Guarda `public_stream_base = https://live-stream.alphadigitalnic.xyz`.
+5. Recarga nginx; si `nginx -t` falla, **desactiva** lo nuevo para no tumbar tu nginx.
+
+### Opción B — que el 443 lo sirva el propio panel (sin nginx)
+
+```bash
+sudo tvlister-admin tls /etc/letsencrypt/live/tvadmin.alphadigitalnic.xyz/fullchain.pem \
+                       /etc/letsencrypt/live/tvadmin.alphadigitalnic.xyz/privkey.pem
+sudo tvlister-admin add-port 443 https     # TLS en el 443
+sudo tvlister-admin add-port 80 both       # HTTPS en el 80 + HTTP redirigido a HTTPS
+```
+
+El panel sirve las mismas rutas que ya sirve, pero cifradas, con el certificado indicado. No hace
+falta nginx. La tarjeta **Certificado HTTPS** de la pestaña de puertos muestra dominio, caducidad,
+fuente y qué nombres quedan sin cubrir.
+
+> Si eliges B, el nginx de XUI **no** debe estar escuchando en 443 (o lo paras para el panel, o te
+> quedas en A). El panel lo detecta y responde `Puerto 443 ocupado por otro proceso (EADDRINUSE)`.
+
+## Paso 4. Guardar los dos dominios en el panel
+
+```bash
+sudo tvlister-admin dominios tvadmin.alphadigitalnic.xyz live-stream.alphadigitalnic.xyz
+```
+
+o en el panel: *Ingesta → Multi-Puertos HTTPS/HTTP → **Dominios públicos: panel y video*** →
+escribe los dos y pulsa **Guardar y abrir 80/443**.
+
+Guarda exactamente:
+
+| Ajuste | Valor |
+| --- | --- |
+| `panel_domain` | `tvadmin.alphadigitalnic.xyz` |
+| `stream_domain` | `live-stream.alphadigitalnic.xyz` |
+| `public_stream_base` | `https://live-stream.alphadigitalnic.xyz` (puerto 443 implícito) |
+
+Y si detecta que el panel pasa por Cloudflare, declara sus rangos como proxies de confianza (para
+que el panel vea la **IP real** de cada cliente y no la de Cloudflare).
+
+**Por qué importa:** `public_stream_base` es lo que hace que los enlaces de video salgan por
+`live-stream` y no por el dominio del panel. Sin él, el reproductor pediría el `.ts` a
+`tvadmin…` → Cloudflare → vídeo por el proxy → cortes y riesgo de suspensión.
+
+## Paso 5. Comprobar
+
+```bash
+sudo tvlister-admin dominios            # DNS + certificado + Cloudflare + HTTP, de los dos
+sudo tvlister-admin streams-check       # reproduce un canal de punta a punta
+```
+
+Resultado esperado:
+
+```
+  [OK]   tvadmin.alphadigitalnic.xyz  —  PANEL (puede ir por Cloudflare)
+          DNS  : 104.21.66.70, 172.67.168.15
+          Cert : *.alphadigitalnic.xyz · vence 2027-01-14 (73 días)
+          HTTP : 200 · cloudflare · por Cloudflare
+  [OK]   live-stream.alphadigitalnic.xyz  —  VIDEO (nube gris)
+          DNS  : 173.208.183.66
+          Cert : live-stream.alphadigitalnic.xyz · …
+          HTTP : 200 · nginx · directo
+```
+
+Y los enlaces que reciben los clientes, a mano:
+
+```bash
+# La lista debe traer las URLs del dominio de VIDEO
+curl -s "https://tvadmin.alphadigitalnic.xyz/get.php?username=USUARIO&password=CLAVE&type=m3u_plus" \
+  | grep -m3 '^http'      # → https://live-stream.alphadigitalnic.xyz/live/...
+
+# Un canal, directamente por el dominio de video
+curl -skI "https://live-stream.alphadigitalnic.xyz/live/USUARIO/CLAVE/1.m3u8" | head -5
+
+# Certificado que ve un reproductor (debe cubrir live-stream y no ser autofirmado)
+echo | openssl s_client -connect live-stream.alphadigitalnic.xyz:443 \
+  -servername live-stream.alphadigitalnic.xyz 2>/dev/null | openssl x509 -noout -subject -issuer -dates
+```
+
+## Qué comprueba `tvlister-admin dominios` (y por qué dos certificados)
+
+Por cada nombre mira **cuatro cosas distintas**:
+
+| Comprobación | Qué detecta |
+| --- | --- |
+| **DNS** | El registro `A` y a qué IP apunta |
+| **Certificado de cara al cliente** (el que ve Cloudflare o el reproductor) | Que sea válido, que cubra el nombre y cuántos días le quedan |
+| **HTTP + `cf-ray`** | Si el tráfico pasa por Cloudflare (el video no debe) |
+| **El 443 de este servidor** (se pregunta a `127.0.0.1` en el puerto HTTPS configurado, con el SNI del dominio) | Que el **origen** tenga certificado para ese nombre. Si falla en el panel, Cloudflare devolverá **521**; si falla en el video, el reproductor recibe «connection refused» |
+
+Por eso el panel y el video pueden usar certificados distintos en el mismo 443:
+
+- `tvadmin` → **Origin Certificate** de Cloudflare (`tvlister-admin tls origin`). Cloudflare lo acepta
+  porque lo emitió su propia CA; un navegador que entre directo al origen verá un aviso, y eso es
+  normal (nadie debería entrar por ahí).
+- `live-stream` → **Let's Encrypt** (`tvlister-admin acme live-stream… correo`). Aquí sí valida el
+  reproductor, así que tiene que ser una CA pública.
+
+## Lo que el panel ya hace con esos ajustes
+
+- `get.php` / `player_api.php` → `server_info.url` y todos los enlaces apuntan a
+  `https://live-stream.alphadigitalnic.xyz`.
+- `xmltv.php` (EPG), login, WebTV y API siguen en `tvadmin…`.
+- No hay claves ni peticiones de licencia: el reproductor sólo pide el manifiesto y los segmentos.
+- **WebTV**: el portal pide el manifiesto al dominio del panel (petición pequeña y en `no-store`),
+  pero el manifiesto se reescribe con URLs absolutas del dominio de video: **los segmentos y el
+  video salen directos** por `live-stream`. Si ves tráfico de video en el panel, es que
+  `public_stream_base` está vacío.
+- Con Cloudflare delante, el panel lee `CF-Connecting-IP` solo si el rango está declarado como
+  proxy de confianza (lo hace el paso 4). **Sin eso, todos los clientes parecen la misma IP** y los
+  límites por IP (intentos de contraseña, anti-compartición) se aplicarían a todos a la vez.
+
+## Si algo falla
+
+| Síntoma | Causa | Arreglo |
+| --- | --- | --- |
+| `[FALLA] live-stream… Sin HTTPS válido` | No hay cert para ese nombre en el 443 | Paso 2 con el SAN e.e. `-d live-stream…`, o el server block del paso 3-A |
+| `El certificado del 443 no cubre live-stream` | Cert emitido solo para `tvadmin` | Reemitir con los dos `-d` |
+| `El origen responde 404` | Ese nombre no tiene server block | Opción A, o `add-port 443 https` en opción B |
+| `El dominio de video está detrás del proxy` | Nube naranja en `live-stream` | Cloudflare → DNS → gris |
+| Vídeo con cortes, panel perfecto | El video está saliendo por `tvadmin` | Revisa `public_stream_base` (paso 4) |
+| `Puerto 443 ocupado` | nginx y panel quieren el mismo puerto | Quédate con A **o** con B, no las dos |
+| Clientes aparecen con IP de Cloudflare | Falta el drop-in de proxies de confianza | `sudo tvlister-admin dominios <panel> <video>` (lo crea solo) |
+| Cloudflare 521/522 en el panel | El origen no responde en el 443/80 que usa CF | Paso 3 y firewall (`ufw allow 443`) |

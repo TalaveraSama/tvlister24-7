@@ -1,0 +1,19 @@
+services:
+  tvlister24-7:
+    build: .
+    container_name: tvlister24-7
+    restart: unless-stopped
+    ports:
+      - "80:80"     # panel HTTP  → http://TU_IP
+      - "443:443"   # panel HTTPS → https://TU_IP (necesita fullchain.pem/privkey.pem)
+    volumes:
+      - ./data:/app/data
+      - ./streams_runtime:/app/streams_runtime
+      # Certificado del dominio: ./certs/fullchain.pem y ./certs/privkey.pem.
+      # Sin él el panel funciona igual por el 80; el 443 aparece en cuanto exista.
+      - ./certs:/app/certs:ro
+    environment:
+      - NODE_ENV=production
+      - PORT=80
+      - TVLISTER_TLS_DIR=/app/certs
+      - PANEL_SECRET=cambia-esta-clave-en-produccion

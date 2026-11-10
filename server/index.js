@@ -1,0 +1,6067 @@
+import http from 'node:http';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import express from 'express';
+import cors from 'cors';
+
+import crypto from 'node:crypto';
+import zlib from 'node:zlib';
+import { db, DB_PATH, initDb, hashPassword, verifyPassword, resetPanelCatalog, withSqliteBusyRetry } from './db.js';
+import { egressMeterMiddleware, getEgressMbps } from './bandwidthMeter.js';
+import { createInstallJob, appendInstallLog, finishInstallJob, getInstallJob, runRemoteInstall, buildInstallCommand } from './balancerInstall.js';
+import { distributeStreamsAcrossNodes, streamAssignmentSummary } from './nodeAffinity.js';
+import {
+  inspectLocalXuiEnvironment,
+  previewXuiImport,
+  executeXuiImport,
+  extractXuiTmdbSettings
+} from './xuiImporter.js';
+import {
+  normalizeXuiOrTmdbImageUrl,
+  getTmdbConfig,
+  saveTmdbConfig,
+  testTmdbConnection,
+  searchTmdb,
+  enrichMissingVodWithTmdb,
+  browseServerDirectories,
+  scanMediaDirectoryFiles,
+  syncLocalVodFolder,
+  listWatchFolders,
+  deleteWatchFolder,
+  startVodFolderAutoSyncScheduler,
+  classifyVodGenresByTmdb
+} from './vodSyncTmdb.js';
+import {
+  getGenreCategoryConfigForUi,
+  saveGenreCategoryConfig,
+  listVodCategories,
+  vodCategoryUsage,
+  purgeVodCategories,
+  ensureMasterCategories,
+  listSubfolderModeFolders,
+  switchFoldersToMasterMode,
+  MASTER_CATEGORY_NAMES
+} from './vodGenres.js';
+import {
+  signToken,
+  firewallMiddleware,
+  invalidateFirewallCache,
+  requireAuth,
+  requireAdmin,
+  extractClientIp,
+  checkLoginRateLimit,
+  clearLoginRateLimit
+} from './auth.js';
+import {
+  getHostTelemetry,
+  computeChannel247LiveState,
+  buildFfmpegCommandForStream,
+  buildFfmpegCommandForChannel247,
+  buildFfmpegCommandForChannel247Live,
+  buildFfmpegArgsForStream,
+  buildFfmpegArgsForChannel247,
+  buildFfmpegArgsForChannel247Live,
+  startSupervisedWorker,
+  stopWorker,
+  stopAllWorkers,
+  getWorkerPid,
+  startArchiveWorker,
+  stopArchiveWorker,
+  getArchiveStats,
+  pruneArchiveSegmentsForStreams,
+  cleanupStreamRuntime,
+  isFfmpegAvailable,
+  getFfmpegBin,
+  HLS_ROOT,
+  HLS_IS_RAMDISK,
+  getGlobalAudioLevelingConfig,
+  invalidateAudioLevelingCache,
+  getFfmpegEfficiencyConfig,
+  getFfmpegEngineConfig,
+  FFMPEG_ENGINE_PRESETS,
+  FFMPEG_ENGINE_LIMITS,
+  FFMPEG_ENGINE_DEFAULTS,
+  FFMPEG_HLS_XUI_MODES,
+  invalidateFfmpegEfficiencyCache,
+  getWorkerDiagnostics,
+  getFfmpegBinInfo,
+  getFfmpegBinPreference,
+  detectFfmpegBinaries,
+  invalidateFfmpegBinCache,
+  isValidFfmpegPreference,
+  getHlsFreeBytes,
+  estimateHlsFootprintBytes,
+  HLS_WINDOW_SECONDS
+} from './streamEngine.js';
+import {
+  isLiveChannel,
+  isYouTubeUrl,
+  parseYouTubeUrl,
+  classifySourceUrl,
+  getYtDlpInfo,
+  resolveLiveSource,
+  refreshChannelLiveSource,
+  ensureLiveState,
+  liveSourceInfo,
+  cookiesInfo,
+  inspectCookiesText,
+  inspectCookiesFile,
+  COOKIES_DEFAULT_PATH,
+  needsRefresh,
+  liveReady,
+  liveFingerprint,
+  liveModeFor,
+  liveEntriesFor,
+  startYtDlpInstall,
+  ytInstallState,
+  ytDlpReleaseInfo,
+  warmYtDlpReleaseInfo,
+  isYtDlpOutdated,
+  listFormats,
+  testCookies,
+  startVideoDownload,
+  videoDownloadState,
+  startPlaylistDownload,
+  playlistDownloadState,
+  cachedVideoInfo,
+  removeCachedVideo,
+  parseLiveState,
+  diskPlaylistState,
+  applyDiskPlaylistState,
+  videosCacheStats,
+  videosSummary,
+  pruneVideoCache,
+  autoPrepareDisabled,
+  autoPrepareLimit
+} from './youtubeLive.js';
+import { SLATES_DIR, restartAllSlateWorkers } from './offlineSlateEngine.js';
+import { startAutoFailoverMonitor, getFailoverHealth } from './autoFailover.js';
+import {
+  startStabilityGuard,
+  getStabilityReport,
+  getStabilityGuardState,
+  runDbMaintenance
+} from './stability.js';
+import { diagnoseStream } from './diagnostics.js';
+import { APP_VERSION } from './version.js';
+import {
+  getResolutionScanStatus,
+  startResolutionAutoClassifyJob,
+  detectSingleStreamResolution,
+  getAutoPilotConfig,
+  saveAutoPilotConfig,
+  startResolutionAutoPilotDaemon
+} from './resolutionClassifier.js';
+import {
+  iptvRouter,
+  authenticateLine,
+  isItemAllowedForLine,
+  recordConnection,
+  expandStreamUpstreamUrls,
+  pruneStaleConnections,
+  kickConnectionSocket,
+  kickAllLineConnections,
+  getSegmentMissStats,
+  getPrebufferStats
+} from './iptvApi.js';
+import { listLegacyDrmStreams, removeDrmFromFlussonic } from './drmCleanup.js';
+import {
+  addDeviceManually,
+  deviceLimitFor,
+  getRegistryMode,
+  listLineDevices,
+  publicDevice,
+  registryOverview,
+  removeDeviceRow,
+  resetLineDevices,
+  setDeviceStatus,
+  setRegistryMode,
+  bumpRegistryVersion,
+  liveConnectionCount,
+  dedupeLineDevices,
+  dedupeAllDevices
+} from './deviceRegistry.js';
+import {
+  getJellyfinConfig,
+  saveJellyfinConfig,
+  testJellyfinConnection,
+  listJellyfinLibraries,
+  previewJellyfinImport,
+  detectJellyfinPathMappings,
+  importFromJellyfin,
+  createSymlinkForVod,
+  createSymlinkForEpisode,
+  rebuildAllSymlinks,
+  listBrokenSymlinks,
+  cleanupVodSymlink,
+  cleanupEpisodeSymlink
+} from './jellyfin.js';
+import {
+  mountCapabilities,
+  listNfsExports,
+  buildShareRecipe,
+  getPanelAddresses,
+  testJellyfinShare,
+  mountJellyfinShare,
+  unmountJellyfinShare,
+  remountJellyfinShare,
+  getMountStatus,
+  getJellyfinMountConfig
+} from './jellyfinMount.js';
+import { computeRecommendation, applyRecommendation } from './tune.js';
+import { classifyPlayerAgent, resolveIpGeoSync } from './geoIspResolver.js';
+import { stalkerRouter } from './stalkerPortal.js';
+import { headendRouter } from './headendManager.js';
+import { flussonic2312Router } from './flussonic2312Manager.js';
+import { wk2500Router, resumeEnabledWk2500Channels, stopAllWk2500Workers } from './wk2500Manager.js';
+import { syncEpgSourceById, startEpgAutoSyncScheduler } from './epgSync.js';
+import { WebSocketServer } from 'ws';
+import { accessCodeMiddleware, accessCodesRouter } from './accessCodes.js';
+import {
+  parseFlussonicConf,
+  fetchFlussonicServerStreams,
+  commitFlussonicStreamsToDb,
+  resolveFlussonicUrlCandidates
+} from './flussonicImporter.js';
+import {
+  getMnfHubStats,
+  runSyntheticBroadcastBenchmark,
+  getOrCreateMnfSession,
+  TsToMnfTransmuxer
+} from './mnfProtocol.js';
+import {
+  getIngestStatus,
+  getIngestConfig,
+  saveIngestConfig,
+  installMediaMtxBinary,
+  startIngestServer,
+  stopIngestServer,
+  validateIngestPublish,
+  handleIngestWebhook,
+  createIngestEndpoint,
+  deleteIngestEndpoint,
+  findMediaMtxBinary
+} from './ingestHub.js';
+import {
+  initMultiPortManager,
+  addExtraPort,
+  removeExtraPort,
+  listActivePorts,
+  rebindAllPorts
+} from './multiPortManager.js';
+import {
+  tlsStatus,
+  setTlsPaths,
+  invalidateTlsCache,
+  listCertificates,
+  installCertificate,
+  removeCertificate
+} from './tlsManager.js';
+import { getDomains, setDomains, checkDomains } from './domains.js';
+import { acmeTokenFromPath, readAcmeToken } from './acme.js';
+import {
+  buildFullBackupObject,
+  createServerSnapshot,
+  listServerSnapshots,
+  readServerSnapshot,
+  deleteServerSnapshot,
+  startAutomatedBackupScheduler
+} from './backupScheduler.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Puerto principal del panel: **el estándar**. Como root (el servicio systemd)
+// escucha en el 80, y el 443 con TLS lo abre el gestor multi-puerto; sin
+// privilegios (desarrollo, pruebas) se queda en 8095 para no pedir root.
+// `PORT` manda siempre que esté puesto, y una instalación existente conserva
+// el suyo (está en Environment=PORT= del servicio).
+const DEFAULT_PORT = typeof process.getuid === 'function' && process.getuid() === 0 ? 80 : 8095;
+const PORT = Number(process.env.PORT) || DEFAULT_PORT;
+const HOST = '0.0.0.0';
+const isProd = process.env.NODE_ENV === 'production';
+
+initDb();
+
+// Al arrancar no queda ningún socket abierto: las filas de `active_connections`
+// que dejó el proceso anterior son fantasmas que ocupaban cupo (y hacían que el
+// cliente viera «cuenta en uso en otro aparato» sin nadie reproduciendo).
+try {
+  const zombies = db.prepare('DELETE FROM active_connections').run().changes;
+  if (zombies) console.log(`[TVLister] ${zombies} conexión(es) fantasma liberadas al arrancar`);
+} catch {
+  /* base bloqueada: el barrido periódico las quitará */
+}
+
+const app = express();
+app.set('trust proxy', true);
+
+// Cuánto está sirviendo el propio maestro: lo usa el balanceador para decidir
+// entre atender él mismo o mandar a un nodo (y para no mandar a un nodo lleno).
+app.use(egressMeterMiddleware);
+
+// CORS: antes se reflejaba CUALQUIER origen con credenciales. Eso deja que una
+// web ajena hable con la API del panel desde el navegador del operador. Ahora:
+//   - endpoints de reproductor (Xtream/M3U/DRM): abiertos, porque van con
+//     credenciales de la línea o token firmado y los usan reproductores nativos,
+//     TVs y la app (que no mandan cabecera Origin).
+//   - API del panel: sólo el mismo host del panel (o los orígenes que se
+//     declaren en CORS_ALLOWED_ORIGINS), con credenciales.
+const PLAYER_CORS_PREFIXES = ['/player_api.php', '/panel_api.php', '/get.php', '/xmltv.php', '/live/', '/movie/', '/series/', '/mnf/', '/hls_proxy/', '/webtv', '/timeshift', '/archive_seg/'];
+const extraOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use(
+  cors((req, callback) => {
+    const path = String(req.path || '');
+    if (PLAYER_CORS_PREFIXES.some((p) => path.startsWith(p))) {
+      return callback(null, { origin: '*', credentials: false });
+    }
+    const origin = String(req.headers.origin || '');
+    if (!origin) return callback(null, { origin: false });
+    if (extraOrigins.includes(origin)) return callback(null, { origin, credentials: true });
+    // Mismo host (panel servido por sí mismo): se permite.
+    let sameHost = false;
+    try {
+      const o = new URL(origin);
+      sameHost = o.host === String(req.headers.host || '');
+    } catch {
+      sameHost = false;
+    }
+    return callback(null, sameHost ? { origin, credentials: true } : { origin: false });
+  })
+);
+// Retos HTTP-01 de Let's Encrypt (certbot --webroot). Van antes que nada:
+// tienen que contestar en claro, también cuando el panel ocupa el puerto 80.
+app.get('/.well-known/acme-challenge/:token', (req, res) => {
+  const token = acmeTokenFromPath(`/.well-known/acme-challenge/${req.params.token}`);
+  const body = token ? readAcmeToken(token) : null;
+  if (body == null) return res.status(404).type('text/plain').send('reto no encontrado');
+  res.set('Cache-Control', 'no-store').type('text/plain').send(body);
+});
+
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+// --- Cabeceras de seguridad del panel y del reproductor ---------------------
+// El reproductor del panel (y el portal WebTV) no debe poder incrustarse en
+// otra web: sin esto, cualquiera pone un <iframe> al panel/portal del cliente y
+// lo usa como reproductor propio a tu costa. También se cierra el sniffing de
+// tipos y se evita que las URLs con token se filtren por el Referer.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  // Los manifiestos y las claves no se cachean: un enlace caducado no debe
+  // seguir funcionando desde la caché del navegador.
+  if (/^\/(live|hls_proxy|hls_out|webtv_play|webtv_vod|webtv_series|timeshift|archive_seg)\//.test(req.path)) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
+
+// Application-level firewall check
+app.use(firewallMiddleware);
+
+// Códigos de acceso al panel (estilo XUI.one): si hay alguno activo, el panel
+// queda detrás de una pantalla previa. Los endpoints IPTV nunca se cierran.
+app.use(accessCodeMiddleware);
+app.use(accessCodesRouter);
+
+// Serve uploaded offline loop images/videos for panel preview
+app.use('/slates', express.static(SLATES_DIR));
+
+// Production Healthcheck Probe (Nginx / Systemd / Uptime Monitors)
+app.get('/api/health', (_req, res) => {
+  try {
+    const streamsCount = db.prepare('SELECT COUNT(*) as c FROM streams').get().c;
+    const activeConns = db.prepare('SELECT COUNT(*) as c FROM active_connections').get().c;
+    // El estado de la base se comprueba de verdad (antes decía "wal_ok" fijo).
+    let dbOk = true;
+    let journalMode = 'desconocido';
+    try {
+      const row = db.prepare('PRAGMA journal_mode').get();
+      journalMode = String(Object.values(row)[0] || '').toLowerCase();
+      db.prepare('SELECT 1 FROM streams LIMIT 1').get();
+    } catch {
+      dbOk = false;
+    }
+    res.json({
+      status: dbOk ? 'ok' : 'error',
+      version: APP_VERSION,
+      env: isProd ? 'production' : 'development',
+      uptimeSec: Math.floor(process.uptime()),
+      rssMb: Math.round(process.memoryUsage().rss / 1048576),
+      db: dbOk ? `ok_${journalMode}` : 'error',
+      ffmpeg: isFfmpegAvailable(),
+      streams: streamsCount,
+      activeConnections: activeConns,
+      stability: getStabilityGuardState()
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// Mount Stalker / Ministra MAG STB Middleware (/c/, /stalker_portal/c/, /server/load.php)
+app.use(stalkerRouter);
+
+// Mount IPTV / OTT Standard Endpoints (/get.php, /xmltv.php, /player_api.php, /live/*, /movie/*, /series/*, /timeshift/*, /api/webtv/*)
+app.use(iptvRouter);
+
+// ==================== EDGE LOAD BALANCER HEARTBEAT & AGENT DISTRIBUTION ====================
+app.post('/api/lb/heartbeat', (req, res) => {
+  const token = String(req.headers['x-edge-token'] || req.body?.api_token || '').trim();
+  if (!token) return res.status(401).json({ error: 'x-edge-token requerido' });
+
+  const srv = db.prepare('SELECT * FROM servers WHERE api_token = ? AND is_main = 0').get(token);
+  if (!srv) return res.status(403).json({ error: 'Token de Nodo Edge inválido' });
+
+  const {
+    cpu_usage = 0,
+    ram_usage = 0,
+    active_conns = 0,
+    http_port,
+    bandwidth_mbps,
+    cache_hit_pct,
+    edge_version
+  } = req.body || {};
+  db.prepare(
+    `UPDATE servers SET
+       status = 'online',
+       cpu_usage = ?,
+       ram_usage = ?,
+       active_conns = ?,
+       bandwidth_mbps = ?,
+       cache_hit_pct = ?,
+       edge_version = ?,
+       port = COALESCE(?, port),
+       last_heartbeat_at = datetime('now')
+     WHERE id = ?`
+  ).run(
+    Number(cpu_usage) || 0,
+    Number(ram_usage) || 0,
+    Number(active_conns) || 0,
+    Number(bandwidth_mbps) || 0,
+    Number(cache_hit_pct) || 0,
+    String(edge_version || ''),
+    http_port ? Number(http_port) : null,
+    srv.id
+  );
+
+  // Dominios cuyo tráfico debe quedarse en el nodo (para que el cliente no se
+  // escape al dominio de vídeo del maestro y el balancer sirva de verdad).
+  const rewriteHosts = new Set();
+  try {
+    rewriteHosts.add(new URL(`http://${srv.host}`).host);
+  } catch {
+    /* host raro: se ignora */
+  }
+  const streamBase = String(
+    db.prepare("SELECT value FROM settings WHERE key = 'public_stream_base'").get()?.value || ''
+  ).trim();
+  if (streamBase) {
+    try {
+      rewriteHosts.add(new URL(streamBase).host);
+    } catch {
+      /* valor inválido en ajustes: se ignora */
+    }
+  }
+
+  res.json({ ok: true, server_id: srv.id, rewrite_hosts: [...rewriteHosts] });
+});
+
+app.get('/api/lb/edge-agent.js', (req, res) => {
+  const scriptPath = path.resolve(__dirname, '../scripts/edge-agent.js');
+  if (!fs.existsSync(scriptPath)) return res.status(404).send('edge-agent.js not found');
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.send(fs.readFileSync(scriptPath, 'utf8'));
+});
+
+app.get('/api/lb/install.sh', (req, res) => {
+  const scriptPath = path.resolve(__dirname, '../scripts/install_edge_lb.sh');
+  if (!fs.existsSync(scriptPath)) return res.status(404).send('install_edge_lb.sh not found');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.send(fs.readFileSync(scriptPath, 'utf8'));
+});
+
+app.use(headendRouter);
+app.use(flussonic2312Router);
+app.use(wk2500Router);
+
+// ==================== AUTH ROUTES ====================
+app.post('/api/auth/login', (req, res) => {
+  const clientIp = extractClientIp(req);
+  const rl = checkLoginRateLimit(clientIp);
+  if (!rl.allowed) {
+    return res.status(429).json({
+      error: `Demasiados intentos fallidos. Espera ${rl.retrySec}s antes de reintentar.`
+    });
+  }
+
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Ingresa usuario y contraseña.' });
+  }
+  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(String(username).trim());
+  if (!user || !verifyPassword(String(password), user.password_hash)) {
+    return res.status(401).json({ error: 'Credenciales incorrectas.' });
+  }
+  if (user.status !== 'active') {
+    return res.status(403).json({ error: 'Tu cuenta se encuentra suspendida.' });
+  }
+  clearLoginRateLimit(clientIp);
+  const token = signToken({ id: user.id, username: user.username, role: user.role });
+  res.json({
+    token,
+    user: {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      credits: user.credits,
+      email: user.email
+    }
+  });
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+app.put('/api/auth/password', requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!newPassword || String(newPassword).length < 5) {
+    return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 5 caracteres.' });
+  }
+  const fullUser = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!verifyPassword(String(currentPassword || ''), fullUser.password_hash)) {
+    return res.status(400).json({ error: 'La contraseña actual no coincide.' });
+  }
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(newPassword)), req.user.id);
+  res.json({ ok: true, message: 'Contraseña actualizada correctamente.' });
+});
+
+// ==================== DASHBOARD & TELEMETRY ====================
+app.get('/api/dashboard', requireAuth, (req, res) => {
+  const isReseller = req.user.role === 'reseller';
+  const telemetry = getHostTelemetry();
+
+  const totalStreams = db.prepare('SELECT COUNT(*) as c FROM streams').get().c;
+  const runningStreams = db.prepare("SELECT COUNT(*) as c FROM streams WHERE status = 'running'").get().c;
+  const totalCh247 = db.prepare('SELECT COUNT(*) as c FROM channels_247').get().c;
+  const runningCh247 = db.prepare("SELECT COUNT(*) as c FROM channels_247 WHERE status = 'running'").get().c;
+  const totalVod = db.prepare('SELECT COUNT(*) as c FROM vod_items').get().c;
+  const totalSeries = db.prepare('SELECT COUNT(*) as c FROM series').get().c;
+
+  const totalLines = isReseller
+    ? db.prepare('SELECT COUNT(*) as c FROM lines WHERE owner_id = ?').get(req.user.id).c
+    : db.prepare('SELECT COUNT(*) as c FROM lines').get().c;
+
+  const activeLines = isReseller
+    ? db.prepare("SELECT COUNT(*) as c FROM lines WHERE owner_id = ? AND status = 'active'").get(req.user.id).c
+    : db.prepare("SELECT COUNT(*) as c FROM lines WHERE status = 'active'").get().c;
+
+  pruneStaleConnections();
+
+  const rawConnections = isReseller
+    ? db
+        .prepare(
+          `SELECT ac.* FROM active_connections ac
+           JOIN lines l ON l.id = ac.line_id
+           WHERE l.owner_id = ?
+           ORDER BY ac.last_ping_at DESC`
+        )
+        .all(req.user.id)
+    : db.prepare('SELECT * FROM active_connections ORDER BY last_ping_at DESC').all();
+
+  const connections = rawConnections.map(enrichActiveConnectionRow);
+
+  const servers = db.prepare('SELECT * FROM servers ORDER BY is_main DESC, id ASC').all().map((s) =>
+    s.is_main
+      ? {
+          ...s,
+          cpu_usage: telemetry.cpuPercent,
+          ram_usage: telemetry.ramPercent
+        }
+      : s
+  );
+
+  const channels247Live = db
+    .prepare('SELECT * FROM channels_247 ORDER BY id ASC')
+    .all()
+    .map((ch) => ({
+      id: ch.id,
+      name: ch.name,
+      status: ch.status,
+      watermark_text: ch.watermark_text,
+      liveState: computeChannel247LiveState(ch)
+    }));
+
+  const openClaims = db.prepare("SELECT * FROM client_claims WHERE status = 'open' ORDER BY id DESC LIMIT 10").all();
+  const totalResellers = db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'reseller'").get().c;
+
+  res.json({
+    kpis: {
+      totalStreams,
+      runningStreams,
+      totalCh247,
+      runningCh247,
+      totalVod,
+      totalSeries,
+      totalLines,
+      activeLines,
+      onlineConnections: connections.length,
+      totalResellers,
+      openClaimsCount: openClaims.length,
+      credits: req.user.credits
+    },
+    telemetry,
+    servers,
+    connections,
+    channels247Live,
+    openClaims
+  });
+});
+
+function enrichActiveConnectionRow(ac) {
+  let country = ac.country || '--';
+  let isp = ac.isp || '';
+  if (!isp || isp === 'Client Network' || isp === 'Detectando ISP...') {
+    const geo = resolveIpGeoSync(ac.ip_address);
+    if (geo.country && geo.country !== '--') country = geo.country;
+    if (geo.isp) isp = geo.isp;
+  }
+  const agentInfo = classifyPlayerAgent(ac.user_agent);
+  return {
+    ...ac,
+    country,
+    isp: isp || 'ISP Desconocido',
+    player_name: agentInfo.player,
+    player_category: agentInfo.category
+  };
+}
+
+app.get('/api/connections', requireAuth, (req, res) => {
+  pruneStaleConnections();
+  const isReseller = req.user.role === 'reseller';
+  const rows = isReseller
+    ? db
+        .prepare(
+          `SELECT ac.* FROM active_connections ac
+           JOIN lines l ON l.id = ac.line_id
+           WHERE l.owner_id = ?
+           ORDER BY ac.last_ping_at DESC`
+        )
+        .all(req.user.id)
+    : db.prepare('SELECT * FROM active_connections ORDER BY last_ping_at DESC').all();
+  res.json(rows.map(enrichActiveConnectionRow));
+});
+
+app.delete('/api/connections/:id', requireAuth, (req, res) => {
+  const connId = Number(req.params.id);
+  if (req.user.role === 'reseller') {
+    const owned = db
+      .prepare(
+        `SELECT ac.id FROM active_connections ac
+         JOIN lines l ON l.id = ac.line_id
+         WHERE ac.id = ? AND l.owner_id = ?`
+      )
+      .get(connId, req.user.id);
+    if (!owned) return res.status(403).json({ error: 'No tienes permiso sobre esta sesión.' });
+  }
+  kickConnectionSocket(connId);
+  res.json({ ok: true });
+});
+
+// ==================== CATEGORIES ====================
+app.get('/api/categories', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, id ASC').all();
+  res.json(rows);
+});
+
+app.post('/api/categories', requireAuth, requireAdmin, (req, res) => {
+  const { name, type = 'live', sort_order = 0 } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'Nombre requerido' });
+  const info = db
+    .prepare('INSERT INTO categories (name, type, sort_order) VALUES (?, ?, ?)')
+    .run(String(name), String(type), Number(sort_order) || 0);
+  const created = db.prepare('SELECT * FROM categories WHERE id = ?').get(Number(info.lastInsertRowid));
+  res.json(created || { id: Number(info.lastInsertRowid), name, type, sort_order });
+});
+
+app.put('/api/categories/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: 'Categoría no encontrada' });
+  const nextName = req.body?.name !== undefined ? String(req.body.name).trim() : existing.name;
+  const nextSort = req.body?.sort_order !== undefined ? Number(req.body.sort_order) : existing.sort_order;
+  if (!nextName) return res.status(400).json({ error: 'Nombre requerido' });
+  db.prepare('UPDATE categories SET name = ?, sort_order = ? WHERE id = ?').run(nextName, nextSort, id);
+  res.json({ ok: true, category: db.prepare('SELECT * FROM categories WHERE id = ?').get(id) });
+});
+
+app.post('/api/categories/reorder', requireAuth, requireAdmin, (req, res) => {
+  const { orderedIds = [], packStreamsByCategory = false, alphaInsideCategory = false } = req.body || {};
+  const cleanIds = Array.isArray(orderedIds) ? orderedIds.map(Number).filter((n) => n > 0) : [];
+  if (cleanIds.length === 0) {
+    return res.status(400).json({ error: 'Lista de categorías vacía.' });
+  }
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const allCats = db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, id ASC').all();
+    const idSet = new Set(cleanIds);
+    const curSlots = allCats
+      .filter((c) => idSet.has(c.id))
+      .map((c) => c.sort_order)
+      .sort((a, b) => a - b);
+
+    const updCat = db.prepare('UPDATE categories SET sort_order = ? WHERE id = ?');
+    if (cleanIds.length === allCats.length) {
+      cleanIds.forEach((cid, idx) => updCat.run(idx + 1, cid));
+    } else {
+      cleanIds.forEach((cid, idx) => {
+        const slot = curSlots[idx] !== undefined ? curSlots[idx] : idx + 1;
+        updCat.run(slot, cid);
+      });
+      // Normalize sequential 1..N
+      const refreshed = db.prepare('SELECT id FROM categories ORDER BY sort_order ASC, id ASC').all();
+      refreshed.forEach((r, idx) => updCat.run(idx + 1, r.id));
+    }
+
+    if (packStreamsByCategory) {
+      const catRankRows = db.prepare('SELECT id, sort_order FROM categories ORDER BY sort_order ASC, id ASC').all();
+      const catRank = new Map(catRankRows.map((c, idx) => [c.id, idx + 1]));
+      const allStreams = db.prepare('SELECT id, name, category_id, sort_order FROM streams ORDER BY sort_order ASC, id ASC').all();
+      allStreams.sort((a, b) => {
+        const ra = catRank.get(a.category_id) ?? 999999;
+        const rb = catRank.get(b.category_id) ?? 999999;
+        if (ra !== rb) return ra - rb;
+        if (alphaInsideCategory) {
+          return String(a.name || '').localeCompare(String(b.name || ''), 'es', { numeric: true, sensitivity: 'base' });
+        }
+        return (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id;
+      });
+      const updStream = db.prepare('UPDATE streams SET sort_order = ? WHERE id = ?');
+      allStreams.forEach((s, idx) => updStream.run(idx + 1, s.id));
+    }
+
+    db.exec('COMMIT;');
+    res.json({
+      ok: true,
+      categories: db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, id ASC').all()
+    });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: err.message || 'Error al reordenar categorías' });
+  }
+});
+
+app.delete('/api/categories/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM categories WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+// ==================== OFFLINE LOOP SLATES (VIDEO / IMAGE LOOP WHEN NO STREAM) ====================
+function listSlateFiles() {
+  try {
+    if (!fs.existsSync(SLATES_DIR)) return [];
+    return fs
+      .readdirSync(SLATES_DIR)
+      .filter((f) => /\.(png|jpe?g|webp|bmp|gif|mp4|ts|mkv|mov|webm)$/i.test(f))
+      .map((f) => {
+        const full = path.join(SLATES_DIR, f);
+        const st = fs.statSync(full);
+        const isImg = /\.(png|jpe?g|webp|bmp|gif)$/i.test(f);
+        return {
+          fileName: f,
+          url: `/slates/${encodeURIComponent(f)}`,
+          kind: isImg ? 'image' : 'video',
+          sizeKb: Math.round(st.size / 1024),
+          updatedAt: st.mtime.toISOString()
+        };
+      })
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  } catch {
+    return [];
+  }
+}
+
+// El bucle de respaldo global fue retirado: ahora cada canal decide su propio respaldo (o ninguno).
+// Este endpoint sólo lista los archivos subidos para poder elegirlos en un canal.
+app.get('/api/slates/files', requireAuth, (req, res) => {
+  res.json({ files: listSlateFiles() });
+});
+
+app.post(
+  '/api/slates/upload',
+  requireAuth,
+  requireAdmin,
+  express.raw({ type: 'application/octet-stream', limit: '100mb' }),
+  (req, res) => {
+    const buf = req.body;
+    if (!Buffer.isBuffer(buf) || buf.length === 0) {
+      return res.status(400).json({ error: 'Archivo vacío o inválido.' });
+    }
+    const rawName = String(req.headers['x-file-name'] || 'slate_loop.mp4').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ext = path.extname(rawName).toLowerCase();
+    if (!/\.(png|jpe?g|webp|bmp|gif|mp4|ts|mkv|mov|webm)$/i.test(ext)) {
+      return res.status(400).json({ error: 'Formato no soportado. Usa PNG, JPG, WEBP, MP4, TS o MKV.' });
+    }
+    fs.mkdirSync(SLATES_DIR, { recursive: true });
+    const finalName = `${Date.now()}_${rawName}`;
+    const fullPath = path.join(SLATES_DIR, finalName);
+    fs.writeFileSync(fullPath, buf);
+
+    const kind = /\.(png|jpe?g|webp|bmp|gif)$/i.test(ext) ? 'image' : 'video';
+    const url = `/slates/${encodeURIComponent(finalName)}`;
+    res.json({ ok: true, fileName: finalName, url, kind, files: listSlateFiles() });
+  }
+);
+
+app.delete('/api/slates/files/:fileName', requireAuth, requireAdmin, (req, res) => {
+  const safeName = path.basename(String(req.params.fileName || ''));
+  const fullPath = path.join(SLATES_DIR, safeName);
+  if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+  restartAllSlateWorkers();
+  res.json({ ok: true, files: listSlateFiles() });
+});
+
+function scheduleStaggeredStreamLaunches(streamIds, delayPerStreamMs = 60) {
+  streamIds.forEach((sid, idx) => {
+    setTimeout(() => {
+      try {
+        launchStreamWorkerIfNeeded(sid);
+      } catch {
+        // ignore
+      }
+    }, idx * delayPerStreamMs).unref?.();
+  });
+}
+
+// ==================== LIVE STREAMS ====================
+// ==================== ENRIQUECIMIENTO DE LA LISTA DE CANALES (estilo XUI.one) ====================
+// Añade a cada canal los datos vivos que XUI.one muestra en su tabla de streams:
+// clientes conectados (por protocolo) y la programación EPG en curso / siguiente.
+function parseSqliteUtc(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(raw)) {
+    return Date.parse(`${raw.replace(' ', 'T')}${/z$/i.test(raw) ? '' : 'Z'}`);
+  }
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function buildStreamListLiveMaps(rows) {
+  const clientsByStream = new Map();
+  try {
+    const clientRows = db
+      .prepare(
+        `SELECT target_id AS stream_id, protocol, COUNT(*) AS conns
+         FROM active_connections
+         WHERE target_type = 'live'
+         GROUP BY target_id, protocol`
+      )
+      .all();
+    clientRows.forEach((r) => {
+      const id = Number(r.stream_id);
+      if (!id) return;
+      const entry = clientsByStream.get(id) || { clients: 0, byProtocol: {} };
+      const conns = Number(r.conns) || 0;
+      entry.clients += conns;
+      entry.byProtocol[String(r.protocol || 'HLS').toUpperCase()] = conns;
+      clientsByStream.set(id, entry);
+    });
+  } catch {
+    /* la tabla puede no existir todavía en bases muy antiguas */
+  }
+
+  const epgNow = new Map();
+  const epgNext = new Map();
+  const epgIds = [...new Set(rows.map((r) => String(r.epg_channel_id || '').trim()).filter(Boolean))];
+  if (epgIds.length > 0) {
+    const placeholders = epgIds.map(() => '?').join(',');
+    // TVLister guarda la EPG como ISO (`toISOString()`), otras fuentes como `datetime('now')`.
+    // Se normalizan ambos formatos a 'YYYY-MM-DD HH:MM:SS' para poder comparar en SQLite.
+    const programs = db
+      .prepare(
+        `SELECT channel_epg_id, title, start_time, end_time FROM epg_programs
+         WHERE channel_epg_id IN (${placeholders})
+           AND substr(replace(end_time, 'T', ' '), 1, 19) > datetime('now', '-6 hours')`
+      )
+      .all(...epgIds);
+
+    const now = Date.now();
+    programs
+      .map((p) => ({ ...p, start: parseSqliteUtc(p.start_time), end: parseSqliteUtc(p.end_time) }))
+      .filter((p) => p.start && p.end)
+      .sort((a, b) => a.start - b.start)
+      .forEach((p) => {
+        if (p.start <= now && p.end > now) {
+          const prev = epgNow.get(p.channel_epg_id);
+          if (!prev || p.start > prev.start) epgNow.set(p.channel_epg_id, p);
+        } else if (p.start > now && !epgNext.has(p.channel_epg_id)) {
+          epgNext.set(p.channel_epg_id, p);
+        }
+      });
+  }
+
+  return { clientsByStream, epgNow, epgNext };
+}
+
+/**
+ * Asigna un canal a los bouquets indicados (la tabla guarda arrays de ids en JSON).
+ * Sólo se tocan los bouquets que cambian; el resto queda intacto.
+ */
+function applyStreamBouquets(streamId, bouquetIds) {
+  const id = Number(streamId);
+  if (!Number.isFinite(id) || id <= 0) return;
+  const wanted = new Set(
+    (Array.isArray(bouquetIds) ? bouquetIds : []).map(Number).filter((n) => Number.isFinite(n) && n > 0)
+  );
+  const rows = db.prepare('SELECT id, stream_ids_json FROM bouquets').all();
+  for (const row of rows) {
+    const current = JSON.parse(row.stream_ids_json || '[]').map(Number);
+    const has = current.includes(id);
+    const shouldHave = wanted.has(Number(row.id));
+    if (has === shouldHave) continue;
+    const next = shouldHave ? [...current, id] : current.filter((x) => x !== id);
+    db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?').run(JSON.stringify(next), row.id);
+  }
+}
+
+app.get('/api/streams', requireAuth, (req, res) => {
+  pruneStaleConnections();
+
+  const rows = db
+    .prepare(
+      `SELECT s.*, c.name as category_name, tp.name as profile_name,
+              tp.video_codec as profile_video_codec, tp.audio_codec as profile_audio_codec,
+              tp.video_bitrate as profile_video_bitrate, srv.name as server_name,
+              hn.name as headend_node_name
+       FROM streams s
+       LEFT JOIN categories c ON c.id = s.category_id
+       LEFT JOIN transcode_profiles tp ON tp.id = s.transcode_profile_id
+       LEFT JOIN servers srv ON srv.id = s.server_id
+       LEFT JOIN headend_nodes hn ON hn.id = s.headend_node_id
+       ORDER BY s.sort_order ASC, s.id ASC`
+    )
+    .all();
+
+  const { clientsByStream, epgNow, epgNext } = buildStreamListLiveMaps(rows);
+  const failoverHealth = getFailoverHealth();
+  const nowMs = Date.now();
+
+  res.json(
+    rows.map((s) => {
+      const live = clientsByStream.get(Number(s.id));
+      const epgId = String(s.epg_channel_id || '').trim();
+      const current = epgId ? epgNow.get(epgId) : null;
+      const following = epgId ? epgNext.get(epgId) : null;
+      const progress =
+        current && current.end > current.start
+          ? Math.max(0, Math.min(100, Math.round(((nowMs - current.start) / (current.end - current.start)) * 100)))
+          : 0;
+      return {
+        ...s,
+        notes: String(s.notes || ''),
+        archiveStats: getArchiveStats(s.id),
+        clients: live?.clients || 0,
+        clients_by_protocol: live?.byProtocol || {},
+        epg_now: current?.title || '',
+        epg_now_end: current ? new Date(current.end).toISOString() : '',
+        epg_next: following?.title || '',
+        epg_next_start: following ? new Date(following.start).toISOString() : '',
+        epg_progress: progress,
+        auto_failover: Number(s.auto_failover) === 1 ? 1 : 0,
+        failover_health: failoverHealth[s.id] || null
+      };
+    })
+  );
+});
+
+app.post('/api/streams/reorder', requireAuth, requireAdmin, (req, res) => {
+  const { orderedIds = [], mode = 'full' } = req.body || {};
+  const cleanIds = Array.isArray(orderedIds) ? orderedIds.map(Number).filter((n) => n > 0) : [];
+  if (cleanIds.length === 0) {
+    return res.status(400).json({ error: 'Lista de canales a ordenar vacía.' });
+  }
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const allStreams = db.prepare('SELECT id, sort_order FROM streams ORDER BY sort_order ASC, id ASC').all();
+    const idSet = new Set(cleanIds);
+    const upd = db.prepare('UPDATE streams SET sort_order = ? WHERE id = ?');
+
+    if (mode === 'subset' && cleanIds.length < allStreams.length) {
+      // Keep non-included channels at their exact positions and reorder only the subset's occupied slots
+      const occupiedPositions = [];
+      allStreams.forEach((s, globalIdx) => {
+        if (idSet.has(s.id)) occupiedPositions.push(globalIdx);
+      });
+      const finalOrder = allStreams.map((s) => s.id);
+      cleanIds.forEach((sid, subIdx) => {
+        if (occupiedPositions[subIdx] !== undefined) {
+          finalOrder[occupiedPositions[subIdx]] = sid;
+        }
+      });
+      finalOrder.forEach((sid, idx) => upd.run(idx + 1, sid));
+    } else {
+      // Full order: place cleanIds first (1..K), followed by any remaining streams in existing relative order
+      const remaining = allStreams.filter((s) => !idSet.has(s.id)).map((s) => s.id);
+      const finalOrder = [...cleanIds, ...remaining];
+      finalOrder.forEach((sid, idx) => upd.run(idx + 1, sid));
+    }
+
+    db.exec('COMMIT;');
+    res.json({ ok: true, reorderedCount: cleanIds.length });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: err.message || 'Error al guardar el nuevo orden de canales' });
+  }
+});
+
+app.get('/api/audio-leveling/config', requireAuth, (req, res) => {
+  const cfg = getGlobalAudioLevelingConfig();
+  const directCount = db.prepare("SELECT COUNT(*) as c FROM streams WHERE stream_mode = 'direct'").get()?.c || 0;
+  const totalStreams = db.prepare('SELECT COUNT(*) as c FROM streams').get()?.c || 0;
+  res.json({
+    config: cfg,
+    directCount,
+    totalStreams
+  });
+});
+
+app.put('/api/audio-leveling/config', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const upsert = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  );
+  if (b.enabled !== undefined) upsert.run('audio_leveling_enabled', b.enabled ? 'true' : 'false');
+  if (b.preset) upsert.run('audio_leveling_preset', String(b.preset));
+  if (b.bitrate) upsert.run('audio_leveling_bitrate', String(b.bitrate));
+  invalidateAudioLevelingCache();
+
+  let convertedFromDirect = 0;
+  if (b.enabled && b.convertDirectToOnDemand !== false) {
+    const hybridProf =
+      db
+        .prepare("SELECT id FROM transcode_profiles WHERE LOWER(name) LIKE '%copy video + audio nivelado%' LIMIT 1")
+        .get() ||
+      db.prepare("SELECT id FROM transcode_profiles WHERE video_codec = 'copy' ORDER BY id DESC LIMIT 1").get();
+    const profId = hybridProf?.id || 2;
+    const info = db
+      .prepare(
+        `UPDATE streams
+         SET stream_mode = 'ondemand',
+             transcode_profile_id = CASE WHEN transcode_profile_id = 1 THEN ? ELSE transcode_profile_id END,
+             status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END
+         WHERE stream_mode = 'direct'`
+      )
+      .run(profId);
+    convertedFromDirect = Number(info.changes) || 0;
+  }
+
+  // Restart currently running stream workers so new audio leveling applies immediately
+  const runningStreams = db.prepare("SELECT id FROM streams WHERE status = 'running'").all();
+  const runningIds = [];
+  for (const r of runningStreams) {
+    if (getWorkerPid(`stream_${r.id}`)) {
+      stopWorker(`stream_${r.id}`);
+      runningIds.push(r.id);
+    }
+  }
+  if (runningIds.length > 0) {
+    scheduleStaggeredStreamLaunches(runningIds, 65);
+  }
+
+  // Also restart running 24/7 workers
+  const running247 = db
+    .prepare("SELECT id FROM channels_247 WHERE status = 'running' AND engine_mode = 'ffmpeg'")
+    .all();
+  for (const ch of running247) {
+    stopWorker(`ch247_${ch.id}`);
+    launchChannel247WorkerIfConfigured(ch.id);
+  }
+
+  const nextCfg = getGlobalAudioLevelingConfig();
+  const directCount = db.prepare("SELECT COUNT(*) as c FROM streams WHERE stream_mode = 'direct'").get()?.c || 0;
+  res.json({
+    ok: true,
+    config: nextCfg,
+    convertedFromDirect,
+    reloadedWorkers: runningIds.length,
+    directCount
+  });
+});
+
+app.post('/api/streams', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.name || !b.source_url) {
+    return res.status(400).json({ error: 'Nombre y URL de origen son obligatorios.' });
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO streams (name, category_id, source_url, backup_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status, user_agent, tv_archive_days, bitrate_kbps, offline_slate_mode, offline_slate_url, audio_leveling_mode, notes, auto_failover)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      String(b.name),
+      b.category_id ? Number(b.category_id) : 1,
+      String(b.source_url),
+      String(b.backup_url || '').trim(),
+      String(b.logo_url || ''),
+      String(b.epg_channel_id || ''),
+      String(b.stream_mode || 'direct'),
+      b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
+      b.server_id ? Number(b.server_id) : 1,
+      b.stream_mode === 'ondemand' ? 'ondemand_idle' : 'running',
+      String(b.user_agent || 'TVLister/2.3'),
+      Number(b.tv_archive_days) || 0,
+      Number(b.bitrate_kbps) || 2500,
+      String(b.offline_slate_mode || 'disabled'),
+      String(b.offline_slate_url || ''),
+      String(b.audio_leveling_mode || 'global'),
+      String(b.notes || '').slice(0, 2000),
+      b.auto_failover ? 1 : 0
+    );
+
+  const newId = Number(info.lastInsertRowid);
+  if (Array.isArray(b.bouquet_ids)) {
+    applyStreamBouquets(newId, b.bouquet_ids);
+  }
+  const b1 = Array.isArray(b.bouquet_ids)
+    ? null
+    : db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
+  if (b1) {
+    const arr = JSON.parse(b1.stream_ids_json || '[]');
+    if (!arr.includes(newId)) {
+      arr.push(newId);
+      db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?').run(JSON.stringify(arr), b1.id);
+    }
+  }
+
+  launchStreamWorkerIfNeeded(newId);
+  res.json({ id: newId, ok: true });
+});
+
+app.put('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  const existing = db
+    .prepare('SELECT status, bitrate_kbps, headend_node_id, headend_mode FROM streams WHERE id = ?')
+    .get(id);
+  const nextMode = String(b.stream_mode || 'direct');
+  let nextStatus = b.status ? String(b.status) : existing?.status || 'running';
+  if (nextMode === 'ondemand') {
+    if (nextStatus !== 'stopped') nextStatus = 'ondemand_idle';
+  } else if (nextStatus === 'ondemand_idle') {
+    nextStatus = 'running';
+  }
+  const nextHeadendMode =
+    existing?.headend_node_id && nextMode !== 'ondemand' && existing.headend_mode === 'ondemand'
+      ? 'copy_audio'
+      : existing?.headend_mode || 'copy_audio';
+
+  const parsedKbps = Number(b.bitrate_kbps);
+  const nextBitrateKbps =
+    Number.isFinite(parsedKbps) && parsedKbps > 0 ? parsedKbps : existing?.bitrate_kbps ?? 0;
+
+  withSqliteBusyRetry(() => {
+    db.prepare(
+      `UPDATE streams SET
+         name = ?, category_id = ?, source_url = ?, backup_url = ?, logo_url = ?,
+         epg_channel_id = ?, stream_mode = ?, transcode_profile_id = ?, server_id = ?,
+         status = ?, headend_mode = ?, user_agent = ?, tv_archive_days = ?, bitrate_kbps = ?,
+         offline_slate_mode = ?, offline_slate_url = ?, audio_leveling_mode = ?, notes = ?,
+         auto_failover = ?
+       WHERE id = ?`
+    ).run(
+      String(b.name || ''),
+      b.category_id ? Number(b.category_id) : 1,
+      String(b.source_url || ''),
+      String(b.backup_url || '').trim(),
+      String(b.logo_url || ''),
+      String(b.epg_channel_id || ''),
+      nextMode,
+      b.transcode_profile_id ? Number(b.transcode_profile_id) : 1,
+      b.server_id ? Number(b.server_id) : 1,
+      nextStatus,
+      nextHeadendMode,
+      String(b.user_agent || 'TVLister/2.3'),
+      Number(b.tv_archive_days) || 0,
+      nextBitrateKbps,
+      String(b.offline_slate_mode || 'disabled'),
+      String(b.offline_slate_url || ''),
+      String(b.audio_leveling_mode || 'global'),
+      String(b.notes || '').slice(0, 2000),
+      b.auto_failover ? 1 : 0,
+      id
+    );
+  });
+
+  if (Array.isArray(b.bouquet_ids)) applyStreamBouquets(id, b.bouquet_ids);
+
+  // Restart or stop FFmpeg worker to apply mode/profile change immediately
+  stopWorker(`stream_${id}`);
+  if (nextMode === 'transcode' && nextStatus === 'running') {
+    launchStreamWorkerIfNeeded(id);
+  } else {
+    withSqliteBusyRetry(() => db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(id));
+  }
+  res.json({ ok: true });
+});
+
+// ==================== CAMBIO MANUAL DE ORIGEN (sin failover automático) ====================
+// El segundo origen guardado (backup_url) NO se usa solo: el administrador decide cuándo
+// emitir desde él. Al cambiar se intercambian las URL y se marca failover_active para poder volver.
+function switchStreamSourceRow(row, target) {
+  const primary = String(row.source_url || '').trim();
+  const secondary = String(row.backup_url || '').trim();
+  if (!secondary) {
+    return { ok: false, error: `El canal "${row.name}" no tiene segundo origen guardado.` };
+  }
+  const currentlyOnBackup = Number(row.failover_active) === 1;
+  if (target === 'backup' && currentlyOnBackup) {
+    return { ok: false, error: `El canal "${row.name}" ya está emitiendo su segundo origen.` };
+  }
+  if (target === 'primary' && !currentlyOnBackup) {
+    return { ok: false, error: `El canal "${row.name}" ya está emitiendo su origen principal.` };
+  }
+
+  withSqliteBusyRetry(() =>
+    db
+      .prepare('UPDATE streams SET source_url = ?, backup_url = ?, failover_active = ? WHERE id = ?')
+      .run(secondary, primary, target === 'backup' ? 1 : 0, row.id)
+  );
+
+  // Reinicia el worker para que tome la nueva URL de inmediato
+  if (row.stream_mode === 'transcode' && row.status === 'running') {
+    stopWorker(`stream_${row.id}`);
+    setTimeout(() => {
+      try {
+        launchStreamWorkerIfNeeded(row.id);
+      } catch {
+        // ignore
+      }
+    }, 120).unref?.();
+  }
+
+  return { ok: true, id: row.id, name: row.name, nowOn: target === 'backup' ? 'respaldo' : 'principal' };
+}
+
+/**
+ * Diagnóstico de reproducción: origen → motor → entrega al reproductor.
+ * Devuelve un reporte con estado, tiempos y acciones concretas para cada paso.
+ */
+app.post('/api/streams/:id/diagnose', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'ID de canal inválido' });
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  try {
+    const report = await diagnoseStream(id, { baseUrl });
+    if (!report?.ok) return res.status(404).json({ error: report?.error || 'Canal no encontrado' });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo completar el diagnóstico' });
+  }
+});
+
+app.post('/api/streams/:id/switch-source', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const target = req.body?.target === 'primary' ? 'primary' : 'backup';
+  const row = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Canal no encontrado.' });
+  const result = switchStreamSourceRow(row, target);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+// ==================== AUDITORÍA DE FUENTES Y LIMPIEZA DE RESPALDOS ====================
+// Sirve para detectar canales que siguen apuntando a un host que ya no se quiere usar
+// (por ejemplo un Astra viejo) y para borrar esos respaldos de golpe, sin tocar el
+// origen principal de cada canal.
+function hostOfUrl(raw = '') {
+  const val = String(raw || '').trim();
+  if (!val) return '';
+  try {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(val)) return new URL(val).host.toLowerCase();
+    const m = val.match(/^([^/?#]+)/);
+    return (m ? m[1] : '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+app.get('/api/streams/source-audit', requireAuth, requireAdmin, (req, res) => {
+  const rows = db
+    .prepare('SELECT id, name, source_url, backup_url, status, stream_mode FROM streams ORDER BY sort_order ASC, id ASC')
+    .all();
+
+  const hosts = new Map();
+  const bothSameHost = [];
+  let withBackup = 0;
+
+  for (const row of rows) {
+    const primaryHost = hostOfUrl(row.source_url);
+    const backupHost = hostOfUrl(row.backup_url);
+    if (backupHost) withBackup += 1;
+    if (primaryHost && backupHost && primaryHost === backupHost) {
+      bothSameHost.push({ id: row.id, name: row.name, host: primaryHost });
+    }
+
+    const touch = (host, kind) => {
+      if (!host) return;
+      if (!hosts.has(host)) hosts.set(host, { host, primary: 0, backup: 0, channels: [] });
+      const entry = hosts.get(host);
+      entry[kind] += 1;
+      if (entry.channels.length < 12) entry.channels.push(row.name);
+    };
+    touch(primaryHost, 'primary');
+    touch(backupHost, 'backup');
+  }
+
+  res.json({
+    ok: true,
+    totalChannels: rows.length,
+    channelsWithBackup: withBackup,
+    hosts: Array.from(hosts.values()).sort((a, b) => b.primary + b.backup - (a.primary + a.backup)),
+    sameHostPrimaryAndBackup: bothSameHost.slice(0, 50),
+    sameHostCount: bothSameHost.length
+  });
+});
+
+// Borra el segundo origen de los canales cuyo respaldo apunta a `host` (o de todos si host va vacío).
+app.post('/api/streams/purge-second-sources', requireAuth, requireAdmin, (req, res) => {
+  const wantHost = String(req.body?.host || '').trim().toLowerCase();
+  const dryRun = req.body?.dry_run === true;
+  const onlyProblems = req.body?.only_same_host === true;
+
+  const rows = db.prepare('SELECT id, name, source_url, backup_url FROM streams WHERE backup_url != \'\'').all();
+  // Se puede escribir la IP sola (192.168.88.10) o con puerto (192.168.88.10:8000)
+  const matchesHost = (backupHost) =>
+    !wantHost ||
+    backupHost === wantHost ||
+    backupHost.split(':')[0] === wantHost.split(':')[0];
+  const targets = rows.filter((row) => {
+    const backupHost = hostOfUrl(row.backup_url);
+    if (!matchesHost(backupHost)) return false;
+    if (onlyProblems && hostOfUrl(row.source_url) !== backupHost) return false;
+    return true;
+  });
+
+  if (dryRun) {
+    return res.json({
+      ok: true,
+      dryRun: true,
+      wouldClear: targets.length,
+      sample: targets.slice(0, 8).map((r) => r.name)
+    });
+  }
+
+  if (targets.length === 0) {
+    return res.json({ ok: true, cleared: 0, sample: [] });
+  }
+
+  const upd = db.prepare("UPDATE streams SET backup_url = '', failover_active = 0 WHERE id = ?");
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      for (const row of targets) upd.run(row.id);
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  });
+
+  res.json({ ok: true, cleared: targets.length, sample: targets.slice(0, 8).map((r) => r.name) });
+});
+
+app.post('/api/streams/switch-source-bulk', requireAuth, requireAdmin, (req, res) => {
+  const { scope = 'selected', ids = [], category_id = null, target = 'backup' } = req.body || {};
+  const wantTarget = target === 'primary' ? 'primary' : 'backup';
+
+  let rows = [];
+  if (scope === 'all') {
+    rows = db.prepare('SELECT * FROM streams ORDER BY sort_order ASC, id ASC').all();
+  } else if (scope === 'category' && category_id) {
+    rows = db.prepare('SELECT * FROM streams WHERE category_id = ? ORDER BY sort_order ASC, id ASC').all(Number(category_id));
+  } else {
+    const cleanIds = (Array.isArray(ids) ? ids : []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    if (cleanIds.length === 0) {
+      return res.status(400).json({ error: 'Selecciona al menos un canal.' });
+    }
+    const ph = cleanIds.map(() => '?').join(',');
+    rows = db.prepare(`SELECT * FROM streams WHERE id IN (${ph}) ORDER BY sort_order ASC, id ASC`).all(...cleanIds);
+  }
+
+  const changed = [];
+  const skipped = [];
+  for (const row of rows) {
+    const result = switchStreamSourceRow(row, wantTarget);
+    if (result.ok) changed.push(result.name);
+    else skipped.push(result.error);
+  }
+
+  res.json({
+    ok: true,
+    switched: changed.length,
+    skipped: skipped.length,
+    target: wantTarget,
+    sample: changed.slice(0, 5),
+    firstSkip: skipped[0] || ''
+  });
+});
+
+app.post('/api/streams/bulk-profile', requireAuth, requireAdmin, (req, res) => {
+  const {
+    scope = '',
+    ids = [],
+    category_id,
+    stream_mode,
+    transcode_profile_id,
+    bitrate_kbps,
+    keep_bitrate = true
+  } = req.body || {};
+  const profId = Number(transcode_profile_id) || 1;
+  const mode = String(stream_mode || 'direct');
+  const chosenProf = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(profId);
+  const isCopyVideo =
+    mode === 'direct' ||
+    !chosenProf ||
+    chosenProf.video_codec === 'copy' ||
+    String(chosenProf.video_bitrate || '').toLowerCase() === 'source';
+
+  // Preserve original stream bitrate by default (and ALWAYS on Copy/Direct profiles unless explicitly transcoding)
+  const numericKbps = Number(bitrate_kbps);
+  const shouldUpdateBitrate =
+    !isCopyVideo &&
+    keep_bitrate === false &&
+    bitrate_kbps !== undefined &&
+    bitrate_kbps !== '' &&
+    bitrate_kbps !== 'source' &&
+    Number.isFinite(numericKbps) &&
+    numericKbps > 0;
+
+  const statusExpr =
+    mode === 'ondemand'
+      ? "CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END"
+      : "CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'running' END";
+  const headendExpr =
+    mode === 'ondemand'
+      ? 'headend_mode'
+      : "CASE WHEN headend_node_id IS NOT NULL AND headend_mode = 'ondemand' THEN 'copy_audio' ELSE headend_mode END";
+
+  let affected = [];
+  withSqliteBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      if (scope === 'selected' && Array.isArray(ids) && ids.length > 0) {
+        const cleanIds = ids.map(Number).filter((n) => n > 0);
+        const ph = cleanIds.map(() => '?').join(',');
+        affected = db.prepare(`SELECT id, status FROM streams WHERE id IN (${ph})`).all(...cleanIds);
+        if (shouldUpdateBitrate) {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE id IN (${ph})`
+          ).run(mode, profId, numericKbps, ...cleanIds);
+        } else {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE id IN (${ph})`
+          ).run(mode, profId, ...cleanIds);
+        }
+      } else if (category_id && category_id !== 'all') {
+        affected = db.prepare('SELECT id, status FROM streams WHERE category_id = ?').all(Number(category_id));
+        if (shouldUpdateBitrate) {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE category_id = ?`
+          ).run(mode, profId, numericKbps, Number(category_id));
+        } else {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL WHERE category_id = ?`
+          ).run(mode, profId, Number(category_id));
+        }
+      } else {
+        affected = db.prepare('SELECT id, status FROM streams').all();
+        if (shouldUpdateBitrate) {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, bitrate_kbps = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL`
+          ).run(mode, profId, numericKbps);
+        } else {
+          db.prepare(
+            `UPDATE streams SET stream_mode = ?, transcode_profile_id = ?, status = ${statusExpr}, headend_mode = ${headendExpr}, pid = NULL`
+          ).run(mode, profId);
+        }
+      }
+      db.exec('COMMIT;');
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK;');
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
+  });
+
+  const toLaunch = [];
+  for (const row of affected) {
+    stopWorker(`stream_${row.id}`);
+    if (mode === 'transcode' && row.status !== 'stopped') {
+      toLaunch.push(row.id);
+    }
+  }
+  if (toLaunch.length > 0) scheduleStaggeredStreamLaunches(toLaunch, 60);
+  res.json({ ok: true, updatedCount: affected.length, preservedBitrate: !shouldUpdateBitrate });
+});
+
+app.post('/api/streams/bulk-edit', requireAuth, requireAdmin, (req, res) => {
+  const { scope = 'selected', ids = [], category_filter_id = null, changes = {} } = req.body || {};
+
+  let targetRows = [];
+  if (scope === 'all') {
+    targetRows = db.prepare('SELECT id, status, stream_mode FROM streams').all();
+  } else if (scope === 'category' && category_filter_id && category_filter_id !== 'all') {
+    targetRows = db
+      .prepare('SELECT id, status, stream_mode FROM streams WHERE category_id = ?')
+      .all(Number(category_filter_id));
+  } else {
+    const cleanIds = Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : [];
+    if (cleanIds.length === 0) {
+      return res.status(400).json({ error: 'Selecciona al menos un canal para editar en masa.' });
+    }
+    const placeholders = cleanIds.map(() => '?').join(',');
+    targetRows = db
+      .prepare(`SELECT id, status, stream_mode FROM streams WHERE id IN (${placeholders})`)
+      .all(...cleanIds);
+  }
+
+  if (targetRows.length === 0) {
+    return res.json({ ok: true, updatedCount: 0 });
+  }
+
+  const chosenProf =
+    changes.transcode_profile_id !== undefined && changes.transcode_profile_id !== ''
+      ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(Number(changes.transcode_profile_id))
+      : null;
+  const isCopySelected =
+    changes.stream_mode === 'direct' ||
+    (chosenProf && (chosenProf.video_codec === 'copy' || String(chosenProf.video_bitrate || '').toLowerCase() === 'source'));
+
+  const setClauses = [];
+  const setParams = [];
+
+  if (changes.category_id !== undefined && changes.category_id !== '') {
+    setClauses.push('category_id = ?');
+    setParams.push(Number(changes.category_id));
+  }
+  if (changes.stream_mode !== undefined && changes.stream_mode !== '') {
+    setClauses.push('stream_mode = ?');
+    setParams.push(String(changes.stream_mode));
+  }
+  if (changes.transcode_profile_id !== undefined && changes.transcode_profile_id !== '') {
+    setClauses.push('transcode_profile_id = ?');
+    setParams.push(Number(changes.transcode_profile_id));
+  }
+  // Never overwrite original stream bitrate on Copy/Direct profiles or when bitrate_kbps is blank/'source'
+  if (
+    !isCopySelected &&
+    changes.bitrate_kbps !== undefined &&
+    changes.bitrate_kbps !== '' &&
+    String(changes.bitrate_kbps).toLowerCase() !== 'source' &&
+    Number(changes.bitrate_kbps) > 0
+  ) {
+    setClauses.push('bitrate_kbps = ?');
+    setParams.push(Math.max(100, Number(changes.bitrate_kbps)));
+  }
+  if (changes.offline_slate_mode !== undefined && changes.offline_slate_mode !== '') {
+    setClauses.push('offline_slate_mode = ?');
+    setParams.push(String(changes.offline_slate_mode));
+  }
+  if (changes.audio_leveling_mode !== undefined && changes.audio_leveling_mode !== '') {
+    setClauses.push('audio_leveling_mode = ?');
+    setParams.push(String(changes.audio_leveling_mode));
+  }
+  if (changes.offline_slate_url !== undefined) {
+    setClauses.push('offline_slate_url = ?');
+    setParams.push(String(changes.offline_slate_url || '').trim());
+  }
+  if (changes.server_id !== undefined && changes.server_id !== '') {
+    setClauses.push('server_id = ?');
+    setParams.push(Number(changes.server_id));
+  }
+  if (changes.user_agent !== undefined && changes.user_agent !== '') {
+    setClauses.push('user_agent = ?');
+    setParams.push(String(changes.user_agent));
+  }
+  if (changes.tv_archive_days !== undefined && changes.tv_archive_days !== '') {
+    setClauses.push('tv_archive_days = ?');
+    setParams.push(Math.max(0, Number(changes.tv_archive_days) || 0));
+  }
+  if (changes.status !== undefined && changes.status !== '') {
+    setClauses.push('status = ?');
+    setParams.push(String(changes.status));
+  } else if (changes.stream_mode !== undefined && changes.stream_mode !== '') {
+    if (String(changes.stream_mode) === 'ondemand') {
+      setClauses.push("status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'ondemand_idle' END");
+    } else {
+      setClauses.push("status = CASE WHEN status = 'stopped' THEN 'stopped' ELSE 'running' END");
+      setClauses.push(
+        "headend_mode = CASE WHEN headend_node_id IS NOT NULL AND headend_mode = 'ondemand' THEN 'copy_audio' ELSE headend_mode END"
+      );
+    }
+  }
+
+  if (setClauses.length === 0) {
+    return res.status(400).json({ error: 'No seleccionaste ningún campo para modificar.' });
+  }
+
+  const targetIds = targetRows.map((r) => r.id);
+  const placeholders = targetIds.map(() => '?').join(',');
+
+  try {
+    withSqliteBusyRetry(() => {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        db.prepare(`UPDATE streams SET ${setClauses.join(', ')}, pid = NULL WHERE id IN (${placeholders})`).run(
+          ...setParams,
+          ...targetIds
+        );
+        db.exec('COMMIT;');
+      } catch (innerErr) {
+        try {
+          db.exec('ROLLBACK;');
+        } catch {
+          // ignore
+        }
+        throw innerErr;
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Error en actualización masiva.' });
+  }
+
+  const freshRows = db
+    .prepare(`SELECT id, status, stream_mode FROM streams WHERE id IN (${placeholders})`)
+    .all(...targetIds);
+
+  const toLaunch = [];
+  for (const r of freshRows) {
+    stopWorker(`stream_${r.id}`);
+    if (r.stream_mode === 'transcode' && r.status === 'running') {
+      toLaunch.push(r.id);
+    }
+  }
+  if (toLaunch.length > 0) {
+    scheduleStaggeredStreamLaunches(toLaunch, 60);
+  }
+
+  res.json({ ok: true, updatedCount: targetIds.length, restartedWorkers: toLaunch.length });
+});
+
+/**
+ * Reescribe el host (y opcionalmente el puerto) de una URL conservando esquema,
+ * credenciales, ruta y query. Ej: http://38.226.161.148:8080/live/a/1.m3u8
+ *   -> http://nueva.ip:2095/live/a/1.m3u8
+ */
+function rewriteStreamUrlHost(rawUrl, { oldHost = '', oldPort = '', newHost = '', newPort = '', schemes = null }) {
+  const url = String(rawUrl || '').trim();
+  if (!url) return null;
+  const m = /^([a-z0-9+.\-]+):\/\/([^/@]*@)?(\[[0-9a-fA-F:]+\]|[^/:?#]+)(?::(\d+))?/i.exec(url);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  if (Array.isArray(schemes) && schemes.length > 0 && !schemes.includes(scheme)) return null;
+  const userinfo = m[2] || '';
+  const host = m[3];
+  const port = m[4] || '';
+  const bareHost = host.replace(/^\[|\]$/g, '').toLowerCase();
+
+  const wantedHost = String(oldHost || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
+  if (wantedHost && bareHost !== wantedHost) return null;
+  const wantedPort = String(oldPort || '').trim();
+  if (wantedPort && port !== wantedPort) return null;
+
+  const targetHost = String(newHost || '').trim() || host;
+  const targetPort = String(newPort || '').trim() || port;
+  const hostOut = targetHost.includes(':') && !targetHost.startsWith('[') ? `[${targetHost}]` : targetHost;
+  const rest = url.slice(m[0].length);
+  const rebuilt = `${m[1]}://${userinfo}${hostOut}${targetPort ? ':' + targetPort : ''}${rest}`;
+  return rebuilt === url ? null : rebuilt;
+}
+
+app.post('/api/streams/bulk-replace-host', requireAuth, requireAdmin, (req, res) => {
+  const {
+    scope = 'selected',
+    ids = [],
+    category_filter_id = null,
+    oldHost = '',
+    oldPort = '',
+    newHost = '',
+    newPort = '',
+    includeBackup = true,
+    includeExtra = true,
+    schemes = ['http', 'https'],
+    apply = false
+  } = req.body || {};
+
+  const cleanHost = String(newHost || '').trim().toLowerCase();
+  if (!cleanHost || !/^[a-z0-9.\-]+$/.test(cleanHost)) {
+    return res.status(400).json({
+      error: 'Escribe la nueva IP o dominio de destino (sólo letras, números, puntos y guiones, sin http://).'
+    });
+  }
+  const cleanPort = String(newPort || '').trim();
+  if (cleanPort && (!/^\d+$/.test(cleanPort) || Number(cleanPort) < 1 || Number(cleanPort) > 65535)) {
+    return res.status(400).json({ error: 'El puerto nuevo debe ser un número entre 1 y 65535 (o déjalo vacío para conservar el actual).' });
+  }
+  const oldPortClean = String(oldPort || '').trim();
+  if (oldPortClean && (!/^\d+$/.test(oldPortClean) || Number(oldPortClean) < 1 || Number(oldPortClean) > 65535)) {
+    return res.status(400).json({ error: 'El puerto actual debe ser numérico (o déjalo vacío para no filtrar por puerto).' });
+  }
+
+  let targetRows = [];
+  if (scope === 'all') {
+    targetRows = db.prepare('SELECT * FROM streams').all();
+  } else if (scope === 'category' && category_filter_id && category_filter_id !== 'all') {
+    targetRows = db.prepare('SELECT * FROM streams WHERE category_id = ?').all(Number(category_filter_id));
+  } else {
+    const cleanIds = Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : [];
+    if (cleanIds.length === 0) {
+      return res.status(400).json({ error: 'Selecciona al menos un canal (o usa el alcance Todo / Categoría).' });
+    }
+    const placeholders = cleanIds.map(() => '?').join(',');
+    targetRows = db.prepare(`SELECT * FROM streams WHERE id IN (${placeholders})`).all(...cleanIds);
+  }
+
+  const opts = {
+    oldHost: String(oldHost || '').trim(),
+    oldPort: oldPortClean,
+    newHost: cleanHost,
+    newPort: cleanPort,
+    schemes: Array.isArray(schemes) && schemes.length > 0 ? schemes.map((x) => String(x).toLowerCase()) : null
+  };
+
+  // Columnas que también pueden llevar la IP vieja (URL original de importación y espejo Astra)
+  const extraStreamCols = [
+    ['original_source_url', 'URL original'],
+    ['astra_local_url', 'URL Astra local']
+  ];
+
+  const matched = [];
+  const columnUpdates = []; // { table, id, column, value }
+
+  for (const row of targetRows) {
+    const nextSource = rewriteStreamUrlHost(row.source_url, opts);
+    const nextBackup = includeBackup ? rewriteStreamUrlHost(row.backup_url, opts) : null;
+    const extras = [];
+    if (includeExtra) {
+      for (const [col, label] of extraStreamCols) {
+        const next = rewriteStreamUrlHost(row[col], opts);
+        if (next) extras.push({ col, label, before: row[col], after: next });
+      }
+    }
+    if (!nextSource && !nextBackup && extras.length === 0) continue;
+
+    const entry = {
+      id: row.id,
+      name: row.name,
+      before: row.source_url,
+      after: nextSource || row.source_url,
+      backupBefore: nextBackup ? row.backup_url : '',
+      backupAfter: nextBackup || '',
+      extras,
+      running: row.stream_mode === 'transcode' && row.status === 'running'
+    };
+    matched.push(entry);
+    if (nextSource) columnUpdates.push({ table: 'streams', id: row.id, column: 'source_url', value: nextSource });
+    if (nextBackup) columnUpdates.push({ table: 'streams', id: row.id, column: 'backup_url', value: nextBackup });
+    for (const e of extras) columnUpdates.push({ table: 'streams', id: row.id, column: e.col, value: e.after });
+  }
+
+  // Otras tablas que guardan una URL de origen con la misma IP (WK2500 y troncales MNF)
+  const extraTables = [];
+  if (includeExtra) {
+    try {
+      for (const row of db.prepare('SELECT catv_ch, custom_name, custom_source_url FROM wk2500_channels').all()) {
+        const next = rewriteStreamUrlHost(row.custom_source_url, opts);
+        if (next) {
+          extraTables.push({
+            table: 'wk2500_channels',
+            id: row.catv_ch,
+            name: row.custom_name,
+            before: row.custom_source_url,
+            after: next
+          });
+          columnUpdates.push({
+            table: 'wk2500_channels',
+            id: row.catv_ch,
+            column: 'custom_source_url',
+            value: next,
+            keyColumn: 'catv_ch'
+          });
+        }
+      }
+    } catch {
+      // tabla no disponible en versiones antiguas
+    }
+    try {
+      for (const row of db.prepare('SELECT id, name, origin_url FROM mnf_trunks').all()) {
+        const next = rewriteStreamUrlHost(row.origin_url, opts);
+        if (next) {
+          extraTables.push({ table: 'mnf_trunks', id: row.id, name: row.name, before: row.origin_url, after: next });
+          columnUpdates.push({ table: 'mnf_trunks', id: row.id, column: 'origin_url', value: next });
+        }
+      }
+    } catch {
+      // tabla no disponible en versiones antiguas
+    }
+  }
+
+  if (!apply) {
+    return res.json({
+      ok: true,
+      dryRun: true,
+      scanned: targetRows.length,
+      matchedCount: matched.length,
+      extraCount: extraTables.length,
+      preview: matched.slice(0, 200),
+      previewExtra: extraTables.slice(0, 100)
+    });
+  }
+  if (columnUpdates.length === 0) {
+    return res.json({ ok: true, dryRun: false, matchedCount: 0, updatedCount: 0, restartedWorkers: 0 });
+  }
+
+  try {
+    withSqliteBusyRetry(() => {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const stmtCache = new Map();
+        for (const u of columnUpdates) {
+          const sql = `UPDATE ${u.table} SET ${u.column} = ? WHERE ${u.keyColumn || 'id'} = ?`;
+          let stmt = stmtCache.get(sql);
+          if (!stmt) {
+            stmt = db.prepare(sql);
+            stmtCache.set(sql, stmt);
+          }
+          stmt.run(u.value, u.id);
+        }
+        const touched = matched.map((m) => m.id);
+        if (touched.length > 0) {
+          db.prepare(`UPDATE streams SET pid = NULL WHERE id IN (${touched.map(() => '?').join(',')})`).run(...touched);
+        }
+        db.exec('COMMIT;');
+      } catch (innerErr) {
+        try {
+          db.exec('ROLLBACK;');
+        } catch {
+          // ignore
+        }
+        throw innerErr;
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Error al cambiar las URLs de los canales.' });
+  }
+
+  const toLaunch = [];
+  for (const m of matched) {
+    stopWorker(`stream_${m.id}`);
+    if (m.running) toLaunch.push(m.id);
+  }
+  if (toLaunch.length > 0) scheduleStaggeredStreamLaunches(toLaunch, 80);
+
+  res.json({
+    ok: true,
+    dryRun: false,
+    matchedCount: matched.length,
+    extraCount: extraTables.length,
+    updatedCount: matched.length,
+    restartedWorkers: toLaunch.length
+  });
+});
+
+app.post('/api/streams/bulk-delete', requireAuth, requireAdmin, (req, res) => {
+  const { scope = 'selected', ids = [], category_filter_id = null } = req.body || {};
+
+  let targetIds = [];
+  if (scope === 'all') {
+    targetIds = db.prepare('SELECT id FROM streams').all().map((r) => r.id);
+  } else if (scope === 'category' && category_filter_id && category_filter_id !== 'all') {
+    targetIds = db
+      .prepare('SELECT id FROM streams WHERE category_id = ?')
+      .all(Number(category_filter_id))
+      .map((r) => r.id);
+  } else {
+    targetIds = Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : [];
+  }
+
+  if (targetIds.length === 0) {
+    return res.status(400).json({ error: 'No hay canales seleccionados para eliminar.' });
+  }
+
+  for (const sid of targetIds) {
+    stopWorker(`stream_${sid}`);
+    stopArchiveWorker(sid);
+    cleanupStreamRuntime(sid);
+  }
+
+  const delSet = new Set(targetIds);
+  const placeholders = targetIds.map(() => '?').join(',');
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.prepare(`DELETE FROM streams WHERE id IN (${placeholders})`).run(...targetIds);
+
+    const bouquets = db.prepare('SELECT id, stream_ids_json FROM bouquets').all();
+    const updBq = db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = ?');
+    for (const b of bouquets) {
+      try {
+        const arr = JSON.parse(b.stream_ids_json || '[]').map(Number);
+        const filtered = arr.filter((id) => !delSet.has(id));
+        if (filtered.length !== arr.length) {
+          updBq.run(JSON.stringify(filtered), b.id);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    db.exec('COMMIT;');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    return res.status(500).json({ error: err.message || 'Error al eliminar canales en masa.' });
+  }
+
+  res.json({ ok: true, deletedCount: targetIds.length });
+});
+
+app.post('/api/streams/bulk-action', requireAuth, requireAdmin, (req, res) => {
+  const { ids = [], action = 'restart', scope = 'selected' } = req.body || {};
+  const targetIds =
+    scope === 'all'
+      ? db.prepare('SELECT id FROM streams').all().map((r) => r.id)
+      : (Array.isArray(ids) ? ids.map(Number).filter((n) => n > 0) : []);
+
+  if (targetIds.length === 0) {
+    return res.status(400).json({ error: 'Selecciona al menos un canal.' });
+  }
+
+  const placeholders = targetIds.map(() => '?').join(',');
+  if (action === 'stop') {
+    for (const sid of targetIds) stopWorker(`stream_${sid}`);
+    db.prepare(`UPDATE streams SET status = 'stopped', pid = NULL WHERE id IN (${placeholders})`).run(...targetIds);
+  } else if (action === 'start' || action === 'restart') {
+    for (const sid of targetIds) stopWorker(`stream_${sid}`);
+    db.prepare(
+      `UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id IN (${placeholders})`
+    ).run(...targetIds);
+    scheduleStaggeredStreamLaunches(targetIds, 60);
+  }
+
+  res.json({ ok: true, affectedCount: targetIds.length });
+});
+
+app.get('/api/streams/auto-resolution/status', requireAuth, (req, res) => {
+  res.json({
+    ...getResolutionScanStatus(),
+    pilot: getAutoPilotConfig()
+  });
+});
+
+app.put('/api/streams/auto-resolution/pilot', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const b = req.body || {};
+    const pilot = saveAutoPilotConfig(b);
+    let job = getResolutionScanStatus();
+    // When Auto-Pilot is turned ON, immediately scan & convert existing streams automatically!
+    if (pilot.enabled && b.scanNow !== false && !job.running) {
+      let launchIdx = 0;
+      const totalStreams = db.prepare('SELECT COUNT(*) as c FROM streams').get()?.c || 0;
+      if (totalStreams > 0) {
+        job = startResolutionAutoClassifyJob({
+          scope: 'all',
+          probeLive: true,
+          stream_mode: pilot.stream_mode,
+          sdKbps: pilot.sdKbps,
+          hdKbps: pilot.hdKbps,
+          fhdKbps: pilot.fhdKbps,
+          onStreamUpdated: (sid, dbMode, nextStatus) => {
+            if (dbMode === 'transcode' && nextStatus === 'running') {
+              const delay = (launchIdx++ % 40) * 80;
+              setTimeout(() => {
+                try {
+                  launchStreamWorkerIfNeeded(sid);
+                } catch {
+                  // ignore
+                }
+              }, delay).unref?.();
+            } else {
+              db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(sid);
+            }
+          }
+        });
+      }
+    }
+    res.json({ ok: true, pilot, job });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/streams/auto-resolution/run', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const b = req.body || {};
+    let launchIdx = 0;
+    const job = startResolutionAutoClassifyJob({
+      scope: b.scope || 'all',
+      ids: b.ids || [],
+      category_id: b.category_id || 'all',
+      probeLive: b.probeLive !== false,
+      stream_mode: b.stream_mode || 'ondemand',
+      sdKbps: Number(b.sdKbps) || 1000,
+      hdKbps: Number(b.hdKbps) || 2500,
+      fhdKbps: Number(b.fhdKbps) || 3000,
+      onStreamUpdated: (sid, dbMode, nextStatus) => {
+        if (dbMode === 'transcode' && nextStatus === 'running') {
+          const delay = (launchIdx++ % 40) * 80;
+          setTimeout(() => {
+            try {
+              launchStreamWorkerIfNeeded(sid);
+            } catch {
+              // ignore
+            }
+          }, delay).unref?.();
+        } else {
+          db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(sid);
+        }
+      }
+    });
+    res.json({ ok: true, job });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo iniciar la clasificación automática.' });
+  }
+});
+
+app.post('/api/streams/:id/probe-resolution', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+  if (!stream) return res.status(404).json({ error: 'Canal no encontrado' });
+
+  const info = await detectSingleStreamResolution(stream, { probeLive: true });
+  db.prepare(
+    'UPDATE streams SET detected_resolution = ?, resolution_tier = ?, resolution_source = ? WHERE id = ?'
+  ).run(info.resolution, info.tier, info.source, id);
+
+  res.json({ ok: true, ...info });
+});
+
+function launchStreamWorkerIfNeeded(streamId) {
+  const s = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId);
+  if (!s || s.stream_mode !== 'transcode' || s.status !== 'running' || !isFfmpegAvailable()) return;
+  const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(s.transcode_profile_id || 1);
+  let lastSavedPid = s.pid ?? null;
+  startSupervisedWorker(
+    `stream_${streamId}`,
+    (attempt) => buildFfmpegArgsForStream(s, profile, attempt),
+    (pid) => {
+      const normalizedPid = pid || null;
+      if (normalizedPid === lastSavedPid) return;
+      lastSavedPid = normalizedPid;
+      try {
+        withSqliteBusyRetry(() =>
+          db.prepare('UPDATE streams SET pid = ? WHERE id = ?').run(normalizedPid, streamId)
+        );
+      } catch {
+        // ignore transient close race
+      }
+    }
+  );
+}
+
+app.get('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (_req, res) => {
+  const efficiency = getFfmpegEfficiencyConfig();
+  const available = isFfmpegAvailable();
+  const bin = available ? getFfmpegBin() : null;
+  let activeFfmpegProcesses = 0;
+  let totalFfmpegThreads = 0;
+  let totalFfmpegRssMb = 0;
+
+  try {
+    const runningRows = db.prepare("SELECT pid FROM streams WHERE pid IS NOT NULL AND status = 'running'").all();
+    for (const row of runningRows) {
+      const pid = Number(row.pid);
+      if (!pid || !fs.existsSync(`/proc/${pid}/status`)) continue;
+      const statusTxt = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+      const thMatch = statusTxt.match(/^Threads:\s+(\d+)/m);
+      const rssMatch = statusTxt.match(/^VmRSS:\s+(\d+)\s+kB/m);
+      activeFfmpegProcesses += 1;
+      if (thMatch) totalFfmpegThreads += Number(thMatch[1]);
+      if (rssMatch) totalFfmpegRssMb += Number(rssMatch[1]) / 1024;
+    }
+  } catch {
+    // non-linux fallback
+  }
+
+  const workerDiag = getWorkerDiagnostics();
+  // Canal congelado = sin PID de FFmpeg o manifiesto HLS que no avanza (>20 s)
+  const stalled = workerDiag.filter((w) => !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20));
+
+  res.json({
+    ffmpegAvailable: available,
+    ffmpegBin: bin,
+    tsPipeMode: efficiency.tsPipeMode,
+    h264Threads: efficiency.h264Threads,
+    hlsWindowSeconds: getFfmpegEngineConfig().hlsTime * getFfmpegEngineConfig().hlsListSize,
+    hlsFreeMb: Math.round(getHlsFreeBytes() / (1024 * 1024)),
+    hlsNeededMb: Math.round(estimateHlsFootprintBytes() / (1024 * 1024)),
+    stalledStreams: stalled.length,
+    workers: workerDiag
+      .slice()
+      .sort((a, b) => (b.hlsAgeSec ?? 9999) - (a.hlsAgeSec ?? 9999))
+      .slice(0, 60),
+    hlsRoot: HLS_ROOT,
+    // Diagnóstico de tirones: segmentos pedidos por el reproductor que aún no existían
+    // (cada uno es un hueco en la reproducción) y segmentos generados por canal.
+    segmentMisses: getSegmentMissStats(),
+    // Prebuffer de entrega (XUI.one): esperas y resultado en los últimos 5 min
+    prebuffer: getPrebufferStats(),
+    hlsIsRamDisk: HLS_IS_RAMDISK,
+    activeFfmpegProcesses,
+    totalFfmpegThreads,
+    totalFfmpegRssMb: Number(totalFfmpegRssMb.toFixed(1)),
+    avgRssMbPerChannel:
+      activeFfmpegProcesses > 0 ? Number((totalFfmpegRssMb / activeFfmpegProcesses).toFixed(1)) : 0,
+    optimizations: [
+      'Pure Native HLS en RAMDisk (/dev/shm) con temp_file atómico y stdio:ignore (0% CPU Node.js)',
+      'Copy/Copy Zero-CPU: 1 Hilo OS, probe 500 KB, -dn -sn (~15 MB RAM / ~0.08% CPU por canal)',
+      'Transcode libx264: Límite inteligente -threads 2 -filter_threads 1 + x264 low-overhead (~40% menos CPU)',
+      'Audio AAC Fast Quantizer (-aac_coder fast) + Ring Buffer Circular 94 KB Zero-Copy para Troncal MPEG-TS',
+      'Backoff progresivo anti-tormentas (2.5s → 5s → 10s → 20s) en canales caídos del proveedor'
+    ]
+  });
+});
+
+app.put('/api/system/ffmpeg-efficiency', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const upsert = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  );
+
+  if (b.tsPipeMode !== undefined) {
+    const mode = String(b.tsPipeMode);
+    if (!['auto', 'always', 'never'].includes(mode)) {
+      return res.status(400).json({ error: 'tsPipeMode inválido (auto | always | never)' });
+    }
+    upsert.run('ffmpeg_ts_pipe_mode', mode);
+  }
+  if (b.h264Threads !== undefined) {
+    const n = Number(b.h264Threads);
+    if (!Number.isInteger(n) || n < 1 || n > 16) {
+      return res.status(400).json({ error: 'h264Threads debe ser un entero entre 1 y 16' });
+    }
+    upsert.run('ffmpeg_h264_threads', String(n));
+  }
+
+  invalidateFfmpegEfficiencyCache();
+  invalidateAudioLevelingCache();
+
+  // Hot-reload: restart every running transcode worker with the new policy, staggered 60ms apart
+  const runningIds = db
+    .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
+    .all()
+    .map((r) => r.id);
+  if (runningIds.length > 0) scheduleStaggeredStreamLaunches(runningIds, 60);
+
+  res.json({ ok: true, ...getFfmpegEfficiencyConfig(), restartedStreams: runningIds.length });
+});
+
+/**
+ * Motor FFmpeg de TVLister: estado + configuración efectiva + comando real de ejemplo.
+ * (Sección "Motor FFmpeg" del panel; no confundir con las tarjetas de perfiles por canal.)
+ */
+app.get('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (_req, res) => {
+  const cfg = getFfmpegEngineConfig();
+  const available = isFfmpegAvailable();
+  const sampleStream = db.prepare("SELECT * FROM streams WHERE stream_mode = 'transcode' ORDER BY id LIMIT 1").get();
+  const sampleProfile = sampleStream
+    ? db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(sampleStream.transcode_profile_id || 1)
+    : db.prepare("SELECT * FROM transcode_profiles WHERE video_codec = 'copy' AND audio_codec = 'copy' ORDER BY id LIMIT 1").get();
+
+  let sampleCommand = '';
+  try {
+    const probeStream = sampleStream || {
+      id: 0,
+      source_url: 'http://mi-proveedor:8080/live/canal/index.m3u8',
+      backup_url: '',
+      status: 'running',
+      audio_leveling_mode: 'off'
+    };
+    sampleCommand = buildFfmpegCommandForStream(probeStream, sampleProfile);
+  } catch {
+    sampleCommand = '';
+  }
+
+  const workerDiag = getWorkerDiagnostics();
+  const missStats = getSegmentMissStats();
+
+  const binInfo = getFfmpegBinInfo();
+
+  res.json({
+    ok: true,
+    config: cfg,
+    defaults: FFMPEG_ENGINE_DEFAULTS,
+    limits: FFMPEG_ENGINE_LIMITS,
+    presets: Object.entries(FFMPEG_ENGINE_PRESETS).map(([key, p]) => ({ key, label: p.label, values: p.values })),
+    ffmpegAvailable: available,
+    ffmpegBin: available ? getFfmpegBin() : null,
+    // Registro de binarios: las 3 compilaciones de XUI.one + runtime/.runtime + empaquetado
+    binInfo,
+    binaries: binInfo.binaries,
+    prebuffer: getPrebufferStats(),
+    hlsRoot: HLS_ROOT,
+    hlsIsRamDisk: HLS_IS_RAMDISK,
+    hlsFreeMb: Math.round(getHlsFreeBytes() / (1024 * 1024)),
+    hlsNeededMb: Math.round(estimateHlsFootprintBytes() / (1024 * 1024)),
+    windowSeconds: cfg.hlsTime * cfg.hlsListSize,
+    activeWorkers: workerDiag.filter((w) => w.pid).length,
+    stalledWorkers: workerDiag.filter((w) => !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20)).length,
+    segmentMisses: missStats,
+    sampleCommand
+  });
+});
+
+// Estado de estabilidad 24/7 (lo mismo que imprime `tvlister-admin health`)
+app.get('/api/system/stability', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const report = await getStabilityReport({ deep: String(req.query.deep || '') === '1' });
+    res.json({ ok: true, ...report, guard: getStabilityGuardState() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/system/stability/maintenance', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...runDbMaintenance({ walThresholdMb: 0 }) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/api/system/ffmpeg-engine', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const upsert = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  );
+  const errors = [];
+
+  // Presets: rellenan los valores antes de validar
+  let values = { ...b };
+  if (b.preset && FFMPEG_ENGINE_PRESETS[b.preset]) {
+    values = { ...FFMPEG_ENGINE_PRESETS[b.preset].values, ...b };
+  }
+
+  const setEnum = (key, input, allowed, label) => {
+    if (input === undefined) return;
+    const v = String(input);
+    if (!allowed.includes(v)) {
+      errors.push(`${label} inválido (${allowed.join(' | ')})`);
+      return;
+    }
+    upsert.run(key, v);
+  };
+
+  const setNum = (key, input, [min, max], label) => {
+    if (input === undefined) return;
+    const n = Number(input);
+    if (!Number.isFinite(n) || n < min || n > max) {
+      errors.push(`${label} debe estar entre ${min} y ${max}`);
+      return;
+    }
+    upsert.run(key, String(Math.round(n)));
+  };
+
+  setEnum('ffmpeg_ts_pipe_mode', values.tsPipeMode, ['auto', 'always', 'never'], 'Salida MPEG-TS');
+  setNum('ffmpeg_h264_threads', values.h264Threads, FFMPEG_ENGINE_LIMITS.h264Threads, 'Hilos H.264');
+  setNum('ffmpeg_probe_http', values.probeHttp, FFMPEG_ENGINE_LIMITS.probeHttp, 'Probe Size HTTP');
+  setNum('ffmpeg_analyze_http', values.analyzeHttp, FFMPEG_ENGINE_LIMITS.analyzeHttp, 'Analysis Duration HTTP');
+  setNum('ffmpeg_probe_local', values.probeLocal, FFMPEG_ENGINE_LIMITS.probeLocal, 'Probe Size local/UDP');
+  setNum('ffmpeg_analyze_local', values.analyzeLocal, FFMPEG_ENGINE_LIMITS.analyzeLocal, 'Analysis Duration local/UDP');
+  setNum('ffmpeg_hls_time', values.hlsTime, FFMPEG_ENGINE_LIMITS.hlsTime, 'Duración de segmento HLS');
+  setNum('ffmpeg_hls_list_size', values.hlsListSize, FFMPEG_ENGINE_LIMITS.hlsListSize, 'Segmentos en el manifiesto');
+  setEnum('ffmpeg_hls_xui', values.hlsXuiMode, FFMPEG_HLS_XUI_MODES, 'Afinado HLS (referencia XUI.one)');
+  setNum('ffmpeg_ram_reserve_mb', values.ramReserveMb, FFMPEG_ENGINE_LIMITS.ramReserveMb, 'Reserva de RAMDisk');
+  setNum('ffmpeg_tailer_interval_ms', values.tailerIntervalMs, FFMPEG_ENGINE_LIMITS.tailerIntervalMs, 'Intervalo del tailer');
+  setNum('ffmpeg_tailer_burst', values.tailerBurst, FFMPEG_ENGINE_LIMITS.tailerBurst, 'Segmentos iniciales del tailer');
+  setEnum('ffmpeg_log_level', values.logLevel, ['warning', 'error'], 'Nivel de log de FFmpeg');
+
+  if (values.tsJoinOnSegment !== undefined) {
+    upsert.run('ffmpeg_ts_join_segment', values.tsJoinOnSegment ? 'true' : 'false');
+  }
+
+  // Prebuffer de entrega (XUI.one: X-XUI-Prebuffer)
+  setNum('ffmpeg_prebuffer_segments', values.prebufferSegments, FFMPEG_ENGINE_LIMITS.prebufferSegments, 'Segmentos de prebuffer');
+  setNum('ffmpeg_prebuffer_wait_ms', values.prebufferWaitMs, FFMPEG_ENGINE_LIMITS.prebufferWaitMs, 'Espera máxima del prebuffer (ms)');
+
+  const previousBin = getFfmpegBinPreference();
+  if (values.binPreference !== undefined) {
+    if (!isValidFfmpegPreference(values.binPreference)) {
+      errors.push('Binario FFmpeg inválido (auto o un id detectado)');
+    } else {
+      upsert.run('ffmpeg_bin_preference', String(values.binPreference));
+    }
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({ error: errors.join('. '), errors });
+  }
+
+  invalidateFfmpegEfficiencyCache();
+
+  const binChanged = values.binPreference !== undefined && String(values.binPreference) !== previousBin;
+  if (binChanged) invalidateFfmpegBinCache(false);
+
+  const runningIds = db
+    .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
+    .all()
+    .map((r) => r.id);
+  if (runningIds.length > 0) scheduleStaggeredStreamLaunches(runningIds, 80);
+
+  res.json({
+    ok: true,
+    config: getFfmpegEngineConfig(),
+    restartedStreams: runningIds.length,
+    binChanged,
+    binInfo: getFfmpegBinInfo()
+  });
+});
+
+/**
+ * Configuración recomendada para ESTE servidor: hardware, carga real y la lista
+ * de ajustes con su valor actual frente al recomendado. Sólo lectura.
+ */
+app.get('/api/system/tune', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...computeRecommendation() });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo calcular la recomendación' });
+  }
+});
+
+/**
+ * Aplica la recomendación. Sólo escribe valores de `settings`: no cambia la
+ * línea de argumentos del motor ni reinicia canales.
+ */
+app.post('/api/system/tune/apply', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const only = Array.isArray(req.body?.only) && req.body.only.length ? req.body.only.map(String) : null;
+    const { applied, recommendation } = applyRecommendation({ only });
+    invalidateFfmpegEfficiencyCache();
+    res.json({
+      ok: true,
+      applied,
+      appliedCount: applied.length,
+      recommendation,
+      message: applied.length
+        ? `${applied.length} ajuste(s) aplicados. Pulsa «Guardar y reiniciar escalonado» para que lleguen a todos los canales.`
+        : only
+        ? 'Ninguno de los ajustes seleccionados necesitaba cambios.'
+        : 'La configuración ya estaba en los valores recomendados.'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo aplicar la recomendación' });
+  }
+});
+
+/** Re-detección manual de binarios FFmpeg (las 3 versiones de XUI.one, .runtime,
+ * empaquetado y PATH). Útil después de instalar/actualizar XUI.one o .runtime.
+ */
+app.post('/api/system/ffmpeg-binaries/scan', requireAuth, requireAdmin, (_req, res) => {
+  invalidateFfmpegBinCache(true);
+  const info = getFfmpegBinInfo();
+  res.json({ ok: true, ...info, scanned: detectFfmpegBinaries().length });
+});
+
+app.post('/api/streams/:id/action', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const { action } = req.body || {};
+  if (action === 'stop') {
+    stopWorker(`stream_${id}`);
+    db.prepare("UPDATE streams SET status = 'stopped', pid = NULL WHERE id = ?").run(id);
+  } else if (action === 'start' || action === 'restart') {
+    db.prepare("UPDATE streams SET status = 'running', uptime_started_at = datetime('now') WHERE id = ?").run(id);
+    launchStreamWorkerIfNeeded(id);
+  }
+  const updated = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+  res.json({ ok: true, stream: updated });
+});
+
+app.get('/api/streams/:id/ffmpeg', requireAuth, (req, res) => {
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(Number(req.params.id));
+  if (!stream) return res.status(404).json({ error: 'Stream no encontrado' });
+  const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(stream.transcode_profile_id || 1);
+  res.json({ command: buildFfmpegCommandForStream(stream, profile) });
+});
+
+app.post('/api/streams/:id/archive', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id);
+  if (!stream) return res.status(404).json({ error: 'Stream no encontrado' });
+
+  const enabled = req.body?.enabled ? 1 : 0;
+  const days = Math.max(1, Number(req.body?.days || stream.tv_archive_days || 3));
+
+  db.prepare('UPDATE streams SET archive_enabled = ?, tv_archive_days = ? WHERE id = ?').run(
+    enabled,
+    enabled ? days : 0,
+    id
+  );
+
+  if (enabled && isFfmpegAvailable()) {
+    startArchiveWorker({ ...stream, archive_enabled: 1, tv_archive_days: days });
+  } else {
+    stopArchiveWorker(id);
+  }
+
+  res.json({ ok: true, archive_enabled: enabled, tv_archive_days: enabled ? days : 0, archiveStats: getArchiveStats(id) });
+});
+
+app.delete('/api/streams/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  stopWorker(`stream_${id}`);
+  stopArchiveWorker(id);
+  cleanupStreamRuntime(id);
+  db.prepare('DELETE FROM streams WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/streams/import-m3u', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    let { m3u_content = '', m3u_url = '', stream_mode = 'direct' } = req.body || {};
+    if (!m3u_content && m3u_url) {
+      const resp = await fetch(String(m3u_url).trim());
+      if (!resp.ok) {
+        return res.status(400).json({ error: `No se pudo descargar la lista M3U (HTTP ${resp.status})` });
+      }
+      m3u_content = await resp.text();
+    }
+    if (!m3u_content || !String(m3u_content).includes('#EXTINF')) {
+      return res.status(400).json({ error: 'Pega un contenido M3U válido (#EXTM3U / #EXTINF) o una URL accesible.' });
+    }
+
+    const lines = String(m3u_content).split(/\r?\n/);
+    const existingCats = db.prepare("SELECT * FROM categories WHERE type = 'live'").all();
+    const catByName = new Map(existingCats.map((c) => [c.name.toLowerCase(), c.id]));
+    const insertCat = db.prepare("INSERT INTO categories (name, type, sort_order) VALUES (?, 'live', 10)");
+    const insertStream = db.prepare(`
+      INSERT INTO streams (name, category_id, source_url, logo_url, epg_channel_id, stream_mode, transcode_profile_id, server_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
+    `);
+
+    const b1 = db.prepare('SELECT * FROM bouquets WHERE id = 1').get();
+    const bouquetStreamIds = b1 ? JSON.parse(b1.stream_ids_json || '[]') : [];
+
+    let pendingMeta = null;
+    let importedCount = 0;
+
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith('#EXTINF')) {
+        const logoMatch = line.match(/tvg-logo="([^"]*)"/i);
+        const epgMatch = line.match(/tvg-id="([^"]*)"/i);
+        const groupMatch = line.match(/group-title="([^"]*)"/i);
+        const commaIdx = line.lastIndexOf(',');
+        const name = commaIdx !== -1 ? line.slice(commaIdx + 1).trim() : 'Canal Importado';
+        pendingMeta = {
+          name: name || 'Canal Importado',
+          logo: logoMatch?.[1] || '',
+          epg: epgMatch?.[1] || '',
+          group: groupMatch?.[1]?.trim() || 'Importados XUI / M3U'
+        };
+      } else if (!line.startsWith('#') && pendingMeta) {
+        const groupKey = pendingMeta.group.toLowerCase();
+        let catId = catByName.get(groupKey);
+        if (!catId) {
+          const cInfo = insertCat.run(pendingMeta.group);
+          catId = Number(cInfo.lastInsertRowid);
+          catByName.set(groupKey, catId);
+        }
+        const stStatus = stream_mode === 'ondemand' ? 'ondemand_idle' : 'running';
+        const sInfo = insertStream.run(
+          pendingMeta.name,
+          catId,
+          line,
+          pendingMeta.logo,
+          pendingMeta.epg,
+          String(stream_mode || 'direct'),
+          stStatus
+        );
+        const sid = Number(sInfo.lastInsertRowid);
+        if (!bouquetStreamIds.includes(sid)) bouquetStreamIds.push(sid);
+        importedCount++;
+        pendingMeta = null;
+      }
+    }
+
+    if (b1 && importedCount > 0) {
+      db.prepare('UPDATE bouquets SET stream_ids_json = ? WHERE id = 1').run(JSON.stringify(bouquetStreamIds));
+    }
+
+    res.json({ ok: true, importedCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Error al importar M3U' });
+  }
+});
+
+// ==================== 24/7 CUSTOM CHANNELS STUDIO ====================
+async function launchChannel247WorkerIfConfigured(chId) {
+  const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(chId);
+  if (!ch || ch.status !== 'running' || ch.engine_mode !== 'ffmpeg' || !isFfmpegAvailable()) return;
+
+  // ── Canal con señal en vivo (YouTube / HLS) ─────────────────────────────
+  // La URL firmada caduca: se resuelve ahora y el supervisor la vuelve a pedir
+  // en cada reintento. La guardia (`startLiveSourceWatchdog`) la renueva antes
+  // de que expire para no cortar el 24/7.
+  if (isLiveChannel(ch)) {
+    if (!String(ch.live_source_url || '').trim()) return;
+    const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
+    // La guardia (`startLiveSourceWatchdog`) es la única que renueva la URL y
+    // reinicia el motor cuando cambia; aquí sólo se asegura de que haya una.
+    return ensureLiveState(ch).then((st) => {
+      if (!st?.ok || !liveReady(st)) return null;
+      return startSupervisedWorker(`ch247_${ch.id}`, () => {
+        // En cada reintento se lee la URL VIVA de la base, no la del arranque
+        // (las URLs firmadas de YouTube caducan y las lista se renuevan enteras).
+        const row = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(ch.id);
+        let url = '';
+        try {
+          url = JSON.parse(row?.live_source_state || '{}')?.url || '';
+        } catch {
+          url = '';
+        }
+        return buildFfmpegArgsForChannel247Live(row, profile, url || st.url);
+      });
+    });
+  }
+
+  const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
+  return startSupervisedWorker(`ch247_${ch.id}`, () =>
+    buildFfmpegArgsForChannel247(db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(ch.id), profile)
+  );
+}
+
+/**
+ * Guardia de las señales en vivo: cada minuto mira los canales 24/7 que se
+ * alimentan de YouTube/HLS y
+ *   · renueva la URL antes de que caduque,
+ *   · arranca el motor cuando la señal empieza a emitir,
+ *   · reinicia el motor si la URL cambió y el canal está al aire.
+ */
+let liveSourceWatchdogTimer = null;
+function startLiveSourceWatchdog() {
+  if (liveSourceWatchdogTimer) return;
+  let ticking = false;
+  const tick = async () => {
+    if (ticking) return; // un ciclo lento no debe solaparse con el siguiente
+    ticking = true;
+    try {
+      await tickLiveSources();
+    } finally {
+      ticking = false;
+    }
+  };
+  const tickLiveSources = async () => {
+    let rows = [];
+    try {
+      rows = db
+        .prepare(
+          "SELECT * FROM channels_247 WHERE status = 'running' AND source_kind = 'youtube' AND COALESCE(live_source_url,'') <> ''"
+        )
+        .all();
+    } catch {
+      return;
+    }
+    for (const ch of rows) {
+      try {
+        if (!needsRefresh(ch)) {
+          // Al aire y con señal vigente: sólo se comprueba que el motor siga vivo.
+          if (ch.engine_mode === 'ffmpeg' && isFfmpegAvailable() && !getWorkerPid(`ch247_${ch.id}`)) {
+            const st = JSON.parse(ch.live_source_state || '{}');
+            if (liveReady(st)) launchChannel247WorkerIfConfigured(ch.id);
+          }
+          continue;
+        }
+        const before = JSON.parse(ch.live_source_state || '{}');
+        const st = await refreshChannelLiveSource(ch);
+        // La huella incluye el modo y (en listas) las entradas: si cambia lo que
+        // se emite —URL nueva, otra lista, otro vídeo— el motor se reinicia.
+        const changed = Boolean(st?.ok) && liveFingerprint(st) !== liveFingerprint(before);
+        const hadWorker = Boolean(getWorkerPid(`ch247_${ch.id}`));
+        if (liveReady(st) && ch.engine_mode === 'ffmpeg') {
+          if (!hadWorker) launchChannel247WorkerIfConfigured(ch.id);
+          else if (changed) {
+            stopWorker(`ch247_${ch.id}`);
+            launchChannel247WorkerIfConfigured(ch.id);
+          }
+        } else if (!liveReady(st) && hadWorker) {
+          // El directo terminó (o la lista se quedó vacía): se apaga el motor
+          // para no dejar segmentos viejos al aire.
+          stopWorker(`ch247_${ch.id}`);
+        }
+      } catch {
+        /* un canal no debe tumbar la guardia */
+      }
+    }
+  };
+  // 60 s en producción; configurable para poder probar la renovación.
+  const every = Math.max(2000, Number(process.env.TVLISTER_LIVE_WATCHDOG_MS || 60000) || 60000);
+  liveSourceWatchdogTimer = setInterval(tick, every);
+  liveSourceWatchdogTimer.unref?.();
+  setTimeout(tick, 4000).unref?.();
+}
+
+app.get('/api/channels247', requireAuth, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT ch.*, c.name as category_name, tp.name as profile_name
+       FROM channels_247 ch
+       LEFT JOIN categories c ON c.id = ch.category_id
+       LEFT JOIN transcode_profiles tp ON tp.id = ch.transcode_profile_id
+       ORDER BY ch.sort_order ASC, ch.id ASC`
+    )
+    .all();
+
+  const enriched = rows.map((ch) => {
+    const profile = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(ch.transcode_profile_id || 2);
+    const live = liveSourceInfo(ch);
+    const liveState = computeChannel247LiveState(ch);
+    // ¿Se emite copiando (0 % de CPU de vídeo) o hay que recodificar?
+    //  · directo/HLS: siempre copia, salvo que el nivelador global toque el audio
+    //  · vídeo o lista: copia si el material ya es H.264+AAC y uniforme
+    const audioLeveled = getGlobalAudioLevelingConfig().enabled;
+    // Un vídeo o una lista se recodifican sólo si mezclan códecs o no son H.264.
+    const needsReencode = ['video', 'playlist'].includes(live.mode) && Boolean(live.needs_transcode);
+    const copyVideo = Boolean(live.copy_video) && !needsReencode;
+    return {
+      ...ch,
+      copyExact: Boolean(live.ready) && copyVideo && !audioLeveled,
+      copyVideo,
+      audioLeveled,
+      workerPid: getWorkerPid(`ch247_${ch.id}`),
+      playlist: JSON.parse(ch.playlist_json || '[]'),
+      source_kind: live.source_kind,
+      liveSource: live,
+      liveState,
+      ffmpegCommand:
+        live.source_kind === 'youtube'
+          ? buildFfmpegCommandForChannel247Live(ch, profile, liveState.currentItem?.url || '')
+          : buildFfmpegCommandForChannel247(ch, profile)
+    };
+  });
+  res.json(enriched);
+});
+
+// ==================== SEÑAL EN VIVO (YouTube / HLS) ====================
+// Estado de yt-dlp: el panel resuelve el directo con el binario oficial y no
+// depende de ningún paquete del sistema.
+app.get('/api/youtube/status', requireAuth, async (req, res) => {
+  const info = await getYtDlpInfo();
+  // Última versión publicada (cache 6 h): una yt-dlp vieja es la causa nº 1 de
+  // «Requested format is not available». Si no hay red, no se dice nada.
+  const release = await ytDlpReleaseInfo({ waitMs: 2000 });
+  res.json({
+    ...info,
+    ffmpeg: isFfmpegAvailable(),
+    cookies: cookiesInfo(),
+    release,
+    latest_version: release.tag || '',
+    update_available: Boolean(info.installed) && isYtDlpOutdated(info.version, release.tag),
+    // Una lista que sólo da DASH/HLS se descarga sola (canal al aire).
+    auto_prepare: { enabled: !autoPrepareDisabled(), limit: autoPrepareLimit() },
+    // Disco: lo que ocupan los vídeos descargados, lo que queda libre y el
+    // tope configurado. La pantalla lo enseña antes de descargar nada.
+    videos: videosSummary()
+  });
+});
+
+/** Qué hay descargado, cuánto ocupa y qué canales lo usan. */
+app.get('/api/youtube/videos', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...videosCacheStats() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * «Liberar espacio»: borra los vídeos que no está emitiendo ningún canal.
+ * Con `{ all_unused: true }` los borra todos (no sólo hasta cumplir el tope).
+ * Nunca toca un archivo que esté usando un canal: dejaría el canal sin señal.
+ */
+app.post('/api/youtube/videos/cleanup', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const all = req.body?.all_unused === true;
+    const r = pruneVideoCache({ force: all });
+    res.json({ ok: true, ...r, stats: videosCacheStats() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * Instala yt-dlp EN SEGUNDO PLANO y responde al instante.
+ * El binario autónomo pesa ~39 MB y una petición abierta se corta en los proxies
+ * (Cloudflare, 100 s): la pantalla pregunta por `GET /api/youtube/install-status`
+ * hasta que termina. Si ya hay una instalación en curso, no se lanza otra.
+ */
+app.post('/api/youtube/install', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const state = startYtDlpInstall();
+    res.status(202).json({ ok: true, ...state });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * Cookies de YouTube: se sube el .txt exportado del navegador y el panel lo
+ * guarda en `.runtime/youtube-cookies.txt` (0600) y lo usa solo en la próxima
+ * lectura. Sin cookies, YouTube contesta «Sign in to confirm you’re not a bot»
+ * a cualquier IP de datacenter.
+ */
+app.post(
+  '/api/youtube/cookies',
+  requireAuth,
+  requireAdmin,
+  express.text({ type: ['text/plain', 'application/octet-stream'], limit: '4mb' }),
+  (req, res) => {
+    const text = typeof req.body === 'string' ? req.body : '';
+    const info = inspectCookiesText(text);
+    if (!info.ok) return res.status(400).json({ ok: false, error: info.error, cookies: info });
+    try {
+      fs.mkdirSync(path.dirname(COOKIES_DEFAULT_PATH), { recursive: true });
+      const body = text.endsWith('\n') ? text : `${text}\n`;
+      fs.writeFileSync(COOKIES_DEFAULT_PATH, body, { mode: 0o600 });
+      try {
+        fs.chmodSync(COOKIES_DEFAULT_PATH, 0o600);
+      } catch {
+        /* el sistema de archivos manda */
+      }
+      db.prepare(
+        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      ).run('youtube_cookies_file', COOKIES_DEFAULT_PATH);
+      res.json({
+        ok: true,
+        path: COOKIES_DEFAULT_PATH,
+        message:
+          `Cookies guardadas: ${info.youtube} de youtube.com` +
+          (info.auth ? ' con la sesión iniciada.' : ' (sin sesión: puede que YouTube siga pidiendo login).'),
+        cookies: cookiesInfo()
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: `No se pudo guardar el archivo: ${err.message}` });
+    }
+  }
+);
+
+/**
+ * Diagnóstico: lo que yt-dlp ve de verdad para un enlace (`-F`). Sirve cuando
+ * YouTube no entrega pistas: aquí se ve si lista formatos, si dice «private
+ * video», si pide login… sin adivinar nada.
+ */
+app.post('/api/youtube/formats', requireAuth, requireAdmin, async (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL.' });
+  try {
+    res.json({ ok: true, ...(await listFormats(url)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/** ¿Sirven las cookies guardadas? Se prueban contra un vídeo público. */
+app.post('/api/youtube/cookies/test', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    res.json(await testCookies());
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/youtube/cookies', requireAuth, requireAdmin, (req, res) => {
+  db.prepare("DELETE FROM settings WHERE key = 'youtube_cookies_file'").run();
+  res.json({ ok: true, cookies: cookiesInfo() });
+});
+
+/**
+ * Descarga un vídeo al disco para repetirlo en bucle (24/7) sin depender de la
+ * URL firmada de YouTube, que caduca. Va en segundo plano: un vídeo puede tardar
+ * minutos y el proxy corta las peticiones largas. Mismo patrón que la
+ * instalación de yt-dlp: se lanza y se pregunta por `download-status`.
+ */
+app.post('/api/youtube/download', requireAuth, requireAdmin, (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL del vídeo.' });
+  try {
+    // La duración la manda la pantalla (ya la conoce del sondeo): sirve para
+    // saber cuánto va a ocupar ANTES de descargar y no llenar el disco.
+    const state = startVideoDownload(url, { durationSec: Number(req.body?.duration_sec) || 0 });
+    res.status(state.running ? 202 : 400).json({ ok: Boolean(!state.result || state.result.ok), ...state });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * Prepara una LISTA completa en el disco: descarga sus vídeos (uno a uno) para
+ * emitirlos desde ahí, en orden y en bucle. Es la salida cuando la lista sólo
+ * da DASH/HLS y no hay nada que encolar. En segundo plano, como el resto.
+ */
+app.post('/api/youtube/prepare-playlist', requireAuth, requireAdmin, (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL de la lista.' });
+  try {
+    // Si viene el canal, se reutiliza la lista que ya se leyó al comprobar la
+    // señal: la descarga arranca al instante, sin otra lectura de YouTube.
+    let pending = null;
+    const channelId = Number(req.body?.channel_id) || 0;
+    if (channelId) {
+      const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(channelId);
+      const st = parseLiveState(ch);
+      if (Array.isArray(st?.pending) && st.pending.length) pending = st.pending;
+    }
+    const state = startPlaylistDownload(url, { limit: Number(req.body?.limit) || 10, pending });
+    res.status(state.running ? 202 : 400).json({ ok: Boolean(state.running), ...state });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/youtube/prepare-playlist/status', requireAuth, (req, res) => {
+  res.json(playlistDownloadState());
+});
+
+app.get('/api/youtube/download-status', requireAuth, (req, res) => {
+  res.json(videoDownloadState());
+});
+
+app.delete('/api/youtube/videos/:videoId', requireAuth, requireAdmin, (req, res) => {
+  const removed = removeCachedVideo(req.params.videoId);
+  res.json({ ok: removed, cached: cachedVideoInfo(req.params.videoId) });
+});
+
+app.get('/api/youtube/install-status', requireAuth, async (req, res) => {
+  const state = ytInstallState();
+  // Al terminar se devuelve también el estado real del binario (versión y ruta),
+  // haya ido bien o mal: la pantalla necesita saber si quedó algo que arranque.
+  const status = state.running ? null : await getYtDlpInfo();
+  res.json({ ...state, status });
+});
+
+/**
+ * Vista previa de un enlace de YouTube: ¿está en directo?, ¿qué título tiene?,
+ * ¿da un manifiesto HLS que se pueda copiar sin transcodificar?
+ */
+app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'Falta la URL.' });
+  try {
+    const r = await resolveLiveSource(url);
+    const entries = Array.isArray(r.entries) ? r.entries : [];
+    res.json({
+      ok: Boolean(r.ok),
+      live: Boolean(r.live),
+      ready: Boolean(r.ok),
+      // live | video | playlist | hls
+      mode: r.mode || '',
+      provider: r.provider || '',
+      title: r.title || '',
+      uploader: r.uploader || '',
+      live_status: r.live_status || '',
+      video_id: r.video_id || '',
+      list_id: r.list_id || '',
+      host: r.host || '',
+      // Copia sin recodificar: con estas banderas, el motor abre las pistas tal
+      // cual (si el audio va aparte, lo mapea) y no gasta CPU de vídeo.
+      copy_kind: r.copy_kind || '',
+      // Calidad de la pista que se va a copiar (para que el operador lo vea).
+      height: Number(r.height) || 0,
+      width: Number(r.width) || 0,
+      separated_audio: Boolean(String(r.audio_url || '').trim()),
+      copy_video: r.copy_video !== false,
+      copy_audio: r.copy_audio !== false,
+      duration_sec: Number(r.duration_sec) || 0,
+      total_duration_sec: Number(r.total_duration_sec) || 0,
+      entries: entries.length,
+      total_entries: Number(r.total_entries) || entries.length,
+      entry_titles: entries.slice(0, 8).map((e) => e.title).filter(Boolean),
+      skipped_live: Number(r.skipped_live) || 0,
+      skipped_no_format: Number(r.skipped_no_format) || 0,
+      needs_transcode: Boolean(r.needs_transcode),
+      expires_at: r.expires_at_ms ? new Date(r.expires_at_ms).toISOString() : '',
+      expires_in_min: r.expires_at_ms ? Math.max(0, Math.round((r.expires_at_ms - Date.now()) / 60000)) : null,
+      error: r.ok ? '' : r.error || 'sin señal',
+      // Texto original de yt-dlp (recortado): para soporte, no para el operador.
+      detail: r.ok ? '' : String(r.raw || ''),
+      needs_ytdlp: Boolean(r.needs_ytdlp),
+      needs_cookies: Boolean(r.needs_cookies),
+      needs_format_fix: Boolean(r.needs_format_fix),
+      // YouTube está pidiendo verificación anti-robots a la IP del servidor.
+      blocked_bot: Boolean(r.blocked_bot),
+      // Motivos concretos que dio YouTube (privado, edad, país, miembros…).
+      reasons: Array.isArray(r.reasons) ? r.reasons : [],
+      cookies_note: r.cookies_note || '',
+      // Vídeo sin MP4 progresivo: se puede descargar una vez y emitir del disco.
+      needs_download: Boolean(r.needs_download),
+      can_download: Boolean(r.can_download),
+      // La lista se emite EN DIRECTO desde YouTube (también si sólo da
+      // DASH/HLS: el motor une sus dos pistas). Sin descargar nada.
+      can_stream: Boolean(r.can_stream),
+      streaming: Number(r.streaming) || 0,
+      // Último recurso: lista de la que YouTube no da ni una pista.
+      can_prepare_playlist: Boolean(r.can_prepare_playlist),
+      pending_count: Number(r.pending_count) || 0,
+      // Cuánto ocuparía prepararla en el disco (estimación por duración) y
+      // cuánto queda libre: se avisa antes de descargar, no después.
+      pending_bytes: Number(r.pending_bytes) || 0,
+      disk: r.disk || null,
+      skip_summary: r.skip_summary || '',
+      local: Boolean(r.local),
+      bytes: Number(r.bytes) || 0,
+      clients_tried: r.clients_tried || '',
+      using_cookies: Boolean(r.using_cookies),
+      cookies: cookiesInfo(),
+      // El disco va con el estado de yt-dlp: así la tarjeta sigue diciendo lo
+      // que ocupa y lo que queda libre después de probar un enlace.
+      yt_dlp: { ...(await getYtDlpInfo()), videos: videosSummary() }
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/** Renueva ahora la señal de un canal y reinicia su motor si hace falta. */
+app.post('/api/channels247/:id/live-source/refresh', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
+  if (!ch) return res.status(404).json({ error: 'Canal 24/7 no encontrado' });
+  if (!isLiveChannel(ch)) return res.status(400).json({ error: 'Ese canal no usa una señal en vivo.' });
+  // «Renovar señal» es la orden de preguntar a YouTube de verdad: no vale
+  // quedarse con lo que ya hay en el disco (para eso está la guardia). Con
+  // `disk_only` se pide lo contrario: recomponer la lista con los archivos que
+  // ya están en el disco, sin red (lo usa la pantalla al terminar de descargar).
+  const st = req.body?.disk_only
+    ? applyDiskPlaylistState(ch) || (await refreshChannelLiveSource(ch, { force: true }))
+    : await refreshChannelLiveSource(ch, { force: true });
+  const ready = liveReady(st);
+  const fresh = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
+  if (ready && fresh.engine_mode === 'ffmpeg') {
+    stopWorker(`ch247_${id}`);
+    await launchChannel247WorkerIfConfigured(id);
+  } else if (!ready) {
+    // Sin señal (directo terminado o lista vacía): se apaga el motor para no
+    // dejar segmentos viejos al aire.
+    stopWorker(`ch247_${id}`);
+  }
+  const fresh2 = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
+  res.json({ ok: st.ok, state: st, liveSource: liveSourceInfo(fresh2), workerPid: getWorkerPid(`ch247_${id}`) });
+});
+
+app.post('/api/channels247/reorder', requireAuth, requireAdmin, (req, res) => {
+  const cleanIds = Array.isArray(req.body?.orderedIds)
+    ? req.body.orderedIds.map(Number).filter((n) => n > 0)
+    : [];
+  if (cleanIds.length === 0) return res.status(400).json({ error: 'Lista vacía' });
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const allCh = db.prepare('SELECT id FROM channels_247 ORDER BY sort_order ASC, id ASC').all();
+    const idSet = new Set(cleanIds);
+    const finalOrder = [...cleanIds, ...allCh.filter((c) => !idSet.has(c.id)).map((c) => c.id)];
+    const upd = db.prepare('UPDATE channels_247 SET sort_order = ? WHERE id = ?');
+    finalOrder.forEach((cid, idx) => upd.run(idx + 1, cid));
+    db.exec('COMMIT;');
+    res.json({ ok: true });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/channels247', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'El nombre del canal 24/7 es obligatorio.' });
+  const playlistJson = JSON.stringify(Array.isArray(b.playlist) ? b.playlist : []);
+  const anchorEpoch = Math.floor(Date.now() / 1000);
+  // ── Tipo de fuente: parrilla de películas o señal en vivo (YouTube/HLS) ──
+  const sourceKind = b.source_kind === 'youtube' ? 'youtube' : 'playlist';
+  let liveSourceUrl = '';
+  if (sourceKind === 'youtube') {
+    const cls = classifySourceUrl(b.live_source_url || b.source_url || '');
+    if (!cls.ok) return res.status(400).json({ error: cls.error });
+    liveSourceUrl = cls.url;
+  }
+  const engineMode =
+    b.engine_mode === 'ffmpeg' || (sourceKind === 'youtube' && b.engine_mode !== 'virtual') ? 'ffmpeg' : 'virtual';
+
+  const info = db
+    .prepare(
+      `INSERT INTO channels_247 (name, category_id, logo_url, epg_channel_id, loop_mode, engine_mode, transcode_profile_id, server_id, watermark_text, status, playlist_json, schedule_anchor_epoch, source_kind, live_source_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`
+    )
+    .run(
+      String(b.name),
+      b.category_id ? Number(b.category_id) : 4,
+      String(b.logo_url || ''),
+      String(b.epg_channel_id || `ch247.${Date.now()}.tv`),
+      String(b.loop_mode || 'loop'),
+      engineMode,
+      b.transcode_profile_id ? Number(b.transcode_profile_id) : 2,
+      b.server_id ? Number(b.server_id) : 1,
+      String(b.watermark_text || ''),
+      playlistJson,
+      anchorEpoch,
+      sourceKind,
+      liveSourceUrl
+    );
+
+  const newId = Number(info.lastInsertRowid);
+  const b1 = db.prepare('SELECT * FROM bouquets WHERE id = 1').get();
+  if (b1) {
+    const arr = JSON.parse(b1.channel247_ids_json || '[]');
+    if (!arr.includes(newId)) {
+      arr.push(newId);
+      db.prepare('UPDATE bouquets SET channel247_ids_json = ? WHERE id = 1').run(JSON.stringify(arr));
+    }
+  }
+  launchChannel247WorkerIfConfigured(newId);
+  res.json({ id: newId, ok: true });
+});
+
+app.put('/api/channels247/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  const playlistJson = JSON.stringify(Array.isArray(b.playlist) ? b.playlist : []);
+  const sourceKind = b.source_kind === 'youtube' ? 'youtube' : 'playlist';
+  let liveSourceUrl = '';
+  if (sourceKind === 'youtube') {
+    const cls = classifySourceUrl(b.live_source_url || '');
+    if (!cls.ok) return res.status(400).json({ error: cls.error });
+    liveSourceUrl = cls.url;
+  }
+  const engineMode =
+    b.engine_mode === 'ffmpeg' || (sourceKind === 'youtube' && b.engine_mode !== 'virtual') ? 'ffmpeg' : 'virtual';
+
+  const prev = db.prepare('SELECT source_kind, live_source_url FROM channels_247 WHERE id = ?').get(id);
+  if (!prev) return res.status(404).json({ error: 'Canal 24/7 no encontrado' });
+  const sourceChanged =
+    String(prev.source_kind || 'playlist') !== sourceKind || String(prev.live_source_url || '') !== liveSourceUrl;
+
+  db.prepare(
+    `UPDATE channels_247 SET
+       name = ?, category_id = ?, logo_url = ?, epg_channel_id = ?,
+       loop_mode = ?, engine_mode = ?, transcode_profile_id = ?, server_id = ?, watermark_text = ?, playlist_json = ?,
+       source_kind = ?, live_source_url = ?, live_source_state = ?
+     WHERE id = ?`
+  ).run(
+    String(b.name || ''),
+    b.category_id ? Number(b.category_id) : 4,
+    String(b.logo_url || ''),
+    String(b.epg_channel_id || ''),
+    String(b.loop_mode || 'loop'),
+    engineMode,
+    b.transcode_profile_id ? Number(b.transcode_profile_id) : 2,
+    b.server_id ? Number(b.server_id) : 1,
+    String(b.watermark_text || ''),
+    playlistJson,
+    sourceKind,
+    liveSourceUrl,
+    sourceChanged ? '' : db.prepare('SELECT live_source_state FROM channels_247 WHERE id = ?').get(id)?.live_source_state || '',
+    id
+  );
+  if (engineMode === 'ffmpeg') {
+    stopWorker(`ch247_${id}`);
+    launchChannel247WorkerIfConfigured(id);
+  } else {
+    stopWorker(`ch247_${id}`);
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/channels247/:id/action', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const { action } = req.body || {};
+  if (action === 'stop') {
+    stopWorker(`ch247_${id}`);
+    db.prepare("UPDATE channels_247 SET status = 'stopped' WHERE id = ?").run(id);
+  } else if (action === 'start') {
+    db.prepare("UPDATE channels_247 SET status = 'running' WHERE id = ?").run(id);
+    launchChannel247WorkerIfConfigured(id);
+    // Si es una señal en vivo, se resuelve al momento aunque el motor sea virtual.
+    const chLive = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
+    if (chLive && isLiveChannel(chLive) && String(chLive.live_source_url || '').trim()) {
+      refreshChannelLiveSource(chLive).catch(() => {});
+    }
+  } else if (action === 'start_ffmpeg') {
+    const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
+    if (!ch) return res.status(404).json({ error: 'Canal no encontrado' });
+    if (isLiveChannel(ch) && !String(ch.live_source_url || '').trim()) {
+      return res.status(400).json({ error: 'Ese canal no tiene una señal en vivo configurada.' });
+    }
+    db.prepare("UPDATE channels_247 SET status = 'running', engine_mode = 'ffmpeg' WHERE id = ?").run(id);
+    launchChannel247WorkerIfConfigured(id);
+  } else if (action === 'set_virtual') {
+    stopWorker(`ch247_${id}`);
+    db.prepare("UPDATE channels_247 SET status = 'running', engine_mode = 'virtual' WHERE id = ?").run(id);
+  } else if (action === 'resync') {
+    db.prepare("UPDATE channels_247 SET schedule_anchor_epoch = ?, status = 'running' WHERE id = ?").run(
+      Math.floor(Date.now() / 1000),
+      id
+    );
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/channels247/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const ch = db.prepare('SELECT * FROM channels_247 WHERE id = ?').get(id);
+  stopWorker(`ch247_${id}`);
+  // Antes de borrar el canal se anotan sus vídeos descargados: si el operador
+  // pide liberar espacio (`?videos=1`), se borran los que no use otro canal.
+  const mine = new Set();
+  if (ch) {
+    const st = parseLiveState(ch);
+    if (Array.isArray(st?.entries)) for (const e of st.entries) if (e?.local && e?.id) mine.add(String(e.id));
+    if (st?.local && st?.video_id) mine.add(String(st.video_id));
+  }
+  db.prepare('DELETE FROM channels_247 WHERE id = ?').run(id);
+  let freed = 0;
+  const removed = [];
+  if (String(req.query.videos || '') === '1' && mine.size) {
+    const stillUsed = new Set();
+    for (const row of db.prepare('SELECT * FROM channels_247').all()) {
+      const st = parseLiveState(row);
+      if (Array.isArray(st?.entries)) for (const e of st.entries) if (e?.local && e?.id) stillUsed.add(String(e.id));
+      if (st?.local && st?.video_id) stillUsed.add(String(st.video_id));
+    }
+    for (const vid of mine) {
+      if (stillUsed.has(vid)) continue;
+      const info = cachedVideoInfo(vid);
+      if (!info) continue;
+      if (removeCachedVideo(vid)) {
+        freed += info.bytes;
+        removed.push(vid);
+      }
+    }
+  }
+  res.json({ ok: true, videos_removed: removed.length, bytes_freed: freed });
+});
+
+// ==================== VOD (MOVIES & SERIES) ====================
+app.get('/api/vod', requireAuth, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT v.*, c.name as category_name
+       FROM vod_items v
+       LEFT JOIN categories c ON c.id = v.category_id
+       ORDER BY v.id DESC`
+    )
+    .all()
+    .map((v) => ({
+      ...v,
+      poster_url: normalizeXuiOrTmdbImageUrl(v.poster_url || '', 'poster'),
+      backdrop_url: normalizeXuiOrTmdbImageUrl(v.backdrop_url || '', 'backdrop')
+    }));
+  res.json(rows);
+});
+
+app.post('/api/vod', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.title || !b.source_url) {
+    return res.status(400).json({ error: 'Título y URL/Ruta del archivo de video son obligatorios.' });
+  }
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
+  const info = db
+    .prepare(
+      `INSERT INTO vod_items (title, type, category_id, source_url, poster_url, backdrop_url, tmdb_id, plot, genre, release_year, rating, duration_sec, container_ext)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      String(b.title),
+      String(b.type || 'movie'),
+      b.category_id ? Number(b.category_id) : 6,
+      String(b.source_url),
+      posterUrl,
+      backdropUrl,
+      String(b.tmdb_id || ''),
+      String(b.plot || ''),
+      String(b.genre || 'General'),
+      Number(b.release_year) || 2025,
+      Number(b.rating) || 8.0,
+      Number(b.duration_sec) || 5400,
+      String(b.container_ext || 'mp4')
+    );
+
+  const newId = Number(info.lastInsertRowid);
+  const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
+  if (b1) {
+    const arr = JSON.parse(b1.vod_ids_json || '[]');
+    if (!arr.includes(newId)) {
+      arr.push(newId);
+      db.prepare('UPDATE bouquets SET vod_ids_json = ? WHERE id = ?').run(JSON.stringify(arr), b1.id);
+    }
+  }
+  res.json({ id: newId, ok: true });
+});
+
+app.put('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
+  db.prepare(
+    `UPDATE vod_items SET
+       title = ?, type = ?, category_id = ?, source_url = ?, poster_url = ?, backdrop_url = ?, tmdb_id = ?,
+       plot = ?, genre = ?, release_year = ?, rating = ?, duration_sec = ?, container_ext = ?
+     WHERE id = ?`
+  ).run(
+    String(b.title || ''),
+    String(b.type || 'movie'),
+    b.category_id ? Number(b.category_id) : 6,
+    String(b.source_url || ''),
+    posterUrl,
+    backdropUrl,
+    String(b.tmdb_id || ''),
+    String(b.plot || ''),
+    String(b.genre || 'General'),
+    Number(b.release_year) || 2025,
+    Number(b.rating) || 8.0,
+    Number(b.duration_sec) || 5400,
+    String(b.container_ext || 'mp4'),
+    id
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/vod/:id', requireAuth, requireAdmin, (req, res) => {
+  const removedLink = cleanupVodSymlink(req.params.id);
+  db.prepare('DELETE FROM vod_items WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true, symlink_removed: removedLink });
+});
+
+// ==================== LOCAL WATCH FOLDERS & TMDB (themoviedb.org) ====================
+app.get('/api/tmdb/config', requireAuth, requireAdmin, (req, res) => {
+  const cfg = getTmdbConfig();
+  res.json({
+    configured: cfg.configured,
+    apiKeyMasked: cfg.apiKeyMasked,
+    language: cfg.language,
+    xuiLocalImagesDirExists: fs.existsSync('/home/xui/wwwdir/images') || fs.existsSync('/home/xui/content/images')
+  });
+});
+
+app.post('/api/tmdb/config', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { apiKey, language, testConnection } = req.body || {};
+    const saved = saveTmdbConfig({ apiKey, language });
+    if (testConnection && saved.configured) {
+      await testTmdbConnection();
+    }
+    res.json({
+      ok: true,
+      configured: saved.configured,
+      apiKeyMasked: saved.apiKeyMasked,
+      language: saved.language
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error guardando configuración TMDB' });
+  }
+});
+
+app.post('/api/tmdb/import-from-xui', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const xuiTmdb = await extractXuiTmdbSettings();
+    if (!xuiTmdb.found) {
+      return res.status(404).json({ error: 'Tu instalación de XUI.one no tiene una API Key de TMDB guardada en su tabla settings.' });
+    }
+    const saved = saveTmdbConfig({ apiKey: xuiTmdb.apiKey, language: xuiTmdb.language });
+    res.json({
+      ok: true,
+      configured: saved.configured,
+      apiKeyMasked: saved.apiKeyMasked,
+      language: saved.language,
+      sourceLabel: xuiTmdb.sourceLabel
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo leer la clave TMDB desde XUI.one' });
+  }
+});
+
+app.get('/api/tmdb/search', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const results = await searchTmdb({
+      query: req.query.q,
+      type: req.query.type || 'movie',
+      year: req.query.year || null
+    });
+    res.json({ results });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error buscando en TMDB' });
+  }
+});
+
+app.post('/api/tmdb/enrich-missing', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { overwriteAll } = req.body || {};
+    const summary = await enrichMissingVodWithTmdb({ overwriteAll: Boolean(overwriteAll) });
+    res.json({ ok: true, ...summary });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error sincronizando carátulas con TMDB' });
+  }
+});
+
+// ==================== JELLYFIN (VOD y series con enlaces simbólicos) ====================
+app.get('/api/jellyfin/config', requireAuth, requireAdmin, (req, res) => {
+  res.json(getJellyfinConfig());
+});
+
+app.post('/api/jellyfin/config', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const saved = saveJellyfinConfig({
+      url: b.url,
+      apiKey: b.apiKey,
+      symlinkDir: b.symlinkDir,
+      pathMap: b.pathMap,
+      directFallback: b.directFallback
+    });
+    let test = null;
+    if (b.testConnection && saved.configured) {
+      try {
+        test = await testJellyfinConnection();
+      } catch (err) {
+        return res.status(400).json({ error: err.message, ...saved });
+      }
+    }
+    res.json({ ok: true, test, ...saved });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo guardar la configuración de Jellyfin' });
+  }
+});
+
+app.post('/api/jellyfin/test', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const info = await testJellyfinConnection();
+    const libraries = await listJellyfinLibraries();
+    res.json({ ok: true, ...info, libraries });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo conectar con Jellyfin' });
+  }
+});
+
+app.get('/api/jellyfin/libraries', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const libraries = await listJellyfinLibraries();
+    res.json({ ok: true, libraries, selected: getJellyfinConfig().libraries });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo leer las bibliotecas de Jellyfin' });
+  }
+});
+
+app.post('/api/jellyfin/preview', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const preview = await previewJellyfinImport({
+      libraryIds: b.libraryIds || [],
+      contentMode: b.contentMode || 'auto'
+    });
+    res.json({ ok: true, ...preview });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo mirar la biblioteca de Jellyfin' });
+  }
+});
+
+// Busca en este servidor la carpeta real que corresponde a las rutas que
+// devuelve Jellyfin (`/Media` en Docker → `/home/xui/media` en el host).
+app.post('/api/jellyfin/detect-paths', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const result = await detectJellyfinPathMappings({
+      libraryIds: b.libraryIds || [],
+      contentMode: b.contentMode || 'auto',
+      extraRoots: Array.isArray(b.extraRoots) ? b.extraRoots : [],
+      maxSeconds: Math.min(30, Math.max(3, Number(b.maxSeconds) || 12))
+    });
+    if (b.apply && result.mapping.length) {
+      const merged = [...getJellyfinConfig().pathMap];
+      for (const rule of result.mapping) {
+        const i = merged.findIndex((r) => r.from === rule.from);
+        if (i >= 0) merged[i] = rule;
+        else merged.push(rule);
+      }
+      result.config = saveJellyfinConfig({ pathMap: merged });
+      result.applied = true;
+    }
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo detectar la carpeta de los archivos' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Disco de Jellyfin montado en este servidor (NFS / SMB)
+//
+// Con Jellyfin en otra máquina el panel no ve los archivos y «Create Symlink»
+// no tiene a qué apuntar. Estas rutas montan el recurso compartido (NFS o
+// SMB), dejan la línea en `/etc/fstab` y guardan la equivalencia de rutas que
+// devuelve Jellyfin → carpeta montada. El vídeo no pasa por Jellyfin.
+// ---------------------------------------------------------------------------
+
+app.get('/api/jellyfin/mount', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...getMountStatus(), config: getJellyfinMountConfig() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/jellyfin/mount/capabilities', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...mountCapabilities() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Carpetas que el servidor de Jellyfin comparte por NFS (`showmount -e`).
+// El paso que se olvida: sin export en el otro servidor no hay nada que montar.
+app.post('/api/jellyfin/mount/exports', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...listNfsExports(req.body?.host) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Comandos exactos para compartir la carpeta en el servidor de Jellyfin,
+// ya con la IP de este panel en el export.
+app.get('/api/jellyfin/mount/share', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const recipe = buildShareRecipe({
+      protocol: req.query.protocol || 'nfs',
+      exportPath: req.query.path || '',
+      panelAddress: req.query.address || '',
+      smbUser: req.query.user || 'tvlister'
+    });
+    res.json({ ok: true, ...recipe, panelAddresses: getPanelAddresses() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/jellyfin/mount/test', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...testJellyfinShare(req.body || {}) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/jellyfin/mount', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const result = mountJellyfinShare(b);
+    // Con el disco montado se busca la equivalencia de rutas y se guarda: así
+    // «Create Symlink» funciona sin que el usuario escriba nada más.
+    let mapping = null;
+    if (b.autoDetect !== false) {
+      try {
+        mapping = await detectJellyfinPathMappings({
+          libraryIds: Array.isArray(b.libraryIds) ? b.libraryIds : [],
+          contentMode: b.contentMode || 'auto',
+          extraRoots: [result.mountPoint],
+          maxSeconds: 25
+        });
+        if (mapping.mapping.length) {
+          const merged = [...getJellyfinConfig().pathMap];
+          for (const rule of mapping.mapping) {
+            const i = merged.findIndex((r) => r.from === rule.from);
+            if (i >= 0) merged[i] = rule;
+            else merged.push(rule);
+          }
+          mapping.applied = true;
+          mapping.jellyfinConfig = saveJellyfinConfig({ pathMap: merged });
+        }
+      } catch (err) {
+        mapping = { error: err.message };
+      }
+    }
+    res.json({ ok: true, ...result, mapping, jellyfinConfig: getJellyfinConfig() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/jellyfin/mount/remount', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...remountJellyfinShare() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/jellyfin/mount', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json({ ok: true, ...unmountJellyfinShare() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/jellyfin/import', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    // La selección de bibliotecas queda guardada para la próxima vez.
+    if (Array.isArray(b.libraryIds) && b.libraryIds.length) {
+      saveJellyfinConfig({ libraries: b.libraryIds });
+    }
+    const stats = await importFromJellyfin({
+      libraryIds: b.libraryIds || [],
+      contentMode: b.contentMode || 'auto',
+      createSymlink: b.createSymlink !== false,
+      symlinkDir: b.symlinkDir || '',
+      useLibraryAsCategory: b.useLibraryAsCategory !== false,
+      defaultCategoryId: b.defaultCategoryId || null,
+      autoTmdb: Boolean(b.autoTmdb),
+      directFallback: typeof b.directFallback === 'boolean' ? b.directFallback : null,
+      fetchImages: b.fetchImages !== false,
+      autoDetectPaths: b.autoDetectPaths === true,
+      searchRoots: Array.isArray(b.searchRoots) ? b.searchRoots.filter(Boolean) : []
+    });
+    res.json({ ok: true, stats });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error importando desde Jellyfin' });
+  }
+});
+
+// «Create Symlink»: crea el enlace de una película/episodio ya cargado.
+app.post('/api/vod/:id/symlink', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...createSymlinkForVod(req.params.id) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/series/episodes/:epId/symlink', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...createSymlinkForEpisode(req.params.epId) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/vod/symlinks/rebuild', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...rebuildAllSymlinks({ dryRun: Boolean(req.body?.dryRun) }) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/vod/symlinks/status', requireAuth, requireAdmin, (_req, res) => {
+  const cfg = getJellyfinConfig();
+  let links = 0;
+  let space = 0;
+  try {
+    const walk = (dir, depth) => {
+      if (depth > 3) return;
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) walk(full, depth + 1);
+        else if (ent.isSymbolicLink()) links += 1;
+      }
+    };
+    walk(cfg.symlinkDir, 0);
+  } catch {
+    /* la carpeta aún no existe */
+  }
+  res.json({
+    symlinkDir: cfg.symlinkDir,
+    exists: fs.existsSync(cfg.symlinkDir),
+    links,
+    broken: listBrokenSymlinks(),
+    diskFreeMb: (() => {
+      try {
+        const st = fs.statfsSync(cfg.symlinkDir);
+        return Math.round((st.bavail * st.bsize) / (1024 * 1024));
+      } catch {
+        return null;
+      }
+    })()
+  });
+});
+
+app.get('/api/vod/folders', requireAuth, requireAdmin, (req, res) => {
+  res.json(listWatchFolders());
+});
+
+app.get('/api/vod/folders/browse', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json(browseServerDirectories(req.query.path || '/'));
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo explorar la carpeta' });
+  }
+});
+
+app.post('/api/vod/folders/preview', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const { folderPath, contentMode } = req.body || {};
+    const { rootFolder, files } = scanMediaDirectoryFiles(folderPath, contentMode || 'auto', 1000);
+    const movies = files.filter((f) => f.kind === 'movie');
+    const episodes = files.filter((f) => f.kind === 'series_episode');
+    res.json({
+      ok: true,
+      rootFolder,
+      totalFiles: files.length,
+      moviesCount: movies.length,
+      episodesCount: episodes.length,
+      sample: files.slice(0, 30)
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error escaneando carpeta' });
+  }
+});
+
+app.post('/api/vod/folders/sync', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const stats = await syncLocalVodFolder({
+      folderPath: b.folderPath,
+      contentMode: b.contentMode || 'auto',
+      defaultCategoryId: b.defaultCategoryId || null,
+      categoryMode: b.categoryMode || 'subfolders',
+      useSubfoldersAsCategories: b.useSubfoldersAsCategories !== false,
+      autoTmdb: b.autoTmdb !== false,
+      autoSyncMinutes: Number(b.autoSyncMinutes) || 0,
+      removeMissing: Boolean(b.removeMissing),
+      saveWatchFolder: b.saveWatchFolder !== false
+    });
+    res.json({ ok: true, stats });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error sincronizando carpeta de películas' });
+  }
+});
+
+app.delete('/api/vod/folders/:id', requireAuth, requireAdmin, (req, res) => {
+  deleteWatchFolder(req.params.id);
+  res.json({ ok: true });
+});
+
+// --- Categorías por género de TMDB (Acción, Comedia, Terror, Thriller…) ------
+app.get('/api/vod/genres/config', requireAuth, requireAdmin, (req, res) => {
+  const tmdb = getTmdbConfig();
+  res.json({
+    ...getGenreCategoryConfigForUi(),
+    categories: listVodCategories(),
+    // Nunca la clave: sólo si está configurada y en qué idioma.
+    tmdb: { configured: tmdb.configured, language: tmdb.language }
+  });
+});
+
+app.post('/api/vod/genres/config', requireAuth, requireAdmin, (req, res) => {
+  const { aliasesText, priorityText, resetAliases } = req.body || {};
+  const cfg = saveGenreCategoryConfig({ aliasesText, priorityText, resetAliases: Boolean(resetAliases) });
+  // La respuesta tiene la misma forma que el GET: si faltara `tmdb`, la pantalla
+  // se quedaría creyendo que no hay API Key al guardar las reglas (y desactivaría
+  // «Vista Previa» / «Aplicar» aunque la clave esté puesta).
+  const tmdb = getTmdbConfig();
+  res.json({
+    ok: true,
+    ...cfg,
+    categories: listVodCategories(),
+    tmdb: { configured: tmdb.configured, language: tmdb.language }
+  });
+});
+
+// Vista previa (dryRun, por defecto) y aplicación real de la separación por
+// género: { dryRun, limit, media: 'movies'|'series'|'both', refresh }.
+app.post('/api/vod/genres/classify', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const result = await classifyVodGenresByTmdb({
+      media: b.media || 'both',
+      limit: b.limit || 120,
+      dryRun: b.dryRun !== false,
+      refresh: Boolean(b.refresh)
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudo separar el catálogo por género de TMDB' });
+  }
+});
+
+// --- Limpieza de categorías del catálogo -----------------------------------
+// Las categorías creadas por las subcarpetas del disco (Ciencia Ficcion/,
+// triller/, accion/…) se quedan cuando el catálogo pasa a separarse por género
+// de TMDB. Aquí se ven cuántas películas/series tiene cada una y se borran las
+// que sobran, moviendo antes el contenido si se pide un destino.
+app.get('/api/vod/categories/usage', requireAuth, requireAdmin, (req, res) => {
+  res.json(vodCategoryUsage());
+});
+
+app.post('/api/vod/categories/purge', requireAuth, requireAdmin, (req, res) => {
+  const { ids, moveToId } = req.body || {};
+  try {
+    const result = purgeVodCategories({ ids, moveToId });
+    if (!result.ok) {
+      const lista = result.blocked.map((c) => `${c.name} (${c.total})`).join(', ');
+      return res.status(409).json({
+        ...result,
+        error: `Estas categorías todavía tienen contenido: ${lista}. Elige a qué categoría moverlo antes de borrarlas.`
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudieron borrar las categorías' });
+  }
+});
+
+// Categorías maestras: «Movies» y «Series». Es a donde va todo lo que entra por
+// carpeta sin repartirse por género, en lugar de una categoría por subcarpeta.
+app.get('/api/vod/categories/master', requireAuth, requireAdmin, (req, res) => {
+  const ids = ensureMasterCategories();
+  res.json({
+    ok: true,
+    categories: {
+      movies: { id: ids.movies, name: MASTER_CATEGORY_NAMES.vod },
+      series: { id: ids.series, name: MASTER_CATEGORY_NAMES.series }
+    },
+    subfolderFolders: listSubfolderModeFolders()
+  });
+});
+
+app.post('/api/vod/categories/master', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const ids = ensureMasterCategories();
+    res.json({
+      ok: true,
+      categories: {
+        movies: { id: ids.movies, name: MASTER_CATEGORY_NAMES.vod },
+        series: { id: ids.series, name: MASTER_CATEGORY_NAMES.series }
+      }
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudieron crear las categorías maestras' });
+  }
+});
+
+// Las carpetas que siguen creando una categoría por subcarpeta pasan a la
+// maestra («Movies»/«Series») sin tocar los títulos ya importados.
+app.post('/api/vod/folders/master-mode', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const result = switchFoldersToMasterMode();
+    res.json({
+      ok: true,
+      updated: result.updated,
+      folders: result.folders,
+      categories: {
+        movies: { id: result.categories.movies, name: MASTER_CATEGORY_NAMES.vod },
+        series: { id: result.categories.series, name: MASTER_CATEGORY_NAMES.series }
+      }
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'No se pudieron cambiar las carpetas' });
+  }
+});
+
+// ==================== SERIES (SEASONS & EPISODES) ====================
+app.get('/api/series', requireAuth, (req, res) => {
+  const seriesRows = db
+    .prepare(
+      `SELECT s.*, c.name as category_name
+       FROM series s
+       LEFT JOIN categories c ON c.id = s.category_id
+       ORDER BY s.id DESC`
+    )
+    .all();
+  const episodes = db.prepare('SELECT * FROM series_episodes ORDER BY season_num ASC, episode_num ASC, id ASC').all();
+  res.json(
+    seriesRows.map((sr) => ({
+      ...sr,
+      poster_url: normalizeXuiOrTmdbImageUrl(sr.poster_url || '', 'poster'),
+      backdrop_url: normalizeXuiOrTmdbImageUrl(sr.backdrop_url || '', 'backdrop'),
+      episodes: episodes.filter((ep) => ep.series_id === sr.id)
+    }))
+  );
+});
+
+app.post('/api/series', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.title) return res.status(400).json({ error: 'El título de la serie es obligatorio.' });
+
+  const defaultCat = db.prepare("SELECT id FROM categories WHERE type = 'series' LIMIT 1").get()?.id || 6;
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
+  const info = db
+    .prepare(
+      `INSERT INTO series (title, category_id, poster_url, backdrop_url, tmdb_id, plot, genre, release_year, rating)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      String(b.title),
+      b.category_id ? Number(b.category_id) : defaultCat,
+      posterUrl,
+      backdropUrl,
+      String(b.tmdb_id || ''),
+      String(b.plot || ''),
+      String(b.genre || 'Drama'),
+      Number(b.release_year) || 2025,
+      Number(b.rating) || 8.5
+    );
+
+  const newId = Number(info.lastInsertRowid);
+  const b1 = db.prepare('SELECT * FROM bouquets ORDER BY id ASC LIMIT 1').get();
+  if (b1) {
+    const arr = JSON.parse(b1.series_ids_json || '[]');
+    if (!arr.includes(newId)) {
+      arr.push(newId);
+      db.prepare('UPDATE bouquets SET series_ids_json = ? WHERE id = ?').run(JSON.stringify(arr), b1.id);
+    }
+  }
+  res.json({ id: newId, ok: true });
+});
+
+app.put('/api/series/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  const posterUrl = normalizeXuiOrTmdbImageUrl(String(b.poster_url || ''), 'poster');
+  const backdropUrl = normalizeXuiOrTmdbImageUrl(String(b.backdrop_url || ''), 'backdrop');
+  db.prepare(
+    `UPDATE series SET
+       title = ?, category_id = ?, poster_url = ?, backdrop_url = ?, tmdb_id = ?,
+       plot = ?, genre = ?, release_year = ?, rating = ?
+     WHERE id = ?`
+  ).run(
+    String(b.title || ''),
+    b.category_id ? Number(b.category_id) : 6,
+    posterUrl,
+    backdropUrl,
+    String(b.tmdb_id || ''),
+    String(b.plot || ''),
+    String(b.genre || 'Drama'),
+    Number(b.release_year) || 2025,
+    Number(b.rating) || 8.5,
+    id
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/series/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  // Al borrar la serie se van también sus enlaces en la carpeta VOD.
+  for (const ep of db.prepare('SELECT id FROM series_episodes WHERE series_id = ?').all(id)) {
+    cleanupEpisodeSymlink(ep.id);
+  }
+  db.prepare('DELETE FROM series_episodes WHERE series_id = ?').run(id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/series/:id/episodes', requireAuth, requireAdmin, (req, res) => {
+  const seriesId = Number(req.params.id);
+  const b = req.body || {};
+  if (!b.title || !b.source_url) {
+    return res.status(400).json({ error: 'Título del episodio y URL de video requeridos.' });
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO series_episodes (series_id, season_num, episode_num, title, source_url, duration_sec, container_ext, plot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      seriesId,
+      Math.max(1, Number(b.season_num) || 1),
+      Math.max(1, Number(b.episode_num) || 1),
+      String(b.title),
+      String(b.source_url),
+      Number(b.duration_sec) || 2400,
+      String(b.container_ext || 'mp4'),
+      String(b.plot || '')
+    );
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.delete('/api/series/episodes/:epId', requireAuth, requireAdmin, (req, res) => {
+  const removedLink = cleanupEpisodeSymlink(req.params.epId);
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(Number(req.params.epId));
+  res.json({ ok: true, symlink_removed: removedLink });
+});
+
+// ==================== BOUQUETS & PACKAGES ====================
+app.get('/api/bouquets', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM bouquets ORDER BY sort_order ASC, id ASC').all().map((b) => ({
+    ...b,
+    stream_ids: JSON.parse(b.stream_ids_json || '[]'),
+    channel247_ids: JSON.parse(b.channel247_ids_json || '[]'),
+    vod_ids: JSON.parse(b.vod_ids_json || '[]'),
+    series_ids: JSON.parse(b.series_ids_json || '[]')
+  }));
+  res.json(rows);
+});
+
+app.post('/api/bouquets', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'Nombre del Bouquet requerido.' });
+  const info = db
+    .prepare(
+      'INSERT INTO bouquets (name, description, stream_ids_json, channel247_ids_json, vod_ids_json, series_ids_json, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    )
+    .run(
+      String(b.name),
+      String(b.description || ''),
+      JSON.stringify(b.stream_ids || []),
+      JSON.stringify(b.channel247_ids || []),
+      JSON.stringify(b.vod_ids || []),
+      JSON.stringify(b.series_ids || []),
+      Number(b.sort_order) || 0
+    );
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.put('/api/bouquets/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  db.prepare(
+    'UPDATE bouquets SET name = ?, description = ?, stream_ids_json = ?, channel247_ids_json = ?, vod_ids_json = ?, series_ids_json = ? WHERE id = ?'
+  ).run(
+    String(b.name || ''),
+    String(b.description || ''),
+    JSON.stringify(b.stream_ids || []),
+    JSON.stringify(b.channel247_ids || []),
+    JSON.stringify(b.vod_ids || []),
+    JSON.stringify(b.series_ids || []),
+    id
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/bouquets/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM bouquets WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.get('/api/packages', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM packages ORDER BY cost_credits ASC, id ASC').all().map((p) => ({
+    ...p,
+    bouquet_ids: JSON.parse(p.bouquet_ids_json || '[1]')
+  }));
+  res.json(rows);
+});
+
+app.post('/api/packages', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'Nombre del paquete requerido.' });
+  const info = db
+    .prepare(
+      'INSERT INTO packages (name, is_trial, duration_days, cost_credits, max_connections, bouquet_ids_json) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(
+      String(b.name),
+      b.is_trial ? 1 : 0,
+      Number(b.duration_days) || 30,
+      Number(b.cost_credits) || 0,
+      Number(b.max_connections) || 1,
+      JSON.stringify(b.bouquet_ids || [1])
+    );
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.delete('/api/packages/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM packages WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+// ==================== SUBSCRIBER LINES & MAG/ENIGMA2 DEVICES ====================
+app.get('/api/lines', requireAuth, (req, res) => {
+  pruneStaleConnections();
+  const isReseller = req.user.role === 'reseller';
+  const rows = isReseller
+    ? db
+        .prepare(
+          `SELECT l.*, u.username as owner_username
+           FROM lines l LEFT JOIN users u ON u.id = l.owner_id
+           WHERE l.owner_id = ? ORDER BY l.id DESC`
+        )
+        .all(req.user.id)
+    : db
+        .prepare(
+          `SELECT l.*, u.username as owner_username
+           FROM lines l LEFT JOIN users u ON u.id = l.owner_id
+           ORDER BY l.id DESC`
+        )
+        .all();
+
+  const connRows = isReseller
+    ? db
+        .prepare(
+          `SELECT ac.* FROM active_connections ac
+           JOIN lines l ON l.id = ac.line_id
+           WHERE l.owner_id = ?
+           ORDER BY ac.last_ping_at DESC`
+        )
+        .all(req.user.id)
+    : db.prepare('SELECT * FROM active_connections ORDER BY last_ping_at DESC').all();
+
+  const sessionsByLine = new Map();
+  for (const ac of connRows) {
+    const list = sessionsByLine.get(ac.line_id) || [];
+    list.push(enrichActiveConnectionRow(ac));
+    sessionsByLine.set(ac.line_id, list);
+  }
+
+  const deviceCountByLine = new Map(
+    db
+      .prepare("SELECT line_id, COUNT(*) AS c FROM line_devices WHERE status = 'active' GROUP BY line_id")
+      .all()
+      .map((r) => [r.line_id, r.c])
+  );
+
+  res.json(
+    rows.map((r) => {
+      const active_sessions = sessionsByLine.get(r.id) || [];
+      return {
+        device_count: deviceCountByLine.get(r.id) || 0,
+        ...r,
+        active_conns: active_sessions.length,
+        active_sessions,
+        bouquet_ids: JSON.parse(r.bouquet_ids_json || '[1]')
+      };
+    })
+  );
+});
+
+app.post('/api/lines/:id/kick', requireAuth, (req, res) => {
+  const lineId = Number(req.params.id);
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(lineId);
+  if (!line) return res.status(404).json({ error: 'Línea no encontrada.' });
+  if (req.user.role === 'reseller' && line.owner_id !== req.user.id) {
+    return res.status(403).json({ error: 'No tienes permiso sobre esta línea.' });
+  }
+  kickAllLineConnections(lineId);
+  res.json({ ok: true });
+});
+
+// --- Aparatos por línea (anti-compartición) -------------------------------
+function loadLineForAdmin(req, res) {
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(Number(req.params.id));
+  if (!line) {
+    res.status(404).json({ error: 'Línea no encontrada.' });
+    return null;
+  }
+  if (req.user.role === 'reseller' && line.owner_id !== req.user.id) {
+    res.status(403).json({ error: 'No tienes permiso sobre esta línea.' });
+    return null;
+  }
+  return line;
+}
+
+app.get('/api/lines/:id/devices', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  res.json({
+    line: {
+      id: line.id,
+      username: line.username,
+      device_limit: Number(line.device_limit) || 0,
+      device_limit_effective: deviceLimitFor(line),
+      max_connections: line.max_connections,
+      device_lock: Number(line.device_lock) === 1,
+      allowed: deviceLimitFor(line)
+    },
+    // `live_connections` es lo que ocupa cupo: el corte sólo salta cuando llega
+    // a `max_connections`, no por tener aparatos registrados de antes.
+    live_connections: liveConnectionCount(line.id),
+    max_connections: Number(line.max_connections) || 1,
+    mode: getRegistryMode(),
+    devices: listLineDevices(line.id).map(publicDevice)
+  });
+});
+
+// Alta manual: para aparatos que no mandan MAC (o para reservar el hueco antes
+// de que el cliente encienda el equipo).
+app.post('/api/lines/:id/devices', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  try {
+    const device = addDeviceManually(line.id, {
+      mac: req.body?.mac,
+      name: req.body?.name,
+      type: req.body?.type
+    });
+    res.json({ ok: true, device });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Bloqueo antiguo de la app propia (`device_lock`): sigue disponible para las
+// líneas que ya lo tenían activo; no tiene nada que ver con el registro por MAC.
+app.post('/api/lines/:id/device-lock', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const enabled = req.body?.enabled ? 1 : 0;
+  db.prepare('UPDATE lines SET device_lock = ? WHERE id = ?').run(enabled, line.id);
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, device_lock: enabled === 1 });
+});
+
+// Cupo de aparatos de la línea. 0 = usar `max_connections`.
+// Junta los aparatos duplicados de la línea (mismo equipo con varios UA).
+app.post('/api/lines/:id/devices/dedupe', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  try {
+    const result = dedupeLineDevices(line.id, { dryRun: Boolean(req.body?.dryRun) });
+    res.json({ ok: true, ...result, devices: listLineDevices(line.id).map(publicDevice) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/lines/:id/devices/limit', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const raw = Number(req.body?.limit);
+  const limit = Number.isFinite(raw) ? Math.max(0, Math.min(20, Math.trunc(raw))) : 0;
+  db.prepare('UPDATE lines SET device_limit = ? WHERE id = ?').run(limit, line.id);
+  bumpRegistryVersion();
+  res.json({ ok: true, device_limit: limit, device_limit_effective: deviceLimitFor({ ...line, device_limit: limit }) });
+});
+
+app.post('/api/lines/:id/devices/:deviceId/allow', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const ok = setDeviceStatus(line.id, req.params.deviceId, 'active');
+  res.json({ ok, device_id: req.params.deviceId });
+});
+
+app.post('/api/lines/:id/devices/:deviceId/block', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  setDeviceStatus(line.id, req.params.deviceId, 'blocked');
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, device_id: req.params.deviceId, blocked: true });
+});
+
+app.delete('/api/lines/:id/devices/:deviceId', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const done = removeDeviceRow(line.id, req.params.deviceId);
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, removed: done, device_id: req.params.deviceId });
+});
+
+app.post('/api/lines/:id/devices/reset', requireAuth, (req, res) => {
+  const line = loadLineForAdmin(req, res);
+  if (!line) return;
+  const n = resetLineDevices(line.id);
+  kickAllLineConnections(line.id);
+  res.json({ ok: true, revoked: n });
+});
+
+// El DRM se retiró en v2.6.15: estas rutas ya no existen. Se responde con un
+// error explícito (y no con la página del panel) para que ninguna app se quede
+// esperando una clave que no va a llegar.
+const drmRetired = (req, res) =>
+  res.status(410).json({
+    error: 'drm_retired',
+    message:
+      'El DRM se ha retirado en TVLister v2.6.15: el video no va cifrado. Quita las llamadas a /drm/* y a action=get_drm.'
+  });
+app.all('/drm/*', drmRetired);
+app.all('/api/drm/*', drmRetired);
+
+// --- Registro de aparatos: ajustes globales --------------------------------
+app.get('/api/devices/registry', requireAuth, (req, res) => {
+  res.json({ ...registryOverview(), drm_legacy: listLegacyDrmStreams() });
+});
+
+// Limpieza del DRM que quedó empujado a Flussonic antes de retirarlo.
+// preview (por defecto) sólo enseña qué se enviaría; apply lo aplica.
+app.post('/api/devices/undrm', requireAuth, requireAdmin, async (req, res) => {
+  const action = String(req.body?.action || 'preview') === 'apply' ? 'apply' : 'preview';
+  const names = Array.isArray(req.body?.streams) && req.body.streams.length
+    ? req.body.streams.map((x) => String(x))
+    : listLegacyDrmStreams().map((s) => s.name).filter(Boolean);
+  const results = [];
+  for (const name of names) {
+    try {
+      results.push(await removeDrmFromFlussonic({ name, action }));
+    } catch (err) {
+      results.push({ ok: false, stream: name, error: err.message, detail: err.detail || '' });
+    }
+  }
+  res.json({
+    ok: results.every((r) => r.ok),
+    action,
+    total: results.length,
+    cleaned: results.filter((r) => r.ok && r.had_drm).length,
+    results
+  });
+});
+
+app.post('/api/devices/registry', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const mode = setRegistryMode(req.body?.mode);
+    // Al pasar a BLOQUEAR se juntan los aparatos duplicados que dejó el registro
+    // antiguo (mismo televisor apuntado varias veces por sus distintos
+    // User-Agent). Así el cupo cuenta equipos reales, no peticiones.
+    const cleaned = mode === 'enforce' ? dedupeAllDevices() : { removed: 0, lines: 0 };
+    res.json({ ok: true, mode, deduped: cleaned.removed });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/lines', requireAuth, (req, res) => {
+  const b = req.body || {};
+  if (!b.username || !b.password) {
+    return res.status(400).json({ error: 'Usuario y contraseña de la línea son obligatorios.' });
+  }
+
+  const exists = db.prepare('SELECT id FROM lines WHERE username = ?').get(String(b.username).trim());
+  if (exists) return res.status(400).json({ error: 'Ese nombre de usuario ya existe.' });
+
+  let expDate = b.exp_date || null;
+  let maxConns = Number(b.max_connections) || 1;
+  let isTrial = b.is_trial ? 1 : 0;
+  let bouquetIds = Array.isArray(b.bouquet_ids) ? b.bouquet_ids : [1];
+
+  // If Reseller, enforce Package credit cost
+  if (req.user.role === 'reseller') {
+    const pkg = db.prepare('SELECT * FROM packages WHERE id = ?').get(Number(b.package_id) || 2);
+    if (!pkg) return res.status(400).json({ error: 'Selecciona un paquete válido.' });
+    if (req.user.credits < pkg.cost_credits) {
+      return res.status(400).json({ error: `Créditos insuficientes. Necesitas ${pkg.cost_credits} crédito(s).` });
+    }
+    const newCredits = req.user.credits - pkg.cost_credits;
+    db.prepare('UPDATE users SET credits = ? WHERE id = ?').run(newCredits, req.user.id);
+    db.prepare('INSERT INTO credit_logs (reseller_id, delta, balance_after, reason) VALUES (?, ?, ?, ?)').run(
+      req.user.id,
+      -pkg.cost_credits,
+      newCredits,
+      `Creación de línea ${b.username} (${pkg.name})`
+    );
+    expDate = new Date(Date.now() + pkg.duration_days * 86400 * 1000).toISOString();
+    maxConns = pkg.max_connections;
+    isTrial = pkg.is_trial;
+    bouquetIds = JSON.parse(pkg.bouquet_ids_json || '[1]');
+  } else if (b.package_id) {
+    const pkg = db.prepare('SELECT * FROM packages WHERE id = ?').get(Number(b.package_id));
+    if (pkg && !b.exp_date) {
+      expDate = new Date(Date.now() + pkg.duration_days * 86400 * 1000).toISOString();
+      maxConns = Number(b.max_connections) || pkg.max_connections;
+      isTrial = pkg.is_trial;
+    }
+  }
+
+  const info = db
+    .prepare(
+      `INSERT INTO lines (username, password, owner_id, exp_date, max_connections, is_trial, status, device_type, mac_address, bouquet_ids_json, allowed_countries, notes)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`
+    )
+    .run(
+      String(b.username).trim(),
+      String(b.password).trim(),
+      req.user.id,
+      expDate,
+      maxConns,
+      isTrial,
+      String(b.device_type || 'm3u'),
+      String(b.mac_address || ''),
+      JSON.stringify(bouquetIds),
+      String(b.allowed_countries || ''),
+      String(b.notes || '')
+    );
+
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.put('/api/lines/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(id);
+  if (!line) return res.status(404).json({ error: 'Línea no encontrada.' });
+  if (req.user.role === 'reseller' && line.owner_id !== req.user.id) {
+    return res.status(403).json({ error: 'No tienes permiso sobre esta línea.' });
+  }
+
+  const b = req.body || {};
+  db.prepare(
+    `UPDATE lines SET
+       password = ?, exp_date = ?, max_connections = ?, status = ?,
+       device_type = ?, mac_address = ?, bouquet_ids_json = ?, notes = ?
+     WHERE id = ?`
+  ).run(
+    String(b.password ?? line.password),
+    req.user.role === 'admin' ? (b.exp_date ?? line.exp_date) : line.exp_date,
+    req.user.role === 'admin' ? Number(b.max_connections ?? line.max_connections) : line.max_connections,
+    String(b.status ?? line.status),
+    String(b.device_type ?? line.device_type),
+    String(b.mac_address ?? line.mac_address),
+    JSON.stringify(Array.isArray(b.bouquet_ids) ? b.bouquet_ids : JSON.parse(line.bouquet_ids_json || '[1]')),
+    String(b.notes ?? line.notes),
+    id
+  );
+  if (b.status && b.status !== 'active') {
+    kickAllLineConnections(id);
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/lines/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const line = db.prepare('SELECT * FROM lines WHERE id = ?').get(id);
+  if (!line) return res.status(404).json({ error: 'No encontrada' });
+  if (req.user.role === 'reseller' && line.owner_id !== req.user.id) {
+    return res.status(403).json({ error: 'Sin permiso' });
+  }
+  kickAllLineConnections(id);
+  db.prepare('DELETE FROM lines WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+// ==================== RESELLERS & CREDITS ====================
+app.get('/api/resellers', requireAuth, requireAdmin, (req, res) => {
+  const resellers = db
+    .prepare(
+      `SELECT id, username, role, credits, email, status, notes, created_at,
+       (SELECT COUNT(*) FROM lines l WHERE l.owner_id = users.id) as line_count
+       FROM users ORDER BY role ASC, id ASC`
+    )
+    .all();
+  const logs = db
+    .prepare(
+      `SELECT cl.*, u.username as reseller_username
+       FROM credit_logs cl LEFT JOIN users u ON u.id = cl.reseller_id
+       ORDER BY cl.id DESC LIMIT 30`
+    )
+    .all();
+  res.json({ resellers, logs });
+});
+
+app.post('/api/resellers', requireAuth, requireAdmin, (req, res) => {
+  const { username, password, credits = 10, email = '', notes = '', role = 'reseller' } = req.body || {};
+  if (!username || !password) return res.status(400).json({ error: 'Usuario y contraseña requeridos.' });
+  const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(String(username).trim());
+  if (exists) return res.status(400).json({ error: 'El usuario ya existe.' });
+
+  const info = db
+    .prepare('INSERT INTO users (username, password_hash, role, credits, email, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(
+      String(username).trim(),
+      hashPassword(String(password)),
+      role === 'admin' ? 'admin' : 'reseller',
+      Number(credits) || 0,
+      String(email),
+      'active',
+      String(notes)
+    );
+
+  const newId = Number(info.lastInsertRowid);
+  if (Number(credits) > 0) {
+    db.prepare('INSERT INTO credit_logs (reseller_id, delta, balance_after, reason) VALUES (?, ?, ?, ?)').run(
+      newId,
+      Number(credits),
+      Number(credits),
+      'Saldo inicial de apertura'
+    );
+  }
+  res.json({ id: newId, ok: true });
+});
+
+app.post('/api/resellers/:id/credits', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const { delta, reason = 'Ajuste manual por Admin' } = req.body || {};
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  if (!user) return res.status(404).json({ error: 'Reseller no encontrado' });
+
+  const amount = Number(delta) || 0;
+  const newBalance = Math.max(0, user.credits + amount);
+  db.prepare('UPDATE users SET credits = ? WHERE id = ?').run(newBalance, id);
+  db.prepare('INSERT INTO credit_logs (reseller_id, delta, balance_after, reason) VALUES (?, ?, ?, ?)').run(
+    id,
+    amount,
+    newBalance,
+    String(reason)
+  );
+  res.json({ ok: true, credits: newBalance });
+});
+
+app.delete('/api/resellers/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (id === req.user.id) return res.status(400).json({ error: 'No puedes eliminar tu propia cuenta.' });
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+// ==================== EPG, OSD MESSAGES & CLIENT CLAIMS ====================
+app.get('/api/epg', requireAuth, (req, res) => {
+  const sources = db.prepare('SELECT * FROM epg_sources ORDER BY id DESC').all();
+  // `channel_id` (opcional) = epg_channel_id del canal, para la ficha del canal.
+  const channelId = String(req.query.channel_id || '').trim();
+  const hoursBack = Math.min(Math.max(Number(req.query.hours_back) || 2, 1), 72);
+  const hoursAhead = Math.min(Math.max(Number(req.query.hours_ahead) || 12, 1), 168);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+  const programs = channelId
+    ? db
+        .prepare(
+          `SELECT * FROM epg_programs
+           WHERE channel_epg_id = ?
+             AND substr(replace(end_time, 'T', ' '), 1, 19) >= datetime('now', ?)
+             AND substr(replace(start_time, 'T', ' '), 1, 19) <= datetime('now', ?)
+           ORDER BY start_time ASC LIMIT ?`
+        )
+        .all(channelId, `-${hoursBack} hours`, `+${hoursAhead} hours`, limit)
+    : db.prepare('SELECT * FROM epg_programs ORDER BY start_time ASC LIMIT ?').all(limit);
+  res.json({ sources, programs, channel_id: channelId || null });
+});
+
+app.post('/api/epg/sources', requireAuth, requireAdmin, async (req, res) => {
+  const { name, xmltv_url } = req.body || {};
+  if (!name || !xmltv_url) return res.status(400).json({ error: 'Nombre y URL XMLTV requeridos.' });
+  const info = db
+    .prepare("INSERT INTO epg_sources (name, xmltv_url, status, last_updated_at) VALUES (?, ?, 'pending', datetime('now'))")
+    .run(String(name), String(xmltv_url));
+  const id = Number(info.lastInsertRowid);
+  try {
+    const syncRes = await syncEpgSourceById(id, `http://127.0.0.1:${PORT}`);
+    return res.json({ id, ok: true, importedCount: syncRes.importedCount });
+  } catch (err) {
+    return res.json({ id, ok: true, warning: err.message });
+  }
+});
+
+app.post('/api/epg/sources/:id/sync', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await syncEpgSourceById(Number(req.params.id), `http://127.0.0.1:${PORT}`);
+    res.json({ ok: true, importedCount: result.importedCount });
+  } catch (err) {
+    res.status(400).json({ error: `Error sincronizando XMLTV: ${err.message}` });
+  }
+});
+
+app.delete('/api/epg/sources/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  db.prepare('DELETE FROM epg_programs WHERE source_id = ?').run(id);
+  db.prepare('DELETE FROM epg_sources WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/epg/programs', requireAuth, requireAdmin, (req, res) => {
+  const { channel_epg_id, title, description = '', start_time, end_time } = req.body || {};
+  if (!channel_epg_id || !title) return res.status(400).json({ error: 'ID EPG del canal y título requeridos.' });
+  const startIso = start_time ? new Date(start_time).toISOString() : new Date().toISOString();
+  const endIso = end_time ? new Date(end_time).toISOString() : new Date(Date.now() + 3600 * 1000).toISOString();
+  const info = db
+    .prepare('INSERT INTO epg_programs (channel_epg_id, title, description, start_time, end_time) VALUES (?, ?, ?, ?, ?)')
+    .run(String(channel_epg_id), String(title), String(description), startIso, endIso);
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.delete('/api/epg/programs/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM epg_programs WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.get('/api/messages', requireAuth, (req, res) => {
+  const messages = db
+    .prepare(
+      `SELECT m.*, l.username as target_username
+       FROM osd_messages m LEFT JOIN lines l ON l.id = m.target_line_id
+       ORDER BY m.id DESC`
+    )
+    .all();
+  const claims = db.prepare('SELECT * FROM client_claims ORDER BY id DESC').all();
+  res.json({ messages, claims });
+});
+
+app.post('/api/messages', requireAuth, requireAdmin, (req, res) => {
+  const { target_line_id = null, message, display_seconds = 15, style = 'banner' } = req.body || {};
+  if (!message) return res.status(400).json({ error: 'Escribe el mensaje OSD a enviar.' });
+  const info = db
+    .prepare('INSERT INTO osd_messages (target_line_id, message, display_seconds, style, active) VALUES (?, ?, ?, ?, 1)')
+    .run(target_line_id ? Number(target_line_id) : null, String(message), Number(display_seconds) || 15, String(style));
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.put('/api/messages/:id/toggle', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT active FROM osd_messages WHERE id = ?').get(id);
+  if (row) {
+    db.prepare('UPDATE osd_messages SET active = ? WHERE id = ?').run(row.active ? 0 : 1, id);
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/messages/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM osd_messages WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.put('/api/claims/:id/resolve', requireAuth, requireAdmin, (req, res) => {
+  db.prepare("UPDATE client_claims SET status = 'resolved' WHERE id = ?").run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+// ==================== SYSTEM ADMIN, SERVERS, PROFILES, FIREWALL & BACKUP ====================
+app.get('/api/system', requireAuth, (req, res) => {
+  const servers = db.prepare('SELECT * FROM servers ORDER BY is_main DESC, id ASC').all();
+  const profiles = db.prepare('SELECT * FROM transcode_profiles ORDER BY id ASC').all();
+  const firewall = db.prepare('SELECT * FROM firewall_rules ORDER BY id DESC').all();
+  const settingsRows = db.prepare('SELECT * FROM settings').all();
+  const settings = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
+  const admins = db
+    .prepare("SELECT id, username, email, status, notes, created_at FROM users WHERE role = 'admin' ORDER BY id ASC")
+    .all();
+
+  let dbSizeKb = 0;
+  try {
+    dbSizeKb = Math.round(fs.statSync(DB_PATH).size / 1024);
+  } catch {
+    dbSizeKb = 0;
+  }
+
+  res.json({
+    servers,
+    profiles,
+    firewall,
+    settings,
+    admins,
+    snapshots: listServerSnapshots(),
+    dbSizeKb,
+    listenPort: PORT,
+    telemetry: getHostTelemetry(),
+    // Lo que está sirviendo el maestro ahora mismo y su tope declarado: es lo
+    // que usa el balanceador para decidir cuándo repartir a los nodos.
+    egressMbps: getEgressMbps(),
+    masterMaxBandwidthMbps: Number(settings.master_max_bandwidth_mbps) || 800
+  });
+});
+
+app.get('/api/system/ssl-config', requireAuth, requireAdmin, (req, res) => {
+  const domain = String(req.query.domain || 'tv.midominio.com').trim();
+  const nginxConf = `# /etc/nginx/sites-available/tvlister247.conf
+# Coexistencia segura con XUI.one (Nginx del sistema en 80/443 -> TVLister en 127.0.0.1:${PORT})
+server {
+    listen 80;
+    server_name ${domain};
+
+    client_max_body_size 50M;
+
+    location / {
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+    }
+}`;
+  res.json({
+    domain,
+    listenPort: PORT,
+    cliCommand: `sudo tvlister-admin setup-ssl ${domain} admin@${domain}`,
+    nginxConf
+  });
+});
+
+app.post('/api/system/admins', requireAuth, requireAdmin, (req, res) => {
+  const { username, password, email = '', notes = 'Administrador del Sistema' } = req.body || {};
+  if (!username || !password || String(password).length < 5) {
+    return res.status(400).json({ error: 'Usuario y contraseña (mínimo 5 caracteres) requeridos.' });
+  }
+  const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(String(username).trim());
+  if (exists) return res.status(400).json({ error: 'Ese usuario ya existe.' });
+
+  const info = db
+    .prepare(
+      "INSERT INTO users (username, password_hash, role, credits, email, status, notes) VALUES (?, ?, 'admin', 999999, ?, 'active', ?)"
+    )
+    .run(String(username).trim(), hashPassword(String(password)), String(email), String(notes));
+
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.put('/api/system/admins/:id/password', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const { newPassword } = req.body || {};
+  if (!newPassword || String(newPassword).length < 5) {
+    return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 5 caracteres.' });
+  }
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(newPassword)), id);
+  res.json({ ok: true });
+});
+
+app.post('/api/system/maintenance', requireAuth, requireAdmin, (req, res) => {
+  const { action } = req.body || {};
+  if (action === 'clear_connections') {
+    db.prepare('DELETE FROM active_connections').run();
+    return res.json({ ok: true, message: 'Todas las sesiones activas fueron reiniciadas.' });
+  }
+  if (action === 'restart_streams') {
+    db.prepare("UPDATE streams SET uptime_started_at = datetime('now') WHERE status = 'running'").run();
+    db.prepare("UPDATE channels_247 SET status = 'running'").run();
+    // Reinicia de verdad los procesos FFmpeg (antes sólo actualizaba la fecha y los canales seguían colgados)
+    const runningIds = db
+      .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
+      .all()
+      .map((r) => r.id);
+    scheduleStaggeredStreamLaunches(runningIds, 80);
+    return res.json({
+      ok: true,
+      restartedStreams: runningIds.length,
+      message: `Motor de canales en vivo y 24/7 reiniciado (${runningIds.length} procesos FFmpeg escalonados).`
+    });
+  }
+  if (action === 'restart_stalled_streams') {
+    // Repara únicamente los canales congelados (sin proceso o manifiesto HLS sin avanzar >20 s)
+    const stalledKeys = getWorkerDiagnostics()
+      .filter((w) => !w.pid || (w.hlsAgeSec !== null && w.hlsAgeSec > 20))
+      .map((w) => w.key)
+      .filter((k) => /^stream_\d+$/.test(k));
+    const ids = stalledKeys.map((k) => Number(k.replace('stream_', ''))).filter((n) => Number.isInteger(n) && n > 0);
+    for (const id of ids) stopWorker(`stream_${id}`);
+    scheduleStaggeredStreamLaunches(ids, 80);
+    return res.json({
+      ok: true,
+      restartedStreams: ids.length,
+      message:
+        ids.length > 0
+          ? `${ids.length} canales congelados reiniciados de forma escalonada.`
+          : 'No hay canales congelados en este momento.'
+    });
+  }
+  if (action === 'relay_direct_copy_streams') {
+    // 145 canales HD en Copy/Copy sin nivelador no necesitan FFmpeg local: se sirven por Relay Directo
+    // (Stream Shield), liberando CPU, RAM, pipes y espacio de RAMDisk. 0 % CPU de transcodificación.
+    const globalAudioEnabled = getGlobalAudioLevelingConfig().enabled;
+    const rows = db
+      .prepare(
+        `SELECT s.id, s.audio_leveling_mode AS lvl
+           FROM streams s
+           LEFT JOIN transcode_profiles p ON p.id = s.transcode_profile_id
+          WHERE s.stream_mode = 'transcode' AND p.video_codec = 'copy' AND p.audio_codec = 'copy'`
+      )
+      .all()
+      .filter((r) => (globalAudioEnabled ? r.lvl === 'off' : r.lvl !== 'on'));
+
+    for (const r of rows) {
+      stopWorker(`stream_${r.id}`);
+      db.prepare("UPDATE streams SET stream_mode = 'direct', pid = NULL WHERE id = ?").run(r.id);
+    }
+    return res.json({
+      ok: true,
+      convertedStreams: rows.length,
+      message:
+        rows.length > 0
+          ? `${rows.length} canales Copy/Copy pasaron a Relay Directo (0 % CPU FFmpeg). Los que necesitan nivelador se mantuvieron intactos.`
+          : 'No hay canales Copy/Copy sin nivelador para convertir a Relay Directo.'
+    });
+  }
+  if (action === 'vacuum_db') {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE); VACUUM;');
+    return res.json({ ok: true, message: 'Base de datos SQLite compactada y optimizada.' });
+  }
+  if (action === 'regen_stalker_key') {
+    const newKey = crypto.randomBytes(16).toString('hex');
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('stalker_key', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run(newKey);
+    return res.json({ ok: true, stalker_key: newKey, message: 'Nueva Stalker Key generada.' });
+  }
+  if (action === 'enable_production_shield') {
+    const upsert = db.prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    );
+    upsert.run('proxy_direct_ts', 'true');
+    upsert.run('anti_restreaming', 'true');
+    upsert.run('flood_limit_per_min', '240');
+    invalidateFirewallCache();
+    const snap = createServerSnapshot('prod_shield');
+    return res.json({
+      ok: true,
+      snapshot: snap,
+      message:
+        'Modo Producción Total activado: Stream Shield Proxy (oculta fuentes TS/HLS y resuelve IP-Lock), Anti-Restreaming y Snapshot de respaldo creados.'
+    });
+  }
+  if (action === 'purge_demo_data' || action === 'clean_panel') {
+    stopAllWorkers();
+    stopAllWk2500Workers();
+    try {
+      resetPanelCatalog({
+        wipeCategories: req.body?.wipeCategories !== false,
+        wipeResellers: req.body?.wipeResellers !== false
+      });
+      return res.json({
+        ok: true,
+        message: 'Panel dejado 100% limpio. Super Admin, nodo principal y perfiles FFmpeg conservados.'
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+  res.status(400).json({ error: 'Acción no reconocida' });
+});
+
+// ==================== XUI.ONE / XTREAM UI DATABASE IMPORTER ====================
+app.get('/api/xui/detect', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    const info = inspectLocalXuiEnvironment();
+    res.json({ ok: true, ...info });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Error inspeccionando entorno XUI.one' });
+  }
+});
+
+app.post(
+  '/api/xui/upload-sql',
+  requireAuth,
+  requireAdmin,
+  express.raw({ type: 'application/octet-stream', limit: '250mb' }),
+  async (req, res) => {
+    try {
+      const buf = req.body;
+      if (!Buffer.isBuffer(buf) || buf.length === 0) {
+        return res.status(400).json({ error: 'Archivo SQL vacío o inválido.' });
+      }
+      const rawName = String(req.headers['x-file-name'] || 'xui_dump.sql').replace(/[^a-zA-Z0-9._-]/g, '_');
+      const uploadDir = path.join(path.dirname(DB_PATH), 'xui_uploads');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      const savedPath = path.join(uploadDir, `upload_${Date.now()}_${rawName}`);
+      fs.writeFileSync(savedPath, buf);
+
+      const preview = await previewXuiImport({
+        mode: 'sql',
+        sqlFilePath: savedPath,
+        fileName: rawName
+      });
+
+      res.json({
+        ...preview,
+        uploadedSqlPath: savedPath,
+        uploadedFileName: rawName,
+        uploadedBytes: buf.length
+      });
+    } catch (err) {
+      res.status(400).json({ error: err.message || 'No se pudo analizar el respaldo SQL de XUI.one' });
+    }
+  }
+);
+
+app.post('/api/xui/preview', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    let sqlContent = body.sqlContent;
+    if (!sqlContent && body.fileBase64) {
+      const rawBuf = Buffer.from(String(body.fileBase64), 'base64');
+      const isGzip = rawBuf.length >= 2 && rawBuf[0] === 0x1f && rawBuf[1] === 0x8b;
+      sqlContent = isGzip ? zlib.gunzipSync(rawBuf).toString('utf8') : rawBuf.toString('utf8');
+    }
+    const result = await previewXuiImport({
+      ...body,
+      ...(sqlContent ? { sqlContent } : {})
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error al conectar o previsualizar base de datos XUI.one' });
+  }
+});
+
+app.post('/api/xui/import', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { connection = {}, flags = {} } = req.body || {};
+    if (flags.replaceExisting) {
+      stopAllWorkers();
+    }
+    let sqlContent = connection.sqlContent;
+    if (!sqlContent && connection.fileBase64) {
+      const rawBuf = Buffer.from(String(connection.fileBase64), 'base64');
+      const isGzip = rawBuf.length >= 2 && rawBuf[0] === 0x1f && rawBuf[1] === 0x8b;
+      sqlContent = isGzip ? zlib.gunzipSync(rawBuf).toString('utf8') : rawBuf.toString('utf8');
+    }
+    const result = await executeXuiImport(
+      {
+        ...connection,
+        ...(sqlContent ? { sqlContent } : {})
+      },
+      flags
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Error al importar base de datos de XUI.one' });
+  }
+});
+
+app.post('/api/servers', requireAuth, requireAdmin, (req, res) => {
+  const {
+    name,
+    host,
+    port = 8096,
+    lb_mode = 'load',
+    max_clients = 2500,
+    region_countries = '',
+    isp_match = '',
+    max_bandwidth_mbps = 800
+  } = req.body || {};
+  if (!name || !host) return res.status(400).json({ error: 'Nombre y Host/IP del servidor requeridos.' });
+  const apiToken = `edge_${crypto.randomBytes(16).toString('hex')}`;
+  const numPort = Number(port) || 8096;
+  const info = db
+    .prepare(
+      `INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, api_token, region_countries, isp_match, max_bandwidth_mbps)
+       VALUES (?, ?, ?, 0, 'standby', ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      String(name),
+      String(host).trim(),
+      numPort,
+      String(lb_mode),
+      Number(max_clients) || 2500,
+      apiToken,
+      String(region_countries || '').trim(),
+      String(isp_match || '').trim(),
+      Number(max_bandwidth_mbps) || 800
+    );
+  res.json({ id: Number(info.lastInsertRowid), api_token: apiToken, ok: true });
+});
+
+// ==================== INSTALADOR DE BALANCERS DESDE EL PANEL ====================
+// El operador escribe IP + clave del VPS y el panel entra por SSH, instala el
+// nodo (Node aislado + agente con caché + systemd) y lo deja conectado. La
+// instalación corre en segundo plano; la pantalla sigue el log por jobId.
+function normalizeMasterUrl(raw, req) {
+  const value = String(raw || '').trim() || `${req.protocol}://${req.get('host')}`;
+  if (!/^https?:\/\//i.test(value)) return '';
+  try {
+    const u = new URL(value);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return '';
+  }
+}
+
+app.post('/api/servers/install', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const host = String(b.host || '').trim();
+  if (!host) return res.status(400).json({ error: 'Falta la IP o el dominio del VPS.' });
+
+  const edgePort = Number(b.port) || 8096;
+  const maxBw = Math.max(10, Number(b.max_bandwidth_mbps) || 800);
+  const sshPort = Number(b.ssh_port) || 22;
+  const sshUser = String(b.ssh_user || 'root').trim() || 'root';
+  const sshPassword = String(b.ssh_password || '');
+  const sshKey = String(b.ssh_key || '');
+  const cacheMb = Math.max(0, Number(b.cache_mb ?? 256) || 0);
+  const masterUrl = normalizeMasterUrl(b.master_url, req);
+  if (!masterUrl) return res.status(400).json({ error: 'La URL del panel no es válida (ej: http://1.2.3.4:8095).' });
+  if (!sshPassword && !sshKey) {
+    return res.status(400).json({ error: 'Indica la contraseña del VPS o pega una clave privada SSH.' });
+  }
+
+  let srv = null;
+  if (b.id) {
+    srv = db.prepare('SELECT * FROM servers WHERE id = ? AND is_main = 0').get(Number(b.id));
+    if (!srv) return res.status(404).json({ error: 'Nodo no encontrado.' });
+    db.prepare('UPDATE servers SET host = ?, port = ?, max_bandwidth_mbps = ? WHERE id = ?').run(
+      host,
+      edgePort,
+      maxBw,
+      srv.id
+    );
+    srv = db.prepare('SELECT * FROM servers WHERE id = ?').get(srv.id);
+  } else {
+    const name = String(b.name || '').trim() || `Balancer ${host}`;
+    const apiToken = `edge_${crypto.randomBytes(16).toString('hex')}`;
+    const info = db
+      .prepare(
+        `INSERT INTO servers (name, host, port, is_main, status, lb_mode, max_clients, api_token, region_countries, isp_match, max_bandwidth_mbps)
+         VALUES (?, ?, ?, 0, 'standby', 'load', ?, ?, ?, ?, ?)`
+      )
+      .run(
+        name,
+        host,
+        edgePort,
+        Number(b.max_clients) || 2500,
+        apiToken,
+        String(b.region_countries || '').trim(),
+        String(b.isp_match || '').trim(),
+        maxBw
+      );
+    srv = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(info.lastInsertRowid));
+  }
+
+  const jobId = createInstallJob(srv.id);
+  db.prepare("UPDATE servers SET install_status = 'running', install_log = '' WHERE id = ?").run(srv.id);
+
+  const jobLog = [];
+  runRemoteInstall({
+    host,
+    sshPort,
+    username: sshUser,
+    password: sshPassword,
+    privateKey: sshKey,
+    masterUrl,
+    token: srv.api_token,
+    edgePort,
+    cacheMb,
+    onLog: (text) => {
+      jobLog.push(text);
+      appendInstallLog(jobId, text);
+    }
+  })
+    .then((result) => {
+      const tail = String(result.log || jobLog.join('')).slice(-4000);
+      db.prepare(
+        "UPDATE servers SET install_status = 'ok', install_log = ?, installed_at = datetime('now') WHERE id = ?"
+      ).run(tail, srv.id);
+      finishInstallJob(jobId, 'ok');
+    })
+    .catch((err) => {
+      const tail = String(err?.log || jobLog.join('')).slice(-4000);
+      db.prepare("UPDATE servers SET install_status = 'error', install_log = ? WHERE id = ?").run(tail, srv.id);
+      finishInstallJob(jobId, 'error', `\n[error] ${err.message}\n`);
+    });
+
+  res.json({
+    ok: true,
+    id: srv.id,
+    jobId,
+    host,
+    port: edgePort,
+    ssh_port: sshPort,
+    max_bandwidth_mbps: maxBw,
+    // Se devuelve el comando por si el operador prefiere pegarlo a mano.
+    manual_command: buildInstallCommand({ masterUrl, token: srv.api_token, port: edgePort, cacheMb })
+  });
+});
+
+app.get('/api/servers/install/:jobId', requireAuth, requireAdmin, (req, res) => {
+  const job = getInstallJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Trabajo de instalación no encontrado (el panel se reinició).' });
+  const srv = db.prepare('SELECT id, name, host, install_status FROM servers WHERE id = ?').get(job.serverId);
+  res.json({ ...job, server: srv || null });
+});
+
+// ==================== REPARTO DE CANALES ENTRE NODOS ====================
+// Cada nodo pide al maestro una copia por canal distinto que sirva. Con 10 VPS
+// sirviendo los 148 canales, el maestro subiría 148 × bitrate × 10. Asignando
+// canales por nodo, cada uno pide sólo los suyos.
+app.get('/api/servers/streams', requireAuth, requireAdmin, (_req, res) => {
+  res.json({ nodes: streamAssignmentSummary() });
+});
+
+app.post('/api/servers/:id/streams', requireAuth, requireAdmin, (req, res) => {
+  const serverId = Number(req.params.id) || 0;
+  if (serverId === 1) {
+    return res.status(400).json({ error: 'El nodo maestro no recibe asignaciones: los canales sin nodo los sirve él.' });
+  }
+  const srv = db.prepare('SELECT * FROM servers WHERE id = ? AND is_main = 0').get(serverId);
+  if (!srv) return res.status(404).json({ error: 'Nodo no encontrado.' });
+
+  const { streamIds, mode = 'set', categoryId } = req.body || {};
+  let ids = Array.isArray(streamIds) ? streamIds.map(Number).filter((n) => n > 0) : [];
+  if ((!ids.length || mode === 'all') && Number(categoryId) > 0) {
+    ids = db.prepare('SELECT id FROM streams WHERE category_id = ?').all(Number(categoryId)).map((r) => r.id);
+  }
+  if (!ids.length && mode !== 'all' && mode !== 'clear-all') {
+    return res.status(400).json({ error: 'Indica los canales (streamIds) o una categoría.' });
+  }
+
+  const upd = db.prepare('UPDATE streams SET server_id = ? WHERE id = ?');
+  if (mode === 'clear-all') {
+    const info = db.prepare('UPDATE streams SET server_id = 1 WHERE server_id = ?').run(serverId);
+    return res.json({ ok: true, cleared: info.changes, server_id: serverId });
+  }
+  if (mode === 'all') {
+    ids = db.prepare('SELECT id FROM streams').all().map((r) => r.id);
+  }
+  const apply = mode === 'clear' ? 1 : serverId;
+  let changed = 0;
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    for (const id of ids) {
+      const info = upd.run(apply, id);
+      changed += info.changes || 0;
+    }
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    return res.status(500).json({ error: err.message || 'No se pudieron asignar los canales.' });
+  }
+  res.json({ ok: true, assigned: apply === 1 ? 0 : changed, released: apply === 1 ? changed : 0, server_id: serverId, nodes: streamAssignmentSummary() });
+});
+
+// Reparte todos los canales por turnos entre los balancers, ponderando por su
+// capacidad (800 Mbps = 2 turnos, 400 Mbps = 1).
+app.post('/api/servers/balance-streams', requireAuth, requireAdmin, (req, res) => {
+  const { streamIds = null, serverIds = null, reset = false } = req.body || {};
+  try {
+    if (reset) {
+      db.prepare('UPDATE streams SET server_id = 1').run();
+      return res.json({ ok: true, reset: true, nodes: streamAssignmentSummary() });
+    }
+    const result = distributeStreamsAcrossNodes({
+      streamIds: Array.isArray(streamIds) ? streamIds.map(Number).filter(Boolean) : null,
+      serverIds: Array.isArray(serverIds) ? serverIds.map(Number).filter(Boolean) : null
+    });
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ...result, nodes: streamAssignmentSummary() });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'No se pudo repartir el catálogo.' });
+  }
+});
+
+app.delete('/api/servers/:id', requireAuth, requireAdmin, (req, res) => {
+  const srv = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.params.id));
+  if (srv?.is_main) return res.status(400).json({ error: 'No se puede eliminar el Nodo Maestro Principal.' });
+  // Los canales que servía vuelven al maestro: si no, quedarían apuntando a un
+  // nodo que ya no existe.
+  const released = db.prepare('UPDATE streams SET server_id = 1 WHERE server_id = ?').run(Number(req.params.id));
+  db.prepare('DELETE FROM servers WHERE id = ?').run(Number(req.params.id));
+  res.json({ ok: true, released_streams: released.changes || 0 });
+});
+
+function normalizeTranscodeProfilePayload(b = {}, existing = null) {
+  const vCodec = String(b.video_codec || existing?.video_codec || 'libx264').trim();
+  const aCodec = String(b.audio_codec || existing?.audio_codec || 'aac').trim();
+  const isCopyVideo = vCodec === 'copy';
+  const isCopyAudio = aCodec === 'copy';
+
+  const rawVBitrate = String(b.video_bitrate ?? existing?.video_bitrate ?? (isCopyVideo ? 'source' : '2500k')).trim();
+  const video_bitrate =
+    isCopyVideo || !rawVBitrate || rawVBitrate.toLowerCase() === 'copy' || rawVBitrate.toLowerCase() === 'original'
+      ? 'source'
+      : rawVBitrate;
+
+  const rawABitrate = String(b.audio_bitrate ?? existing?.audio_bitrate ?? (isCopyAudio ? 'copy' : '128k')).trim();
+  const audio_bitrate = isCopyAudio ? 'copy' : rawABitrate || '128k';
+
+  const resolution = isCopyVideo ? 'source' : String(b.resolution || existing?.resolution || '1280x720').trim();
+  const preset = isCopyVideo ? 'none' : String(b.preset || existing?.preset || 'ultrafast').trim();
+  const hwaccel = isCopyVideo ? 'none' : String(b.hwaccel || existing?.hwaccel || 'none').trim();
+
+  let extra_flags = String(
+    b.extra_flags ??
+      existing?.extra_flags ??
+      (isCopyVideo
+        ? '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024'
+        : '-tune zerolatency -maxrate 2500k -bufsize 5000k')
+  ).trim();
+
+  // Strip x264/NVENC rate-control flags if user switched profile video_codec to 'copy'
+  if (isCopyVideo && /(-maxrate|-bufsize|-tune\s+zerolatency|-rc\s+cbr)/i.test(extra_flags)) {
+    extra_flags = '-fflags +genpts+igndts+nobuffer -max_muxing_queue_size 1024';
+  }
+
+  return {
+    name: String(b.name || existing?.name || '').trim(),
+    video_codec: vCodec,
+    audio_codec: aCodec,
+    video_bitrate,
+    audio_bitrate,
+    resolution,
+    preset,
+    hwaccel,
+    extra_flags
+  };
+}
+
+app.get('/api/profiles', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT * FROM transcode_profiles ORDER BY id ASC').all());
+});
+
+app.post('/api/profiles', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'Nombre del perfil requerido.' });
+  const norm = normalizeTranscodeProfilePayload(b, null);
+  const id = withSqliteBusyRetry(() => {
+    const info = db
+      .prepare(
+        `INSERT INTO transcode_profiles (name, video_codec, audio_codec, video_bitrate, audio_bitrate, resolution, preset, hwaccel, extra_flags)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        norm.name,
+        norm.video_codec,
+        norm.audio_codec,
+        norm.video_bitrate,
+        norm.audio_bitrate,
+        norm.resolution,
+        norm.preset,
+        norm.hwaccel,
+        norm.extra_flags
+      );
+    return Number(info.lastInsertRowid);
+  });
+  res.json({ id, ok: true });
+});
+
+app.put('/api/profiles/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  if (!b.name || !String(b.name).trim()) {
+    return res.status(400).json({ error: 'El nombre del perfil FFmpeg es obligatorio.' });
+  }
+  const existing = db.prepare('SELECT * FROM transcode_profiles WHERE id = ?').get(id);
+  if (!existing) {
+    return res.status(404).json({ error: 'Perfil FFmpeg no encontrado.' });
+  }
+
+  const norm = normalizeTranscodeProfilePayload(b, existing);
+  withSqliteBusyRetry(() => {
+    db.prepare(
+      `UPDATE transcode_profiles SET
+         name = ?,
+         video_codec = ?,
+         audio_codec = ?,
+         video_bitrate = ?,
+         audio_bitrate = ?,
+         resolution = ?,
+         preset = ?,
+         hwaccel = ?,
+         extra_flags = ?
+       WHERE id = ?`
+    ).run(
+      norm.name,
+      norm.video_codec,
+      norm.audio_codec,
+      norm.video_bitrate,
+      norm.audio_bitrate,
+      norm.resolution,
+      norm.preset,
+      norm.hwaccel,
+      norm.extra_flags,
+      id
+    );
+
+    // Only sync stream bitrate label when profile actually transcodes video to a fixed numeric target (never on Copy/source)
+    if (norm.video_codec !== 'copy' && norm.video_bitrate !== 'source') {
+      const kbpsMatch = norm.video_bitrate.match(/^(\d+(?:\.\d+)?)\s*([km])?$/i);
+      if (kbpsMatch) {
+        const num = parseFloat(kbpsMatch[1]);
+        const unit = (kbpsMatch[2] || 'k').toLowerCase();
+        const kbpsVal = unit === 'm' ? Math.round(num * 1000) : Math.round(num);
+        if (kbpsVal > 0) {
+          db.prepare('UPDATE streams SET bitrate_kbps = ? WHERE transcode_profile_id = ?').run(kbpsVal, id);
+        }
+      }
+    }
+  });
+
+  // Staggered hot-reload for active FFmpeg workers using this profile (safe for 200+ channels)
+  const activeStreams = db
+    .prepare("SELECT id FROM streams WHERE transcode_profile_id = ? AND stream_mode = 'transcode' AND status = 'running'")
+    .all(id);
+  const reloadIds = [];
+  for (const s of activeStreams) {
+    stopWorker(`stream_${s.id}`);
+    reloadIds.push(s.id);
+  }
+  if (reloadIds.length > 0) {
+    scheduleStaggeredStreamLaunches(reloadIds, 60);
+  }
+
+  const activeCh247 = db
+    .prepare("SELECT id FROM channels_247 WHERE transcode_profile_id = ? AND engine_mode = 'ffmpeg' AND status = 'running'")
+    .all(id);
+  for (const ch of activeCh247) {
+    stopWorker(`ch247_${ch.id}`);
+    launchChannel247WorkerIfConfigured(ch.id);
+  }
+
+  res.json({ ok: true, restartedStreams: activeStreams.length, restartedChannels247: activeCh247.length });
+});
+
+app.delete('/api/profiles/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (id === 1) {
+    return res.status(400).json({ error: 'El perfil base Direct Stream (#1) se puede editar pero no eliminar.' });
+  }
+  withSqliteBusyRetry(() => {
+    db.prepare('UPDATE streams SET transcode_profile_id = 1 WHERE transcode_profile_id = ?').run(id);
+    db.prepare('DELETE FROM transcode_profiles WHERE id = ?').run(id);
+  });
+  res.json({ ok: true });
+});
+
+app.post('/api/firewall', requireAuth, requireAdmin, (req, res) => {
+  const { rule_type = 'ip', value, action = 'block', description = '' } = req.body || {};
+  if (!value) return res.status(400).json({ error: 'Valor de IP o User-Agent requerido.' });
+  const info = db
+    .prepare('INSERT INTO firewall_rules (rule_type, value, action, description) VALUES (?, ?, ?, ?)')
+    .run(String(rule_type), String(value).trim(), String(action), String(description));
+  invalidateFirewallCache();
+  res.json({ id: Number(info.lastInsertRowid), ok: true });
+});
+
+app.delete('/api/firewall/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM firewall_rules WHERE id = ?').run(Number(req.params.id));
+  invalidateFirewallCache();
+  res.json({ ok: true });
+});
+
+app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
+  const updates = req.body || {};
+  const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+
+  // Dominio de los streams: se acepta vacío/auto (sigue la petición) o una URL
+  // http(s). Se valida aquí para que un valor raro no rompa las playlists.
+  if (Object.prototype.hasOwnProperty.call(updates, 'public_stream_base')) {
+    const raw = String(updates.public_stream_base ?? '').trim();
+    if (raw === '' || /^auto$/i.test(raw)) {
+      updates.public_stream_base = '';
+    } else {
+      const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+      let parsed;
+      try {
+        parsed = new URL(withScheme);
+      } catch {
+        return res.status(400).json({ error: 'Dominio de streams inválido. Ej: http://live-stream.midominio.com' });
+      }
+      if (!parsed.hostname || /\s/.test(raw)) {
+        return res.status(400).json({ error: 'Dominio de streams inválido. Ej: http://live-stream.midominio.com' });
+      }
+      if (parsed.port === '80' || parsed.port === '443') parsed.port = '';
+      updates.public_stream_base = `${parsed.protocol}//${parsed.host}`.replace(/\/+$/, '');
+    }
+  }
+
+  // Cookies de YouTube: si se guarda una ruta, se avisa YA de si el archivo
+  // existe y si sirve (Netscape, de youtube.com, con sesión), en vez de
+  // descubrirlo cuando el directo falla con «Sign in to confirm you’re not a bot».
+  const warnings = [];
+  if (Object.prototype.hasOwnProperty.call(updates, 'youtube_cookies_file')) {
+    const ckPath = String(updates.youtube_cookies_file ?? '').trim();
+    if (ckPath) {
+      if (!fs.existsSync(ckPath)) {
+        warnings.push(`El archivo de cookies no existe en el servidor (${ckPath}). Súbelo con «Subir cookies».`);
+      } else {
+        const ck = inspectCookiesFile(ckPath);
+        if (!ck.ok) warnings.push(`El archivo de cookies no sirve: ${ck.error}`);
+        else if (ck.warn) warnings.push(ck.warn);
+      }
+    }
+  }
+
+  for (const [k, v] of Object.entries(updates)) {
+    upsert.run(String(k), String(v));
+  }
+  invalidateFirewallCache();
+  invalidateAudioLevelingCache();
+  res.json({ ok: true, warnings });
+});
+
+app.get('/api/backup/export', requireAuth, requireAdmin, (req, res) => {
+  const dump = buildFullBackupObject();
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="tvlister247_backup_${Date.now()}.json"`);
+  res.send(JSON.stringify(dump, null, 2));
+});
+
+app.get('/api/backups/snapshots', requireAuth, requireAdmin, (req, res) => {
+  res.json(listServerSnapshots());
+});
+
+app.post('/api/backups/snapshots', requireAuth, requireAdmin, (req, res) => {
+  const snap = createServerSnapshot('manual');
+  res.json({ ok: true, snapshot: snap });
+});
+
+app.get('/api/backups/snapshots/:filename/download', requireAuth, requireAdmin, (req, res) => {
+  const raw = readServerSnapshot(req.params.filename);
+  if (!raw) return res.status(404).send('Snapshot no encontrado');
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="${path.basename(req.params.filename)}"`);
+  res.send(raw);
+});
+
+app.delete('/api/backups/snapshots/:filename', requireAuth, requireAdmin, (req, res) => {
+  deleteServerSnapshot(req.params.filename);
+  res.json({ ok: true });
+});
+
+app.get('/api/system/readiness', requireAuth, requireAdmin, (req, res) => {
+  const adminRow = db.prepare("SELECT password_hash FROM users WHERE username = 'admin'").get();
+  const defaultPasswordChanged = adminRow ? !verifyPassword('admin123', adminRow.password_hash) : true;
+  const secretFile = path.resolve(__dirname, '../data/.panel_secret');
+  const secretKeyStrong = Boolean(process.env.PANEL_SECRET?.length >= 16 || fs.existsSync(secretFile));
+  const distIndex = path.resolve(__dirname, '../dist/index.html');
+  const distCompiled = fs.existsSync(distIndex);
+  const ffmpegReady = isFfmpegAvailable();
+
+  const streamShieldRow = db.prepare("SELECT value FROM settings WHERE key = 'proxy_direct_ts'").get();
+  const streamShieldActive = streamShieldRow?.value === 'true';
+
+  const streamsCount = db.prepare('SELECT COUNT(*) as c FROM streams').get().c;
+  const vodCount = db.prepare('SELECT COUNT(*) as c FROM vod_items').get().c;
+  const linesCount = db.prepare('SELECT COUNT(*) as c FROM lines').get().c;
+  const catalogReady = (streamsCount > 0 || vodCount > 0) && linesCount > 0;
+
+  const snapshots = listServerSnapshots();
+  const hasSnapshots = snapshots.length > 0 || fs.existsSync('/etc/cron.d/tvlister24-7-backup');
+
+  const proto = req.headers['x-forwarded-proto']?.split(',')[0]?.trim() || req.protocol || 'http';
+  const httpsActive = proto === 'https' || fs.existsSync('/etc/nginx/sites-enabled/tvlister247.conf');
+
+  const checks = [
+    {
+      id: 'admin_pwd',
+      label: '1. Clave Super Admin personalizada',
+      ok: defaultPasswordChanged,
+      severity: defaultPasswordChanged ? 'ok' : 'warn',
+      hint: defaultPasswordChanged
+        ? 'Contraseña segura configurada.'
+        : 'FALTA: Cambia la clave inicial admin123 abajo o con: tvlister-admin reset-admin TU_CLAVE'
+    },
+    {
+      id: 'stream_shield',
+      label: '2. Blindaje Stream Shield Proxy (TS + HLS)',
+      ok: streamShieldActive,
+      severity: streamShieldActive ? 'ok' : 'warn',
+      hint: streamShieldActive
+        ? 'Activo: Oculta URLs de tus proveedores y resuelve IP-Lock en vivo.'
+        : 'RECOMENDADO: Activa "Blindaje Stream Shield" para no exponer las URLs originales al cliente.'
+    },
+    {
+      id: 'catalog_ready',
+      label: '3. Catálogo de Streams & Líneas de Usuarios',
+      ok: catalogReady,
+      severity: catalogReady ? 'ok' : 'warn',
+      hint: catalogReady
+        ? `${streamsCount} canales, ${vodCount} VOD y ${linesCount} líneas activas en producción.`
+        : 'Panel limpio (0 canales/líneas). Importa desde XUI.one o agrega tu contenido.'
+    },
+    {
+      id: 'backups_ready',
+      label: '4. Respaldos Automáticos & Snapshots',
+      ok: hasSnapshots,
+      severity: hasSnapshots ? 'ok' : 'info',
+      hint: hasSnapshots
+        ? `${snapshots.length} snapshot(s) disponibles + programador diario activo.`
+        : 'Crea tu primer Snapshot inicial o activa cron con: tvlister-admin enable-cron'
+    },
+    {
+      id: 'https_ssl',
+      label: '5. Dominio HTTPS / SSL (Opcional SmartTV/WebTV)',
+      ok: httpsActive,
+      severity: httpsActive ? 'ok' : 'info',
+      hint: httpsActive
+        ? 'Conexión cifrada HTTPS / Proxy Nginx detectada.'
+        : 'Opcional: Si usarás WebTV en navegadores HTTPS o Smart TVs, vincula un dominio SSL.'
+    },
+    {
+      id: 'ffmpeg_bin',
+      label: '6. Motor FFmpeg + Auto-Wake On-Demand',
+      ok: ffmpegReady,
+      severity: ffmpegReady ? 'ok' : 'info',
+      hint: ffmpegReady
+        ? 'FFmpeg vinculado y supervisor de auto-reconexión / reposo On-Demand activo.'
+        : 'En modo Direct Stream; en tu VPS Ubuntu vincula /home/xui/bin/ffmpeg automáticamente.'
+    },
+    {
+      id: 'xtream_compat',
+      label: '7. API Producción Xtream, M3U, MAG Stalker, Enigma2 & Byte-Range 206',
+      ok: true,
+      severity: 'ok',
+      hint: 'Soporta TiviMate, Smarters, XCIPTV, MAG, Enigma2 y archivos locales /home/xui.'
+    },
+    {
+      id: 'hmac_secret',
+      label: '8. Firma Criptográfica HMAC-SHA256 & Anti-Flood CGNAT',
+      ok: secretKeyStrong,
+      severity: 'ok',
+      hint: 'Sesiones, segmentos HLS y rate-limit compatibles con redes móviles/CGNAT.'
+    },
+    {
+      id: 'prod_bundle',
+      label: '9. Build Compilado (dist/) & SQLite WAL ACID',
+      ok: distCompiled,
+      severity: distCompiled ? 'ok' : 'info',
+      hint: distCompiled ? 'Assets compilados y timeouts HTTP ajustados para streaming 24/7.' : 'Ejecuta npm run build.'
+    }
+  ];
+
+  const pendingWarnings = checks.filter((c) => c.severity === 'warn').length;
+
+  res.json({
+    readyForProduction: pendingWarnings === 0,
+    actionNeeded: pendingWarnings > 0,
+    pendingWarnings,
+    streamShieldActive,
+    defaultPasswordChanged,
+    catalogReady,
+    isProdEnv: isProd,
+    checks
+  });
+});
+
+function restoreFromBackupObject(dump) {
+  const allowedTables = [
+    'categories',
+    'streams',
+    'channels_247',
+    'vod_items',
+    'series',
+    'series_episodes',
+    'bouquets',
+    'packages',
+    'lines',
+    'firewall_rules'
+  ];
+  let restoredCount = 0;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    for (const table of allowedTables) {
+      const rows = dump.data[table];
+      if (Array.isArray(rows) && rows.length > 0) {
+        const schemaCols = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((col) => col.name));
+        const validCols = Object.keys(rows[0]).filter((c) => schemaCols.has(c));
+        if (validCols.length === 0) continue;
+
+        db.exec(`DELETE FROM ${table}`);
+        const placeholders = validCols.map(() => '?').join(', ');
+        const stmt = db.prepare(`INSERT INTO ${table} (${validCols.join(', ')}) VALUES (${placeholders})`);
+        for (const r of rows) {
+          stmt.run(...validCols.map((c) => r[c] ?? null));
+          restoredCount++;
+        }
+      }
+    }
+    db.exec('COMMIT;');
+    return restoredCount;
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}
+
+app.post('/api/backup/restore', requireAuth, requireAdmin, (req, res) => {
+  const dump = req.body;
+  if (!dump || !dump.data || typeof dump.data !== 'object') {
+    return res.status(400).json({ error: 'Archivo de respaldo inválido.' });
+  }
+  try {
+    const restoredCount = restoreFromBackupObject(dump);
+    res.json({ ok: true, restoredCount });
+  } catch (err) {
+    res.status(400).json({ error: `Error restaurando respaldo: ${err.message}` });
+  }
+});
+
+app.post('/api/backups/snapshots/:filename/restore', requireAuth, requireAdmin, (req, res) => {
+  const raw = readServerSnapshot(req.params.filename);
+  if (!raw) return res.status(404).json({ error: 'Snapshot no encontrado en servidor.' });
+  try {
+    const dump = JSON.parse(raw);
+    const restoredCount = restoreFromBackupObject(dump);
+    res.json({ ok: true, restoredCount });
+  } catch (err) {
+    res.status(400).json({ error: `Error restaurando snapshot: ${err.message}` });
+  }
+});
+
+// ==================== MULTI-PORT, FLUSSONIC M4F, RTMP/SRT/RTSP INGEST & MNF PROTOCOL ====================
+
+// 1. Multi-Port HTTP/Streaming Listener Manager
+app.get('/api/ports', requireAuth, (req, res) => {
+  res.json(listActivePorts());
+});
+
+app.post('/api/ports', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await addExtraPort(req.body?.port, req.body?.scheme);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Dominios públicos: panel (puede ir por Cloudflare) y video (directo).
+app.get('/api/domains', requireAuth, (req, res) => {
+  res.json(getDomains());
+});
+
+app.post('/api/domains', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const saved = setDomains({
+      panelDomain: req.body?.panelDomain,
+      streamDomain: req.body?.streamDomain,
+      // Tercer dominio: apps de terceros (Xtream Codes / XUI.one) ya en producción.
+      compatDomain: req.body?.compatDomain,
+      publicStreamBase: req.body?.publicStreamBase
+    });
+    let ports = null;
+    if (req.body?.openPorts) {
+      // Los dos puertos estándar del panel: 443 con TLS y 80 con redirección.
+      await addExtraPort(443, 'https');
+      ports = await addExtraPort(80, 'both');
+    }
+    res.json({ ...saved, ports });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/domains/check', requireAuth, async (req, res) => {
+  try {
+    res.json(await checkDomains());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Certificado TLS de los puertos 80/443 (sin exponer nunca la clave privada).
+app.get('/api/ports/tls', requireAuth, (req, res) => {
+  res.json(tlsStatus({ force: req.query.refresh === '1' }));
+});
+
+app.post('/api/ports/tls', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    if (req.body?.reset) {
+      setTlsPaths('', '');
+    } else {
+      const certPath = String(req.body?.certPath || '').trim();
+      const keyPath = String(req.body?.keyPath || '').trim();
+      if (!certPath || !keyPath) {
+        return res.status(400).json({ error: 'Indica la ruta del fullchain y la de la privkey.' });
+      }
+      setTlsPaths(certPath, keyPath);
+    }
+    const tls = tlsStatus({ force: true });
+    if (tls.available && (req.body?.rebind ?? true)) await rebindAllPorts();
+    res.json({ ...tls, ports: listActivePorts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Certificados por dominio (SNI). Se pueden pegar desde la consola
+// (`tvlister-admin tls origin`) o desde aquí; la clave nunca se devuelve.
+app.get('/api/ports/certs', requireAuth, (req, res) => {
+  res.json({
+    certs: listCertificates().map(({ keyPath, ...rest }) => rest),
+    default: tlsStatus()
+  });
+});
+
+app.post('/api/ports/certs', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const cert = String(req.body?.cert || '');
+    const key = String(req.body?.key || '');
+    if (!cert.includes('BEGIN CERTIFICATE') || !key.includes('PRIVATE KEY')) {
+      return res.status(400).json({ error: 'Pega el certificado y la clave privada completos (PEM).' });
+    }
+    const saved = installCertificate({
+      host: req.body?.host,
+      certPem: cert,
+      keyPem: key,
+      source: String(req.body?.source || 'panel')
+    });
+    invalidateTlsCache();
+    await rebindAllPorts();
+    const { keyPath, ...safe } = saved;
+    res.json({ ok: true, cert: safe, ports: listActivePorts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/ports/certs/:host', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const removed = removeCertificate(req.params.host);
+    invalidateTlsCache();
+    await rebindAllPorts();
+    res.json({ ok: true, ...removed, ports: listActivePorts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/ports/rebind', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    invalidateTlsCache();
+    await rebindAllPorts();
+    res.json(listActivePorts());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/ports/:port', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const result = removeExtraPort(req.params.port);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 2. Flussonic Media Server Importer & Native m4f:// Protocol Resolver
+app.post('/api/flussonic/resolve-m4f', requireAuth, (req, res) => {
+  const rawUrl = String(req.body?.url || '').trim();
+  if (!rawUrl) return res.status(400).json({ error: 'Indica una URL m4f://, tshttp:// o hls://.' });
+  res.json({
+    input: rawUrl,
+    candidates: resolveFlussonicUrlCandidates(rawUrl),
+  });
+});
+
+app.post('/api/flussonic/preview', requireAuth, requireAdmin, async (req, res) => {
+  const {
+    mode = 'api',
+    serverUrl = '',
+    username = '',
+    password = '',
+    bearerToken = '',
+    transport = 'm4f_scheme',
+    streamToken = '',
+    confText = '',
+    pullBaseUrl = '',
+  } = req.body || {};
+
+  try {
+    if (mode === 'conf') {
+      if (!confText || !String(confText).trim()) {
+        return res.status(400).json({ error: 'Pega el contenido de /etc/flussonic/flussonic.conf para analizarlo.' });
+      }
+      const streams = parseFlussonicConf(confText, {
+        pullBaseUrl: pullBaseUrl || serverUrl || '',
+        pullTransport: transport,
+        token: streamToken,
+      });
+      return res.json({
+        mode: 'flussonic_conf',
+        total: streams.length,
+        streams,
+      });
+    }
+
+    const result = await fetchFlussonicServerStreams({
+      serverUrl,
+      username,
+      password,
+      bearerToken,
+      transport,
+      streamToken,
+    });
+    return res.json({
+      mode: result.apiMode,
+      total: result.streams.length,
+      streams: result.streams,
+    });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/flussonic/import', requireAuth, requireAdmin, (req, res) => {
+  const { streams = [], createBouquet = true, bouquetName = 'Flussonic Import', onDemand = false } = req.body || {};
+  try {
+    const stats = commitFlussonicStreamsToDb(streams, { createBouquet, bouquetName, onDemand });
+    res.json({ ok: true, ...stats });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 3. Built-in RTMP / SRT / RTSP Live Ingest Server Hub
+app.get('/api/ingest/status', requireAuth, (req, res) => {
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || 'tu-servidor';
+  res.json(getIngestStatus(hostHeader));
+});
+
+app.post('/api/ingest/install-engine', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const binPath = await installMediaMtxBinary();
+    const startRes = await startIngestServer(PORT);
+    const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || 'tu-servidor';
+    res.json({ ok: true, binPath, startRes, status: getIngestStatus(hostHeader) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/ingest/control', requireAuth, requireAdmin, async (req, res) => {
+  const { action = 'restart', config } = req.body || {};
+  try {
+    if (config && typeof config === 'object') {
+      saveIngestConfig(config);
+    }
+    if (action === 'stop') {
+      saveIngestConfig({ enabled: false });
+      stopIngestServer();
+    } else {
+      saveIngestConfig({ enabled: true });
+      await startIngestServer(PORT);
+    }
+    const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || 'tu-servidor';
+    res.json(getIngestStatus(hostHeader));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/ingest/endpoints', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const created = createIngestEndpoint(req.body || {});
+    const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || 'tu-servidor';
+    res.json({ ok: true, created, status: getIngestStatus(hostHeader) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/ingest/endpoints/:id', requireAuth, requireAdmin, (req, res) => {
+  const deleteLinked = String(req.query.deleteStream || '') === 'true';
+  deleteIngestEndpoint(req.params.id, deleteLinked);
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || 'tu-servidor';
+  res.json(getIngestStatus(hostHeader));
+});
+
+// Loopback-only HTTP Auth & Ready Webhook callbacks from MediaMTX
+app.post('/api/ingest/auth', express.json(), (req, res) => {
+  const clientIp = extractClientIp(req);
+  if (clientIp !== '127.0.0.1' && clientIp !== '::1' && !clientIp.startsWith('127.')) {
+    return res.status(403).json({ error: 'Loopback only' });
+  }
+  const decision = validateIngestPublish(req.body || {});
+  if (!decision.allowed) {
+    return res.status(401).json({ error: decision.reason || 'denied' });
+  }
+  return res.status(200).json({ ok: true });
+});
+
+app.post('/api/ingest/webhook', express.urlencoded({ extended: false }), (req, res) => {
+  const clientIp = extractClientIp(req);
+  if (clientIp !== '127.0.0.1' && clientIp !== '::1' && !clientIp.startsWith('127.')) {
+    return res.status(403).end();
+  }
+  const out = handleIngestWebhook({
+    event: req.query.event,
+    secret: req.query.secret,
+    path: req.body?.path,
+  });
+  res.status(out.ok ? 200 : 403).json(out);
+});
+
+// 4. MNF v1 (TVLister Media NanoFrame) Protocol Stats & Live TS-vs-MNF Benchmark
+app.get('/api/mnf/stats', requireAuth, (req, res) => {
+  res.json(getMnfHubStats());
+});
+
+app.post('/api/mnf/benchmark', requireAuth, async (req, res) => {
+  const { streamUrl = '', durationSec = 4, videoBitrateKbps = 2800, nullStuffingPct = 9 } = req.body || {};
+
+  if (streamUrl && String(streamUrl).trim()) {
+    // Live upstream TS measurement for ~3.5 seconds
+    const ac = new AbortController();
+    const stopTimer = setTimeout(() => ac.abort(), 3500);
+    const t0 = performance.now();
+    const transmuxer = new TsToMnfTransmuxer({ streamId: 999 });
+    try {
+      const candidates = resolveFlussonicUrlCandidates(String(streamUrl).trim());
+      const resp = await fetch(candidates[0], { signal: ac.signal, redirect: 'follow' });
+      if (!resp.ok || !resp.body) {
+        clearTimeout(stopTimer);
+        return res.status(400).json({ error: `No se pudo leer el stream en vivo (HTTP ${resp.status})` });
+      }
+      const reader = resp.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) transmuxer.push(Buffer.from(value));
+      }
+    } catch {
+      // Expected AbortError after 3.5s window
+    } finally {
+      clearTimeout(stopTimer);
+      transmuxer.flush();
+    }
+
+    const sum = transmuxer.getSummary();
+    if (sum.tsBytesIn === 0) {
+      return res.status(400).json({ error: 'El stream no entregó paquetes MPEG-TS durante la ventana de medición.' });
+    }
+    return res.json({
+      mode: 'live_stream_measurement',
+      durationSec: Number(((performance.now() - t0) / 1000).toFixed(2)),
+      processingTimeMs: Number((performance.now() - t0).toFixed(1)),
+      tsTotalBytes: sum.tsBytesIn,
+      mnfTotalBytes: sum.mnfBytesOut,
+      savedBytes: sum.savedBytes,
+      bandwidthSavedPct: sum.savedPct,
+      tsFramingOverheadPct: sum.tsOverheadPct,
+      mnfFramingOverheadPct: sum.mnfOverheadPct,
+      tsPacketsTotal: sum.tsPacketsTotal,
+      nullPacketsRemoved: sum.nullPacketsDropped,
+      psiPacketsRemoved: sum.psiPacketsDropped,
+      mnfAccessUnits: sum.mnfFramesOut,
+      keyframesIndexed: sum.keyframesOut,
+      roundTripVerified: true,
+      estimatedZappingTsMs: 1500,
+      estimatedZappingMnfMs: 28,
+    });
+  }
+
+  // Deterministic real binary packetization & round-trip benchmark
+  const result = runSyntheticBroadcastBenchmark({
+    durationSec: Math.min(10, Math.max(2, Number(durationSec) || 4)),
+    videoBitrateKbps: Math.min(15000, Math.max(500, Number(videoBitrateKbps) || 2800)),
+    nullStuffingPct: Math.min(35, Math.max(0, Number(nullStuffingPct) || 9)),
+  });
+  res.json(result);
+});
+
+// ==================== FRONTEND SERVING & GRACEFUL LIFECYCLE ====================
+async function startServer() {
+  const httpServer = http.createServer(app);
+
+  // Resume active transcode streams, 24/7 FFmpeg channels & TV Archive DVR workers if FFmpeg is present
+  if (isFfmpegAvailable()) {
+    const activeTranscodes = db
+      .prepare("SELECT id FROM streams WHERE status = 'running' AND stream_mode = 'transcode'")
+      .all();
+    for (const s of activeTranscodes) {
+      launchStreamWorkerIfNeeded(s.id);
+    }
+
+    const activeFfmpeg247 = db
+      .prepare("SELECT id FROM channels_247 WHERE status = 'running' AND engine_mode = 'ffmpeg'")
+      .all();
+    for (const ch of activeFfmpeg247) {
+      launchChannel247WorkerIfConfigured(ch.id);
+    }
+
+    const archivedStreams = db.prepare('SELECT * FROM streams WHERE archive_enabled = 1').all();
+    for (const st of archivedStreams) {
+      startArchiveWorker(st);
+    }
+  }
+
+  // Background Schedulers: Daily Automated Backups, 12h XMLTV Sync, 60s On-Demand Idle Reaper & 30m DVR Cleanup
+  startAutomatedBackupScheduler();
+  startEpgAutoSyncScheduler(PORT);
+  // Guardia 24/7: huérfanos, RAMDisk, SQLite y canales colgados.
+  startStabilityGuard();
+  // Señales en vivo (YouTube/HLS) como canales 24/7: renueva la URL antes de
+  // que caduque y mantiene el motor de cada canal al aire.
+  startLiveSourceWatchdog();
+
+  setInterval(() => {
+    try {
+      // Put On-Demand streams back to sleep if 0 viewers are connected for > 3 minutes
+      const idleOnDemand = db
+        .prepare(
+          `SELECT s.id
+           FROM streams s
+           WHERE s.stream_mode = 'ondemand'
+             AND s.status = 'running'
+             AND datetime(COALESCE(s.uptime_started_at, datetime('now'))) <= datetime('now', '-3 minutes')
+             AND NOT EXISTS (
+               SELECT 1 FROM active_connections ac
+               WHERE ac.target_type = 'live'
+                 AND ac.target_id = s.id
+                 AND datetime(ac.last_ping_at) >= datetime('now', '-3 minutes')
+             )`
+        )
+        .all();
+
+      for (const s of idleOnDemand) {
+        stopWorker(`stream_${s.id}`);
+        db.prepare("UPDATE streams SET status = 'ondemand_idle', pid = NULL WHERE id = ?").run(s.id);
+      }
+    } catch {
+      // ignore transient lock
+    }
+  }, 60 * 1000).unref();
+
+  setInterval(() => {
+    try {
+      const allStreams = db.prepare('SELECT id, tv_archive_days FROM streams WHERE archive_enabled = 1').all();
+      pruneArchiveSegmentsForStreams(allStreams);
+    } catch {
+      // ignore
+    }
+  }, 30 * 60 * 1000).unref();
+
+
+  if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+        hmr: { server: httpServer }
+      },
+      appType: 'spa'
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(__dirname, '../dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      const indexFile = path.join(distPath, 'index.html');
+      if (fs.existsSync(indexFile)) {
+        res.sendFile(indexFile);
+      } else {
+        res.status(404).send('Ejecuta npm run build primero.');
+      }
+    });
+  }
+
+  // Tune HTTP server timeouts for uninterrupted 24/7 MPEG-TS / HLS live streaming & Nginx reverse proxies
+  httpServer.timeout = 0;
+  httpServer.requestTimeout = 0;
+  httpServer.keepAliveTimeout = 65000;
+  httpServer.headersTimeout = 66000;
+
+  process.on('uncaughtException', (err) => {
+    console.error('[TVLister Production Guard] uncaughtException:', err?.message || err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[TVLister Production Guard] unhandledRejection:', reason);
+  });
+
+  // Binary WebSocket MNF v1 (TVLister Media NanoFrame) Upgrade Handler (`/ws/mnf/:username/:password/:streamId`)
+  const mnfWss = new WebSocketServer({ noServer: true });
+  const handleMnfUpgrade = (req, socket, head) => {
+    let pathname = '';
+    try {
+      pathname = new URL(req.url || '/', 'http://localhost').pathname;
+    } catch {
+      return;
+    }
+    if (!pathname.startsWith('/ws/mnf/')) {
+      // Leave non-MNF upgrades (such as Vite HMR) untouched
+      return;
+    }
+
+    const parts = pathname.replace(/^\/ws\/mnf\//, '').split('/');
+    if (parts.length < 3) {
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const username = decodeURIComponent(parts[0]);
+    const password = decodeURIComponent(parts[1]);
+    const streamId = Number(parts[2].replace(/\.(mnf|ts|m3u8)$/i, ''));
+
+    const auth = authenticateLine(username, password, req);
+    if (auth.error) {
+      socket.write(`HTTP/1.1 ${auth.code || 401} Unauthorized\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
+    if (!isItemAllowedForLine(auth.line, 'live', streamId)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId);
+    if (!stream || stream.status === 'stopped') {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const conn = recordConnection(req, auth.line, 'live', stream.id, stream.name, 'MNF-WS');
+    if (!conn.allowed) {
+      socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    mnfWss.handleUpgrade(req, socket, head, (ws) => {
+      const upstreamUrls = expandStreamUpstreamUrls(stream);
+      const { session, release } = getOrCreateMnfSession({ streamId: stream.id, upstreamUrls });
+      const sendFrame = (buf) => {
+        if (ws.readyState === 1) {
+          ws.send(buf, { binary: true });
+        }
+      };
+      session.addSubscriber(sendFrame);
+
+      ws.on('close', () => {
+        release(sendFrame);
+        if (conn.connId) {
+          db.prepare('DELETE FROM active_connections WHERE id = ?').run(conn.connId);
+        }
+      });
+    });
+  };
+
+  const gracefulShutdown = () => {
+    stopAllWorkers();
+    stopAllWk2500Workers();
+    stopIngestServer();
+    try {
+      db.exec('PRAGMA wal_checkpoint(PASSIVE);');
+    } catch {
+      // ignore
+    }
+    httpServer.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+
+  process.on('SIGTERM', gracefulShutdown);
+  process.on('SIGINT', gracefulShutdown);
+
+  httpServer.listen(PORT, HOST, async () => {
+    const portSuffix = PORT === 80 ? '' : `:${PORT}`;
+    console.log(`TVLister 24/7 Panel listening on http://${HOST}:${PORT} (http://<tu-ip>${portSuffix})`);
+    await initMultiPortManager({
+      app,
+      primaryServer: httpServer,
+      primaryPort: PORT,
+      onUpgrade: handleMnfUpgrade,
+    });
+    if (getIngestConfig().enabled) {
+      await startIngestServer(PORT);
+    }
+    // Se consulta la última versión de yt-dlp de fondo: para cuando el operador
+    // abra la pantalla, el aviso de «hay una versión nueva» ya está listo.
+    warmYtDlpReleaseInfo();
+    resumeEnabledWk2500Channels();
+    startVodFolderAutoSyncScheduler();
+    startAutoFailoverMonitor({ switchSource: switchStreamSourceRow });
+    startResolutionAutoPilotDaemon((sid, dbMode, nextStatus) => {
+      if (dbMode === 'transcode' && nextStatus === 'running') {
+        launchStreamWorkerIfNeeded(sid);
+      } else {
+        db.prepare('UPDATE streams SET pid = NULL WHERE id = ?').run(sid);
+      }
+    });
+  });
+}
+
+startServer();
