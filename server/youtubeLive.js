@@ -193,6 +193,10 @@ export function inspectCookiesText(raw) {
   out.youtube = youtube;
   out.auth = auth;
   out.auth_expires_ms = authExpiresMs;
+  // Fecha legible y días que le quedan a la sesión (para avisar antes de que
+  // caduque, en vez de descubrirlo cuando el canal se queda sin señal).
+  out.auth_expires_iso = authExpiresMs ? new Date(authExpiresMs).toISOString().slice(0, 10) : '';
+  out.auth_days_left = authExpiresMs ? Math.max(0, Math.floor((authExpiresMs - Date.now()) / 86400000)) : null;
   out.domains = [...domains].slice(0, 8);
   out.format = count > 0 ? 'netscape' : 'unknown';
 
@@ -210,7 +214,11 @@ export function inspectCookiesText(raw) {
     return out;
   }
   out.ok = true;
-  if (!auth && out.expired_auth) {
+  if (auth && out.auth_days_left !== null && out.auth_days_left <= 3) {
+    out.warn =
+      `La sesión de las cookies caduca pronto (${out.auth_expires_iso || 'en días'}): ` +
+      'vuelve a exportarlas de youtube.com con la sesión iniciada para que los canales no se queden sin señal.';
+  } else if (!auth && out.expired_auth) {
     out.warn =
       'Las cookies traen la sesión pero YA HAN CADUCADO: abre youtube.com con la sesión iniciada, vuelve a ' +
       'exportarlas y súbelas otra vez. YouTube las caduca en días (a veces horas).';

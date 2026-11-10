@@ -797,11 +797,13 @@ fs.writeFileSync(out, body, { mode: 0o755 });
         const head = '# Netscape HTTP Cookie File\\n';
         const past = Math.floor(Date.now() / 1000) - 3600;
         const future = Math.floor(Date.now() / 1000) + 86400;
+        const soon = Math.floor(Date.now() / 1000) + 2 * 86400;
         const line = (exp) => '.youtube.com\\tTRUE\\t/\\tTRUE\\t' + exp + '\\t__Secure-3PSID\\txyz';
         console.log(JSON.stringify({
           vigentes: inspectCookiesText(head + line(future)),
           caducadas: inspectCookiesText(head + line(past)),
-          sesion: inspectCookiesText(head + line(0))
+          sesion: inspectCookiesText(head + line(0)),
+          prontas: inspectCookiesText(head + line(soon))
         }));
       `;
       const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
@@ -814,6 +816,9 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     ok('una sesión caducada se detecta', unit?.caducadas?.auth === false && unit?.caducadas?.expired_auth === true);
     ok('y se avisa de que hay que volver a exportarlas', /CADUCADO/.test(unit?.caducadas?.warn || ''), (unit?.caducadas?.warn || '').slice(0, 50));
     ok('una cookie de sesión (sin fecha) no vale como sesión', unit?.sesion?.auth === false);
+    ok('y se dice hasta cuándo vale la sesión', /^\d{4}-\d{2}-\d{2}$/.test(unit?.vigentes?.auth_expires_iso || ''), unit?.vigentes?.auth_expires_iso);
+    ok('con los días que le quedan', [0, 1].includes(unit?.vigentes?.auth_days_left), String(unit?.vigentes?.auth_days_left));
+    ok('y avisa cuando quedan pocos días', /caduca pronto/.test(unit?.prontas?.warn || ''), (unit?.prontas?.warn || '').slice(0, 60));
 
     // Se suben cookies otra vez (la sección 1d las quitó): así se prueba el caso
     // real del operador, que YA tiene cookies puestas y YouTube sigue sin dar nada.

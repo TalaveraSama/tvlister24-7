@@ -259,6 +259,8 @@ globalThis.fetch = async (url, opts = {}) => {
               usable: Boolean(cookiesPath),
               auth: Boolean(cookiesPath) && !cookiesExpired,
               expired_auth: Boolean(cookiesPath) && cookiesExpired,
+              auth_expires_iso: Boolean(cookiesPath) && !cookiesExpired ? '2099-01-01' : '',
+              auth_days_left: Boolean(cookiesPath) && !cookiesExpired ? 120 : null,
               count: cookiesPath ? 3 : 0,
               youtube: cookiesPath ? 3 : 0,
               error: ''
@@ -798,6 +800,8 @@ ok(
   await clickText('Probar cookies');
   ok(cookieTests >= 1, '«Probar cookies» las prueba contra YouTube', `${cookieTests} pruebas`);
   ok(/Las cookies funcionan/.test(text()), 'y confirma que funcionan');
+  ok(/Sesión iniciada con estas cookies \(válida hasta el 2099-01-01/.test(text()), 'y dice hasta cuándo vale la sesión');
+  ok(/Por qué un archivo y no usuario\/contraseña/.test(text()), 'explica por qué se usa un archivo y no usuario/contraseña');
   ok(/youtube-dl test video/.test(text()), 'diciendo qué ha leído con ellas');
 
   // Cookies caducadas: la prueba falla con el motivo y el bloque lo marca.

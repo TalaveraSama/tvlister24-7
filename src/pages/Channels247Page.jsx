@@ -1274,7 +1274,11 @@ export default function Channels247Page({ onPreview }) {
                         >
                           {' '}
                           · {ytStatus.cookies.auth ? 'activas' : 'SIN sesión'} ({ytStatus.cookies.count} de youtube.com
-                          {ytStatus.cookies.expired_auth ? ', caducadas' : ytStatus.cookies.auth ? ', con sesión' : ''})
+                          {ytStatus.cookies.expired_auth
+                            ? ', caducadas'
+                            : ytStatus.cookies.auth
+                              ? `, con sesión${ytStatus.cookies.auth_expires_iso ? ` hasta ${ytStatus.cookies.auth_expires_iso}` : ''}`
+                              : ''})
                         </span>
                       ) : (
                         ''
@@ -1343,7 +1347,42 @@ export default function Channels247Page({ onPreview }) {
                         </div>
                       )}
 
+                      {ytStatus?.cookies?.usable && (
+                        <div
+                          className={`text-[10px] ${
+                            ytStatus.cookies.expired_auth
+                              ? 'text-rose-300'
+                              : ytStatus.cookies.auth
+                                ? ytStatus.cookies.auth_days_left !== null && ytStatus.cookies.auth_days_left <= 3
+                                  ? 'text-amber-300'
+                                  : 'text-emerald-300'
+                                : 'text-amber-300'
+                          }`}
+                        >
+                          {ytStatus.cookies.expired_auth
+                            ? 'La sesión de este archivo ha caducado: vuelve a exportarlo.'
+                            : ytStatus.cookies.auth
+                              ? `Sesión iniciada con estas cookies${
+                                  ytStatus.cookies.auth_expires_iso
+                                    ? ` (válida hasta el ${ytStatus.cookies.auth_expires_iso}${
+                                        ytStatus.cookies.auth_days_left !== null
+                                          ? `, quedan ${ytStatus.cookies.auth_days_left} días`
+                                          : ''
+                                      })`
+                                    : ''
+                                }.`
+                              : 'El archivo no trae la sesión (falta SID): YouTube seguirá tratando al panel como visitante.'}
+                        </div>
+                      )}
+
                       <div className="text-[10px] text-slate-500 space-y-1">
+                        <div>
+                          <b className="text-slate-300">Por qué un archivo y no usuario/contraseña:</b> YouTube (Google)
+                          no permite que un programa inicie sesión con la contraseña; yt-dlp lo rechaza
+                          explícitamente. La sesión se le da con este <code className="text-slate-400">.txt</code>,
+                          que son las cookies de tu navegador ya con la sesión iniciada: es lo mismo que haber
+                          iniciado sesión, pero sin darle la contraseña al servidor.
+                        </div>
                         <div>
                           <b className="text-slate-300">Cómo:</b> abre <b>youtube.com</b> en tu PC con la sesión
                           iniciada → extensión «<b>Get cookies.txt LOCALLY</b>» → Export → sube aquí el{' '}

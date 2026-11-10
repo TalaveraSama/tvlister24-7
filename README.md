@@ -235,6 +235,10 @@ lo guarda con permisos 600 en `.runtime/youtube-cookies.txt` y lo usa solo, tamb
 **«Probar cookies»** (las usa contra YouTube de verdad) y, cuando algo falla, **«Ver qué formatos ve yt-dlp»**
 con el motivo exacto que da YouTube.
 
+No hay inicio de sesión con usuario y contraseña porque **YouTube no lo permite** (Google bloquea el login
+automático y yt-dlp lo rechaza: `Login with password is not supported for YouTube`). El `.txt` de cookies **es** la
+sesión: el panel muestra hasta qué día vale y avisa cuando le quedan ≤ 3 días.
+
 ---
 
 ## Desinstalar (sin tocar XUI.one ni el resto del servidor)

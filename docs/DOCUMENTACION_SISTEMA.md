@@ -3029,6 +3029,20 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.61: por qué no se inicia sesión con usuario/contraseña (y hasta cuándo vale la sesión)
+
+YouTube no admite login automático: Google bloquea el acceso con contraseña desde programas y yt-dlp lo rechaza
+explícitamente (`Login with password is not supported for YouTube`, `Login with OAuth is no longer supported`).
+La sesión se entrega con el archivo de cookies del navegador (lleva `SID`/`__Secure-3PSID`): es la misma sesión,
+sin dar la contraseña al servidor.
+
+- `inspectCookiesText` devuelve `auth_expires_iso` (fecha legible) y `auth_days_left`, y añade `warn` cuando a la
+  sesión le quedan **≤ 3 días** («vuelve a exportarlas»).
+- La pantalla muestra *«Sesión iniciada con estas cookies (válida hasta el …, quedan N días)»*, la fecha en la
+  cabecera del bloque y una nota que explica por qué se usa un archivo y no usuario/contraseña.
+
+Pruebas: `test_youtube_live.mjs` **192 OK** y `test_youtube_live_ui.mjs` **121 OK**.
+
 ### v2.6.60: cuando YouTube no entrega nada, se explica el motivo real (y se comprueba)
 
 El aviso «es privado, tiene restricción de edad o de país, o no lo entrega sin iniciar sesión» era un cajón de
