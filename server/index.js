@@ -2865,6 +2865,8 @@ app.post('/api/youtube/probe', requireAuth, requireAdmin, async (req, res) => {
       needs_ytdlp: Boolean(r.needs_ytdlp),
       needs_cookies: Boolean(r.needs_cookies),
       needs_format_fix: Boolean(r.needs_format_fix),
+      // YouTube está pidiendo verificación anti-robots a la IP del servidor.
+      blocked_bot: Boolean(r.blocked_bot),
       // Motivos concretos que dio YouTube (privado, edad, país, miembros…).
       reasons: Array.isArray(r.reasons) ? r.reasons : [],
       cookies_note: r.cookies_note || '',

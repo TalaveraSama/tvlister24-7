@@ -282,6 +282,7 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u === '/api/youtube/formats') {
     return json({
       ok: true,
+      client: 'tv',
       using_cookies: Boolean(cookiesPath),
       text: [
         '[youtube] ioSKlIL4Hs8: Downloading webpage',
@@ -442,6 +443,26 @@ globalThis.fetch = async (url, opts = {}) => {
         error:
           'YouTube pide iniciar sesión desde este servidor («Sign in to confirm you’re not a bot»). ' +
           'Sube un archivo de cookies de youtube.com y el panel lo usará solo.',
+        detail: "ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you're not a bot. Use --cookies."
+      });
+    }
+    if (/watch\?v=ipbot/.test(body?.url || '')) {
+      // Cookies con sesión válida y, aun así, verificación anti-robots: es la
+      // IP del servidor. No se le puede pedir al operador que reexporte nada.
+      return json({
+        ok: false,
+        live: false,
+        blocked_bot: true,
+        needs_cookies: false,
+        needs_format_fix: true,
+        clients_tried: 'normal, tv, web_safari, ios, mweb, tv_samsung',
+        error:
+          'YouTube no entrega este vídeo a la IP pública de este servidor: pide «Sign in to confirm you’re not a bot» ' +
+          '(su control anti-robots). Las cookies son válidas hasta el 01/01/2030 y se han enviado a yt-dlp, así que el ' +
+          'aviso no es por falta de sesión: YouTube lo aplica por IP (lo normal en servidores y centros de datos). ' +
+          'Se ha probado con los clientes: normal, tv, web_safari, ios, mweb, tv_samsung. Qué hacer, en este orden: pulsa ' +
+          '«Actualizar yt-dlp»; inicia sesión en YouTube desde la misma red del servidor y vuelve a exportar las cookies; ' +
+          'y si el servidor sale por una IP de centro de datos, YouTube puede seguir pidiéndolo.',
         detail: "ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you're not a bot. Use --cookies."
       });
     }
@@ -888,6 +909,25 @@ ok(
   ok(/Lista preparada: 10 de 10 vídeos en el disco/.test(text()), 'al terminar dice cuántos hay en el disco');
   ok(/se emiten en orden desde el disco/i.test(text()), 'y que ya no dependen de YouTube');
   ok(/LISTA · 10/.test(text()) || /10 vídeos/.test(text()), 'el enlace queda resuelto con sus vídeos', text().slice(-160));
+
+  // Se vuelve al directo normal para seguir con el resto de la prueba.
+  await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');
+}
+
+// ── 4g. Anti-robots con cookies válidas: es la IP, no la sesión ────────────
+{
+  await setValue(urlInput, 'https://www.youtube.com/watch?v=ipbot123');
+  await clickText('Comprobar señal');
+  ok(/Verificación anti-robots de YouTube/.test(text()), 'el aviso de anti-robots se ve de un vistazo');
+  ok(/IP pública de este servidor/.test(text()), 'y explica que es la IP del servidor');
+  ok(/cookies son válidas hasta el 01\/01\/2030/.test(text()), 'diciendo que la sesión está bien (no hay que reexportar)');
+  ok(/los clientes: normal, tv/.test(text()), 'con los clientes probados');
+  ok(buttons('Actualizar yt-dlp').length > 0, 'y ofrece actualizar yt-dlp');
+  ok(!/Sube un archivo de cookies/.test(text()), 'sin pedir cookies nuevas');
+
+  // La tabla de formatos dice con qué cliente la ha visto.
+  await clickText('Ver qué formatos ve yt-dlp');
+  ok(/cliente tv/.test(text()), 'la tabla de formatos dice con qué cliente la vio', text().slice(-160));
 
   // Se vuelve al directo normal para seguir con el resto de la prueba.
   await setValue(urlInput, 'https://www.youtube.com/@canaldemo/live');

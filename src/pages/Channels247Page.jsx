@@ -19,7 +19,8 @@ import {
   CheckCircle2,
   Download,
   RefreshCw,
-  Loader2
+  Loader2,
+  ShieldAlert
 } from 'lucide-react';
 import { apiFetch } from '../lib/api.js';
 
@@ -377,7 +378,14 @@ export default function Channels247Page({ onPreview }) {
     setFmtDiag({ busy: true });
     try {
       const r = await apiFetch('/api/youtube/formats', { method: 'POST', body: JSON.stringify({ url }) });
-      setFmtDiag({ busy: false, ok: Boolean(r.ok), text: r.text || '', error: r.error || '' });
+      setFmtDiag({
+        busy: false,
+        ok: Boolean(r.ok),
+        text: r.text || '',
+        client: r.client || '',
+        botCheck: Boolean(r.bot_check),
+        error: r.error || ''
+      });
     } catch (err) {
       setFmtDiag({ busy: false, ok: false, text: '', error: err.message });
     }
@@ -1168,6 +1176,12 @@ export default function Channels247Page({ onPreview }) {
                         </div>
                       ) : (
                         <div className="space-y-1">
+                          {probe.blocked_bot && (
+                            <div className="flex items-center gap-1.5 font-bold text-amber-200">
+                              <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                              Verificación anti-robots de YouTube (no es la lista ni el vídeo)
+                            </div>
+                          )}
                           <div className="flex items-start gap-1.5">
                             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                             <span>{probe.error || 'No hay directo disponible en ese enlace.'}</span>
@@ -1301,7 +1315,8 @@ export default function Channels247Page({ onPreview }) {
                           {fmtDiag?.text && (
                             <div className="mt-1 rounded-lg bg-black/40 border border-slate-700 p-2">
                               <div className="text-[10px] text-slate-400 mb-1">
-                                Salida de <code>yt-dlp -F</code> para este enlace:
+                                Salida de <code>yt-dlp -F</code> para este enlace
+                                {fmtDiag.client ? ` · cliente ${fmtDiag.client}` : ''}:
                               </div>
                               <pre className="text-[10px] leading-tight text-slate-300 overflow-x-auto whitespace-pre">
                                 {fmtDiag.text}

@@ -83,6 +83,11 @@ const counter = ${JSON.stringify(YT_COUNTER)};
 if (args.includes('--write-info-json')) {
   const flagsDl = (() => { try { return JSON.parse(fs.readFileSync(${JSON.stringify(YT_FLAGS)}, 'utf8')); } catch { return {}; } })();
   const tpl = String(args[args.indexOf('-o') + 1] || '');
+  // Anti-robots en la DESCARGA: el cliente por defecto bloqueado, «tv» no.
+  if (flagsDl.botAll === true || (flagsDl.botNormal === true && !args.includes('--extractor-args'))) {
+    console.error("ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you" + String.fromCharCode(39) + "re not a bot. This helps protect our community. Use --cookies-from-browser or --cookies for the authentication.");
+    process.exit(1);
+  }
   if (flagsDl.dlFail) {
     console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden');
     process.exit(1);
@@ -107,12 +112,25 @@ try { fs.appendFileSync(${JSON.stringify(path.join(TMP, 'yt-argv.txt'))}, JSON.s
 // «Requested format is not available»: el cliente normal no recibe ninguna pista
 // con URL (PO token / SABR). Con player_client=tv, sí. Con 'all', ninguno.
 const clientArg = String((args[args.indexOf('--extractor-args') + 1]) || '');
+// Anti-robots según el cliente: con «botNormal» sólo bloquea al cliente por
+// defecto (el «visionos» de yt-dlp 2026.10.26); con «botAll», a todos. Es el
+// fallo real del canal de Los Simpson: sesión válida, cero pistas.
+const botMsg = "ERROR: [youtube] ioSKlIL4Hs8: Sign in to confirm you" + String.fromCharCode(39) + "re not a bot. This helps protect our community. Use --cookies-from-browser or --cookies for the authentication.";
+const botHere = flags.botAll === true || (flags.botNormal === true && !/player_client=/.test(clientArg));
 // Diagnóstico: yt-dlp -F enseña la tabla de formatos.
 if (args.includes('-F')) {
+  if (botHere) { console.error(botMsg); process.exit(1); }
   console.log('[youtube] ioSKlIL4Hs8: Downloading webpage');
   console.log('ID  EXT   RESOLUTION FPS CH │   FILESIZE   TBR PROTO │ VCODEC          ACODEC');
   console.log('137 mp4   1920x1080   30    │    512.00MiB 4000 https │ avc1.640028     none');
   console.log('140 m4a   audio only        │      3.50MiB  128 https │ audio only      mp4a.40.2');
+  process.exit(0);
+}
+// Anti-robots: la ficha llega (código 0, con --ignore-no-formats-error) pero
+// sin NI UNA pista. El panel NO debe darse por vencido con este cliente.
+if (botHere) {
+  console.error(botMsg);
+  console.log(JSON.stringify({ id: 'ioSKlIL4Hs8', title: 'Vídeo con anti-robots', is_live: false, live_status: 'not_live', duration: 125, formats: [] }));
   process.exit(0);
 }
 // Cookies que estorban: con --cookies YouTube no entrega nada, sin ellas sí.
@@ -690,7 +708,27 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     }
     ok('yt-dlp recibe --cookies con el archivo guardado', /--cookies\s+\S*youtube-cookies\.txt/.test(used), used.slice(0, 120));
 
-    // 5) Quitarlas dejarlo todo como estaba.
+    // 5) Anti-robots CON cookies válidas: no se culpa a la sesión ni se piden
+    // cookies nuevas. Es lo que pasó con Los Simpson: sesión hasta 2027 y
+    // YouTube pidiendo verificación a la IP del servidor.
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, botAll: true }));
+    const botIp = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    ok(
+      'con anti-robots y cookies válidas NO se piden cookies nuevas',
+      botIp?.ok === false && botIp?.needs_cookies === false,
+      (botIp?.error || '').slice(0, 80)
+    );
+    ok('se marca como anti-robots', botIp?.blocked_bot === true);
+    ok(
+      'y se explica que es la IP del servidor',
+      /IP/i.test(botIp?.error || '') && /anti-robots/i.test(botIp?.error || ''),
+      (botIp?.error || '').slice(0, 100)
+    );
+    ok('diciendo hasta cuándo vale la sesión', /2030/.test(botIp?.error || ''), (botIp?.error || '').slice(0, 120));
+    ok('y con qué clientes se probó', /normal/.test(botIp?.clients_tried || '') && /tv/.test(botIp?.clients_tried || ''), botIp?.clients_tried);
+    ok('el canal guarda el aviso sin volver a probar', Boolean(botIp?.clients_tried));
+
+    // 6) Quitarlas dejarlo todo como estaba.
     const del = await fetch(`${BASE}/api/youtube/cookies`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     const delBody = await del.json().catch(() => null);
     ok('se pueden quitar las cookies', del.status === 200 && delBody?.cookies?.path === '', delBody?.cookies?.path);
@@ -746,7 +784,7 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     ok('si ningún cliente da pistas, se dice claro', none?.ok === false && none?.needs_format_fix === true, (none?.error || '').slice(0, 70));
     ok('con la salida: actualizar yt-dlp', /Actualizar yt-dlp/.test(none?.error || ''));
     ok('sin pegar el inglés tal cual delante', !/^yt-dlp no pudo leer el enlace/.test(none?.error || ''));
-    ok('y se probaron los cuatro clientes', (none?.clients_tried || '').split(',').length === 4, none?.clients_tried);
+    ok('y se probaron los seis clientes', (none?.clients_tried || '').split(',').length === 6, none?.clients_tried);
     ok('el texto original queda en el detalle', /Requested format is not available/.test(none?.detail || ''), (none?.detail || '').slice(0, 60));
 
     // El estado del canal lo guarda: la tarjeta puede avisar sin volver a probar.
@@ -956,6 +994,37 @@ fs.writeFileSync(out, body, { mode: 0o755 });
     fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
   }
 
+  // --- 1f. Anti-robots según el cliente: no se rinde con el primero --------
+  // Con yt-dlp 2026.10.26 el cliente por defecto (`visionos`) contesta «Sign
+  // in to confirm you're not a bot» y devuelve la ficha sin NI UNA pista. Antes
+  // el panel se quedaba ahí y decía «ninguna pista de vídeo»; con `tv` el mismo
+  // vídeo se ve. Esto es lo que dejó sin señal el canal de Los Simpson.
+  {
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, botNormal: true }));
+    const viaTv = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    ok('si el cliente por defecto tiene anti-robots, se prueba otro', viaTv?.ok === true, (viaTv?.error || '').slice(0, 80));
+    ok('y la señal queda lista', viaTv?.live === true && Boolean(viaTv?.copy_kind));
+    ok(
+      'diciendo con qué clientes se probó',
+      /normal/.test(viaTv?.clients_tried || '') && /tv/.test(viaTv?.clients_tried || ''),
+      viaTv?.clients_tried
+    );
+
+    // La tabla de `-F` usa la misma cadena: no enseña sólo el intento bloqueado.
+    const fmtTv = (await api('POST', '/api/youtube/formats', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    ok('la tabla de formatos se pide con los clientes', fmtTv?.ok === true && /mp4/.test(fmtTv?.text || ''), (fmtTv?.error || '').slice(0, 60));
+    ok('y dice con qué cliente la vio', Boolean(fmtTv?.client), fmtTv?.client);
+    ok('un cliente bloqueado no la deja vacía', !/not a bot/.test(fmtTv?.text || ''), (fmtTv?.text || '').slice(0, 60));
+
+    // Todos bloqueados y sin cookies: ahí sí toca subir cookies.
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true, botAll: true }));
+    const allBot = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=ioSKlIL4Hs8' })).data;
+    ok('sin cookies el anti-robots pide subirlas', allBot?.ok === false && allBot?.needs_cookies === true, (allBot?.error || '').slice(0, 70));
+    ok('y se marca blocked_bot', allBot?.blocked_bot === true);
+    ok('con los seis clientes probados', (allBot?.clients_tried || '').split(',').length === 6, allBot?.clients_tried);
+    fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: true }));
+  }
+
   // --- 2. Vista previa del directo ---------------------------------------
   const probe = (await api('POST', '/api/youtube/probe', { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' })).data;
   ok('el enlace está en directo', probe?.ok === true && probe?.live === true, JSON.stringify(probe?.error || ''));
@@ -1009,6 +1078,18 @@ fs.writeFileSync(out, body, { mode: 0o755 });
   ok('sin volver a llamar a yt-dlp', ytCalls() === ytBefore, `${ytBefore} → ${ytCalls()}`);
   ok('y sin caducidad (no hay URL firmada)', !fromDisk?.expires_at || fromDisk?.expires_in_min === null, JSON.stringify(fromDisk?.expires_in_min));
 
+  // El enlace corto de «Compartir» (youtu.be/…?si=…) es el mismo vídeo: si el
+  // archivo está en el disco, se emite desde ahí y no se pregunta a YouTube.
+  // Antes youtu.be se trataba como directo y se saltaba el disco: el canal no
+  // reproducía nunca, aunque el vídeo estuviera descargado.
+  const ytBeforeShort = ytCalls();
+  const shortDisk = (await api('POST', '/api/youtube/probe', {
+    url: 'https://youtu.be/ioSKlIL4Hs8?si=FVh9kPKr4j4GTERg'
+  })).data;
+  ok('el enlace corto youtu.be también sale del disco', shortDisk?.ok === true && shortDisk?.local === true, shortDisk?.error);
+  ok('con el mismo identificador', shortDisk?.video_id === 'ioSKlIL4Hs8', shortDisk?.video_id);
+  ok('y sin volver a llamar a yt-dlp', ytCalls() === ytBeforeShort, `${ytBeforeShort} → ${ytCalls()}`);
+
   // El canal lo emite desde el disco y no se refresca nunca.
   {
     const ch = await api('POST', '/api/channels247', {
@@ -1038,6 +1119,25 @@ fs.writeFileSync(out, body, { mode: 0o755 });
   ok('se puede borrar el vídeo descargado', delVid.data?.ok === true && delVid.data?.cached === null);
   const again = (await api('POST', '/api/youtube/probe', { url: VIDEO_URL })).data;
   ok('sin el archivo vuelve a ofrecer la descarga', again?.ok === false && again?.can_download === true);
+
+  // Descargar con el cliente por defecto bloqueado: se reintenta con `tv`.
+  // Sin esto, «Descargar vídeo»/«Preparar lista en el disco» fallaban aunque la
+  // comprobación de la señal sí hubiera pasado con otro cliente.
+  fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, onlyDash: true, botNormal: true }));
+  await api('POST', '/api/youtube/download', { url: VIDEO_URL });
+  let dlClients = { running: true };
+  const dlClientsDeadline = Date.now() + 30000;
+  while (Date.now() < dlClientsDeadline && dlClients?.running) {
+    await sleep(200);
+    dlClients = (await api('GET', '/api/youtube/download-status')).data;
+  }
+  ok(
+    'la descarga también se reintenta con otro cliente',
+    dlClients?.result?.ok === true && /tv/.test(dlClients?.result?.clients_tried || ''),
+    `${dlClients?.result?.ok} · ${dlClients?.result?.clients_tried || ''}`
+  );
+  ok('y queda en el disco', fs.existsSync(dlClients?.result?.path || ''));
+  await api('DELETE', '/api/youtube/videos/ioSKlIL4Hs8');
 
   fs.writeFileSync(YT_FLAGS, JSON.stringify({ live: false, onlyDash: true, dlFail: true }));
   const dlBad = await api('POST', '/api/youtube/download', { url: VIDEO_URL });

@@ -3029,6 +3029,34 @@ El panel usaba `8095` como puerto por defecto y el 80/443 había que abrirlos a 
   los quitas, no vuelven), y el modo `both` del 80 ya no falla sin certificado.
 - `Dockerfile`/`docker-compose.yml` publican 80 y 443 con `./certs` en `/app/certs`.
 
+### v2.6.63: anti-robots de YouTube por cliente, sin culpar a las cookies buenas
+
+Canal sin señal con las cookies válidas (sesión hasta 2027): el fallo no era la sesión ni la lista, era que el
+panel se rendía con el **primer** cliente de YouTube.
+
+- **`shouldRetryWithOtherClient()`**: una ficha con `formats: []` (lo que devuelve yt-dlp con
+  `--ignore-no-formats-error` cuando YouTube no entrega pistas) ya no corta la cadena. Sólo un bloqueo
+  definitivo (`isDefinitiveBlock()`: privado, retirado, de pago, sólo miembros, futuro) la corta.
+- **`YT_CLIENT_CHAIN`** pasa a 6 clientes (`normal`, `tv`, `web_safari`, `ios`, `mweb`, `tv_samsung`) con tope
+  de tiempo: `PROBE_BUDGET_MS` 90 s (vídeo) y `PLAYLIST_BUDGET_MS` 5 min (lista), configurables por
+  `TVLISTER_YT_PROBE_BUDGET_MS` / `TVLISTER_YT_PLAYLIST_BUDGET_MS`.
+- El diagnóstico (`diagnoseNoMedia`) recibe `stderrAll` (salidas de todos los intentos) y `clientsTried`; el
+  motivo ya no se pierde cuando el último cliente falla por otra cosa.
+- **`explainBotCheck()`**: con cookies con sesión y sin caducar, el mensaje dice que es la IP del servidor
+  (y hasta cuándo vale la sesión), lista los clientes probados y ya no pide reexportar cookies
+  (`needs_cookies: false`, `blocked_bot: true`). Con cookies malas o caducadas, sí las pide.
+- `isBotCheckError()` ya no confunde «Sign in to confirm your **age**» (restricción de edad) con el anti-robots.
+- **`youtu.be/<id>?si=…`** se clasifica como vídeo (`kind: 'video'`, URL normalizada a `watch?v=<id>`): un vídeo
+  ya descargado se emite desde el disco y no se vuelve a preguntar a YouTube.
+- **`downloadVideoFile()`** recorre la cadena de clientes (el archivo guarda `client` y `clients_tried`); un
+  fallo que no depende del cliente (`isRetryableDownloadError`) no se repite.
+- **`listFormats()`** y **`testCookies()`** usan la misma cadena y devuelven `client`, `bot_check` y
+  `clients_tried`: la tabla de `-F` y la prueba de cookies ya no enseñan sólo el intento bloqueado.
+- Pantalla: aviso **«Verificación anti-robots de YouTube (no es la lista ni el vídeo)»**, cliente en la
+  cabecera de la tabla de formatos; `blocked_bot` se guarda en `live_source_state` y en la tarjeta.
+
+Pruebas: `test_youtube_live.mjs` **227 OK** y `test_youtube_live_ui.mjs` **143 OK**.
+
 ### v2.6.62: listas de YouTube sin MP4 progresivo → se preparan en el disco
 
 Una lista cuyos vídeos sólo dan DASH/HLS dejaba el canal a 0 vídeos («Ningún vídeo de la lista se puede emitir»).

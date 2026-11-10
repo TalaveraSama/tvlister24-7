@@ -201,7 +201,7 @@ En **Canales 24/7 → Crear Canal 24/7** hay dos tipos de fuente: *Parrilla 24/7
 
 | Enlace | Qué hace |
 | --- | --- |
-| `youtube.com/watch?v=…` · `youtu.be/…` · `/shorts/…` | **Vídeo en bucle**: el mismo vídeo, una y otra vez (`-re -stream_loop -1`) |
+| `youtube.com/watch?v=…` · `youtu.be/…` (también con `?si=…`) · `/shorts/…` | **Vídeo en bucle**: el mismo vídeo, una y otra vez (`-re -stream_loop -1`) |
 | `youtube.com/playlist?list=…` | **Lista completa**: sus vídeos en orden y, al terminar el último, vuelve al primero |
 | `watch?v=…&list=…` (el del navegador) | Se trata como **lista completa**; la pantalla ofrece «Sólo ese vídeo» si quieres el vídeo suelto |
 | `…/live/…` · `/@canal/live` · `/channel/UC…/live` | **Directo**, tal cual (se copia el HLS, sin recodificar) |
@@ -228,9 +228,14 @@ Requisito: **yt-dlp** (se instala desde la propia pantalla, sin `apt`) y FFmpeg.
 baja el **binario autónomo** (`yt-dlp_linux`, ~39 MB), que lleva su propio Python y **no depende del python3
 del servidor**; el zipapp normal necesita un python3 completo (`_ssl`, `sqlite3`) y en servidores recortados
 fallaba al arrancar. El binario se prueba (`--version`) **antes** de instalarlo y la descarga va en segundo
-plano con su paso a la vista. Si YouTube contesta «Requested format is not available», el panel reintenta con
-otros clientes (`tv`, `web_safari`, `ios`) y avisa cuando la versión instalada de yt-dlp se ha quedado vieja
-(botón **Actualizar yt-dlp**, que al terminar recomprueba el enlace solo). Si YouTube pide «confirma que no eres
+plano con su paso a la vista. Si YouTube no entrega ni una pista —«Requested format is not available» o su control
+anti-robots «Sign in to confirm you're not a bot»—, el panel **no se queda con el primer cliente**: recorre
+seis (`normal`, `tv`, `web_safari`, `ios`, `mweb`, `tv_samsung`), con y sin cookies, y se queda con el que
+entregue formatos. Eso vale igual para comprobar la señal, para «Ver qué formatos ve yt-dlp», para «Probar
+cookies» y para descargar al disco. Cuando el anti-robots aparece con las cookies bien (sesión sin caducar), la
+pantalla lo dice claro: **el aviso es por la IP del servidor, no por la sesión**, y no pide reexportar nada.
+Avisa también cuando la versión instalada de yt-dlp se ha quedado vieja (botón **Actualizar yt-dlp**, que al
+terminar recomprueba el enlace solo). Si YouTube pide «confirma que no eres
 un robot», hay un apartado para indicar un
 archivo de cookies en formato Netscape: botón **Subir cookies (.txt)** en la propia pantalla (el panel lo valida,
 lo guarda con permisos 600 en `.runtime/youtube-cookies.txt` y lo usa solo, también al renovar el enlace),

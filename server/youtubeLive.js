@@ -288,24 +288,77 @@ export function cookiesInfo() {
  */
 export function isBotCheckError(text) {
   const t = String(text || '');
+  // «Sign in to confirm your age» NO es el anti-robots: es restricción de edad
+  // y tiene su propio mensaje. Antes se confundían y al operador con un vídeo
+  // para adultos se le hablaba de la IP del servidor.
+  if (/confirm your age|confirm you.{0,3}re 18|inappropriate for some users/i.test(t)) {
+    return /not a bot|unusual traffic|automated (?:queries|requests)/i.test(t);
+  }
   return (
-    /sign in to confirm/i.test(t) ||
-    /confirm you.{0,3}re not a bot/i.test(t) ||
-    /not a bot.{0,120}(--cookies|log in|sign in)/i.test(t)
+    /not a bot/i.test(t) ||
+    /unusual traffic|automated (?:queries|requests)|verify you.{0,3}re not a robot/i.test(t) ||
+    /sign in to confirm/i.test(t)
   );
+}
+
+const fmtExpiry = (iso) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+};
+
+/**
+ * El control anti-robots de YouTube, explicado sin culpar a las cookies cuando
+ * las cookies son buenas. Es lo que salió en el canal de Los Simpson: sesión
+ * válida hasta 2027 y, aun así, «Sign in to confirm you’re not a bot» porque a
+ * YouTube no le gusta la IP del servidor.
+ */
+export function explainBotCheck({ cookies = null, usingCookies = false, clientsTried = '' } = {}) {
+  const ck = cookies || cookiesInfo();
+  const hasSession = Boolean(ck && ck.auth);
+  const expired = Boolean(ck && ck.expired_auth);
+  const until = ck && ck.auth_expires_iso ? ` hasta el ${fmtExpiry(ck.auth_expires_iso)}` : '';
+  const parts = [];
+  parts.push(
+    'YouTube no entrega este vídeo a la IP pública de este servidor: pide «Sign in to confirm you’re not a bot» ' +
+      '(su control anti-robots). No es que el vídeo esté roto ni que la lista esté vacía.'
+  );
+  if (!ck || !ck.path) {
+    parts.push('Sube un cookies.txt de una cuenta con la sesión iniciada (botón «Subir cookies») y el panel lo reintenta solo.');
+  } else if (!ck.exists || ck.ok === false) {
+    parts.push('El cookies.txt guardado no se puede usar, así que YouTube ve una visita anónima: vuelve a subirlo.');
+  } else if (expired) {
+    parts.push('Las cookies guardadas están CADUCADAS: vuelve a exportarlas desde youtube.com con la sesión iniciada.');
+  } else if (!hasSession) {
+    parts.push('El cookies.txt no trae la sesión de YouTube (falta SID/__Secure-3PSID): expórtalo con la cuenta ya iniciada.');
+  } else {
+    parts.push(
+      `Las cookies son válidas${until}${usingCookies ? ' y se han enviado a yt-dlp' : ''}, así que el aviso no es por ` +
+        'falta de sesión: YouTube lo aplica por IP (lo normal en servidores y centros de datos).'
+    );
+  }
+  if (clientsTried) parts.push(`Se ha probado con los clientes: ${clientsTried}.`);
+  parts.push(
+    'Qué hacer, en este orden: pulsa «Actualizar yt-dlp» (los clientes de YouTube cambian cada pocas semanas); ' +
+      'inicia sesión en YouTube desde la misma red del servidor y vuelve a exportar las cookies; y si el servidor ' +
+      'sale por una IP de centro de datos, YouTube puede seguir pidiéndolo: una IP doméstica o residencial ' +
+      '(proxy o VPN sólo para YouTube) lo resuelve. Un vídeo ya descargado en el disco no pasa por esto.'
+  );
+  return parts.join(' ');
 }
 
 /**
  * Traduce el fallo de yt-dlp a algo que se pueda accionar desde el panel.
  * Devuelve `null` si el error no es de los que sabemos explicar.
  */
-export function explainYtDlpError(stderr) {
+export function explainYtDlpError(stderr, { clientsTried = '', usingCookies = false } = {}) {
   const raw = String(stderr || '').replace(/\s+/g, ' ').trim();
 
   // «Requested format is not available»: YouTube no entrega ninguna pista que
   // yt-dlp sepa usar. Casi siempre es una versión vieja de yt-dlp (YouTube
   // cambia cada pocas semanas) o una IP/cuenta que sólo recibe SABR.
-  if (isFormatError(raw)) {
+  // El anti-robots manda: cuando aparece, el «Requested format is not available»
+  // que a veces lo acompaña es una consecuencia, no la causa.
+  if (isFormatError(raw) && !isBotCheckError(raw)) {
     return {
       message:
         'YouTube no ha dado ninguna pista de vídeo utilizable para este enlace («Requested format is not available»). ' +
@@ -318,6 +371,18 @@ export function explainYtDlpError(stderr) {
 
   if (!isBotCheckError(raw)) return null;
   const ck = cookiesInfo();
+  // Con cookies buenas (sesión sin caducar) el texto de siempre culpaba a la
+  // sesión y mandaba reexportar cookies que ya servían. Eso confundió en el
+  // canal de Los Simpson: la sesión valía hasta 2027. Si las cookies son
+  // buenas, el problema es la IP del servidor y hay que decirlo así.
+  if (ck.path && ck.exists && ck.ok && ck.auth && !ck.expired_auth) {
+    return {
+      message: explainBotCheck({ cookies: ck, usingCookies, clientsTried }),
+      needs_cookies: false,
+      blocked_bot: true,
+      detail: raw.length > 240 ? `${raw.slice(0, 240)}…` : raw
+    };
+  }
   let message = 'YouTube pide iniciar sesión desde este servidor («Sign in to confirm you’re not a bot»).';
   if (!ck.path) {
     message +=
@@ -333,10 +398,9 @@ export function explainYtDlpError(stderr) {
       'con la sesión iniciada en youtube.com.';
   } else {
     message +=
-      ' Las cookies guardadas están caducadas o esa cuenta no puede ver este vídeo: vuelve a exportarlas ' +
-      '(caducan en días) o usa otra cuenta.';
+      ' Las cookies guardadas están caducadas: vuelve a exportarlas con la sesión iniciada en youtube.com.';
   }
-  return { message, needs_cookies: true, detail: raw.length > 240 ? `${raw.slice(0, 240)}…` : raw };
+  return { message, needs_cookies: true, blocked_bot: true, detail: raw.length > 240 ? `${raw.slice(0, 240)}…` : raw };
 }
 
 // ============================================================================
@@ -671,8 +735,14 @@ export function parseYouTubeUrl(raw = '') {
   }
   const parts = u.pathname.split('/').filter(Boolean);
   if (host.endsWith('youtu.be')) {
-    const id = parts[0] || '';
-    return id ? { ok: true, kind: 'live', video_id: id, url: text } : { ok: false, error: 'Enlace youtu.be sin ID.' };
+    const id = safeVideoId(parts[0] || '');
+    if (!id) return { ok: false, error: 'Enlace youtu.be sin ID.' };
+    // youtu.be/<id> es el enlace corto de UN vídeo (o de un directo: eso lo dice
+    // yt-dlp al resolverlo). Antes se trataba como directo y por eso un vídeo
+    // corto ya descargado no se emitía desde el disco: volvía a preguntar a
+    // YouTube cada vez y, con el anti-robots, se quedaba sin señal. Se normaliza
+    // además la URL para no arrastrar el ?si=… de «compartir».
+    return { ok: true, kind: 'video', video_id: id, url: `https://www.youtube.com/watch?v=${id}` };
   }
   // Lista de reproducción completa: /playlist?list=PL…
   if (parts[0] === 'playlist') {
@@ -947,20 +1017,30 @@ const lastLines = (text, n = 3) =>
     .join(' ');
 
 /**
+ * ¿Vale la pena descargar el mismo vídeo con otro cliente de YouTube?
+ * El anti-robots, «Requested format is not available» y los 403 de la
+ * extracción sí (los firma YouTube por cliente); un 404 del CDN o un vídeo
+ * privado no.
+ */
+function isRetryableDownloadError(text) {
+  return /sign in to confirm|not a bot|requested format is not available|no video formats found|unable to extract|player response|failed to extract|HTTP Error 403/i.test(
+    String(text || '')
+  );
+}
+
+/**
  * Descarga UN vídeo al disco (promesa). Reutilizable: la usa la descarga de un
  * vídeo suelto y la preparación de una lista completa.
  * Devuelve `{ ok, path, video_id, title, duration_sec, bytes, error }`.
  */
 function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
-  return new Promise((resolve) => {
+  return (async () => {
     const id = safeVideoId(videoId);
-    if (!bin || !id) {
-      resolve({ ok: false, error: 'Falta yt-dlp o el identificador del vídeo.' });
-      return;
-    }
+    if (!bin || !id) return { ok: false, error: 'Falta yt-dlp o el identificador del vídeo.' };
+
     fs.mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
     const tmpBase = path.join(VIDEO_CACHE_DIR, `${id}.tmp`);
-    const args = [
+    const baseArgs = [
       '--no-warnings',
       '--no-config',
       '--no-playlist',
@@ -974,8 +1054,7 @@ function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
       `${tmpBase}.%(ext)s`
     ];
     const cookies = String(getSetting('youtube_cookies_file') || process.env.TVLISTER_YT_COOKIES || '').trim();
-    if (cookies && fs.existsSync(cookies)) args.push('--cookies', cookies);
-    args.push(url);
+    if (cookies && fs.existsSync(cookies)) baseArgs.push('--cookies', cookies);
 
     const cleanTmp = () => {
       try {
@@ -987,88 +1066,116 @@ function downloadVideoFile({ bin, url, videoId, onStep = () => {} }) {
       }
     };
 
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stderr = '';
-    const onChunk = (buf) => {
-      const text = String(buf || '');
-      const progress = [...text.matchAll(/(\d{1,3}(?:\.\d+)?)%\s+of\s+~?\s*([\d.]+)([KMG]iB)/g)].pop();
-      if (progress) {
-        onStep(`descargando ${progress[1]} % (${progress[2]} ${progress[3]})`);
-        return;
-      }
-      if (/\[Merger\]|\[ffmpeg\]/i.test(text)) onStep('uniendo vídeo y audio…');
-    };
-    child.stdout.on('data', onChunk);
-    child.stderr.on('data', (buf) => {
-      stderr += String(buf || '');
-      onChunk(buf);
-    });
-    child.on('error', (err) => {
-      cleanTmp();
-      resolve({ ok: false, error: `No se pudo ejecutar yt-dlp: ${err.message}` });
-    });
-    child.on('close', (code) => {
-      if (code !== 0) {
-        const detail = lastLines(stderr, 3);
-        cleanTmp();
-        resolve({
-          ok: false,
-          error: `yt-dlp no pudo descargar el vídeo${code ? ` (código ${code})` : ''}.${detail ? ` ${detail}` : ''}`,
-          raw: detail
+    // Una descarga con un cliente concreto. La descarga es la que de verdad
+    // necesita YouTube: si el cliente por defecto está con el anti-robots,
+    // «Preparar lista en el disco» fallaba aunque la comprobación sí pasara con
+    // `tv`. Se recorren los mismos clientes que la comprobación.
+    const runOnce = (extraArgs) =>
+      new Promise((resolve) => {
+        const child = spawn(bin, [...baseArgs, ...extraArgs, url], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        const onChunk = (buf) => {
+          const text = String(buf || '');
+          const progress = [...text.matchAll(/(\d{1,3}(?:\.\d+)?)%\s+of\s+~?\s*([\d.]+)([KMG]iB)/g)].pop();
+          if (progress) {
+            onStep(`descargando ${progress[1]} % (${progress[2]} ${progress[3]})`);
+            return;
+          }
+          if (/\[Merger\]|\[ffmpeg\]/i.test(text)) onStep('uniendo vídeo y audio…');
+        };
+        child.stdout.on('data', onChunk);
+        child.stderr.on('data', (buf) => {
+          stderr += String(buf || '');
+          onChunk(buf);
         });
-        return;
+        child.on('error', (err) => resolve({ ok: false, code: -1, stderr: `No se pudo ejecutar yt-dlp: ${err.message}` }));
+        child.on('close', (code) => resolve({ ok: code === 0, code, stderr }));
+      });
+
+    let lastErr = '';
+    const tried = [];
+    let usedClient = '';
+    for (const client of YT_CLIENT_CHAIN) {
+      tried.push(client.label);
+      // eslint-disable-next-line no-await-in-loop
+      const res = await runOnce(client.extractorArgs ? ['--extractor-args', client.extractorArgs] : []);
+      if (res.ok) {
+        usedClient = client.label;
+        break;
       }
-      // El archivo bueno es el que dejó yt-dlp; se le quita el «.tmp.» del nombre.
-      let produced = '';
-      try {
-        produced = fs
-          .readdirSync(VIDEO_CACHE_DIR)
-          .find((f) => f.startsWith(`${id}.tmp.`) && !f.endsWith('.json') && !f.endsWith('.part'));
-      } catch {
-        produced = '';
-      }
-      if (!produced) {
-        cleanTmp();
-        resolve({ ok: false, error: 'yt-dlp terminó pero no dejó ningún archivo de vídeo.' });
-        return;
-      }
-      const ext = path.extname(produced).replace(/^\./, '') || 'mp4';
-      const finalPath = path.join(VIDEO_CACHE_DIR, `${id}.${ext}`);
-      try {
-        fs.renameSync(path.join(VIDEO_CACHE_DIR, produced), finalPath);
-      } catch (err) {
-        cleanTmp();
-        resolve({ ok: false, error: `No se pudo mover el vídeo descargado: ${err.message}` });
-        return;
-      }
-      let meta = {};
-      try {
-        meta = JSON.parse(fs.readFileSync(path.join(VIDEO_CACHE_DIR, `${produced}.info.json`), 'utf8'));
-      } catch {
-        meta = {};
-      }
-      const acodec = String(meta.acodec || '');
-      const sidecar = {
-        video_id: id,
-        title: String(meta.title || ''),
-        duration_sec: Math.round(Number(meta.duration) || 0),
-        vcodec: String(meta.vcodec || ''),
-        acodec: acodec === 'none' && meta.requested_downloads ? '' : acodec,
-        bytes: realFile(finalPath) ? fs.statSync(finalPath).size : 0,
-        downloaded_at_ms: Date.now(),
-        format_id: String(meta.format_id || ''),
-        merge: true
-      };
-      try {
-        fs.writeFileSync(`${finalPath}.json`, JSON.stringify(sidecar, null, 2));
-        fs.rmSync(path.join(VIDEO_CACHE_DIR, `${produced}.info.json`), { force: true });
-      } catch {
-        /* la ficha es un extra */
-      }
+      lastErr = String(res.stderr || '').trim() || lastErr;
       cleanTmp();
-      resolve({ ok: true, ...sidecar, path: finalPath });
-    });
-  });
+      // Un fallo que no depende del cliente (vídeo privado, 403 del propio CDN)
+      // no se reintenta seis veces.
+      if (!isRetryableDownloadError(res.stderr)) {
+        break;
+      }
+    }
+
+    if (!usedClient) {
+      const explained = explainYtDlpError(lastErr, { clientsTried: tried.join(', '), usingCookies: Boolean(cookies) });
+      const detail = lastLines(lastErr, 3);
+      cleanTmp();
+      return {
+        ok: false,
+        error: explained
+          ? explained.message
+          : `yt-dlp no pudo descargar el vídeo.${detail ? ` ${detail}` : ''}`,
+        raw: detail,
+        clients_tried: tried.join(', '),
+        blocked_bot: Boolean(explained && explained.blocked_bot)
+      };
+    }
+
+    // El archivo bueno es el que dejó yt-dlp; se le quita el «.tmp.» del nombre.
+    let produced = '';
+    try {
+      produced = fs
+        .readdirSync(VIDEO_CACHE_DIR)
+        .find((f) => f.startsWith(`${id}.tmp.`) && !f.endsWith('.json') && !f.endsWith('.part'));
+    } catch {
+      produced = '';
+    }
+    if (!produced) {
+      cleanTmp();
+      return { ok: false, error: 'yt-dlp terminó pero no dejó ningún archivo de vídeo.', clients_tried: tried.join(', ') };
+    }
+    const ext = path.extname(produced).replace(/^\./, '') || 'mp4';
+    const finalPath = path.join(VIDEO_CACHE_DIR, `${id}.${ext}`);
+    try {
+      fs.renameSync(path.join(VIDEO_CACHE_DIR, produced), finalPath);
+    } catch (err) {
+      cleanTmp();
+      return { ok: false, error: `No se pudo mover el vídeo descargado: ${err.message}` };
+    }
+    let meta = {};
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(VIDEO_CACHE_DIR, `${produced}.info.json`), 'utf8'));
+    } catch {
+      meta = {};
+    }
+    const acodec = String(meta.acodec || '');
+    const sidecar = {
+      video_id: id,
+      title: String(meta.title || ''),
+      duration_sec: Math.round(Number(meta.duration) || 0),
+      vcodec: String(meta.vcodec || ''),
+      acodec: acodec === 'none' && meta.requested_downloads ? '' : acodec,
+      bytes: realFile(finalPath) ? fs.statSync(finalPath).size : 0,
+      downloaded_at_ms: Date.now(),
+      format_id: String(meta.format_id || ''),
+      merge: true,
+      client: usedClient
+    };
+    try {
+      fs.writeFileSync(`${finalPath}.json`, JSON.stringify(sidecar, null, 2));
+      fs.rmSync(path.join(VIDEO_CACHE_DIR, `${produced}.info.json`), { force: true });
+    } catch {
+      /* la ficha es un extra */
+    }
+    cleanTmp();
+    return { ok: true, ...sidecar, path: finalPath, clients_tried: tried.join(', ') };
+  })();
 }
 
 /**
@@ -1427,15 +1534,26 @@ export function playlistNeedsTranscode(entries) {
 // de la ficha dicen exactamente por qué. Antes se enseñaba un cajón de sastre
 // («es privado, restricción de edad o de país…») y el operador se quedaba sin
 // saber si el problema eran SUS cookies.
-export function diagnoseNoMedia(entry, stderr, { usingCookies = false, cookies = null } = {}) {
-  const err = String(stderr || '');
+export function diagnoseNoMedia(
+  entry,
+  stderr,
+  { usingCookies = false, cookies = null, clientsTried = '', stderrAll = '' } = {}
+) {
+  const own = String(stderr || '');
+  // El motivo puede estar en la salida del intento que trajo la ficha o en la
+  // de otro cliente de la cadena: se miran las dos (antes se perdía el
+  // «Sign in to confirm you're not a bot» y salía el cajón de sastre).
+  const err = [own, String(stderrAll || '')].filter(Boolean).join(' ');
   const availability = String(entry?.availability || '').toLowerCase();
   const reasons = [];
   const has = (re) => re.test(err);
+  const botCheck = isBotCheckError(err);
 
   if (has(/sign in to confirm your age|age-restricted|confirm your age|inappropriate for some users/i) || Number(entry?.age_limit) >= 18) {
     reasons.push('tiene restricción de edad (YouTube exige una cuenta con la edad confirmada)');
-  } else if (isBotCheckError(err) || has(/sign in|login required|please log in/i)) {
+  } else if (botCheck) {
+    reasons.push('YouTube pide verificación anti-robots a la IP de este servidor');
+  } else if (has(/sign in|login required|please log in/i)) {
     reasons.push('YouTube exige una sesión iniciada para entregarlo');
   }
   if (availability === 'private' || has(/private video/i)) reasons.push('es privado');
@@ -1453,7 +1571,13 @@ export function diagnoseNoMedia(entry, stderr, { usingCookies = false, cookies =
   const poToken = formats.length > 0 && withUrl === 0;
 
   let message;
-  if (reasons.length) {
+  if (botCheck) {
+    // El anti-robots se explica aparte: si las cookies son buenas, el culpable
+    // es la IP del servidor y no hay que pedir que se reexporten.
+    message = explainBotCheck({ cookies: cookies || cookiesInfo(), usingCookies, clientsTried });
+    const otros = reasons.filter((r) => !/anti-robots/.test(r));
+    if (otros.length) message = `YouTube no entrega este vídeo porque ${otros.join(', ')}. ${message}`;
+  } else if (reasons.length) {
     // Si el motivo es de sesión y hay cookies puestas, hay que decir que NO valen.
     const sessionIssue = reasons.some((r) => /sesión|edad|miembros|suscriptores/.test(r));
     message = `YouTube no entrega este vídeo porque ${reasons.join(', ')}.`;
@@ -1484,22 +1608,28 @@ export function diagnoseNoMedia(entry, stderr, { usingCookies = false, cookies =
     message =
       'YouTube no ha entregado ninguna pista de vídeo para este enlace' +
       (err ? ` (${lastLines(err, 2)})` : '') +
-      '. Suele ser una restricción del propio vídeo o una versión vieja de yt-dlp.';
+      (clientsTried ? ` Probado con los clientes: ${clientsTried}.` : '') +
+      ' Suele ser una restricción del propio vídeo, el control anti-robots de YouTube o una versión vieja de yt-dlp.';
   } else {
     message = 'Este enlace no ofrece ninguna pista que se pueda emitir (HLS o MP4 progresivo).';
   }
 
+  const cookiesGood = Boolean(cookies && cookies.auth && !cookies.expired_auth);
+  const sessionIssue = reasons.some((r) => /sesión|edad|miembros|suscriptores/.test(r));
   return {
     message,
     reasons,
     po_token: poToken,
+    blocked_bot: botCheck,
     formats_total: formats.length,
     formats_with_url: withUrl,
     availability,
     age_limit: Number(entry?.age_limit) || 0,
-    needs_cookies: reasons.some((r) => /sesión|edad|miembros|suscriptores/.test(r)) && (!usingCookies || Boolean(cookies && (!cookies.auth || cookies.expired_auth))),
-    needs_format_fix: poToken,
-    detail: err ? (err.length > 240 ? `${err.slice(0, 240)}…` : err) : ''
+    // Con cookies buenas no se piden más cookies: el problema es la IP.
+    needs_cookies: botCheck ? !cookiesGood : sessionIssue && (!usingCookies || !cookiesGood),
+    // Un yt-dlp nuevo trae clientes nuevos: es lo primero que se puede probar.
+    needs_format_fix: poToken || botCheck,
+    detail: (own || err) ? ((own || err).length > 240 ? `${(own || err).slice(0, 240)}…` : own || err) : ''
   };
 }
 
@@ -1521,12 +1651,26 @@ export function isFormatError(text) {
 
 // Clientes que se prueban, en orden. El primero es el de siempre (sin tocar
 // nada); los demás sólo se usan si el anterior no dio ni una pista con URL.
+// El control anti-robots de YouTube («Sign in to confirm you're not a bot») no
+// es igual para todos: lo que el cliente por defecto no entrega, `tv`, `mweb` o
+// `tv_samsung` sí lo dan a menudo desde la misma IP. Por eso la cadena es larga
+// y cada cliente se prueba también sin cookies (ver resolveLiveSource).
 export const YT_CLIENT_CHAIN = [
   { label: 'normal', extractorArgs: '' },
   { label: 'tv', extractorArgs: 'youtube:player_client=tv' },
   { label: 'web_safari', extractorArgs: 'youtube:player_client=web_safari' },
-  { label: 'ios', extractorArgs: 'youtube:player_client=ios' }
+  { label: 'ios', extractorArgs: 'youtube:player_client=ios' },
+  { label: 'mweb', extractorArgs: 'youtube:player_client=mweb' },
+  { label: 'tv_samsung', extractorArgs: 'youtube:player_client=tv_samsung' }
 ];
+
+// Tiempo máximo para recorrer la cadena entera (vídeo suelto y lista). Sin tope,
+// con seis clientes y dos modos (con/sin cookies) una comprobación podría
+// tardar diez minutos y la pantalla se quedaría colgada.
+const PROBE_BUDGET_MS = Number(process.env.TVLISTER_YT_PROBE_BUDGET_MS || 90000);
+const PLAYLIST_BUDGET_MS = Number(process.env.TVLISTER_YT_PLAYLIST_BUDGET_MS || 300000);
+// Por debajo de esto ya no se arranca otro cliente: no daría tiempo a nada.
+const PROBE_MIN_ATTEMPT_MS = 8000;
 
 /** ¿La respuesta de yt-dlp trae alguna pista con URL que se pueda emitir? */
 export function hasUsableMedia(info) {
@@ -1539,21 +1683,46 @@ export function hasUsableMedia(info) {
 }
 
 /**
+ * ¿El vídeo está cerrado por algo que NO depende del cliente de YouTube?
+ * Privado, retirado, sólo para miembros/suscriptores de pago o aún no emitido:
+ * probar seis clientes no cambia nada.
+ */
+export function isDefinitiveBlock(info, stderr) {
+  const err = String(stderr || '');
+  if (
+    /private video|has been removed|does not exist|no longer available|terminated|account .{0,20}closed|members-only|join this channel|premium|paid members|upcoming|premieres in|will begin/i.test(
+      err
+    )
+  ) {
+    return true;
+  }
+  const av = String(info?.availability || '').toLowerCase();
+  return av === 'private' || av === 'premium_only' || av === 'subscriber_only';
+}
+
+/**
  * ¿Merece la pena reintentar con otro cliente de YouTube?
- * Sólo cuando el problema es de formatos: si el vídeo no existe, es privado o
- * pide iniciar sesión, probar más clientes es perder el tiempo.
+ *
+ * Ojo: con `--ignore-no-formats-error` yt-dlp devuelve la ficha del vídeo
+ * aunque YouTube no dé NI UNA pista, y sale con código 0. Esa ficha vacía no
+ * significa que el vídeo no se pueda emitir: significa que ese cliente no
+ * recibió pistas (anti-robots, PO token, SABR…). Antes se daba por perdido y el
+ * operador veía «ninguna pista de vídeo» con los otros cinco clientes sin
+ * probar. Sólo un bloqueo definitivo (privado, retirado, de pago, futuro) corta
+ * la cadena.
  */
 export function shouldRetryWithOtherClient(info, stderr) {
   const err = String(stderr || '');
   if (isFormatError(err)) return true;
+  // El anti-robots cambia según el cliente: nunca se da por perdido.
+  if (isBotCheckError(err)) return true;
   if (!info || typeof info !== 'object') return false;
   if (hasUsableMedia(info)) return false;
+  if (isDefinitiveBlock(info, err)) return false;
   if (Array.isArray(info.entries) && info.entries.length) return true;
-  const formats = Array.isArray(info.formats) ? info.formats : [];
-  // Formatos «vacíos» (sin URL): los que YouTube firma con PO token o SABR.
-  if (formats.length && !hasUsableMedia(info)) return true;
-  // Directo sin formatos: puede ser cosa del cliente que se usó.
-  return formats.length === 0 && (info.is_live === true || String(info.live_status || '') === 'is_live');
+  // Ficha sin ninguna pista, o con pistas sin URL (PO token / SABR): otro
+  // cliente puede sí entregarlas.
+  return true;
 }
 
 // ============================================================================
@@ -1589,17 +1758,61 @@ export async function listFormats(rawUrl, { timeoutMs = 60000 } = {}) {
 
   const ck = cookiesInfo();
   const usingCookies = Boolean(ck.exists && ck.ok);
-  const args = ['-F', '--no-warnings', '--no-progress', '--no-config', '--no-playlist'];
-  if (usingCookies) args.push('--cookies', ck.path);
-  args.push(cls.url);
-  const res = await runBinary(bin, args, { timeoutMs });
-  const text = trimFormatList(`${res.stdout || ''}\n${res.stderr || ''}`);
+  // La tabla se pide con los mismos clientes que usa la comprobación: si sólo
+  // se enseñaba el intento del cliente por defecto, el operador veía el
+  // «Sign in to confirm you're not a bot» y creía que el panel no veía nada,
+  // cuando con `tv` sí había formatos.
+  const errors = [];
+  let text = '';
+  let client = '';
+  let botCheck = false;
+  const deadline = Date.now() + PROBE_BUDGET_MS;
+  for (const c of YT_CLIENT_CHAIN) {
+    const remaining = deadline - Date.now();
+    if (remaining < PROBE_MIN_ATTEMPT_MS) break;
+    const args = ['-F', '--no-warnings', '--no-progress', '--no-config', '--no-playlist'];
+    if (usingCookies) args.push('--cookies', ck.path);
+    if (c.extractorArgs) args.push('--extractor-args', c.extractorArgs);
+    args.push(cls.url);
+    // eslint-disable-next-line no-await-in-loop
+    const res = await runBinary(bin, args, { timeoutMs: Math.min(timeoutMs, remaining) });
+    const out = `${res.stdout || ''}\n${res.stderr || ''}`;
+    const hasTable = /\b(?:mp4|webm|m4a|audio only)\b/i.test(String(res.stdout || ''));
+    if (res.ok && hasTable) {
+      return {
+        ok: true,
+        text: trimFormatList(out),
+        error: '',
+        client: c.label,
+        bot_check: isBotCheckError(out),
+        using_cookies: usingCookies,
+        url: cls.url,
+        clients_tried: YT_CLIENT_CHAIN.map((x) => x.label).join(', ')
+      };
+    }
+    const errText = lastLines(`${res.stderr || ''}${res.stdout || ''}`, 3);
+    errors.push({ client: c.label, error: errText });
+    if (!text) {
+      text = trimFormatList(out);
+      client = c.label;
+    }
+    botCheck = botCheck || isBotCheckError(out);
+    // Un bloqueo que ningún cliente arregla (privado, retirado) no se repite.
+    if (!isBotCheckError(out) && !isFormatError(out) && res.ok) break;
+  }
   return {
-    ok: res.ok,
+    ok: false,
     text,
-    error: res.ok ? '' : lastLines(`${res.stderr || ''}${res.stdout || ''}`, 3) || 'yt-dlp no pudo listar los formatos.',
+    error:
+      (errors.length ? errors[errors.length - 1].error : '') ||
+      (botCheck
+        ? 'YouTube pide verificación anti-robots a la IP de este servidor (no es un problema de la lista).'
+        : 'yt-dlp no pudo listar los formatos.'),
+    client,
+    bot_check: botCheck,
     using_cookies: usingCookies,
-    url: cls.url
+    url: cls.url,
+    clients_tried: errors.map((e) => e.client).join(', ')
   };
 }
 
@@ -1614,33 +1827,68 @@ export async function testCookies({ timeoutMs = 45000 } = {}) {
   if (!ck.ok) return { ok: false, error: ck.error || 'El archivo de cookies no sirve.', cookies: ck };
   const bin = findYtDlp();
   if (!bin) return { ok: false, error: 'Falta yt-dlp.', cookies: ck };
-  const args = ['-J', '--no-warnings', '--no-progress', '--no-config', '--no-playlist', '--ignore-no-formats-error', '--cookies', ck.path, COOKIE_TEST_URL];
-  const res = await runBinary(bin, args, { timeoutMs });
+  // También aquí se recorre la cadena: si el cliente por defecto está con el
+  // anti-robots y `tv` pasa, las cookies SÍ sirven y no hay que reexportarlas.
   let data = null;
-  try {
-    data = JSON.parse(res.stdout);
-  } catch {
-    data = null;
+  let err = '';
+  let client = '';
+  let botCheck = false;
+  const deadline = Date.now() + PROBE_BUDGET_MS;
+  for (const c of YT_CLIENT_CHAIN) {
+    const remaining = deadline - Date.now();
+    if (remaining < PROBE_MIN_ATTEMPT_MS) break;
+    const args = [
+      '-J',
+      '--no-warnings',
+      '--no-progress',
+      '--no-config',
+      '--no-playlist',
+      '--ignore-no-formats-error',
+      '--cookies',
+      ck.path
+    ];
+    if (c.extractorArgs) args.push('--extractor-args', c.extractorArgs);
+    args.push(COOKIE_TEST_URL);
+    // eslint-disable-next-line no-await-in-loop
+    const res = await runBinary(bin, args, { timeoutMs: Math.min(timeoutMs, remaining) });
+    let parsed = null;
+    try {
+      parsed = JSON.parse(res.stdout);
+    } catch {
+      parsed = null;
+    }
+    if (parsed && hasUsableMedia(parsed)) {
+      data = parsed;
+      client = c.label;
+      break;
+    }
+    err = lastLines(res.stderr, 3) || err;
+    botCheck = botCheck || isBotCheckError(res.stderr);
   }
-  const usable = Boolean(data && hasUsableMedia(data));
-  const err = lastLines(res.stderr, 3);
-  if (usable) {
+  if (data) {
     return {
       ok: true,
       message:
-        `Las cookies funcionan: yt-dlp ha leído «${String(data.title || 'el vídeo de prueba')}» con esa sesión.`,
+        `Las cookies funcionan: yt-dlp ha leído «${String(data.title || 'el vídeo de prueba')}» con esa sesión` +
+        (client && client !== 'normal' ? ` (cliente ${client}).` : '.'),
       title: String(data.title || ''),
       formats: Array.isArray(data.formats) ? data.formats.length : 0,
+      client,
       cookies: ck
     };
   }
   return {
     ok: false,
+    // El anti-robots no dice nada de las cookies: lo aplica YouTube por IP.
+    bot_check: botCheck,
     error:
-      (ck.expired_auth
-        ? 'Las cookies están caducadas: vuelve a exportarlas de youtube.com con la sesión iniciada.'
-        : 'YouTube no ha entregado nada con estas cookies. Vuelve a exportarlas con la sesión iniciada; si el ' +
-          'navegador ve el vídeo y el panel no, la cuenta no tiene acceso o la sesión ya no vale.') +
+      (botCheck
+        ? 'Las cookies están puestas, pero YouTube pide verificación anti-robots a la IP de este servidor, así que ' +
+          'no deja comprobar la sesión. El problema no es el archivo de cookies: es la IP (suele pasar en servidores).'
+        : ck.expired_auth
+          ? 'Las cookies están caducadas: vuelve a exportarlas de youtube.com con la sesión iniciada.'
+          : 'YouTube no ha entregado nada con estas cookies. Vuelve a exportarlas con la sesión iniciada; si el ' +
+            'navegador ve el vídeo y el panel no, la cuenta no tiene acceso o la sesión ya no vale.') +
       (err ? ` (${err})` : ''),
     detail: err,
     cookies: ck
@@ -1695,8 +1943,9 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   const usingCookies = Boolean(ck?.exists && fs.existsSync(cookies));
 
   // Un vídeo suelto que ya está descargado se emite desde el disco: no se
-  // vuelve a molestar a YouTube (ni cookies, ni clientes, ni caducidades).
-  if (cls.kind === 'video' && cls.video_id) {
+  // vuelve a molestar a YouTube (ni cookies, ni clientes, ni caducidades). Sirve
+  // igual para watch?v=…, youtu.be/… y /live/…: si el archivo está, manda él.
+  if ((cls.kind === 'video' || cls.kind === 'live') && cls.video_id) {
     const cached = cachedVideoInfo(cls.video_id);
     if (cached) return cachedVideoState(cls.video_id, { using_cookies: usingCookies });
   }
@@ -1720,43 +1969,64 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     baseArgs.push('--no-playlist');
   }
   // Un intento = recorrer la cadena de clientes con (o sin) cookies.
+  const budgetMs = isPlaylist ? PLAYLIST_BUDGET_MS : PROBE_BUDGET_MS;
+  const baseTimeout = isPlaylist ? PLAYLIST_TIMEOUT_MS : 45000;
   const attempt = async (withCookies) => {
     let data = null;
     let lastErr = '';
+    // `lastErr` tiene que ser el del intento que dio la ficha: si se pisa con el
+    // del siguiente cliente, el diagnóstico habla de otro error y se pierde el
+    // motivo real (así salía «ninguna pista de vídeo» sin decir del anti-robots).
+    let usedClient = '';
+    const errors = [];
     const attempts = [];
+    const deadline = Date.now() + budgetMs;
     for (const client of YT_CLIENT_CHAIN) {
+      const remaining = deadline - Date.now();
+      if (remaining < PROBE_MIN_ATTEMPT_MS) break;
       const args = [...baseArgs];
       if (withCookies) args.push('--cookies', cookies);
       if (client.extractorArgs) args.push('--extractor-args', client.extractorArgs);
       args.push(cls.url);
 
-      const res = await runBinary(info.bin, args, { timeoutMs: isPlaylist ? PLAYLIST_TIMEOUT_MS : 45000 });
+      // eslint-disable-next-line no-await-in-loop
+      const res = await runBinary(info.bin, args, { timeoutMs: Math.min(baseTimeout, remaining) });
       let parsed = null;
       try {
         parsed = JSON.parse(res.stdout);
       } catch {
         parsed = null;
       }
-      lastErr = String(res.stderr || '').replace(/\s+/g, ' ').trim();
+      const errText = String(res.stderr || '').replace(/\s+/g, ' ').trim();
+      if (errText) errors.push(errText);
       attempts.push({
         client: client.label,
         cookies: withCookies,
-        ok: Boolean(parsed),
-        error: parsed ? '' : lastErr.length > 200 ? `${lastErr.slice(0, 200)}…` : lastErr
+        ok: Boolean(parsed) && !shouldRetryWithOtherClient(parsed, errText),
+        error: errText ? (errText.length > 200 ? `${errText.slice(0, 200)}…` : errText) : ''
       });
 
-      if (parsed && !shouldRetryWithOtherClient(parsed, lastErr)) return { data: parsed, lastErr, attempts };
-      if (!shouldRetryWithOtherClient(parsed, lastErr)) return { data: parsed || null, lastErr, attempts };
-      // Se sigue con el siguiente cliente; si era el último, se queda lo leído.
-      data = parsed || data;
+      if (parsed && !shouldRetryWithOtherClient(parsed, errText)) {
+        return { data: parsed, lastErr: errText, usedClient: client.label, attempts, errors };
+      }
+      // Ningún cliente ha dado nada todavía. Se guarda la primera ficha (es la
+      // que luego se diagnostica) con SU salida de error, y se sigue probando.
+      if (parsed && !data) {
+        data = parsed;
+        lastErr = errText;
+        usedClient = client.label;
+      }
+      // Si ni siquiera hay ficha, se sigue igual: otro cliente puede darla.
     }
-    return { data, lastErr, attempts };
+    // Sin ficha, el último error es el que hay que enseñar.
+    return { data, lastErr: data ? lastErr : errors[errors.length - 1] || lastErr, usedClient: usedClient || '', attempts, errors };
   };
 
   let run = await attempt(usingCookies);
   let data = run.data;
   let lastErr = run.lastErr;
   const attempts = [...run.attempts];
+  const errors = [...run.errors];
   // Con cookies a veces va PEOR (una sesión de otra red/país hace que YouTube
   // devuelva cero pistas). Si con ellas no hay nada que emitir, se prueba sin.
   let retriedWithoutCookies = false;
@@ -1764,6 +2034,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     retriedWithoutCookies = true;
     run = await attempt(false);
     attempts.push(...run.attempts);
+    errors.push(...run.errors);
     if (run.data && !shouldRetryWithOtherClient(run.data, run.lastErr)) {
       data = run.data;
       lastErr = run.lastErr;
@@ -1772,6 +2043,8 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       lastErr = run.lastErr || lastErr;
     }
   }
+  // Todas las salidas, sin repetir: el motivo puede estar en cualquier cliente.
+  const stderrAll = [...new Set(errors)].join(' ').slice(0, 4000);
 
   // ¿Se emitió con cookies o hubo que quitarlas?
   const cookiesWorked = usingCookies && attempts.some((a) => a.cookies && a.ok);
@@ -1785,11 +2058,11 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     : '';
 
   if (!data) {
-    const err = lastErr;
+    const err = stderrAll || lastErr;
     const short = err.length > 240 ? `${err.slice(0, 240)}…` : err;
     // Los fallos conocidos se explican con lo que hay que hacer (subir cookies,
     // actualizar yt-dlp), no con el texto en inglés que copia y pega yt-dlp.
-    const explained = explainYtDlpError(err);
+    const explained = explainYtDlpError(err, { clientsTried, usingCookies });
     if (explained) {
       return {
         ok: false,
@@ -1800,6 +2073,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         raw: explained.detail,
         needs_cookies: Boolean(explained.needs_cookies),
         needs_format_fix: Boolean(explained.needs_format_fix),
+        blocked_bot: Boolean(explained.blocked_bot),
         using_cookies: usingCookies,
         clients_tried: clientsTried
       };
@@ -1878,7 +2152,9 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         continue;
       }
       // Sin MP4 progresivo: si hay pistas con URL, se puede descargar.
-      const dx = diagnoseNoMedia(e, lastErr, { usingCookies, cookies: ck });
+      // En una lista, `stderrAll` mezcla los errores de todos los vídeos: para el
+      // motivo de cada entrada se usa la salida de la lectura que trajo la lista.
+      const dx = diagnoseNoMedia(e, lastErr, { usingCookies, cookies: ck, clientsTried });
       const formats = Array.isArray(e.formats) ? e.formats : [];
       const canDownload = formats.length > 0 && (dx.formats_with_url > 0 || dx.po_token === true);
       if (canDownload && eId) {
@@ -1903,6 +2179,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       .map(([reason, n]) => `${n} ${reason}`)
       .join(' · ');
 
+    const blockedBot = Boolean(stderrAll && isBotCheckError(stderrAll));
     if (!entries.length) {
       return {
         ok: false,
@@ -1919,6 +2196,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         skip_summary: skipSummary,
         // Motivos concretos para que la pantalla no hable de un cajón de sastre.
         reasons: [...skipReasons.keys()].slice(0, 5),
+        blocked_bot: blockedBot,
         error:
           rawEntries.length === 0
             ? 'La lista está vacía o es privada: no hay vídeos que emitir.'
@@ -1926,7 +2204,9 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
               ? `Los ${rawEntries.length} vídeos de la lista no ofrecen un MP4 progresivo (sólo DASH/HLS). ` +
                 `Se pueden descargar una vez (los primeros ${Math.min(pending.length, MAX_PLAYLIST_ITEMS)}) y emitir ` +
                 'desde el disco: botón «Preparar lista en el disco». Después no caducan ni dependen de YouTube.'
-              : `Ningún vídeo de la lista se puede emitir${skipSummary ? ` (${skipSummary})` : ''}.`,
+              : blockedBot
+                ? explainBotCheck({ cookies: ck, usingCookies, clientsTried })
+                : `Ningún vídeo de la lista se puede emitir${skipSummary ? ` (${skipSummary})` : ''}.`,
         skipped_live: skippedLive,
         skipped_no_format: skippedNoFormat
       };
@@ -1976,7 +2256,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
     const hls = pickHls(entry);
     if (!hls) {
       // El motivo real sale de yt-dlp: privado, edad, miembros, país, PO token…
-      const dx = diagnoseNoMedia(entry, lastErr, { usingCookies, cookies: ck });
+      const dx = diagnoseNoMedia(entry, lastErr, { usingCookies, cookies: ck, clientsTried, stderrAll });
       return {
         ok: false,
         live: true,
@@ -1986,6 +2266,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
         live_status: liveStatus,
         error: `El directo está en vivo, pero no se puede emitir: ${dx.message}`,
         reasons: dx.reasons,
+        blocked_bot: dx.blocked_bot,
         needs_format_fix: dx.needs_format_fix,
         needs_cookies: dx.needs_cookies,
         detail: dx.detail,
@@ -2060,7 +2341,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
   // ── Vídeo normal: se emite en bucle (24/7) ───────────────────────────────
   const prog = pickProgressive(entry);
   if (!prog || !prog.url) {
-    const dx = diagnoseNoMedia(entry, lastErr, { usingCookies, cookies: ck });
+    const dx = diagnoseNoMedia(entry, lastErr, { usingCookies, cookies: ck, clientsTried, stderrAll });
     // Sólo se ofrece descargar si YouTube SÍ da pistas con URL (DASH/HLS): en un
     // vídeo privado o restringido la descarga tampoco funcionaría.
     const hasFormats = Array.isArray(entry.formats) ? entry.formats.length : 0;
@@ -2083,6 +2364,7 @@ export async function resolveLiveSource(rawUrl, { cookiesFile = '' } = {}) {
       reasons: dx.reasons,
       needs_cookies: dx.needs_cookies,
       needs_format_fix: dx.needs_format_fix,
+      blocked_bot: dx.blocked_bot,
       detail: dx.detail,
       error: downloadable
         ? 'Este vídeo no ofrece un MP4 progresivo (sólo DASH/HLS en pistas separadas). ' +
@@ -2281,6 +2563,7 @@ export async function refreshChannelLiveSource(channel) {
     needs_ytdlp: Boolean(res.needs_ytdlp),
     needs_cookies: Boolean(res.needs_cookies),
     needs_format_fix: Boolean(res.needs_format_fix),
+    blocked_bot: Boolean(res.blocked_bot),
     reasons: Array.isArray(res.reasons) ? res.reasons : [],
     cookies_note: String(res.cookies_note || ''),
     // Vídeo/listas descargados al disco, o que se pueden descargar/preparar.
@@ -2357,6 +2640,9 @@ export function liveSourceInfo(channel) {
     can_prepare_playlist: Boolean(st?.can_prepare_playlist),
     pending_count: Number(st?.pending_count) || 0,
     skip_summary: String(st?.skip_summary || ''),
+    // YouTube pide verificación anti-robots a la IP del servidor: se puede
+    // enseñar en la tarjeta sin volver a comprobar.
+    blocked_bot: Boolean(st?.blocked_bot),
     clients_tried: String(st?.clients_tried || '')
   };
 }
